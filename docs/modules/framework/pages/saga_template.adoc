@@ -1,0 +1,57 @@
+= SagaTemplate<A> [[saga_template]]
+
+`SagaTemplate` is the class which is responsible for starting the StackSaga engine to invoke your transaction.
+By providing the necessary data, you can say to start the process of the transaction for StackSaga engine.
+`SagaTemplate` is an instance, and it provides one method called `process(...)` for starting the process.
+
+NOTE: `SagaTemplate` Is a spring bean that you can Autowire (Injectable) in Spring environment.
+You can autowire it by using spring @Autowire annotation or by creating the constructor.
+
+[source,java]
+----
+@RestController
+@RequestMapping("/order")
+@AllArgsConstructor
+public class PlaceOrderSagaController {
+
+    private final SagaTemplate<PlaceOrderAggregator> sagaTemplate; //<1>
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public Map<String, String> placeOrder() {
+        //<2>
+        PlaceOrderAggregator aggregator = new PlaceOrderAggregator();
+        aggregator.setUsername("mafei");
+        aggregator.setTotal(200.00);
+
+        //<3>
+        this.sagaTemplate.process(
+                aggregator,
+                CheckUserExecutor.class
+        );
+        //<4>
+        return Collections.singletonMap(
+                "order_id",
+                aggregator.getAggregatorTransactionId()
+        );
+    }
+}
+----
+
+<1> Autowire(inject) the `SagaTemplate` by providing the target <<creating_aggregator_class,Aggregator>> Class.
+<2> Initialize your aggregator by providing the initial data.
+<3> Use the autowired `SagaTemplate` object and call the `process(..)` method.
+As the first argument, you have to provide the initialized target aggregator object.
+As the second argument you have to provide, which is the first executor that should be started the transaction.
+According to the example, The 1st executor is `CheckUserExecutor.class`.
+It can be either <<command_executor,Command-Executor>> or <<query_executor,Query-Executor>>.
+<4> Returns the response by obtaining the aggregatorTransactionId from the initialized object.
+
+NOTE: Due to the fact that the target aggregator class has been extended from the `Aggregator`, you can use inherited methods from `Aggregator` class.
+The `getAggregatorTransactionId()` method is one of inherited methods from `Aggregator` class.
+It will provide you the *unique ID* for each object (each transaction) that you initialize.
+It will be the transaction id for the entire transaction.
+
+'''
+
+TIP: Even though `SagaTemplate<A>` can be autowired anywhere in the application, As the best practice it is recommended to use `SagaTemplate<A>` inside of an `EventHandler` class according to the StackSaga design pattern called <<test,CHES>>.
