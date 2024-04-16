@@ -1,0 +1,32 @@
+= Dual-Consistency problem of SEC in microservice. [[dual_consistency_problem_of_sec_in_microservice]]
+
+In the microservice architecture, It is highly concerned about the data consistency.
+As a result of that, you had to move in to the <<introduction_to_saga,SAGA design pattern,>> and it ensures eventual consistency.
+
+But you know that <<SEC,SEC>> also uses a database internally for storing the event data for retry purpose in StackSaga.
+SEC is also another program that supports for your execution as a middleware framework.
+That means that all the executions are saved in the database as an event by the StackSaga framework before the real execution.
+Because, in case your atomic transaction is failed for some reason, the atomic transaction should be retried by the SEC.
+To do re-play, the old state should be in the hand of the StackSaga.
+
+Just imagine that Your entire domain (<<quick_understanding_example,place order example>>) can have 5 atomic transactions inside the <<executor_architecture,executors>>.
+After calling the execution through the <<saga_template,`SagaTemplate`>>, StackSaga starts execution one by one as you configured order by the developer.
+Then, before executing the transaction, the transaction should be initialized in the event-store.
+In that case, StackSaga uses the event-store to store the event data at the 1st time in the transaction execution.
+After successfully saving the initial event data, you will have a transaction id (<<creating_aggregator_class,aggregatorTransactionId>>).
+And after that, your 1st executor will be executed by the SEC.
+After executing your 1st atomic transaction, again the updated state is saved in the event-store by SEC.
+Like so, all the time your state is saved in the event-store.
+Then just think that after executing the 2nd atomic transaction (execution) SEC going to update the event-store and then an error is occurred due to connection issues of the event-store database.
+
+Then the framework is failed to provide the data consistency by themselves of their side.
+But the real fact, the first reason is for choosing a framework is to overcome the data consistency.
+But If the framework is not capable of handling the data consistency by itself, there is no point in using a framework.
+
+##In brief, The responsibility of protecting both data-consistency of internal event-store and your transaction's data-consistency is known as the Dual consistency problem of SEC.
+##
+
+Even though it is not possible technically to handle by the database side, StackSaga provides a best solution for that.
+It is called as *Execution Chunk Protection Mechanism * in StackSaga.
+
+include::how_execution_chunk_protection_works.adoc[]

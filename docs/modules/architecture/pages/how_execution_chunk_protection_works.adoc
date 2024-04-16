@@ -1,0 +1,145 @@
+== How *Execution Chunk Protection Mechanism* works [[how_execution_chunk_protection_works]]
+
+In brief, In the Execution Chunk Protection Mechanism, chunk execution data will be stored in the shared filesystem for the particular instance.
+
+If the database connection (event-store) is failed for some reason during the execution of your executor.
+The framework doesn't give up the process due to the event-store problem.
+The event-store will be back to normal soon for sure.
+But while then, the transaction data must be kept in somewhere because your executor has already been executed.
+Those events are called as *Execution Chunk*.
+That chunk-data is stored in the file system temporally while the event-store is back to normal.
+Ones the event-store connection is back to normal, all the chunk-data files are restored in the event-store by the framework.
+After restoring the chunk-data files, the transaction is exposed to be run for the next scheduler and the transaction will be continued as usual.
+To make the chunk-data file, the entire data set is converted into the JSON format by using the <<aggregator_mapper_implementation,mapper>> that you provided for the target aggregator.
+
+NOTE: To ensure the permissions of the shared file system to write the files, StackSaga checks the permissions before the application is started.
+If there is a permission issue, the application is terminated immediately (Only the application is stated).
+
+NOTE: Execution Chunk Protection Mechanism* protects the partially executed transactions only.
+Just imagine the instance is executing a hundred of transactions at the time of the event-store connection is failed, all the transaction execution data is saved in the file storage temporally.
+But during the event-store connection is failed,
+<<saga_template,SagaTemplate>> the SEC does not accept all the new transactions that received through the SgaTemplate in to the SEC.
+IF the transaction initialization process is failed, it will throw an `TransactionInitializationFailedException` immaterially.
+
+At first glance, it is a simple solution the *Execution Chunk Protection Mechanism* will be very complicated when is it considered from the microservice architecture.
+
+In the microservice architecture, it is used as a stateless service when it is considered saving files in the storage.
+Because caching file is not recommended in microservice architecture inside the individual instance.
+The reason for that is at any time, any instance can be created or deleted based on the auto-scaling.
+In case, an instance went down with chunk-data; there is no way to recover that data at all.
+Therefore, it is used a shared common file storage for each of them.
+
+NOTE: If you are familiar with https://docs.docker.com/storage/volumes/[Docker] or https://kubernetes.io/docs/concepts/storage/persistent-volumes/[Kubernetes], the file storage that is used is called as *persistent volumes*.
+
+== Execution chunk protection mechanism with the help of eureka service registry. [[execution_chunk_protection_mechanism_with_the_help_of_eureka_service_registry]]
+
+According to the StackSaga architecture, eureka service helps to *`Execution chunk protection`* process by providing the instance metadata for each instance.
+
+As mentioned above, one unique folder is created for each instance by the StackSaga when the application is started.
+To create the folder for each instance uniquely, the instance information that eureka provides is used as the 1st.
+
+When the directory is created for saving the files, the following properties are considered.
+
+. *Region*: The region of the instance is located currently.
+. *Availability Zone*: The availability zone of the instance is located currently.
+. *Service-Name*: The service name of the instance (`spring.application.name` is used).
+. *Instance-ID*: The unique id of the instance. (https://cloud.spring.io/spring-cloud-netflix/multi/multi__service_discovery_eureka_clients.html#_changing_the_eureka_instance_id[`eureka.instance.instanceId`] is used )
+
+NOTE: Even though instance-id and service Name are provided by default by Eureka and Spring Web, You have to provide other extra instance-related <<stacksaga_discovery_configuration_properties,properties>> through the Eureka metadata.
+
+NOTE: You can provide the https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-regions-availability-zones.html[*Region* and *Availability Zone*] of the instance through the application properties.
+Or otherwise, the default value (defaultRegion and defaultZone) will be used.
+If your entire application is running on only a single region, you can keep the default value as it is.
+But if your application is running on cluster environment, you can obtain what is the current region the instance is running on and configure it through` the property.
+
+Based on the above properties here you can see that how a `order-serivice` instance's directory is created in the filesystem.
+
+*Directory Path* `baseDir/#US_East#/#us-east-2#/#order-serice#/#3365ec45-51e7-470b-ba10-1ebf6a318bb6#`
+
+. This diagram shows how the file system looks like in general with default region and default zone.
++
+
+image::stack-saga-e-store-example-chunk-files-in-default-region-and-zone.drawio.svg[alt="StackSaga Chunk Files In default Region Adn Zone",height=300]
+
++
+In this diagram, you can see two default servers called order-service and user-service with default region and default zone.
+That means each service has a folder, and inside the folder the instance's folder is created.
+Here two servers have been run, and those services have had two instances.
+As well as, the instances might have chunk-files waiting to be restored.
++
+NOTE: In your entire application can have multiple servers that StackSaga framework is used.
+Just imagine your entire application system has 100 services (like user-service, order-service, delivery-service etc.).
+Among them, there are 20 services use StackSaga on their services.
+Then you will have 20 folders in the root folder by that service names.
+
+. If you have multiple regions and multiple availability zones with multiple instances, the file storage will be like this.
++
+image::stack-saga-e-store-example-chunk-files-in-mulltiple-regions-adn-zones.drawio.svg[alt="StackSaga Chunk Files In Mulltiple Regions Adn Zones",height=300]
++
+NOTE: If it is a cluster architecture, it is recommended to use zone-specific file storage for each to avoid the latency and file protection.
+
+Here we are going to discuss the worst case.
+Saving files inside the file system is not a considerable thing.
+But restoring the files in without a data-loss is very important.
+Then let's see' that how can be a data-loss here.
+As it is mentioned above, you know that in the microservice architecture any instance can be removed at any time.
+Just imagine some of the instances are removed due to a scale down.
+Even though those instances have been deleted, the chunk-files can be in the file storage.
+If the instance is responsible for restoring the files that the instance has added to the file storage, those directories have not responsible instance up and running at this moment due to the scale down.
+
+To avoid this issue, StackSaga does use a *master and slave architecture* when the chunk-files are restored.
+
+*What is master and slave architecture for chunk-files restoring?*
+
+This architecture is limited to the zone.
+That means that it can have a master node for each zone and other services are considered as slaves inside the zone.
+
+*Chunk Relocating Process By The Master node*
+
+Let's dive into the deep how this problem is solved by the master and slave architecture.
+After appointing as the master service for the zone, the master server does not act like other services.
+Because, For the service that becomes as the master has different responsibilities that the slaves.
+In general, every instance tries to restore the chunk-files that inside the particular instance's folder.
+To identify the instance their folder's name, it uses the instance-Id from the eureka instance-info.
+But if the instance is the Master server, it checks what folders are available in the service's folder without having up and running instances.
+
+If there are some folders like that, all the files that are inside those folders are moved to other available instances' folders at that moment.
+Then that instance will restore the files to the event-store.
+
+And specially, The master node also has a folder, and also it can have the chunk files when the schedule is triggered.
+But due to the instance being the master node, it has another responsibility for *relocating* the files into available instances.
+Therefore, the master node doesn't try to restore the files of the folder its own as well.
+
+The master's folder is also considered as a folder that has no responsible instance, and those files are moved to another instance's folder too.
+
+That means, the master node changes the ownership of the files if those files have no a responsible-instance up and running.
+
+NOTE: The master node is appointed by considering the time that service started.
+All the service has the available service registry through the eureka server.
+By using the cache, all the services check whether I am a master or slave.
+If the instance has the most past timestamp, that instance appoints as the master by itself.
+
+Here you can see how Chunk Relocating Process is done by StackSaga with help the of Eureka.
+
+image::stacksaga-unit-test-Trash-File-Collecting-MI-MZ.drawio.svg[alt="StackSaga Chunk Files In Mulltiple Regions Adn Zones",height=300]
+
+For your understanding, the image shows two zones.
+But having multiple zones is not effected to the Relocating process.
+
+Let's have a look at the zone-A.
+
+* The zone-A has 4 instances up and running at this moment.
+* The master node is instance-1.
+And you can see in the file system there is a directory without an up and running instance.
+(The folder belonged to the instance-5, but the instance-5 went down rectally) That means, that folder's instance went down recently without restoring the chunk-files.
+* Therefore, the master instance moves that directory's files to another folder that the responsible instance is up and running.
+* As we mentioned above, you can see the master instance's files (instance-1) also moved to another folder by the master due to the master has its own responsibility.
+
+NOTE: After relocating the files, the empty folders are deleted by the master node as well.
+
+NOTE: You can customize the scheduler as you want.
+But there is no any scheduler for Relocating process.
+You can only configure the scheduler for checking the chunk-files in the filesystem.
+But if some instance is appointed as the master that same scheduler will be used for the relocating process.
+
+== StackSaga Discovery Configuration Properties [[stacksaga_discovery_configuration_properties]]
