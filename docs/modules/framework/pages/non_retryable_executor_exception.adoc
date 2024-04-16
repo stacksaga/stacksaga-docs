@@ -1,0 +1,100 @@
+= NonRetryableExecutorException [[non_retryable_executor_exception]]
+
+If you are having an exception while processing the executor that is not temporally occurred (The exceptions that have not any point of executing again), you can throw a `NonRetryableExecutorException`.
+Then the StackSaga engine will stop the execution forward, and start reverting back, according to the configuration.
+
+IF you were unable to catch the exception properly, the execution might throw `RuntimeException` s.
+That kind of unhandled exception will be caught as *non-retryable* exception by the StackSaga engine as well.
+But if you want to have proper error handling, you have to catch exceptions properly.
+
+*Non-Retryable Executor Exceptions* are allowed for the following executors.
+
+[cols="*,*,*"]
+|===
+|Executor |DoProcess() Method|doRevert() Method
+
+|Query Executor
+|✔
+|✖
+
+|Command Executor
+|✔
+|✖
+
+|Revert Before Executor
+|✖
+|
+
+|Revert After Executor
+|✖
+|
+
+|===
+
+NOTE: You can see in the summary table, all the revert executions are not allowed `NonRetryableExecutorException` s.
+The reason for that is according to the StackSaga architecture, any *command-execution* can have revert execution (compensation execution).
+But all the *revert-executions* can have retryable-exception only.
+Because, even though the process can be failed, the revert execution cannot be failed at all.
+If the process is failed, there is a revert execution to have a compensation.
+But if the revert is failed, there are any other executions to have compensation for the reverting fail. +
+*The summary is that only forward execution can have non-retryable-exception.*
+
+[source,java]
+----
+@SagaExecutor(
+        executeFor = "user-service",
+        liveCheck = true,
+        value = "CheckUserExecutor"
+)
+@AllArgsConstructor
+public class CheckUserExecutor implements QueryExecutor<PlaceOrderAggregator> {
+
+    private final UserService userService;
+
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            ProcessStack processStack,
+            PlaceOrderAggregator aggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManagerUtil
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        try {
+
+            ResponseEntity<UserDetailDto> userDetail = this.userService.getUserDetail(aggregator.getUsername());
+            ...
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            throw RetryableExecutorException
+                    .buildWith(unavailableException)
+                    .build();
+        } catch (FeignException.BadRequest badRequestException) {
+            //<1>
+            throw NonRetryableExecutorException
+                    .buildWith(badRequestException)
+                    .put("time", LocalDateTime.now())  //<2>
+                    .put("reason", "BadRequest") //<2>
+                    ...
+                    .build();
+        }
+    }
+
+}
+
+----
+
+<1> *NonRetryableExecutorException* is thrown due to the exception is a `BadRequest`. specially `NonRetryableExecutorException` provides a way to add the metadata regarding the exception.
+<2> Put the metadata regarding exception as a key and value. [[stacksaga_exception_wrapping]]
+
+NOTE: In java, we usually pass the data regarding the exception with the exception object.
+But in the StackSaga it is *not recommended*.
+Because, any time any object can be serialized (even Exceptions) for saving to the event-store.
+Serializing an exception object (like Json or XML) is not easy, and it might be a performance issue without any benefit.
+And also most of the time if you pass a complex exception, it might throw an exception when it is serialized.
+Therefore, StackSaga engine just saves your exception as a string in the event-store(Only for seeing through the Admin-Dashboard).
+If you want to put some metadata to the backward regarding the exception,
+*NonRetryableExecutorException* has a method to put the data as key and value pare called `put(key, value)`.
+You can put any number of key/value pare into that by using the put method.
+
+IMPORTANT: There is nothing like you can throw an exception when some exception is occurred.
+If you don't want to continue the execution of the transaction to forward, and if you decide that the transaction should be stopped at some point, due to a condition is not met, you can throw a *NonRetryableExecutorException* exception as well.
+<<usage_of_exceptions,See the full implementation>>
+
