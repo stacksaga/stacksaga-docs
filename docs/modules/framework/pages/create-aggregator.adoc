@@ -1,0 +1,69 @@
+= Creating Aggregator Class [[creating_aggregator_class]]
+
+The aggregator^<<aggregator_architecture,ref>>^  class does represent your business domain, and it is the container for carrying out the data for the executors.
+In side of the aggregator class, you should provide all the data regarding your entire transaction.
+
+example: Just think you are will be to make a transaction for place and order by using StackSaga.
+then you have to create an Aggregator class to put the data that you want to while the whole process.
+you can create an Aggregator class called `PlaceOrderAggregator` and provide all the data that you want like _username,
+orderId, transactionId_ etc...
+and also you might want
+to add complex data structure inside that aggregator class like _list of items_ regarding the items that the customer's order.
+then you have to create a java pojo as well.
+as a best practice,
+the framework suggests you
+to create all related pojo classes in the same package of the Aggregator class or as the inner classes of the Aggregator class.
+
+To be an aggregator in StackSaga, Mainly, The aggregator class should be extended from `org.stacksaga.Aggregator` class and also the aggregator class should be annotated with `org.stacksaga.core.annotation.SagaAggregator`.
+
+WARNING: All the classes (main aggregator class and other classes that are used inside it) that are used for the SagaAggregator should be implemented by the `java.io.Serializable` class.
+By default, The main aggregator class is Serializable due to the fact that it is implemented from the `Aggregator` class. <<complex_aggrgator,See complex object implementation>>
+
+Let's see how it is created in StackSaga project.
+
+[source,java]
+----
+@SagaAggregator(// <1>
+        version = @SagaAggregatorVersion(major = 1, minor = 0, patch = 1), // <2>
+        idPrefix = "po", // <3>
+        name = "PlaceOrderAggregator", // <4>
+        sagaSerializable = PlaceOrderAggregatorSample.class // <5>
+)
+@Getter // <6>
+@Setter // <7>
+public class PlaceOrderAggregator extends Aggregator  { // <8>
+
+    // <9>
+    public PlaceOrderAggregator() {
+        super(PlaceOrderAggregator.class);
+    }
+
+    private String orderId;
+    private String username;
+    private int isActive;
+}
+----
+
+<1> The aggregator class should be annotated with `org.stacksaga.core.annotation.SagaAggregator`.
+<2> *version* will be used for the identification of the aggregator versioning. it is helpful for the *event-upper-casting* and *event-down-casting*. `org.stacksaga.core.annotation.SagaAggregatorVersion` annotation help you to provide the version of the aggregator.
+<3> *idPrefix* will be used as the prefix of the transaction id. you can give a prefix according to the aggregator name.
+The maximum length of the prefix is 4 characters.
+<4> *name* The name of the aggregator. this is used for identification of the aggregator by the name.
+
+<5> *sagaSerializable* is used for pre-serialization of the samples of the aggregator. <<saga_serializable,see the implementation>>
+
+<6> *Getter* you can create getters as usual for the aggregator.
+<7> *Setter* you can create setters as usual for the aggregator.
+<8> The aggregator class should be implemented from the `org.stacksaga.Aggregator` class.
+It provides the shep of aggregator in the framework.
+<9> The aggregator class should have the default constructor and also the *super()* method should be called by passing the same aggregator class.
+
+WARNING: The name of the aggregator should be the same forever.
+Because, all the event-store data is mapped with the aggregator name.
+
+TIP: Due to the fact that the aggregator name is configured by an attribute, you can change the package of the aggregator class anytime.
+
+NOTE: In StackSaga, The aggregator is not a spring bean at all.
+Therefore, it is not necessary to have inside the *component scan* area.
+
+
