@@ -1,0 +1,101 @@
+=== @SagaException Annotation  [[saga_exception_annotation]]
+
+If you want to throw an exception as a <<non_retryable_executor_exception,NonRetryableExecutorException>>, The framework suggests you to create a new exception for that by warping the real exception and specially that can be annotated with `@SagaException` annotation like below.
+
+IMPORTANT: Make sure to don't add the variables for exception metadata in your new exception class.
+Keep the exception class clear.
+Because, the framework does provide another way to provide the metadata in <<stacksaga_exception_wrapping,NonRetryableExecutorException>>
+
+[source,java]
+----
+@SagaException(name = "UserInactiveException") //<1>
+public class UserInactiveException extends RuntimeException {
+    //for just throw an exception.
+    public UserInactiveException() {
+    }
+
+    //for just throw an exception with message.
+    public UserInactiveException(String message) {
+        super(message);
+    }
+
+    //for wrapping the exception.
+    public UserInactiveException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+----
+
+<1> According to the <<usage_of_exceptions,usage of exceptions example>>, you can see this exception is used to throw if the user is inactive.
+And also if you think the package of the exception class will be changed in some cases in the future, you can set a fixed name for the exception.
+By annotating `@SagaException`.
+
+At the first glance, you might think that there is no point in annotating by `@SagaException` when it is thrown.
+However, it is important when it is used in the revert executions (revert execution of the <<command_executor,command executors>> or <<revert_after_executor,revert after>> or <<revert_before_executor,revert before>>).
+As you know, the revert process goes through revert method of each and every <<command_executor,command executors>> that successfully executed in the past regarding the transaction.
+Then you have to check what is the real exception that was thrown, and what is the metadata that you want to make the decisions.
+As an example, just imagine that there is an event in the event-store to be executed.
+While the event is in the event-store, a new version is released of the particular service.
+And also the exception class has been moved to another package by mistake, or as a requirement.
+But while then, the old event is trying to be invoked through the StackSaga engine with old data.
+However, At this moment the exception class that caused the exception does not exist in the path when the exception was thrown initially.
+
+you can use the following methods that `NonRetryableExecutorException` does provide for checking the exception in the revert process.
+
+. `getRealExceptionName()`: Get the name with the path of the exception class that was thrown.
+(This name is provided by the framework when the exception is thrown).
+. `getRealExceptionSimpleName()`: Get just the name of the exception class that was thrown.
+(This name is provided by the framework when the exception is thrown).
+. `*getRealSagaExceptionName()*`: Get the name that has been given with `@SagaException` annotation.
+
+NOTE: You can get the `Real Saga Exception Name` only if you have annotated with `@SagaException` annotation.
+
+Here you can see an example of how you can use `SagaException` in the revert process.
+
+[source,java]
+----
+@SagaExecutor(
+        executeFor = "stock-management-service",
+        liveCheck = true,
+        value = "UpdateStockExecutor"
+)
+@AllArgsConstructor
+public class UpdateStockExecutor implements CommandExecutor<PlaceOrderAggregator> {
+
+
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            ProcessStack processStack,
+            PlaceOrderAggregator aggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        ...
+    }
+
+    @Override
+    public void doRevert(
+            ProcessStack previousProcessStack,
+            NonRetryableExecutorException realException,
+            PlaceOrderAggregator finalAggregatorState,
+            RevertHintStore revertHintStore
+    ) throws RetryableExecutorException {
+
+        realException.getRealSagaExceptionName().ifPresent(realSagaExceptionName -> {// <1>
+            if (realSagaExceptionName.equals("UserInactiveException")) {// <2>
+                // <3>
+                realException.get("reason").ifPresent(reason -> {
+                    if (reason.equalsIgnoreCase("BadRequest")) {
+                        //do the revert process
+                    }
+                });
+            }
+        });
+    }
+}
+----
+
+<1> You can get the `RealSagaExceptionName` by calling `getRealSagaExceptionName()` method.
+And if you have annotated the exception class with `@SagaException` annotation when the exception was thrown, it will return a `Optional<String>` object with the name that has been mentioned in the `@SagaException` annotation.
+Or otherwise, the object will be empty.
+<2> check the equality of Saga exception name with the exception that you want.
+<3> due to that, the exception is the exact same, you can get and check the metadata of the exception that you have given at the moment the exception was thrown.
