@@ -1,0 +1,44 @@
+== Query Executor. [[query_executor]]
+
+You can create any number of your custom Query-Executors regarding the Aggregator.
+Here you can see how you can create a Query-Executor for your `<<creating_aggregator_class,PlaceOrderAggregator>>`.
+
+[source,java]
+----
+// <1>
+@SagaExecutor(
+        executeFor = "user-service", // <2>
+        liveCheck = true, // <3>
+        value = "CheckUserExecutor" // <4>
+)
+public class CheckUserExecutor implements QueryExecutor<PlaceOrderAggregator> { // <5>
+
+    // <6>
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            ProcessStack processStack,
+            PlaceOrderAggregator aggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManagerUtil
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        //execute the service and check the conndtion.
+
+        //return or throw // <7>
+    }
+}
+----
+
+<1> *@SagaExecutor*: annotate your query executor with `@org.stacksaga.annotation.SagaExecutor` annotation.
+The annotation provides the spring bean capabilities and also another metadata for the StackSaga framework.
+
+<2> *executeFor*: The name of the service that particular executor is going to be connected. it can be a service name of another service. if the service is spring boot service, make sure to keep the application name as its. because it will be helpful for the retry process.
+
+<3> *liveCheck*: When the retry process is executed, liveCheck is considered by the engine. if the target service is a spring boot service or registered service with the service registry, the availability is checked before executing the retry by the StackSaga engine.
+
+<4> *value*: The bean name of the executor.
+The executor is identified with this value by StackSaga engine. after configuring the bean name, it cannot be changed at all. if you want to the class package, it does not matter without changing the configured name.
+
+<5> *QueryExecutor<T>* IF the executor is Query one, The executor should be implemented by `org.stacksaga.executor.QueryExecutor<T>`. `T` should be the target Aggregator class for the domain.
+
+<6> Override the `doProcess()`  method and put your execution code block that should be executed when the executor is executed by the StackSaga engine.
+
+<7> Finally, you can either return the next executor with the method that provides by the `ProcessStepManager`.

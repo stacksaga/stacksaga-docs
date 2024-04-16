@@ -1,0 +1,72 @@
+== Command Executor. [[command_executor]]
+
+[source,java]
+----
+// <1>
+@SagaExecutor(
+        executeFor = "delivery-service", // <2>
+        liveCheck = true, // <3>
+        value = "DispatchOrderExecutor" // <4>
+)
+public class DispatchOrderExecutor implements CommandExecutor<PlaceOrderAggregator> { // <5>
+
+    // <6>
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            ProcessStack processStack, // <7>
+            PlaceOrderAggregator aggregator, // <8>
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager // <9>
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        //execute the service and check the conndtion.
+        ...
+        //return or throw // <10>
+    }
+
+    @RevertBefore(startFrom = DispatchRevertNotifierExecutor.class)  // <11>
+    @RevertAfter(startFrom = DispatchRevertCompleteLogExecutor.class) // <12>
+    @Override
+    public void doRevert(
+            ProcessStack processStack,// <13>
+            NonRetryableExecutorException nonRetryableExecutorException,// <14>
+            PlaceOrderAggregator aggregator, // <15>
+            RevertHintStore revertHintStore // <16>
+    ) throws RetryableExecutorException {
+        //call the atomic process that you want to as the compensation,
+        ...
+    }
+}
+----
+
+<1> *@SagaExecutor*: annotate your query executor with `@org.stacksaga.annotation.SagaExecutor` annotation.
+The annotation provides the spring bean capabilities and also another metadata for the StackSaga framework.
+
+<2> *executeFor*: The name of the service that particular executor is going to be connected. it can be a service name of another service. if the service is spring boot service, make sure to keep the application name as its. because it will be helpful for the retry process.
+
+<3> *liveCheck*: When the retry process is executed, liveCheck is considered by the engine. if the target service is a spring boot service or registered service with the service registry, the availability is checked before executing the retry by the StackSaga engine.
+
+<4> *value*: The bean name of the executor.
+The executor is identified with this value by StackSaga engine. after configuring the bean name, it cannot be changed at all. if you want to the class package, it does not matter without changing the configured name.
+
+<5> *CommandExecutor<T>* IF the executor is command one, The executor should be implemented by `org.stacksaga.executor.CommandExecutor<T>`. `T` should be the target Aggregator class for the domain.
+
+<6> Override the `doProcess()`  method and put your execution code block that should be executed when the executor is executed by the StackSaga engine.
+<7> *ProcessStack* Object provides all the executed execution until the process so far.
+It will help for gen an idea about the execution history.
+And also you can get the decision of the execution base on the execution history.
+
+<8> *PlaceOrderAggregator*: The current aggregator state.
+<9> *ProcessStepManagerUtil<T>*: This object provides the methods for giving the navigation to the engine regarding the next step. it can be another executor (command or query) or a process completion.
+<10> Inside the method scope, you can provide the execution that should be executed when the StackSaga engine executes.
+And finally you can navigate to the next step by using the `ProcessStepManagerUtil` object.
+<11> *@RevertBefore*: If the executor has any revert-before-executors, you can mention that executor class with `@RevertBefore` annotation.
+According to the example, the revert before execution will be started from <<revert_before_executor,DispatchRevertNotifierExecutor>>.
+
+<12> *@RevertAfter*: If the executor has any revert-after-executors, you can mention that executor class with `@RevertAfter` annotation.
+According to the example, the revert after execution will be started from <<revert_after_executor,DispatchRevertCompleteLogExecutor>>.
+
+<13> *ProcessStack* The final process stack that was when the final execution was executed.
+<14> *NonRetryableExecutorException* The exception that caused the transition process stopping to forward.
+<15> *PlaceOrderAggregator* The final aggregator state when the NonRetryableExecutorException is thrown.
+<16> *RevertHintStore* If you want to add some data to the backward process, you can use the `RevertHintStore` to put the data.
+
+'''
