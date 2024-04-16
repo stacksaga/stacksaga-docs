@@ -1,0 +1,49 @@
+== Aggregator-Oriented casting [[aggregator_oriented_casting_architecture]]
+
+If some changes are done for the aggregator, it will cause for a version-update.
+Even though the version is updated, there is something to be considered carefully.
+After updating the aggregator's version, it is not a problem for that particular version at all.
+But StackSaga follows the event sourcing architecture and event re-invoking mechanism, in the event-store can have some events from the old version of the aggregator to be re-invoked.
+Therefore, the SEC has to cast (map/convert/deserialize) the old aggregator event to the new version.
+It is called as Aggregator-Oriented casting.
+
+WARNING: Even thought the term is quite simple at first glance, It can be effected to get crashed all the old events if you are unable to manage the version mapping.
+The casting process is failed for the old version's events, there is no chance to be re-invoked that retry process with the old versions.
+
+NOTE: Even though the casting process is done by the SEC, as the developer, you are responsible for managing the casting the new version with the old versions' events.
+
+Based on the behavior of the aggregator state-change, the Aggregator-Oriented version casting can be divided to two.
+
+. *<<aggregator_oriented_up_casting,Up-Casting>>*
+. *<<aggregator_oriented_down_casting,Down-Casting>>*
+
+== Aggregator-Oriented Up-Casting [[aggregator_oriented_up_casting]]
+
+If the new aggregator has more new attributes than the old one, that kind of event should be cast with upcasting.
+
+For instance, the old version's aggregator has 3 fields, and the new version can have 4 fields or more than that, the old version's events should be cast to the new aggregator object, and that term is called as upcasting.
+
+The following image shows how it is done by the SEC.
+
+image:Architecture-Stacksaga-aggregator-oriented-up-casting-view.drawio.svg[Stacksaga aggregator version up-casting]
+
+*Explanation:* In the event-store can have old remaining events to be re-tried.
+But due to the fact that the aggregator has been updated to a new version with new attributes, The old events also should be converted and should be run through the new aggregator.
+But if it is an upcast mapping, The new version doesn't bother to the casting process at all due that SEC uses `jackson objectmapper` to *serialization* and *deserialization* both.
+The new values will have the default values with help of
+`jackson objectmapper` and you have nothing to worry about upcasting with StackSaga at all. See the <<,technical documentation>>
+
+TIP: All the events that go through the SEO process can be identified easily in the <<saga_executors,Executor's>> methods with the help of event-version data that provides with the aggregator object.
+See the <<technical documentation>>
+
+== Aggregator-Oriented Down-Casting [[aggregator_oriented_down_casting]]
+
+image:Architecture-Stacksaga-aggregator-oriented-down-casting-view.drawio.svg[Stacksaga aggregator version down-casting]
+
+According to the example, the event-store might have the old events consisting of 2 fields.
+And if the new version has a less number of fields than the old one, it is called as down-casting.
+Now those remaining events are going to be executed through the new version.
+And the framework tries to build the new aggregator object by using the old event's binaries.
+This is the time the casting is been worked on.
+You have to modify and annotate the aggregator so as not to conflict while building the object by the framework.
+Here you can see the best practices related to the casting of aggregators.
