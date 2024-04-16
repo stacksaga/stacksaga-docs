@@ -1,0 +1,85 @@
+= StackSaga in High-level
+In the <<what_is_stacksaga,introduction section>>, We got a clear idea of how microservice architecture works, and what are the challenges that we have to face when implementing the microservice in traditional way.
+
+Here, we are going to see how the StackSaga works together with typical microservice architecture.
+It shows how StackSaga does impact on the default https://spring.io/microservices[spring boot microservice architecture].
+
+For your convenience, both *Spring Microservice Architecture* and **Spring Microservice Architecture With StackSaga** diagrams have been added here.
+
+* *Spring Microservice Architecture* [[spring_microservice_architecture]] +
++
+image::microservice-high-level-diagram.svg[alt="Microservice High Level Diagram",height=300]
+
+* **Spring Microservice Architecture With StackSaga**
++
+image::stack-saga-high-level-diagram.svg[alt="StackSaga High-level architecture",height=300]
+
+After adding stack saga in the microservice architecture, you can see there are some additional components in the high-level architecture diagram.
+
+TIP: In the diagram, the *Gray* color components and lines are related to the typical microservice architecture, and additional stacksaga related components and lines have been colored by *Green* color.
+
+Let's have a look at all the components and how they are interacted with each other.
+
+. At first glance, you can see a major difference in database architecture.
+// todo add links
+The reason is StackSaga *SEC* uses *event sourcing* for managing your *aggregator state* for each *executor*.
+In brief, StackSaga internally uses a database to string your execution data as events.
+Therefore, If you are using StackSaga, you have to provide a database as the *event-store*.
++
+TIP: Even though the diagram shows event-store per service, It can be configured as a single event-store for all services if the application is currently not a large one. *Read more*.
++
+TIP: It is recommended to use one of the StackSaga-DB implementations equal to the primary database for the particular service.
+Because, you don't need to configure another separate database and complicate the architecture. +
+As an example, If the order-service uses *MYSQL* databases as the *primary database*, you can use the `StackSaga-MYSQL` implementation for the event-store.
++
+The event-store is accessed by the StackSaga framework.
+Therefore, The `StackSaga-Core` library (StackSaga *SEC* is located in this library) should be added to your application.
+. Even though it is enough for the event-sourcing, StackSaga provides more additional functionalities like avoiding *Dual-Consistency Problem*, *Monitoring Trace,* etc.
+Therefore, another library should be added to your application called `StackSaga-Discovery`.
+// TODO: add a link to why use eureka by the StackSaga framework.
+It will interact with your *service-registry* and get to know about the service availability.
++
+NOTE: Currently, StackSaga only supports for https://spring.io/projects/spring-cloud-netflix[Eureka Service Registry].
+
+. Next, Let's have a look at *StackSaga Admin*.
+// TODO: add a link [facilities]
+Admin provides a lot of facilities in the framework.
+Primarily feature is monitoring and tracking the transaction's flow and trace.
+For monitoring your transactions, Admin should be able to retrieve the transaction data from each event-store.
+Internally, `StackSaga-Discovery` library provides and exposes the endpoints for that.
+
+According to the high-level architecture diagram and the brief explanation, you can identify one application and 4 libraries are involved for StackSaga.
+
+. `StackSaga-Core` (library).
+. `StackSaga-Discovery` (library).
+. `StackSaga-DB` (library).
+. `StackSaga-Admin-Server` (Application).
+
+image::architecture-stacksaga-products.drawio.svg[alt="StackSaga High-level architecture",height=300]
+
+* `StackSaga-Core`, `StackSaga-DB` and `StackSaga-Discovery` dependencies are used for the individual service that you want to use the service as an *orchestrator*.
++
+NOTE: No need to add StackSaga for all the services in the ecosystem.
+It can be added freely only to the services that you want to use.
+If There is no any complex business domain in some services, there is no point in adding StackSaga for that particular service and keep it as it is in the ecosystem.
+* `StackSaga-Admin-Server` Can be run as a standalone server.
++
+NOTE: Currently, StackSaga-Admin does support only for MYSQL.
+It does not bother other services.
+// TODO: add a link [facilities]
+StackSaga-Admin's Database is used only for saving the *User's-Credentials* and the *Terminated Transactions'* metadata.
+##Other data that you can see in the StackSaga-Admin dashboard are obtained from each service's event-store endpoints.
+##
+
+We had a quit a simple idea over this high-level overview.
+It is recommended to fallow the following architectures in detailed to have a better understanding.
+
+. How <<SEC,SEC>> does work with help of `StackSaga-Core` and `StackSaga-DB` inside the individual services.
++
+<<SEC,Read in detailed>>
+. How StackSaga Overcomes the *Dual-Consistency Problem* with help of `StackSaga-Discovery`.
++
+*Read in detailed*
+. How StackSaga Admin communicates with each service's event-store endpoints with the help of API-Gateway
++
+<<SEC,Read in detailed>>
