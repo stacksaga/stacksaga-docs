@@ -1,0 +1,53 @@
+= Transaction Replay. [[replay_transaction]]
+
+Transaction Replay concept is help to re-invoke the transaction that stopped for some reason in the past.
+Even though all the transactions can not be re-invoked, some transactions/executions can be re-invoked.
+Specially in the microservice architecture, a transaction can be deviated in to small atomic operations.
+Therefore, that atomic process can be failed at any time for some reason.
+But we have to be careful with that error if we are in a *distributed transaction*.
+It is not like in a standalone application with a single database.
+After executing some atomic operations successfully, reverting that executed executions is quite complicated than doing rollback in a single database.
+Even though Saga provides the way to have the compensation, we can not give up the entire transaction easily.
+Therefore, it should be identified whether the transaction can be re-invoked or not.
+
+The following reasons are caused to Transaction Replay.
+
+. IF the transaction executor was failed with <<NonRetryableExecutorException,NonRetryableExecutorException>>. +
+Any <<executor_architecture,executor>> can be re-invoked in StackSaga.
+After executing your logic inside the executor, you can provide to the <<SEC,SEC>> what should be done as the next based on your conditions.
+IF the executed transaction is failed due to a retry-able exception that executor can be re-invoked.
+That helps to have the eventual consistency of the entire transaction.
+
+. IF a <<dual_consistency_problem_of_sec_in_microservice,chunk-data>> file is restored after every-store problem.
+
+IF your application is a large one.
+There can be a lot of retryable transactions from each service in the event-store.
+Therefore, executing the retryable transactions will be a heavy process due to the bulk.
+To overcome this problem, StackSaga shares all the retryable transactions within the available instances in the zone.
+The architecture is quite the same as <<execution_chunk_protection_mechanism_with_the_help_of_eureka_service_registry,chunk-data file relocating>>.
+To share the transactions within the available instances, StackSaga follows the master and slave architecture.
+
+*How is the master node appointed with the help of Eureka Registry?*
+
+For selecting the master node, StackSaga uses eureka client metadata.
+When the instance is started, StackSaga adds the timestamp as a metadata to the Eureka instance Info.
+Then all the instances know who is the oldest instance in the zone.
+The older instance will be appointed as the master node by itself.
+
+image::stacksaga-unit-test-Transaction-Replay-Architecture-MI.drawio.svg[alt="StackSaga Transaction Replay Architecture",height=300]
+
+
+* pass:[<span class="rounded-number">1</span>] Master gets the service registry from the eureka cache, and allocates retryable-transactions in the event-store for each available instance.
+In the diagram, instance-1 makes the retryable-transactions allocation (you can configure the allocation count) for instance-2, instance-3, and instance-4.
+
+* pass:[<span class="rounded-number">2</span>] After making the allocation for each.
+the master notifies to each instance by making http requests.
+
+* pass:[<span class="rounded-number">3</span>]  Then each instance starts the executing the allocated retryable-transactions bulk.
+
+NOTE: Each availability zone has a master node.
+
+After becoming as the master node, the instance has a special responsibility other than the slaves.
+Here there is an allocation process by the master for other instances in the zone.
+
+The slaves try to invoke the *allocated* retryable transactions for that particular instance by the master node.
