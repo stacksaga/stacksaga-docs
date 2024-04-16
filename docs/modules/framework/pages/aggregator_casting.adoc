@@ -1,0 +1,218 @@
+= Aggregator's Event Casting [[aggregators_event_casting]]
+
+As per the architecture <<version_casting_architecture,documentation>> StackSag does support Aggregator Event <<aggregator_oriented_up_casting,UpCast>> and also Aggregator Event <<aggregator_oriented_down_casting,DownCast>>. +
+For the upcasting of the Aggregator Event, there is nothing to be done.
+The only thing is adding the new properties.
+But the down-casting process is a little more complicated.
+
+To overcome Aggregator's Event down-casting in StackSaga, it can be followed in two different approaches technically.
+
+. Ignore Unknown JSON Properties.
+. Collect Missing properties
+
+WARNING: *Ignore Unknown JSON Properties* Is not a recommended approach.
+Technically, it is possible to ignore the missing properties in Object Mapper by using `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` globally or using `@JsonIgnoreProperties(ignoreUnknown = true)`.
+Annotation in class level.
+But it is not recommended in StackSaga.
+Because old events have more data that the new one when it provided down-casting changes in your aggregator.
+Then, while the old events are processed, that removed data will not be available for accessing.
+
+== Collect Missing properties [[collect_missing_properties]]
+
+For collecting missing properties it can be used `@JsonAnySetter` and `@JsonAnyGetter` with a custom method.
+But you don't need to create all the things from scratch.
+Because StackSaga provides the helper class called `MissingJsonPropertyCollector` for extending without writing any custom methods.
+
+NOTE: The root implementation (Custom Aggregator) of the *Aggregator* is by default extended from `MissingJsonPropertyCollector`.
+Therefore, the root Custom Aggregator class is ready to collect the missing properties.
+But if you want to empower other inner classes that are used inside the Root Aggregator class also with Missing properties collector capabilities, you can extend all the inner classes from `MissingJsonPropertyCollector` as well.
+
+Here is an example for down-casting with using `MissingJsonPropertyCollector` implementation.
+
+- *Old Version Of the Custom Aggregator.*
+
+[source,java]
+----
+@SagaAggregator(
+        version = @SagaAggregatorVersion(major = 1, minor = 1, patch = 0),
+        idPrefix = "po",
+        name = "PlaceOrderAggregator",
+        sagaSerializable = PlaceOrderAggregatorSample.class,
+        mapper = PlaceOrderAggregatorJsonMapper.class
+)
+@Getter
+@Setter
+public class PlaceOrderAggregator extends Aggregator {
+
+    public PlaceOrderAggregator() {
+        super(PlaceOrderAggregator.class);
+    }
+
+    @JsonProperty("order_id")
+    private String orderId;
+
+    @JsonProperty("username")
+    private String username;
+
+    @JsonProperty("total")
+    private Double total;
+
+    @JsonProperty("is_active")
+    private Integer isActive;
+
+    @JsonProperty("comment")
+    private String comment;
+
+    @JsonProperty("item_details")
+    private List<ItemDetail> itemDetails = new ArrayList<>();
+
+    @Getter
+    @Setter
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class ItemDetail implements Serializable {
+
+        @JsonProperty("order_id")
+        private String itemName;
+
+        @JsonProperty("qty")
+        private int qty;
+
+        @JsonProperty("price")
+        private double price;
+
+        @JsonProperty("note")
+        private String note;
+    }
+}
+----
+
+In this `PlaceOrderAggregator` class you can see some properties in the root class, and also there is another nested class called `ItemDetail` and it contains more properties regarding the items.
+
+- *New Version Of the Custom Aggregator.*
+
+[source,java]
+----
+@SagaAggregator(
+        version = @SagaAggregatorVersion(major = 1, minor = 1, patch = 1),
+        idPrefix = "po",
+        name = "PlaceOrderAggregator",
+        sagaSerializable = PlaceOrderAggregatorSample.class,
+        mapper = PlaceOrderAggregatorJsonMapper.class
+)
+@Getter
+@Setter
+public class PlaceOrderAggregator extends Aggregator {
+
+    public PlaceOrderAggregator() {
+        super(PlaceOrderAggregator.class);
+    }
+
+    @JsonProperty("order_id")
+    private String orderId;
+
+    @JsonProperty("username")
+    private String username;
+
+    @JsonProperty("total")
+    private Double total;
+
+    @JsonProperty("is_active")
+    private Integer isActive;
+
+    //@JsonProperty("comment") //<1>
+    //private String comment;
+
+    @JsonProperty("item_details")
+    private List<ItemDetail> itemDetails = new ArrayList<>();
+
+    @Getter
+    @Setter
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class ItemDetail extends MissingJsonPropertyCollector { //<3>
+
+        @JsonProperty("order_id")
+        private String itemName;
+
+        @JsonProperty("qty")
+        private int qty;
+
+        @JsonProperty("price")
+        private double price;
+
+        //@JsonProperty("note") //<2>
+        //private String note;
+    }
+}
+----
+
+Relatively the old version, some attributes have been removed from the root class and also from the `ItemDetail` nested class.
+That means that the old event data should be cast down when it is deserialized into the new aggregator class.
+
+<1> The `comment` property has been removed from the root class.
+But should not be executed from the `MissingJsonPropertyCollector`.
+Because the root class is already executed from the `MissingJsonPropertyCollector` through the `Aggregator` class.
+<2> The `note` property has been removed from the `ItemDetail` class.
+
+<3> To be collected that missing property (`note`), the `ItemDetail` has been extended from the `MissingJsonPropertyCollector` class.
+Then the deserialization is happened that missing property will be saved in to the `missingProperties` map in side of teh `MissingJsonPropertyCollector` that has been provided by the framework.
+
+WARNING: If the `ItemDetail` has not been extended from the `MissingJsonPropertyCollector` class, an exception will be thrown by the framework when the application is started by mapping the old version's samples that you have given in the previous version through the `<<saga_serializable,SagaSerializable>>` implementation.
+It will ensure that the application is in a casting trouble.
+
+- *Getting The Collected Properties For specific Version.*
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", liveCheck = true, value = "OrderSaveExecutor")
+@AllArgsConstructor
+public class OrderSaveExecutor implements CommandExecutor<PlaceOrderAggregator> {
+
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            ProcessStack processStack,
+            PlaceOrderAggregator aggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        if (aggregator.getRealVersionAsString().equals("1.0.0")) { //<1>
+            String comment = aggregator.getMissingProperties().get("comment").toString(); //<2>
+            System.out.println("comment = " + comment);
+
+            for (PlaceOrderAggregator.ItemDetail itemDetail : aggregator.getItemDetails()) { //<3>
+                String note = itemDetail.getMissingProperties().get("note").toString(); //<3>
+                System.out.println("note = " + note);
+            }
+        }
+        ...
+
+        return stepManager.next(UpdateStockExecutor.class);
+    }
+
+    @Override
+    public void doRevert(
+            ProcessStack processStack,
+            NonRetryableExecutorException e,
+            PlaceOrderAggregator aggregator,
+            RevertHintStore revertHintStore
+    ) throws RetryableExecutorException {
+        ...
+    }
+}
+----
+
+You already know that you have to use the same aggregator as well as the same executors for invoking the old transactions as well.
+Although the missing properties should not be need for the new version(`1.0.1`), If the event is an old transaction from the version of `1.0.0`, the missing properties can be required.
+Therefore, it is necessary to identify the exact version of the execution (Event).
+To identify the exact version of the current execution (Event), The framework provides the data version data along with the Room Aggregator Object By default.
+
+<1> Check the current execution is 1.0.0 or another version by using the version data that provides by the Aggregator.
+
+<2> If the version is `1.0.0`, you can get the missing properties from the `aggregator` object by calling `getMissingProperties()` method.
+That pert is based on the root aggregator object.
+
+<3> If the version is `1.0.0`, you can get the missing properties from the `itemDetail` object by calling `getMissingProperties()` method.
+That pert is based on the root `ItemDetail` object.
+
+NOTE: It is possible to get the missing properties and the version of the current execution (Event) in every executor like <<command_executor,Command-Executor>>, <<query_executor,Query-Executor>> and <<revert_after_executor,Revert-Executor>>.
