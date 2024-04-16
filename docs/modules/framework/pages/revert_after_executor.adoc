@@ -1,0 +1,60 @@
+== Revert After Executor. [[revert_after_executor]]
+
+[source,java]
+----
+//<1>
+@SagaExecutor(
+        executeFor = "delivery-service",//<2>
+        liveCheck = true,//<3>
+        value = "DispatchRevertNotifierExecutor" //<4>
+)
+public class DispatchRevertCompleteLogExecutor implements RevertAfterExecutor<PlaceOrderAggregator, DispatchOrderExecutor> {//<5>
+
+    //<6>
+    @Override
+    public RevertAfterStepManager<PlaceOrderAggregator, DispatchOrderExecutor> doProcess(
+            PlaceOrderAggregator aggregator,//<7>
+            ProcessStack previousProcessStack,//<8>
+            NonRetryableExecutorException processException,//<9>
+            RevertHintStore revertHintStore,//<10>
+            RevertAfterStepManagerUtil<PlaceOrderAggregator, DispatchOrderExecutor> revertStepManagerUtil //<11>
+    ) throws RetryableExecutorException { //<12>
+        return revertStepManagerUtil.next(NextAfterExecutor.class); //<13>
+        //or
+        return revertStepManagerUtil.complete(); //<14>
+    }
+}
+----
+
+<1> *@SagaExecutor*: annotate your query executor with `@org.stacksaga.annotation.SagaExecutor` annotation.
+The annotation provides the spring bean capabilities and also another metadata for the StackSaga framework.
+
+<2> *executeFor*: The name of the service that particular executor is going to be connected. it can be a service name of another service. if the service is spring boot service, make sure to keep the application name as its. because it will be helpful for the retry process.
+
+<3> *liveCheck*: When the retry process is executed, liveCheck is considered by the engine. if the target service is a spring boot service or registered service with the service registry, the availability is checked before executing the retry by the StackSaga engine.
+
+<4> *value*: The bean name of the executor.
+The executor is identified with this value by StackSaga engine. after configuring the bean name, it cannot be changed at all. if you want to the class package, it does not matter without changing the configured name.
+
+<5> *RevertAfterExecutor<A, E>*: The Revert After Executor should be implemented from the `RevertAfterExecutor<A,E>`.
+Generic *A* is the aggregator.
+Generic *E* is the <<command_executor,command-executor>> of the given aggregator as the Generic *A*.
+
+<6> Override the `doProcess()` method that `RevertAfterExecutor` provides.
+That is the method is executed by the StackSaga engine.
+
+<7> *PlaceOrderAggregator*: The final aggregator state when the process exception is thrown.
+
+<8> *ProcessStack*: The final process stack when the process exception is thrown.
+
+<9> *NonRetryableExecutorException*:The process-exception that was thrown by the last executor.
+
+<10> *RevertHintStore* If you want to add some data to the backward process, you can use the `RevertHintStore` to put the data as container.
+
+<11> **RevertAfterStepManagerUtil<A, E>**: This object provides the methods for giving the navigation to the engine regarding the next step. it can be another revert-after-executor or a revert-after completion.
+
+<12> *RetryableExecutorException*: If the revert after execution is failed due to a retryable exception, you can provide that by warping with `RetryableExecutorException`.
+
+<13> *next()*: You can provide (only if you have) the next revert-after-executor with `revertStepManagerUtil.next()`.
+
+<14> *complete()*: If you don't have any revert-after-executor to be executed as next regarding the command-executor, you can return `revertStepManagerUtil.complete()`.
