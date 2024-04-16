@@ -1,0 +1,36 @@
+== Saga Discovery Retry Transaction TaskExecutor [[saga_discovery_retry_transaction_task_executor]]
+
+Even though the transaction is started by the <<saga_discovery_transaction_task_executor,`SagaDiscoveryTransactionTaskExecutor`>>
+thread-pool, if the transaction is paused due a <<retryable_executor_exception,`RetryableExecutorException`>>, the transaction should be retried again after some time (configured schedule).
+For those executions, the `SagaDiscoveryRetryTransactionTaskExecutor` thread-pool is used.
+
+NOTE: It ensures the application's resiliency.
+And also the application can receive the new transaction without interrupting the transaction retry-bulk.
+The summary is that the retry execution does not disturb to the brand-new transaction.
+
+— In case if you want to customize the default configuration, you can update the default configuration as follows:
+
+[source,java]
+----
+@Component //<1>
+public class CustomSagaDiscoveryRetryTransactionTaskExecutor
+    implements SagaDiscoveryRetryTransactionTaskExecutorProvider {//<2>
+
+    @Override
+    public ThreadPoolTaskExecutor getTaskExecutor() {
+        //<3>
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(Runtime.getRuntime().availableProcessors() * 5);
+        ...
+        return executor;
+    }
+}
+----
+
+<1> Mark the class as a spring `@Component` (bean).
+<2> Implement the custom task-executor provider class from `SagaDiscoveryRetryTransactionTaskExecutorProvider` and override the `getTaskExecutor()` method.
+<3> Provide your custom task-executor configurations by creating a new instance of https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/scheduling/concurrent/ThreadPoolTaskExecutor.html[`ThreadPoolTaskExecutor`].
+
+NOTE: Even though you change the prefix of the thread-pool when the task-executor is created, the prefix is restored for maintaining the thread-name uniqueness. <<custom_thread_pool_configuration,See the prefix of each thread-pool>>.
+
+'''
