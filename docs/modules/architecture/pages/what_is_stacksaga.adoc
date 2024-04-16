@@ -1,0 +1,84 @@
+= What is StackSaga
+
+StackSaga is an echo system that helps you to manage and monitor your distributed transactions in microservice' architecture.
+
+As you saw in the .... Section, There's a distributed transaction problem in microservice' architecture.
+So managing distributed transaction is very complicated without a framework.
+StackSaga Saga provides a better and resilient architecture as an *orchestration engine framework* to overcome that problem with a lot of additional features as well.
+
+StackSaga mainly consists of two parts.
+
+. *StackSaga Admin* +
+StackSaga admin mainly provides the monitoring facilities of the transactions and manages the security.
+. *StackSaga Framework*.
+- StackSaga Framework provides orchestration engine support for your distributed transactions in your service.
+
+
+*Quick Understanding:* [[quick_understanding_example]]
+
+Just imagine that you have a business domain for placing an order in microservice architecture.
+So you can have multiple services, and you have to visit all over the services to complete the place-odder transaction.
+
+The services might be as follows:
+
+- Order-service
+- Payment-service
+- Cart-service
+- Delivery-Service and many more.
+
+IF you execute the place order process, you have to go through each and every service one by one after competing each of them.
+There is no issue with that if the entire process is completed successfully all the time.
+But in microservice architecture, it is not possible and there is a possibility to have an at least connection issue.
+Just think all the past services are done successfully, but the last execution is failed due to insufficient balance or payment-service's failure.
+Then you have to revert (compensation-transaction) all the past executions *one by one as the same-order*
+that those services were executed to overcome the eventual consistency according to the Saga design pattern.
+It is very complicated if you are going to do manually.
+Other than that, just imagine you are able to handle and bare the last failed execution, and you started to revert all the past executions one by one.
+Just imagine very unfortunately, you are getting a connection error at the last revert process.
+
+*Oops!*
+Now your in a big trouble with your data consistency.
+Because your both transaction Forward-process and Revert-process are failed at this moment.
+You can do nothing in this kind of situation.
+
+You were unable to reach the target end execution to forward.
+Therefore, you stated revert-process for all the past executions one by one (Last-In, First-Out order [*LIFO*] ).
+But unfortunately, You were unable to reach the target final revert as well due to a network issue.
+
+Here you can see What happened to your place-order transaction with a diagram.
+
+image::revert-failed-transaction-intro.svg[alt="StackSaga revert failed transaction",height=300]
+
+. You Started the place-order transaction there.
+. Stopped the place-order transaction due to not sufficient balance.
+. Your target transaction ending for a successful transaction.
+. Started revert process due the transaction was stopped unsuccessfully.
+. The revert process was stopped due to a connection error.
+. The target revert process ending for a successful revert transaction.
+
+*How StackSaga framework helps to overcome this problem?*
+
+StackSaga provides a *Codes paces* (Those called as *Command Executor*, *Query Executor* to provide your atomic operations that you did same in the place-order transaction.
+The only thing that you have to do is to provide the execution-process inside the *Codespaces* and notify the exception type whether it is retryable or not.
+Then the StackSaga engine will invoke each atomic transaction until the entire transaction gets succeeded (revert success or full process success).
+
+image::stack-saga-codespacess.drawio.svg[alt=" Stacksaga Executors",height=300]
+
+In the above diagram, you can see the Codespaces for each atomic transaction.
+You already might have the code portion for making the requests to other services.
+In StackSaga, you can call those methods inside the *Codespaces*.
+Then StackSaga coordinator will invoke your code portion through the *Codespaces*.
+StackSaga does not involve your request.
+Therefore, you don't want to really on specific protocol, and you can use any protocol for making request.
+At least the endpoints should not be within the same https://spring.io/microservices[spring cloud ecosystem].
+The endpoints can be anything external or within the ecosystem.
+The only thing that you want to do is make the request part of each atomic transaction and warp up with *Codespaces* (<<executor_architecture,executors>>).
+
+StackSaga orchestration engine follows these concepts behind the scenes.
+
+. Saga design pattern
+. Event sourcing
+. Eventual consistency.
+
+
+
