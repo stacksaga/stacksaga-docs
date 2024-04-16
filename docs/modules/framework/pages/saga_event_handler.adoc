@@ -1,17 +1,21 @@
 = Saga Execution Event Listener  [[saga_event_handler]]
 
-`SagaExecutionEventListener` is the place where you're notified about each and every action during the process by the SEC.
-As an example, you hand over your transaction to the StackSaga engine by mentioning the starting executor.
-After handing over, the engine will invoke your executors one by one.
+`ExecutionEventListener<A>` is the place where you're notified about each and every action during the process by the SEC.
+As an example, After handing over the transaction to the StackSaga engine by mentioning the starting executor, the engine will invoke your executors one by one.
 During the process, the engine does provide some events regarding the execution to notify.
-To get notified, you can create a separate EventListener classes for each and every <<creating_aggregator_class,Aggregator>>.
-For creating the EventListeners, the EventListeners should be implemented from `ExecutionEventListener<A>` interface.
-`A` is the Aggregator class that you want to get notified.
-And also the class should be annotated with `*@SagaExecutionEventListener*`  or `@*SagaAsyncExecutionEventListener*`.
-Those annotations provide Spring bean capabilities for your implementation as well.
+To get notified for each action, you can create a separate ExecutionEventListener implementations for <<creating_aggregator_class,Aggregators>>.
+One aggregator can have many ExecutionEventListener implementations as needed.
+Specially the ExecutionEventListener is provided for cross-cutting concerns.
+therefore the implementations of the `ExecutionEventListener<A>` can be used in two ways.
 
-NOTE: If you want to call the event methods in *Async-mode*  inside the handler, the handler class can be annotated with `@SagaAsyncExecutionEventListener` instead of `@SagaExecutionEventListener`.
-Then it will run the event methods in separate threads asynchronously.
+* Synchronous way
+- if the events also should be run in sequence order with the same thread, the Synchronous way can be implemented.
+to overcome the Synchronous feature the implementation should be annotated by `*@SagaExecutionEventListener*`.
+* Asynchronous way
+- if the events should not be bothered to the man executions and if not required sequence order between real executions and events, the Asynchronous way can be implemented. and also the events are triggered in separate threads.
+to overcome the Asynchronous feature the implementation should be annotated by `@*SagaAsyncExecutionEventListener*`.
+
+NOTE: `ExecutionEventListener` comes with a generic parameter. the `<A>` is represented the target Aggregator. when the ExecutionEventListener implementation is created, the target aggregator should be mentioned.
 
 WARNING: Make sure to not use spring `@Async` annotation with each method inside the listener or the entire class.
 Because StackSaga does create a separate thread pool for executing the event methods and also, you can customize it as per the requirements.
@@ -66,28 +70,34 @@ Here you can see an example how you can create a listener of `ExecutionEventList
 @SagaExecutionEventListener
 public class PlaceOrderEventListener implements ExecutionEventListener<PlaceOrderAggregator> {
     @Override
-    public void onEachProcessPerformed(Class<? extends SagaExecutor<? extends Aggregator>> processedExecutor, PlaceOrderAggregator currentAggregator) {
-        //do whatever you want
+    public void onEachProcessExecutionPerformed(String executedExecutor, PlaceOrderAggregator currentAggregator) {
+        // TODO: implement
     }
 
     @Override
-    public void onEachRevertPerformed(Class<? extends SagaExecutor<? extends Aggregator>> revertedExecutor, PlaceOrderAggregator finalAggregatorState, NonRetryableExecutorException nonRetryableExecutorException, RevertHintStore revertHintStore) {
-        //do whatever you want
+    public void onEachRevertPerformed(String revertedExecutor, PlaceOrderAggregator finalAggregatorState, NonRetryableExecutorException nonRetryableExecutorException,
+                                      RevertHintStore revertHintStore) {
+        // TODO: implement
     }
 
     @Override
-    public void onTransactionCompleted(TransactionCompletedDetail<PlaceOrderAggregator> transactionCompletedDetail, CompleteStatus completeStatus) {
-        //do whatever you want
+    public void onTransactionCompleted(TransactionCompletedDetail<PlaceOrderAggregator> transactionCompletedDetail,
+                                       CompleteStatus completeStatus) {
+        // TODO: implement
     }
 
     @Override
     public void onTransactionTerminated(TransactionTerminationDetail<PlaceOrderAggregator> transactionTerminationDetail) {
-        //do whatever you want
+        // TODO: implement
     }
 
     @Override
-    public void onProcessException(PlaceOrderAggregator finalAggregatorState, NonRetryableExecutorException exception, Class<? extends SagaExecutor<? extends Aggregator>> executorClass) {
-        //do whatever you want
+    public void onProcessException(PlaceOrderAggregator finalAggregatorState,
+                                   NonRetryableExecutorException exception,
+                                   String executedExecutor) {
+        // TODO: implement
     }
 }
 ----
+
+NOTE: All the methods are in the *default* form. it helps to ignore the un necessary methods.
