@@ -5,14 +5,10 @@ In side of the aggregator class, you should provide all the data regarding your 
 
 example: Just think you are will be to make a transaction for place and order by using StackSaga.
 then you have to create an Aggregator class to put the data that you want to while the whole process.
-you can create an Aggregator class called `PlaceOrderAggregator` and provide all the data that you want like _username,
-orderId, transactionId_ etc...
-and also you might want
-to add complex data structure inside that aggregator class like _list of items_ regarding the items that the customer's order.
+you can create an Aggregator class called `PlaceOrderAggregator` and provide all the data that you want like _username, orderId, transactionId_ etc...
+and also you might want to add complex data structure inside that aggregator class like _list of items_ regarding the items that the customer's order.
 then you have to create a java pojo as well.
-as a best practice,
-the framework suggests you
-to create all related pojo classes in the same package of the Aggregator class or as the inner classes of the Aggregator class.
+as a best practice, the framework suggests you to create all related pojo classes in the same package of the Aggregator class or as the inner classes of the Aggregator class.
 
 To be an aggregator in StackSaga, Mainly, The aggregator class should be extended from `org.stacksaga.Aggregator` class and also the aggregator class should be annotated with `org.stacksaga.core.annotation.SagaAggregator`.
 
@@ -27,13 +23,14 @@ Let's see how it is created in StackSaga project.
         version = @SagaAggregatorVersion(major = 1, minor = 0, patch = 1), // <2>
         idPrefix = "po", // <3>
         name = "PlaceOrderAggregator", // <4>
-        sagaSerializable = PlaceOrderAggregatorSample.class // <5>
+        sagaSerializable = PlaceOrderAggregatorSample.class, // <5>
+        keyGen = PlaceOrderAggregatorKeyGenerator.class //<6>
 )
-@Getter // <6>
-@Setter // <7>
-public class PlaceOrderAggregator extends Aggregator  { // <8>
+@Getter // <7>
+@Setter // <8>
+public class PlaceOrderAggregator extends Aggregator  { // <9>
 
-    // <9>
+    // <10>
     public PlaceOrderAggregator() {
         super(PlaceOrderAggregator.class);
     }
@@ -49,14 +46,14 @@ public class PlaceOrderAggregator extends Aggregator  { // <8>
 <3> *idPrefix* will be used as the prefix of the transaction id. you can give a prefix according to the aggregator name.
 The maximum length of the prefix is 4 characters.
 <4> *name* The name of the aggregator. this is used for identification of the aggregator by the name.
-
-<5> *sagaSerializable* is used for pre-serialization of the samples of the aggregator. <<saga_serializable,see the implementation>>
-
-<6> *Getter* you can create getters as usual for the aggregator.
-<7> *Setter* you can create setters as usual for the aggregator.
-<8> The aggregator class should be implemented from the `org.stacksaga.Aggregator` class.
+<5> *keyGen* is used for creating unique id for the aggregator. the keyGen has a default implementation. even though if it is not necessary to provide, providing a custom ID generator can beneficial for sometimes like make proper indexing.
+xref:aggregator_key_gen_custom_implementation.adoc[see the implementation]
+<6> *sagaSerializable* is used for pre-serialization of the samples of the aggregator. <<saga_serializable,see the implementation>>
+<7> *Getter* you can create getters as usual for the aggregator.
+<8> *Setter* you can create setters as usual for the aggregator.
+<9> The aggregator class should be implemented from the `org.stacksaga.Aggregator` class.
 It provides the shep of aggregator in the framework.
-<9> The aggregator class should have the default constructor and also the *super()* method should be called by passing the same aggregator class.
+<10> The aggregator class should have the default constructor and also the *super()* method should be called by passing the same aggregator class.
 
 WARNING: The name of the aggregator should be the same forever.
 Because, all the event-store data is mapped with the aggregator name.
