@@ -52,10 +52,52 @@ After implementing it should be provided as keyGen of the aggregator inside the 
 public class PlaceOrderAggregator extends Aggregator  {
 ----
 
-Generated samples.
+After configuring the custom keygen to the aggregator that will be invoked by framework when start the transaction.
+and then the generated ID will be stored to the `Aggregator#aggregatorTransactionId`. and then it can be accessed by calling the get method from your aggregator class due to that your aggregator class has been extended by the `Aggregator`.
 
-* *ORDER-SERVICE-117115-71230b5c-79b5-418b-990b-058fba747869*
-* *ORDER-SERVICE-117115-23949c51-2f0d-430b-a333-4d4821b36cbb*
-* *ORDER-SERVICE-117115-26f01a67-24d8-47cd-b109-571cb8065e82*
+Accessing the generated ID;
+
+[source,java]
+----
+@RequestMapping("/order-place")
+@RestController
+public class PlaceOrderController {
+    private final SagaTemplate<PlaceOrderAggregator> placeOrderAggregatorSagaTemplate;
+
+    public PlaceOrderController(SagaTemplate<PlaceOrderAggregator> placeOrderAggregatorSagaTemplate) {
+        this.placeOrderAggregatorSagaTemplate = placeOrderAggregatorSagaTemplate;
+    }
+
+    @PostMapping
+    public Object placeOrder() {
+        PlaceOrderAggregator placeOrderAggregator = new PlaceOrderAggregator();
+        //initialize your aggregator data
+        placeOrderAggregator.setParam1("1");
+        //calling the getAggregatorTransactionId() method but still the id is null.
+        String aggregatorTransactionIdBefore = placeOrderAggregator.getAggregatorTransactionId();
+        System.out.println("aggregatorTransactionIdBefore = " + aggregatorTransactionIdBefore);
+
+        //calling the process() method and then the aggregatorTransactionId will be added internally by the framework.
+        placeOrderAggregatorSagaTemplate.process(
+                placeOrderAggregator,
+                OP1Executor1.class
+        );
+        //after calling the process() method, the aggregatorTransactionId is no longer null.
+        String aggregatorTransactionIdAfter = placeOrderAggregator.getAggregatorTransactionId();
+        System.out.println("aggregatorTransactionIdAfter = " + aggregatorTransactionIdAfter);
+
+        return Collections.singletonMap("aggregator_id", aggregatorTransactionIdAfter);
+    }
+}
+
+----
+
+The output wil be like below.
+
+[source,bash]
+----
+aggregatorTransactionIdBefore = null
+aggregatorTransactionIdAfter = ORDER-SERVICE-117115-71230b5c-79b5-418b-990b-058fba747869
+----
 
 NOTE: Make sure to mark the implementation class as `@Component`.
