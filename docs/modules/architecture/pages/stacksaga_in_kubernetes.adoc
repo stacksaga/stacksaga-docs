@@ -1,0 +1,26 @@
+= Kubernetes
+
+== Overview
+
+When your application is deployed in Kubernetes with StackSaga the core architecture is changed a bit.
+in the StackSaga architecture there is a spacial part called xref:replay-transaction.adoc[transaction replay (retry)].
+you know already that to get the responsibility and perform retrying, there should be one leader for the given cluster of servers. in simple StackSaga should select one of the services (within the same service name) for perform the retrying.
+it is called leader election. the leader election part was quite simple when you are in the spring pure microservice environment.
+It was used the Eureka service registry for electing the leader. but if we move to the Kubernetes environment, the best practices and the recommitted way is using built-in https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/[ service discovery capabilities.]
+
+NOTE: If you are prefer to go with default pure spring cloud architecture with Eureka it also can be done without any doubt as usual.
+
+If you are going with kubernetes' built-in service discovery capabilities Eureka-Server is not used anymore (https://docs.spring.io/spring-cloud-kubernetes/reference/discovery-client.html[read Spring DiscoveryClient for Kubernetes]) and the leader election part is done by using the https://kubernetes.io/docs/concepts/architecture/leases/[Kubernetes Leases Leader election]. to overcome that inside of the StackSaga, the framework uses https://github.com/kubernetes-client/java[kubernetes-client] internally.
+
+== Migrating to StackSaga kubernetes discover
+
+In general architecture `stack-saga-discovery-client` dependency has been used for discover related things. when you are moving with kubernetes discover, `stack-saga-k8s-discovery` dependency is replaced.
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stack-saga-k8s-discovery</artifactId>
+    <version>1.0.0</version>
+</dependency>
+----
