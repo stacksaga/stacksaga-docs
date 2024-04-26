@@ -25,5 +25,52 @@ In general architecture `stack-saga-discovery-client` dependency has been used f
 </dependency>
 ----
 
+This dependency helps to leader election part and retrying by connect with kubernetes' API. due to accessing the kubernetes' API (https://kubernetes.io/docs/reference/access-authn-authz/rbac/[RBAC Authorization]), you have to bind a https://kubernetes.io/docs/concepts/security/service-accounts/[service account] with https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-and-clusterrole[a ClusterRole].
+
+**ServiceAccount**
+
+[source,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: order-service-service-account #the name of the service account.
+  namespace: default #the namespace the application is deployed.
+----
+
+*ClusterRole*
+
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: leader-election-lease-role #the name of the role.
+rules:
+  - apiGroups: [ "" ]
+    resources: [ "endpoints"]
+    verbs: [ "get", "update", "create" ,"list","delete" ]
+----
+
+*ClusterRoleBinding*
+
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: read-lease-global
+subjects:
+  - kind: ServiceAccount #bind the service account with role
+    name: order-service-service-account
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: leader-election-lease-role
+  apiGroup: rbac.authorization.k8s.io
+----
+
+After creating the user account related necessary manifests, make sure to bind the user account with the Deployment. (https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/[configure-service-account in k8s])
+
 IMPORTANT: StackSga leader election is elected based on the region and also the service-name. and also kubernetes leader election supports only for withing the cluster. therefore one region only can have one kubernetes cluster.
 for instance just imagine that you run 2 clusters and in both clusters your run same service with the same database. then both clusters will have tow different leaders for the same service at the same time. that means you brake the leader rule. the problem with it is that the leader fetches the retryable data for retrying (The retrying process is done batch vise) from the database related to the region and the service name. then at the same time the same transaction can be caught both leaders. then the transactions can be crashed due to the parallel execution.
