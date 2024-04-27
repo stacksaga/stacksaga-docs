@@ -31,6 +31,7 @@ This dependency helps to leader election part and retrying by connect with kuber
 
 [source,yaml]
 ----
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -47,25 +48,29 @@ kind: ClusterRole
 metadata:
   name: leader-election-lease-role #the name of the role.
 rules:
-  - apiGroups: [ "" ]
-    resources: [ "endpoints"]
-    verbs: [ "get", "update", "create" ,"list","delete" ]
+  - apiGroups: [ "","coordination.k8s.io" ] # <1>
+    resources: [ "endpoints","leases" ]
+    verbs: [ "get", "list", "watch", "create", "update", "patch", "delete" ]
 ----
+
+IMPOTENT: Due to the fact that the Kubernetes java client uses leases for leader election, `coordination.k8s.io` api-group should be added into the `apiGroups` array. because the lease object related data is provided through the `"coordination.k8s.io"` api. https://kubernetes.io/docs/concepts/architecture/leases/[read more...]
 
 *ClusterRoleBinding*
 
 [source,yaml]
 ----
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: read-lease-global
+  name: order-service-service-account-leader-election-lease-role
+  namespace: default
+#bind the service account with role
 subjects:
-  - kind: ServiceAccount #bind the service account with role
+  - kind: ServiceAccount
     name: order-service-service-account
     namespace: default
 roleRef:
-  kind: ClusterRole
+  kind: Role
   name: leader-election-lease-role
   apiGroup: rbac.authorization.k8s.io
 ----
