@@ -27,7 +27,8 @@ In general architecture `stack-saga-discovery-client` dependency has been used f
 
 IMPORTANT: In general architecture a kubernetes service is created to make the Internal communication within the services.
 (Service to Service communication and Api-Gateway to other downstream services).
-Due to the eureka is not used in kubernetes by default the framework uses the service name as the host to communicate to other instances. When you create the https://kubernetes.io/docs/concepts/services-networking/service/:[kubernetes service], the service name that is used for the service (`metadata.name`) is different to application name (`spring.application.name`) make sure to mention it by using xref:kubernetes-support-configuration-properties.adoc[`stacksaga.cloud.k8s.serviceHost`] property.
+Due to the eureka is not used in kubernetes by default the framework uses the service name as the host to communicate to other instances.
+When you create the https://kubernetes.io/docs/concepts/services-networking/service/:[kubernetes service], the service name that is used for the service (`metadata.name`) is different to application name (`spring.application.name`) make sure to mention it by using xref:kubernetes-support-configuration-properties.adoc[`stacksaga.cloud.k8s.serviceHost`] property.
 
 This dependency helps to leader election part and retrying by connect with kubernetes' API. due to accessing the kubernetes' API (https://kubernetes.io/docs/reference/access-authn-authz/rbac/[RBAC Authorization]), you have to bind a https://kubernetes.io/docs/concepts/security/service-accounts/[service account] with https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-and-clusterrole[a ClusterRole].
 
@@ -88,3 +89,5 @@ After creating the user account related necessary manifests, make sure to bind t
 
 IMPORTANT: StackSga leader election is elected based on the region and also the service-name. and also kubernetes leader election supports only for withing the cluster. therefore one region only can have one kubernetes cluster.
 for instance just imagine that you run 2 clusters and in both clusters your run same service with the same database. then both clusters will have tow different leaders for the same service at the same time. that means you brake the leader rule. the problem with it is that the leader fetches the retryable data for retrying (The retrying process is done batch vise) from the database related to the region and the service name. then at the same time the same transaction can be caught both leaders. then the transactions can be crashed due to the parallel execution.
+
+NOTE: If you want to use https://docs.spring.io/spring-cloud-kubernetes/reference/leader-election.html:[spring leader election dependency], you are totally free to use that as usual. because Stacksaga does not use spring's leader election object to leader election. and also any spring leader election dependency is not used internally in StackSaga. therefore you can implement your own leader election requirement.
