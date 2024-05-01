@@ -32,45 +32,6 @@ When you create the https://kubernetes.io/docs/concepts/services-networking/serv
 
 This dependency helps to leader election part and retrying by connect with kubernetes' API. due to accessing the kubernetes' API (https://kubernetes.io/docs/reference/access-authn-authz/rbac/[RBAC Authorization]), you have to bind a https://kubernetes.io/docs/concepts/security/service-accounts/[service account] with https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-and-clusterrole[a ClusterRole].
 
-====
-TIP:  After adding `stack-saga-k8s-discovery` you can use it to access the *pod metadata*  and as well as the *node metadata* that kubernetes provides.
-
-[source,java]
-----
-
-import io.kubernetes.client.openapi.models.V1Node;
-import io.kubernetes.client.openapi.models.V1Pod;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Component;
-import org.stacksaga.common.communication.SagaInstanceInfo;
-import org.stacksaga.common.communication.ServiceInstanceInfo;
-import org.stacksaga.kubernetes.KubernetesSagaInstanceInfo;
-
-@Component
-@RequiredArgsConstructor
-public class InstanceDetailService {
-
-    private final ServiceInstanceInfo serviceInstanceInfo; //<1>
-
-    public void showInstanceInfo() {
-        final SagaInstanceInfo sagaInstanceInfo = serviceInstanceInfo.getSagaInstanceInfo();
-        if (sagaInstanceInfo instanceof KubernetesSagaInstanceInfo) { //<2>
-            final KubernetesSagaInstanceInfo kubernetesSagaInstanceInfo = (KubernetesSagaInstanceInfo) sagaInstanceInfo; //<3>
-            V1Pod v1Pod = kubernetesSagaInstanceInfo.getV1Pod(); //<4>
-            System.out.println("v1Pod = " + v1Pod);
-            V1Node v1Node = kubernetesSagaInstanceInfo.getV1Node(); //<5>
-            System.out.println("v1Node = " + v1Node);
-        }
-    }
-}
-----
-
-<1> Autowire the `ServiceInstanceInfo` bean.
-<2> Call the `getSagaInstanceInfo()` method to get the assistance details and check that object is an instance of `KubernetesSagaInstanceInfo`. due to the adding the `stack-saga-k8s-discovery` dependency you will have a `KubernetesSagaInstanceInfo`.
-<3> cast the object in to `KubernetesSagaInstanceInfo` object.
-<4> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Pod.md[V1Pod] object.
-<5> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Node.md[V1Node] object.
-====
 
 [#Leader-Election-based-configuration]
 == Leader Election based configuration
@@ -131,3 +92,44 @@ IMPORTANT: StackSga leader election is elected based on the region and also the 
 for instance just imagine that you run 2 clusters and in both clusters your run same service with the same database. then both clusters will have tow different leaders for the same service at the same time. that means you brake the leader rule. the problem with it is that the leader fetches the retryable data for retrying (The retrying process is done batch vise) from the database related to the region and the service name. then at the same time the same transaction can be caught both leaders. then the transactions can be crashed due to the parallel execution.
 
 NOTE: If you want to use https://docs.spring.io/spring-cloud-kubernetes/reference/leader-election.html[spring leader election dependency], you are totally free to use that as usual. because Stacksaga does not use spring's leader election object to leader election. and also any spring leader election dependency is not used internally in StackSaga. therefore you can implement your own leader election requirement.
+
+
+====
+TIP:  After adding `stack-saga-k8s-discovery` you can use it to access the *pod metadata*  and as well as the *node metadata* that kubernetes provides.
+
+[source,java]
+----
+
+import io.kubernetes.client.openapi.models.V1Node;
+import io.kubernetes.client.openapi.models.V1Pod;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+import org.stacksaga.common.communication.SagaInstanceInfo;
+import org.stacksaga.common.communication.ServiceInstanceInfo;
+import org.stacksaga.kubernetes.KubernetesSagaInstanceInfo;
+
+@Component
+@RequiredArgsConstructor
+public class InstanceDetailService {
+
+    private final ServiceInstanceInfo serviceInstanceInfo; //<1>
+
+    public void showInstanceInfo() {
+        final SagaInstanceInfo sagaInstanceInfo = serviceInstanceInfo.getSagaInstanceInfo();
+        if (sagaInstanceInfo instanceof KubernetesSagaInstanceInfo) { //<2>
+            final KubernetesSagaInstanceInfo kubernetesSagaInstanceInfo = (KubernetesSagaInstanceInfo) sagaInstanceInfo; //<3>
+            V1Pod v1Pod = kubernetesSagaInstanceInfo.getV1Pod(); //<4>
+            System.out.println("v1Pod = " + v1Pod);
+            V1Node v1Node = kubernetesSagaInstanceInfo.getV1Node(); //<5>
+            System.out.println("v1Node = " + v1Node);
+        }
+    }
+}
+----
+
+<1> Autowire the `ServiceInstanceInfo` bean.
+<2> Call the `getSagaInstanceInfo()` method to get the assistance details and check that object is an instance of `KubernetesSagaInstanceInfo`. due to the adding the `stack-saga-k8s-discovery` dependency you will have a `KubernetesSagaInstanceInfo`.
+<3> cast the object in to `KubernetesSagaInstanceInfo` object.
+<4> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Pod.md[V1Pod] object.
+<5> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Node.md[V1Node] object.
+====
