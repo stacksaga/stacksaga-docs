@@ -6,9 +6,155 @@
 
 This example will demonstrate how you can configure and work together StackSaga cloud ecosystem with Kubernetes environment by using inbuilt internal Kubernetes service communication (Without any spring related Discovery client implementation).
 
-There are 3 utility service in the cluster called `order-service,` `user-service` and `stock-service.` as well as https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway] is used as the (In K8s it is can be called ingress service) Application Load Balancer (ALB) and as well as the Reverse proxy server.
-The `order-service` act as the StackSaga xref://[orchestrator service here]. as mentioned above, Eureka or any of Discovery client is not used for Service-Discovery and Service-Registry. to overcome the capability of Service-Discovery it is used inbuilt https://kubernetes.io/docs/concepts/services-networking/service/[Kubernetes Service].
+There are 3 utility services in the cluster called `order-service,` `user-service` and `stock-service.` as well as https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway] is used as the (In K8s it is can be called ingress service) Application Load Balancer (ALB) and as well as the Reverse proxy server.
+The `order-service` act as the StackSaga xref://[orchestrator service here].
+As mentioned above, Eureka or any of Discovery clients are not used for Service-Discovery and Service-Registry.
+To overcome the capability of Service-Discovery, it is used inbuilt https://kubernetes.io/docs/concepts/services-networking/service/[Kubernetes Service].
+
+== High-level Implementation Diagram.
+
+stack-saga-icon.svg[width=20]
+You can see below what we are going to implement from the general perspective.
 
 image::stacksaga-example-drawing-stacksaga-kubernetes-spring-cloud-api-gateway-demo-hight-level.drawio.svg[alt="stacksaga example drawing stacksaga kubernetes spring cloud api gateway demo high-level architecture diagram"]
 
+* In the diagram, StackSaga icons image:stack-saga-icon.svg[width=20] are shown which parts StackSaga interact.
+* Red lines are shown how the StackSaga Admin interacts with the process and the request-flow.
+* Black lines are shown how the regular requests are done.
+
+== High-level implementation diagram with Kubernetes Flags.
+
 image::stacksaga-example-drawing-stacksaga-kubernetes-spring-cloud-api-gateway-demo-hight-level-with-k8s-flags.drawio.svg[alt="stacksaga example drawing stacksaga kubernetes spring cloud api gateway demo high-level architecture diagram"]
+
+* The Kubernetes related blue icons indicate how Kubernetes interacts with the deployment.
+
+== Implementation
+
+include::commons:comprehensive-implementation-message.adoc[]
+
+As the first step, let's create our services one by one.
+
+=== Create Order-Service (Orchestrator Service)
+
+The `order-service` is little bit spacial than the other utility servers because the `order-service` is the responsible for managing the entire transaction here.
+That's why it called as xref://[Orchestrator Service].
+And the next reason is that StackSaga involves with that kind of service in your entire system.
+Selecting a service as an Orchestrator service or not depends on your rearmament.
+
+Go to the https://start.spring.io/[spring initializer] and create your project with the following Dependencies.
+
+* `spring-boot-starter-web`
+* `spring-boot-starter-data-jpa`
+* `mysql-connector-j`
+* `lombok`
+
+NOTE: In general, you would add `spring-eureka-client` but in this example eureka is not used.
+
+After creating your project, add the StackSaga dependencies in the dependencies section.
+There are 3 dependencies to be added based on your implementation.
+
+* You can add the `stacksaga-spring-boot-starter` dependency based on the spring version that you wish to use.
+#In this example, we will be using spring2.X.#
+Spring 2.X:::
++
+[source,xml]
+----
+<dependency>
+  <groupId>org.stacksaga</groupId>
+  <artifactId>stacksaga-spring-boot-2-starter</artifactId>
+  <version>1.0.0</version>
+</dependency>
+----
+Spring 3.X:::
++
+[source,xml]
+----
+<dependency>
+  <groupId>org.stacksaga</groupId>
+  <artifactId>stacksaga-spring-boot-2-starter</artifactId>
+  <version>1.0.0</version>
+</dependency>
+----
+
+* Due to the database has been selected as Mysql, you have to add `stacksaga-mysql-support` dependency.
+:::
++
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-mysql-support</artifactId>
+    <version>1.0.0</version>
+</dependency>
+----
+* Due to we are going to deploy the application in the Kubernetes cluster environment, `stacksaga-connect-k8s-support` dependency should be added.
+
+:::
++
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-connect-k8s-support</artifactId>
+    <version>1.0.0</version>
+</dependency>
+----
+
+Finally, the `pom.xml` file will be like below.
+
+https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/pom.xml[icon:github[role=black,3x]]
+
+[source,xml]
+----
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.0</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+
+    <groupId>org.example</groupId>
+    <artifactId>order-service</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <spring-cloud.version>2021.0.3</spring-cloud.version>
+    </properties>
+
+    <dependencies>
+
+        ...
+        ...
+        <!--othe dependencies-->
+
+        <!--StackSaga related dependacies -->
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-spring-boot-2-starter</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-mysql-support</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-connect-k8s-support</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+    </dependencies>
+</project>
+----
