@@ -1,0 +1,78 @@
+=== Creating PreAuthExecutor (Command-Executor)
+
+`PreAuthExecutor` is responsible for making `PreAuth` by calling to the utility  `payment-service`.
+Due to the execution should be reverted if the entire process is not successful as wished, the `PreAuthExecutor` is implemented from the `CommandExecutor` interface.
+TO make the PreAuth request, we should provide the `userId`, `amount` and `orderId`.
+And to revert the process we have to provide the `PreAuthRef` back.
+
+[source,java]
+----
+
+// <1>
+@SagaExecutor(executeFor = "payment-service", liveCheck = false, value = "PreAuthExecutor")
+@RequiredArgsConstructor
+public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> { // <2>
+    private final PaymentService paymentService;
+
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException { // <3>
+
+        // <4>
+        final String preAuthRef = this.paymentService.makePreAuth(
+                PreAuthDto
+                        .RequestBody
+                        .builder()
+                        .userId(currentAggregator.getUserId())
+                        .amount(currentAggregator.getAmount())
+                        .orderId(currentAggregator.getAggregatorTransactionId())
+                        .build()
+        );
+        // <5>
+        currentAggregator.setPreAuthRef(preAuthRef);
+        // <6>
+        return stepManager.next(StockUpdateExecutor.class, OrderStatus.MADE_PRE_AUTH.name());
+    }
+
+    @Override
+    public String doRevert(
+            NonRetryableExecutorException processException,
+            PlaceOrderAggregator finalAggregatorState,
+            RevertHintStore revertHintStore
+    )
+    throws RetryableExecutorException { // <7>
+
+        this.paymentService.releasePreAuth(
+                PreAuthReleaseDto.RequestBody.builder()
+                        // <8>
+                        .pareAuthRef(finalAggregatorState.getPreAuthRef())
+                        // <9>
+                        .reason(processException.get("reason").orElse(""))
+                        .build()
+        );
+        return OrderStatus.RELEASED_PRE_AUTH.name();
+    }
+}
+----
+
+<1> Annotate the `PreAuthExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
++
+> Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+
+<2> Implement the `PreAuthExecutor` from the `CommandExecutor` by passing the target Aggregator.
++
+Read more about xref:framework:saga_executors.adoc#query_executor[`QueryExecutor<A>`] interface.
+
+<3> you will have the `currentAggregator` object through the method parameter. due to this executor is the 3d executor, the `currentAggregator` object has been updated by the `OrderController`(initialization), `UserDetailExecutor`,and `OrderInitializeExecutor`.
+
+<4> make the pre-auth process by invoking the PaymentService's `makePreAuth()` method.
+
+<5> Update the `currentAggregator` with `preAuthRef` data that received as the response.
+
+<6> Navigates the execution by using `stepManager` to the next executor called `StockUpdateExecutor`.
+And also passed the status as `MADE_PRE_AUTH`.
+
+
+=== Creating PaymentService
