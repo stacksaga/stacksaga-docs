@@ -1,0 +1,47 @@
+=== Creating OrderController (API Endpoint).
+
+As per the diagram, you know that the request comes to the `/order/place` endpoint and also the handing over the execution to the stacksaga is happened in this controller class.
+
+[source,java]
+----
+
+@RestController
+@RequestMapping("/order")
+@RequiredArgsConstructor
+public class OrderController {
+
+    // <1>
+    private final SagaTemplate<PlaceOrderAggregator> placeOrderAggregatorSagaTemplate;
+
+    @PostMapping("/place")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public PlaceOrderDto.ResponseBody createOrder(@RequestBody PlaceOrderDto.RequestBody requestBody) {
+
+        // <2>
+        final PlaceOrderAggregator placeOrderAggregator = new PlaceOrderAggregator();
+        placeOrderAggregator.setUserId(requestBody.getUserId());
+        placeOrderAggregator.setItems(requestBody.getItems());
+        // <3>
+        placeOrderAggregatorSagaTemplate.process(
+                placeOrderAggregator,
+                OrderInitializeExecutor.class
+        );
+        // <4>
+        return PlaceOrderDto.ResponseBody.builder()
+                .orderId(placeOrderAggregator.getAggregatorTransactionId())
+                .message("order has been submitted successfully")
+                .build();
+    }
+}
+----
+
+<1> Autowire the xref:framework:saga_template.adoc[SagaTemplate] for handing over the execution to the framework.
+Your target aggregator class should be provided to the `SagaTemplate` as a type.
+<2> Initialize the xref:quick-examples:creating-aggregator.adoc[PlaceOrderAggregator]  [https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/aggregator/PlaceOrderAggregator.java[icon:github[role=black]]] and set the data that should be added initially.
+In our case, the necessary data that are given from the endpoint are added to the aggregator object.
+You can see the initialized data at the dashboard xref://[like this].
+<3> Handing over the execution to the framework.
+From here the execution will be handled by the StackSaga execution coordinator xref://[(SEC)] asynchronously.
+
+<4> Build the response object to the client by using the `aggregatorTransactionId`.
+`aggregatorTransactionId` can access through your aggregator object due to that id comes from the `Aggregator` super.
