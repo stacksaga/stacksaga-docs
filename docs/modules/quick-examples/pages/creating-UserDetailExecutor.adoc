@@ -83,10 +83,11 @@ public class UserService {
 
     public UserDetailDto.ResponseBody getUserDetails(String userId)
             throws
-            NonRetryableExecutorException,
-            RetryableExecutorException {
+            NonRetryableExecutorException,  RetryableExecutorException // <1>
+    {
 
         try {
+            // <2>
             UserDetailDto.ResponseBody responseBody = this.restTemplate.getForObject(
                     "http://user-service/users/{userId}",
                     UserDetailDto.ResponseBody.class,
@@ -94,34 +95,75 @@ public class UserService {
             );
             assert responseBody != null;
             return responseBody;
-        } catch (HttpClientErrorException ex) {
+        } catch (HttpClientErrorException ex) { // <3>
             // This exception is thrown for HTTP 4xx errors (Client errors)
             // You can handle specific HTTP error codes here
-            if (ex.getStatusCode().equals(HttpStatus.FORBIDDEN)) {
+            if (ex.getStatusCode().equals(HttpStatus.NOT_FOUND)) {
+                // <4>
                 throw NonRetryableExecutorException
                         .buildWith(
-                                new InsufficientBalanceException("Balance not sufficient"),
+                                new RuntimeException("User not found"),
                                 ""
                         )
                         .build();
             } else {
+                // <5>
                 throw NonRetryableExecutorException.buildWith(ex, "").build();
             }
-        } catch (HttpServerErrorException ex) {
+        } catch (HttpServerErrorException ex) { // <6>
             // This exception is thrown for HTTP 5xx errors (Server errors)
             // You can handle specific HTTP error codes here
             if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                // <7>
                 throw NonRetryableExecutorException.buildWith(ex, "").build();
             } else {
+                // <8>
                 //502 , 503, 504, 509 etc.
                 throw RetryableExecutorException.buildWith(ex).build();
             }
-        } catch (RestClientException ex) {
+        } catch (RestClientException ex) { // <10>
             // This exception is a generic RestClientException
             // Handle other types of exceptions here
+            // <10>
             throw ex;
         }
     }
 }
 ----
+
+IMPORTANT: Handling the exceptions is the most important task in StackSaga framework.
+You have to handle the exception, and decide what should be the `NonRetryableExecutorException` and what should be the `RetryableExecutorException` carefully.
+For example, in this demo you saw that we handled `NOT_FOUND` status.
+the `NOT_FOUND` can be thrown if the #endpoint not found# that you are looking for.
+Or otherwise it can be passed if the #user does not exist#.
+Then, if you have not any awareness about what the target service returns, you will not be able to catch the real error.
+In this example, we know exactly there is an endpoint `/users/{userId}` in the user-service therefore no worries.
+But be careful if you access third party APIs.
+Read the API documentation in detail.
+
+<1> We have thrown both `NonRetryableExecutorException`,and `RetryableExecutorException` that UserDetailExecutor's `doPrcess()` method expects.
+That's why it was mentioned in above.
+The headlining exception part is done in the service layer.
++
+[Read the xref:#exception_tip[TIP]]
+
+<2> Call the http request to the user-service.
+
+<3> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*4xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
+
+<4> Due to the http error code is equal to NOT_FOUND (404), the process cannot be done anymore.
+Therefore
+
+[[exception_tip]]
+====
+TIP: The reason for handling the exception is that this is where the http client does the invocation and the spacial this is most probably the exceptions are different to each other even though the http status code is the same.
+
+Case-1::: IF you change the Rest-Client (For instance, you move to RestTemplate to Feign-client), all the exceptions are changed.
+Then you have to change all the codes in the executor if you have handled the exceptions inside the executor.
+But in this way nothing to do anything.
+
+Case-2::: If you have to change the protocol like HttpRest to GRPC, you have nothing to do in the executor layer.
+====
+
+
 
