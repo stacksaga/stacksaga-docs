@@ -11,21 +11,23 @@ Fetching user details doesn't change any data.
 // <1>
 @SagaExecutor(executeFor = "user-service", liveCheck = false, value = "UserDetailExecutor")
 @RequiredArgsConstructor
-public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> { //<2>
+public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> { // <2>
 
-    //<3>
+    // <3>
     private final UserService userService;
 
     @Override
     public ProcessStepManager<PlaceOrderAggregator> doProcess(
             PlaceOrderAggregator currentAggregator, //<4>
             ProcessStepManagerUtil<PlaceOrderAggregator> stepManager //<5>
-    ) throws RetryableExecutorException, NonRetryableExecutorException {
-        //<6>
+    ) throws
+    RetryableExecutorException, NonRetryableExecutorException // <6>
+    {
+        // <7>
         UserDetailDto.ResponseBody userDetails = this.userService.getUserDetails(currentAggregator.getUserId());
-        //<7>
+        // <8>
         currentAggregator.setDeliveryDetails(userDetails.getDeliveryDetails());
-        return stepManager.next(OrderInitializeExecutor.class, ""); //<8>
+        return stepManager.next(OrderInitializeExecutor.class, ""); // <9>
 
     }
 }
@@ -33,10 +35,10 @@ public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> {
 
 <1> Annotate the `UserDetailExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
 +
-Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+> Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
 <2> Implement the `UserDetailExecutor` from the `QueryExecutor` by passing the target Aggregator.
 +
-Read more about xref:framework:saga_executors.adoc#query_executor[`QueryExecutor<A>`] interface.
+> Read more about xref:framework:saga_executors.adoc#query_executor[`QueryExecutor<A>`] interface.
 
 <3> Autowire the https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/service/external/UserService.java[`UserService`]
 to make the execution by calling the `user-service`.
@@ -45,9 +47,81 @@ to make the execution by calling the `user-service`.
 
 <5> `stepManager` helps you to navigate the execution to the next executor.
 
-<6> By using the UserService's `getUserDetails()` method, fetches the user's data from user `user-service`.
+<6> If you throw an exception, that is how the framework knows that the executor has an exception at this moment.
+Based on the exception type that you have thrown, The framework decides that the process should be started the revert process or either process should be stopped temporally.
++
+IF the exception is a `RetryableExecutorException` the framework stops the process temporally.
+Or if the exception is a `NonRetryableExecutorException` the framework knows that the execution cannot be processed to forward anymore and the revert process should be started.
+Throwing an exception can be implemented in the method as well.
+But in this example, we categorize the exceptions whether the exception is a `RetryableExecutorException` or otherwise a `NonRetryableExecutorException` in the xref:creating_user_service[UserService] (service layer).
++
+> Read more about xref:framework:retryable_executor_exception.adoc[RetryableExecutorException] and xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException].
 
-<7> After receiving the user's detail the `currentAggregator` is updated with user's details.
+<7> By using the UserService's `getUserDetails()` method, fetches the user's data from user `user-service`.
+
+<8> After receiving the user's detail the `currentAggregator` is updated with user's details.
 Therefore, you can access the user's detail within the next executor.
 
-<8> By using the `stepManager`, navigates the execution to the next executor called xref:creating-OrderInitializeExecutor.adoc#creating_order_initialize_executor[OrderInitializeExecutor].
+<9> By using the `stepManager`, navigates the execution to the next executor called xref:creating-OrderInitializeExecutor.adoc#creating_order_initialize_executor[OrderInitializeExecutor].
+
+[[creating_user_service]]
+=== Creating UserService.
+
+`Userservice` is a regular spring service that creates for calling `user-service`.
+Due to the `user-service` is another utility service we have to call it through http or any other protocol that target service supports (Most probably API endpoints are exposed by http protocol).
+This example's `user-service` also support http endpoint to access the API.
+Therefore, we will be using rest template as http client.
+But you can use any Http client like Feign-client, Okhttp, Spring-webclient and so on.
+
+[source,java]
+----
+@Service
+@RequiredArgsConstructor
+public class UserService {
+
+    private final RestTemplate restTemplate;
+
+    public UserDetailDto.ResponseBody getUserDetails(String userId)
+            throws
+            NonRetryableExecutorException,
+            RetryableExecutorException {
+
+        try {
+            UserDetailDto.ResponseBody responseBody = this.restTemplate.getForObject(
+                    "http://user-service/users/{userId}",
+                    UserDetailDto.ResponseBody.class,
+                    userId
+            );
+            assert responseBody != null;
+            return responseBody;
+        } catch (HttpClientErrorException ex) {
+            // This exception is thrown for HTTP 4xx errors (Client errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.FORBIDDEN)) {
+                throw NonRetryableExecutorException
+                        .buildWith(
+                                new InsufficientBalanceException("Balance not sufficient"),
+                                ""
+                        )
+                        .build();
+            } else {
+                throw NonRetryableExecutorException.buildWith(ex, "").build();
+            }
+        } catch (HttpServerErrorException ex) {
+            // This exception is thrown for HTTP 5xx errors (Server errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                throw NonRetryableExecutorException.buildWith(ex, "").build();
+            } else {
+                //502 , 503, 504, 509 etc.
+                throw RetryableExecutorException.buildWith(ex).build();
+            }
+        } catch (RestClientException ex) {
+            // This exception is a generic RestClientException
+            // Handle other types of exceptions here
+            throw ex;
+        }
+    }
+}
+----
+
