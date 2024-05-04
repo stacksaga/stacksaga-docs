@@ -1,0 +1,53 @@
+[[creating_user_detail_executor]]
+=== Creating UserDetailExecutor
+
+In the `OrderController` class The `UserDetailExecutor` mentioned as the initial executor.
+As per the diagram, you know that executor should be a `Query-Executor`.
+Because the requirement is only fetching the user details.
+Fetching user details doesn't change any data.
+
+[source,java]
+----
+// <1>
+@SagaExecutor(executeFor = "user-service", liveCheck = false, value = "UserDetailExecutor")
+@RequiredArgsConstructor
+public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> { //<2>
+
+    //<3>
+    private final UserService userService;
+
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator, //<4>
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager //<5>
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        //<6>
+        UserDetailDto.ResponseBody userDetails = this.userService.getUserDetails(currentAggregator.getUserId());
+        //<7>
+        currentAggregator.setDeliveryDetails(userDetails.getDeliveryDetails());
+        return stepManager.next(OrderInitializeExecutor.class, ""); //<8>
+
+    }
+}
+----
+
+<1> Annotate the `UserDetailExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
++
+Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+<2> Implement the `UserDetailExecutor` from the `QueryExecutor` by passing the target Aggregator.
++
+Read more about xref:framework:saga_executors.adoc#query_executor[`QueryExecutor<A>`] interface.
+
+<3> Autowire the https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/service/external/UserService.java[`UserService`]
+to make the execution by calling the `user-service`.
+
+<4> you will have the `currentAggregator` object through the method parameter. due to this executor is the 1st executor, the `currentAggregator` object contains the initialized values from the xref:creating-controller.adoc#orderController_source[OrderController] class.
+
+<5> `stepManager` helps you to navigate the execution to the next executor.
+
+<6> By using the UserService's `getUserDetails()` method, fetches the user's data from user `user-service`.
+
+<7> After receiving the user's detail the `currentAggregator` is updated with user's details.
+Therefore, you can access the user's detail within the next executor.
+
+<8> By using the `stepManager`, navigates the execution to the next executor called xref:creating-OrderInitializeExecutor.adoc#creating_order_initialize_executor[OrderInitializeExecutor].
