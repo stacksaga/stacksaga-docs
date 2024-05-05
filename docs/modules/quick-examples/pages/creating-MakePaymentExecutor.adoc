@@ -1,1 +1,42 @@
 === Creating MakePaymentExecutor (Command-Executor)
+
+`MakePaymentExecutor` is the final executor as per the diagram. this executor interacts with the utility `payment-service`.
+in the `PreAuthExecutor` also we accessed the utility `payment-service` for making the pre-auth.
+his executor is responsible for making the real payment for that `pre-auth`.
+
+[source,java]
+----
+// <1>
+@SagaExecutor(executeFor = "stock-service", liveCheck = false, value = "StockUpdateExecutor")
+@RequiredArgsConstructor
+public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator> { // <2>
+
+    private final PaymentService paymentService; // <3>
+
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+                PlaceOrderAggregator currentAggregator,
+                ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        // <4>
+        String paymentId = this.paymentService.makePayment(
+                MakePaymentDto
+                        .RequestBody
+                        .builder()
+                        .amount(currentAggregator.getAmount())
+                        .pareAuthRef(currentAggregator.getPreAuthRef())
+                        .userId(currentAggregator.getUserId())
+                        .build()
+        );
+        // <5>
+        currentAggregator.setPaymentId(paymentId);
+        // <6>
+        return stepManager.complete(OrderStatus.MADE_PAYMENT.name());
+    }
+
+    @Override
+    public String doRevert(NonRetryableExecutorException processException, PlaceOrderAggregator finalAggregatorState, RevertHintStore revertHintStore) throws RetryableExecutorException {
+        throw new UnsupportedOperationException(); // <7>
+    }
+}
+----
