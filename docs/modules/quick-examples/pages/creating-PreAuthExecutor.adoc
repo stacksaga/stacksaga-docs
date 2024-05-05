@@ -86,3 +86,90 @@ All the time the process can be failed (With  `NonRetryableExecutorException`)we
 This is the time that can be used.
 
 === Creating PaymentService
+
+`PaymentService` is a regular spring service that creates for calling utility `payment-service`.
+Due to the `payment-service` is another utility service we have to call it through http or any other protocol that target service supports (Most probably API endpoints are exposed by http protocol).
+This example's `payment-service` also support http endpoint to access the API.
+Therefore, we will be using rest template as http client.
+But you can use any Http client like Feign-client, Okhttp, Spring-webclient and so on.
+
+
+TIP: The relationship between the executor and service should not be *one-to-one*.
+A service can be used for many executors.
+In this example, the `PaymentService` class is used for `PreAuthExecutor` both executors.
+
+[source,java]
+----
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class PaymentService {
+
+    private final RestTemplate restTemplate;
+
+    public String makePreAuth(PreAuthDto.RequestBody requestBody) throws RetryableExecutorException, NonRetryableExecutorException {
+        try {
+            PreAuthDto.ResponseBody responseBody = this.restTemplate.postForObject(
+                    "http://payment-service/pre-auth",
+                    requestBody,
+                    PreAuthDto.ResponseBody.class
+            );
+            assert responseBody != null;
+            return responseBody.getPreAuthRef();
+        } catch (HttpClientErrorException ex) {
+            // This exception is thrown for HTTP 4xx errors (Client errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.FORBIDDEN)) {
+                throw NonRetryableExecutorException
+                        .buildWith(
+                                new InsufficientBalanceException("Balance not sufficient"),
+                                ""
+                        )
+                        .build();
+            } else {
+                throw NonRetryableExecutorException.buildWith(ex, "").build();
+            }
+        } catch (HttpServerErrorException ex) {
+            // This exception is thrown for HTTP 5xx errors (Server errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                throw NonRetryableExecutorException.buildWith(ex, "").build();
+            } else {
+                //502 , 503, 504, 509 etc.
+                throw RetryableExecutorException.buildWith(ex).build();
+            }
+        } catch (RestClientException ex) {
+            // This exception is a generic RestClientException
+            // Handle other types of exceptions here
+            throw ex;
+        }
+
+    }
+
+    public void releasePreAuth(PreAuthReleaseDto.RequestBody requestBody) throws RetryableExecutorException {
+        try {
+            this.restTemplate.put(
+                    "http://payment-service/pre-auth/release",
+                    requestBody
+            );
+        } catch (HttpClientErrorException ex) {
+            // This exception is thrown for HTTP 4xx errors (Client errors)
+            // You can handle specific HTTP error codes here
+            throw ex;
+        } catch (HttpServerErrorException ex) {
+            // This exception is thrown for HTTP 5xx errors (Server errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                throw ex;
+            } else {
+                //502 , 503, 504, 509 etc.
+                throw RetryableExecutorException.buildWith(ex).build();
+            }
+        } catch (RestClientException ex) {
+            // This exception is a generic RestClientException
+            // Handle other types of exceptions here
+            throw ex;
+        }
+    }
+}
+----
