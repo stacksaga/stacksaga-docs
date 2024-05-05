@@ -20,6 +20,13 @@ public class OrderController {
         final PlaceOrderAggregator placeOrderAggregator = new PlaceOrderAggregator();
         placeOrderAggregator.setUserId(requestBody.getUserId());
         placeOrderAggregator.setItems(requestBody.getItems());
+        placeOrderAggregator.setAmount(
+                requestBody.getItems()
+                        .stream()
+                        .map(orderItem -> orderItem.getItemPrice() * orderItem.getQty())
+                        .mapToDouble(Double::doubleValue)
+                        .sum()
+        );
         // <3>
         placeOrderAggregatorSagaTemplate.process(
                 placeOrderAggregator,
@@ -45,7 +52,7 @@ From here the execution will be handled by the StackSaga execution coordinator x
 <4> Build the response object to the client by using the `aggregatorTransactionId`.
 `aggregatorTransactionId` can access through your aggregator object due to that id comes from the `Aggregator` super.
 
-The Links for the class from the code snippet that you may be interested in.
+Related Classes' links
 
 - [ https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/aggregator/PlaceOrderAggregator.java[icon:github[role=black]] ] xref:creating-aggregator.adoc[PlaceOrderAggregator]
 - [ https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/executor/UserDetailExecutor.java[icon:github[role=black]] ] xref:creating-UserDetailExecutor.adoc#creating_user_detail_executor`UserDetailExecutor`

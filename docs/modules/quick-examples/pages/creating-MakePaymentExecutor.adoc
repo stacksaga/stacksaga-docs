@@ -40,3 +40,85 @@ public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator
     }
 }
 ----
+
+*Highlights*
+
+<1> Annotate the `MakePaymentExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
++
+> Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+
+<2> Implement the `MakePaymentExecutor` from the `CommandExecutor` by passing the target Aggregator.
++
+Read more about xref:framework:saga_executors.adoc#command_executor[`CommandExecutor<A>`] interface.
+
+<3> Autowire the `PaymentService`.
+The old payment service is used this as well.
+(The new methods will be updated below.)
+
+<4> Calling the PaymentService's `makePayment()` method for making the payment.
+To make the payment, we have to pass the following data.
++
+
+-`amount`:: initialized at `OrderController`
+-`pareAuthRef`:: initialized at `PreAuthExecutor`
+-`userId`:: initialized at `OrderController`
+
+<5> Updates the payment in the `currentAggregator`.
+
+<6> Due to this step is the finale execution, mentions the *compiled* signal to the SEC by using `stepManager.complete` method with the status as `MADE_PAYMENT`.
+By mentioning *compiled* signal, the SEC stop the execution and mark the transaction has been successfully completed.
+
+<7> All other command-executors had a Compensation but in this executor have no any execution for compensation.
+The reason is that this is the final execution of this entire process and there is no any next executor can be failed.
+You know that all the revert executions are called as the descending order from where the `NonRetryableExecutorException` is thrown.
+Even this execution is failed for some reason, no need to do a compensation because that execution already failed.
+If this execution failed for some reason, all other executed (successfully executed so far), executor's compensations should be invoked.
++
+IMPORTANT: If you add another execution after making the Payment, you must implement the `doRevert()` method.
+Because that new execution is failed for some reason, the payment should be refunded.
+Because the payment is already done.
+
+> Refer the xref://[reference documentation] to see how the executions are invoked.
+
+*Related Classes*
+
+=== Updating the PaymentService.
+
+To make the payment, we have to create a new method in the existing `PaymentService`.
+
+[source,java]
+----
+    public String makePayment(MakePaymentDto.RequestBody requestBody) throws RetryableExecutorException, NonRetryableExecutorException {
+        try {
+            MakePaymentDto.ResponseBody responseBody = this.restTemplate.postForObject(
+                    "http://payment-service/pay",
+                    requestBody,
+                    MakePaymentDto.ResponseBody.class
+            );
+            assert responseBody != null;
+            log.debug(responseBody.getMessage());
+            return responseBody.getPaymentRef();
+        } catch (HttpClientErrorException ex) {
+            // This exception is thrown for HTTP 4xx errors (Client errors)
+            // You can handle specific HTTP error codes here
+            throw ex;
+        } catch (HttpServerErrorException ex) {
+            // This exception is thrown for HTTP 5xx errors (Server errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                throw ex;
+            } else {
+                //502 , 503, 504, 509 etc.
+                throw RetryableExecutorException.buildWith(ex).build();
+            }
+        } catch (RestClientException ex) {
+            // This exception is a generic RestClientException
+            // Handle other types of exceptions here
+            throw ex;
+        }
+    }
+----
+That method is also pretty much the same as the service methods we have been implementing so far.
+Just call the target utility service and handle the exception.
+
+*Related Classes' links*
