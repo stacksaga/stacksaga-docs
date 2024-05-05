@@ -1,0 +1,64 @@
+=== Creating StockUpdateExecutor (Command-Executor)
+
+`StockUpdateExecutor` is responsible for updating (reduce) the stock by connecting with the utility stock-service.
+After reducing the stock to place the order, an error occurred that reduced stock should be restored because the order will be canceled.
+That means that the execution has Compensation.
+Therefore, the executor should be a `Command-Executor`
+
+[source,java]
+----
+// <1>
+@SagaExecutor(executeFor = "stock-service", liveCheck = false, value = "StockUpdateExecutor")
+@RequiredArgsConstructor
+public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator> { // <2>
+
+    private final StockService stockService;
+
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator, // <3>
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager // <4>
+    )
+    throws RetryableExecutorException, NonRetryableExecutorException { // <5>
+        // <6>
+        this.stockService.updateStock(
+                UpdateStockDto.RequestBody
+                        .builder()
+                        .items(currentAggregator
+                                .getItems()
+                                .stream()
+                                .collect(
+                                        Collectors.toMap(
+                                                OrderItem::getItemId,
+                                                OrderItem::getQty
+                                        )
+                                )
+                        )
+                        .build()
+        );
+        // <7>
+        return stepManager.next(MakePaymentExecutor.class, OrderStatus.UPDATED_STOCK.name());
+    }
+
+    @Override
+    public String doRevert(
+            NonRetryableExecutorException processException,
+            PlaceOrderAggregator finalAggregatorState,
+            RevertHintStore revertHintStore
+    ) throws RetryableExecutorException {
+        // <8>
+        this.stockService.restoreStock(
+                RestoreStockDto.RequestBody
+                        .builder()
+                        .reason(processException
+                                .get("reason")
+                                .orElse("")
+                        )
+                        .build()
+        );
+        return OrderStatus.RESTORED_STOCK.name();
+    }
+}
+----
+
+
