@@ -102,24 +102,28 @@ In this example, the `PaymentService` class is used for `PreAuthExecutor` both e
 ----
 @Service
 @RequiredArgsConstructor
-@Slf4j
 public class PaymentService {
 
     private final RestTemplate restTemplate;
 
-    public String makePreAuth(PreAuthDto.RequestBody requestBody) throws RetryableExecutorException, NonRetryableExecutorException {
+    public String makePreAuth(PreAuthDto.RequestBody requestBody)
+        throws RetryableExecutorException, NonRetryableExecutorException { // <1>
+
         try {
+            // <2>
             PreAuthDto.ResponseBody responseBody = this.restTemplate.postForObject(
                     "http://payment-service/pre-auth",
                     requestBody,
                     PreAuthDto.ResponseBody.class
             );
             assert responseBody != null;
+            // <3>
             return responseBody.getPreAuthRef();
-        } catch (HttpClientErrorException ex) {
+        } catch (HttpClientErrorException ex) { // <4>
             // This exception is thrown for HTTP 4xx errors (Client errors)
             // You can handle specific HTTP error codes here
             if (ex.getStatusCode().equals(HttpStatus.FORBIDDEN)) {
+                // <5>
                 throw NonRetryableExecutorException
                         .buildWith(
                                 new InsufficientBalanceException("Balance not sufficient"),
@@ -127,20 +131,24 @@ public class PaymentService {
                         )
                         .build();
             } else {
+                // <6>
                 throw NonRetryableExecutorException.buildWith(ex, "").build();
             }
-        } catch (HttpServerErrorException ex) {
+        } catch (HttpServerErrorException ex) {  // <7>
             // This exception is thrown for HTTP 5xx errors (Server errors)
             // You can handle specific HTTP error codes here
             if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                // <8>
                 throw NonRetryableExecutorException.buildWith(ex, "").build();
             } else {
                 //502 , 503, 504, 509 etc.
+                // <9>
                 throw RetryableExecutorException.buildWith(ex).build();
             }
-        } catch (RestClientException ex) {
+        } catch (RestClientException ex) {  // <10>
             // This exception is a generic RestClientException
             // Handle other types of exceptions here
+            // <11>
             throw ex;
         }
 
@@ -148,28 +156,82 @@ public class PaymentService {
 
     public void releasePreAuth(PreAuthReleaseDto.RequestBody requestBody) throws RetryableExecutorException {
         try {
+            // <12>
             this.restTemplate.put(
                     "http://payment-service/pre-auth/release",
                     requestBody
             );
-        } catch (HttpClientErrorException ex) {
-            // This exception is thrown for HTTP 4xx errors (Client errors)
-            // You can handle specific HTTP error codes here
-            throw ex;
-        } catch (HttpServerErrorException ex) {
+        } catch (HttpServerErrorException ex) {// <13>
             // This exception is thrown for HTTP 5xx errors (Server errors)
             // You can handle specific HTTP error codes here
             if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
-                throw ex;
+                // <14>
+                throw NonRetryableExecutorException.buildWith(ex, "").build();
             } else {
                 //502 , 503, 504, 509 etc.
+                // <15>
                 throw RetryableExecutorException.buildWith(ex).build();
             }
-        } catch (RestClientException ex) {
-            // This exception is a generic RestClientException
-            // Handle other types of exceptions here
+        } catch (RestClientException ex) { // <16>
+            // This exception is thrown for HTTP 4xx errors (Client errors)
+            // You can handle specific HTTP error codes here
+            // <17>
             throw ex;
         }
     }
 }
 ----
+
+<1> We have thrown both `NonRetryableExecutorException`,and `RetryableExecutorException` that PreAuthExecutor's `doPrcess()` method expects.
+The headlining exception part is done in the service layer.
++
+[ Read the xref:creating-UserDetailExecutor.adoc#exception_tip[TIP] ]
+
+<2> Call the http request to the utility payment-service.
+
+<3> Returns the `authRef` that received as the response to the `PreAuthExecutor`.
+
+<4> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*4xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
+
+<5> An error can be thrown by the payment-service when we try to make a pre-auth if the user has no enough balance for making the pre-auth.
+Therefore, the `FORBIDDEN` error code is filtered and throws it as `NonRetryableExecutorException` wrapping with a new exception called `InsufficientBalanceException`.
+
+<6> Other 4xx errors are thrown as `NonRetryableExecutorException`.
+
+<7> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*5xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
+Most probably 5xx errors can be retried, but there are some cases it can not.
+
+<8> Check the 5xx error is equal to `INTERNAL_SERVER_ERROR`.
+Because if there is an internal server in this case, we know that we cannot go ahead and the process should be stopped going forward.
+Therefore, `NonRetryableExecutorException` is thrown by wrapping the rela error.
+
+<9> If the 5xx is not equal to `INTERNAL_SERVER_ERROR`, then other errors like 502, 503, 504, 509 error codes are caught as `RetryableExecutorException` and therefore a `RetryableExecutorException` is thrown by wrapping the real exception.
+
+<10> Cathe the other exceptions.
+
+<11> In this example, other error codes are not considered because we assume that errors cannot be happened.
+Therefore, that error just throws without wrapping with `NonRetryableExecutorException`.
+IF you want to wrap, you can do as usual but is not required if you don't consider those errors.
+Because internally the framework wraps the all `RuntimeExceptions` with `NonRetryableExecutorException` by default.
+
+<12> Making the request to the utility payment-service to release the PreAuth that we made.
+This method is the Compensation of the `makePreAuth`.
+
+<13> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*5xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
+Most probably 5xx errors can be retried, but there are some cases it can not.
+
+
+<14> If the 5xx is not equal to `INTERNAL_SERVER_ERROR`, then other errors like 502, 503, 504, 509 error codes are caught as `RetryableExecutorException` and therefore a `RetryableExecutorException` is thrown by wrapping the real exception.
+
+
+
+<15> If the 5xx is not equal to `INTERNAL_SERVER_ERROR`, then other errors like 502, 503, 504, 509 error codes are caught as `RetryableExecutorException` and therefore a `RetryableExecutorException` is thrown by wrapping the real exception.
+
+
+
+<16> Cathe the other exceptions.
+
+<17> In this example, other error codes are not considered because we assume that errors cannot be happened.
+Therefore, that error just throws without wrapping with `NonRetryableExecutorException`.
+IF you want to wrap, you can do as usual but is not required if you don't consider those errors.
+Because internally the framework wraps the all `RuntimeExceptions` with `NonRetryableExecutorException` by default.
