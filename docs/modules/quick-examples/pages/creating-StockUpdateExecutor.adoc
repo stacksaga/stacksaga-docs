@@ -17,13 +17,14 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
     @Override
     public ProcessStepManager<PlaceOrderAggregator> doProcess(
             PlaceOrderAggregator currentAggregator, // <3>
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager // <4>
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
     )
-    throws RetryableExecutorException, NonRetryableExecutorException { // <5>
-        // <6>
+    throws RetryableExecutorException, NonRetryableExecutorException {
+        // <4>
         this.stockService.updateStock(
                 UpdateStockDto.RequestBody
                         .builder()
+                        .orderId(currentAggregator.getAggregatorTransactionId())
                         .items(currentAggregator
                                 .getItems()
                                 .stream()
@@ -36,7 +37,7 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
                         )
                         .build()
         );
-        // <7>
+        // <5>
         return stepManager.next(MakePaymentExecutor.class, OrderStatus.UPDATED_STOCK.name());
     }
 
@@ -45,8 +46,8 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
             NonRetryableExecutorException processException,
             PlaceOrderAggregator finalAggregatorState,
             RevertHintStore revertHintStore
-    ) throws RetryableExecutorException {
-        // <8>
+    ) throws RetryableExecutorException { // <6>
+        // <7>
         this.stockService.restoreStock(
                 RestoreStockDto.RequestBody
                         .builder()
@@ -56,9 +57,37 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
                         )
                         .build()
         );
+        // <8>
         return OrderStatus.RESTORED_STOCK.name();
     }
 }
 ----
 
+*Highlights*
 
+<1> Annotate the `StockUpdateExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
++
+> Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+
+<2> Implement the `StockUpdateExecutor` from the `CommandExecutor` by passing the target Aggregator.
++
+Read more about xref:framework:saga_executors.adoc#command_executor[`CommandExecutor<A>`] interface.
+
+<3> you will have the `currentAggregator` object through the method parameter. due to this executor is the 4th executor, the `currentAggregator` object has been updated by the `OrderController`(initialization), `UserDetailExecutor`, `OrderInitializeExecutor`,and `PreAuthExecutor`.
+
+<4> updating the stock by invoking the StockService's `updateStock()` method. the `orderId` and `items` are passed accessing from the `currentAggregator`.
+
+<5> Navigates the execution by using `stepManager` to the next executor called `MakePaymentExecutor`.
+And also passed the status as `UPDATED_STOCK`.
+
+
+<6> `RetryableExecutorException` As per the StackSaga design pattern the revert process cannot have any `NonRetryableExecutorException` error.
+It only can have `RetryableExecutorException`.
+
+<7> Calling the StockService's `restoreStock()` method to restoring the items that has been reduced in the `doProcess()` method.
+
+<8> Reruns the status as `RESTORED_STOCK` finally.
+
+*Related classes*
+
+=== Creating StockService

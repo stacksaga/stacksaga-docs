@@ -15,9 +15,9 @@ public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> { 
 
     @Override
     public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            PlaceOrderAggregator currentAggregator,
+            PlaceOrderAggregator currentAggregator, // <3>
             ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
-    ) throws RetryableExecutorException, NonRetryableExecutorException { // <3>
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
 
         // <4>
         final String preAuthRef = this.paymentService.makePreAuth(
@@ -51,7 +51,7 @@ public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> { 
                         .reason(processException.get("reason").orElse(""))
                         .build()
         );
-        return OrderStatus.RELEASED_PRE_AUTH.name();
+        return OrderStatus.RELEASED_PRE_AUTH.name(); // <10>
     }
 }
 ----
@@ -62,7 +62,7 @@ public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> { 
 
 <2> Implement the `PreAuthExecutor` from the `CommandExecutor` by passing the target Aggregator.
 +
-Read more about xref:framework:saga_executors.adoc#query_executor[`QueryExecutor<A>`] interface.
+Read more about xref:framework:saga_executors.adoc#command_executor[`CommandExecutor<A>`] interface.
 
 <3> you will have the `currentAggregator` object through the method parameter. due to this executor is the 3d executor, the `currentAggregator` object has been updated by the `OrderController`(initialization), `UserDetailExecutor`,and `OrderInitializeExecutor`.
 
@@ -83,6 +83,8 @@ Therefore, that contains the `pareAuthRef` and we can access it from the `finalA
 <9> And As well as a reason should be given for the releasing `PreAuth`.
 All the time the process can be failed (With  `NonRetryableExecutorException`)we have added a data called `reason` with the `NonRetryableExecutorException`.
 This is the time that can be used.
+
+<10> Return the status as `RELEASED_PRE_AUTH`  finally.
 
 === Creating PaymentService
 
