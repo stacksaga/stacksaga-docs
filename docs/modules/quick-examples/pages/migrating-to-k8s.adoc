@@ -1,30 +1,41 @@
-= StackSaga With Kubernetes Example
+= StackSaga Demo (Core concept practice)
 :keywords: SatckSaga Spring microservice,spring boot saga,spring cloud microservice saga, saga design pattern,saga orchestration spring boot
 :description: StackSaga Quick Start With Kubernetes
 
 == Overview
 
-This example will demonstrate how you can configure and work together StackSaga cloud ecosystem with Kubernetes environment by using inbuilt internal Kubernetes service communication (Without any spring related Discovery client implementation).
+In this demo, we are focusing on how to implement the StackSaga things in the spring boot in microservice architecture.
+
+> IF you are new to StackSaga, it is recommitted to read the xref:architecture:aggregator.adoc[architecture] and xref:framework:create-aggregator.adoc[reference documentation]
+for read individual components.
+
+In this example, we have 4 utility microservices.
+,`payment-service` and `stock-service.` and as the proxy server we use https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway].
+The requirement is the clients can palace an order and then the order request should be completed go through these 4 services.
+
+Each services' responsibilities as follows.
+
+[horizontal]
+`*order-service*`:: Order service is responsible for accepting the place order request and managing the entire transaction as the orchestrator. and also as a utility service, the service is responsible for storing the order related specific data in the order-service database.
+
+`*user-service*`:: To make the process we want to have the user details like delivery address.
+User-service provides the endpoints to fetch the user's data.
+
+`*payment-service*`:: In the placing order process, the user service involves to execute to main steps.
++
+. To make the Pre-Auth before doing the real transaction and to check that the payment can be done or not.
+. To make the payment (Real transaction).
+All the steps are done smoothly finally the reserved transaction should be made.
+These endpoints are provided by the `payment-service`.
+
+`*stock-service*`:: After making the pre-auth process, we should update the real stock.
+`stock-service` is responsible to update the real stock.
+
 
 There are 3 utility services in the cluster called `order-service,` `user-service` and `stock-service.` as well as https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway] is used as the (In K8s it is can be called ingress service) Application Load Balancer (ALB) and as well as the Reverse proxy server.
 The `order-service` act as the StackSaga xref://[orchestrator service here].
 As mentioned above, Eureka or any of Discovery clients are not used for Service-Discovery and Service-Registry.
 To overcome the capability of Service-Discovery, it is used inbuilt https://kubernetes.io/docs/concepts/services-networking/service/[Kubernetes Service].
-
-`*order-service*`::: Order service is responsible for accepting the place order request and managing the entire transaction as the orchestrator. and also as a utility service, the service is responsible for storing the order related specific data in the order-service database.
-`*user-service*`::: To make the process we want to have the user details like delivery address.
-User-service provides the endpoints to fetch the user's data.
-
-`*payment-service*`::: In the placing order process, the user service involves to execute to main steps.
-+
-. To make the Pre-Auth before doing the real transaction and to check that the payment can be done or not.
-. To make the payment (Real transaction).
-All the steps are done smoothly finally the reserved transaction should be made.
-
-These endpoints are provided by the `payment-service`.
-
-`*stock-service*`::: After making the pre-auth process, we should update the real stock.
-`stock-service` is responsible to update the real stock.
 
 == High-level Implementation Diagram.
 
@@ -57,6 +68,7 @@ And the next reason is that StackSaga involves that kind of service in your enti
 Selecting a service as an Orchestrator service or not depends on your rearmament.
 
 ====  Create order the project with spring initializer
+
 Go to the https://start.spring.io/[spring initializer] and create your project with the following Dependencies.
 
 * `spring-boot-starter-web`
@@ -173,6 +185,7 @@ Finally, the `pom.xml` file will be like below.
     </dependencies>
 </project>
 ----
+
 include::creating-aggregator.adoc[]
 
 include::creating-executor.adoc[]
@@ -189,6 +202,7 @@ include::creating-StockUpdateExecutor.adoc[]
 
 include::creating-MakePaymentExecutor.adoc[]
 
+== Environment Deployment
 
-
+== Testing
 
