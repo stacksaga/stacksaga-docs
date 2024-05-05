@@ -9,33 +9,52 @@ In this demo, we are focusing on how to implement the StackSaga things in the sp
 > IF you are new to StackSaga, it is recommitted to read the xref:architecture:aggregator.adoc[architecture] and xref:framework:create-aggregator.adoc[reference documentation]
 for read individual components.
 
-In this example, we have 4 utility microservices.
-,`payment-service` and `stock-service.` and as the proxy server we use https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway].
-The requirement is the clients can palace an order and then the order request should be completed go through these 4 services.
+In this example, we have 4 utility microservices called `order-service`, `user-service`, `payment-service`, and `stock-service.` in addition to that,
+https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway] is used as the proxy server and as well as the Application Load Balancer (ALB).
+and also Eureka Discovery is used for service registry.
+
+The use-case is the clients can palace an order and then the order request should be completed go through these 4 services.
 
 Each services' responsibilities as follows.
 
 [horizontal]
-`*order-service*`:: Order service is responsible for accepting the place order request and managing the entire transaction as the orchestrator. and also as a utility service, the service is responsible for storing the order related specific data in the order-service database.
+`*order-service*`:: Order service is responsible for accepting the place order request and managing the entire transaction as the xref://[orchestrator].
+and also as a utility service, the service is responsible for storing the order related specific data in the order-service database.
+According to this us-case, This is the service that stacksaga is added.
 
 `*user-service*`:: To make the process we want to have the user details like delivery address.
-User-service provides the endpoints to fetch the user's data.
+`user-service` managing the user-related data, and it provides endpoints to fetch the user's data.
 
-`*payment-service*`:: In the placing order process, the user service involves to execute to main steps.
+`*payment-service*`:: In the placing order process, the utility `payment-service` involves to two main tasks.
 +
-. To make the Pre-Auth before doing the real transaction and to check that the payment can be done or not.
+. To make the *Pre-Auth* before doing the real transaction and to check that the payment can be done or not.
 . To make the payment (Real transaction).
 All the steps are done smoothly finally the reserved transaction should be made.
 These endpoints are provided by the `payment-service`.
 
 `*stock-service*`:: After making the pre-auth process, we should update the real stock.
-`stock-service` is responsible to update the real stock.
+`stock-service` is responsible for providing endpoints to update the real stock and restore the update.
 
 
-There are 3 utility services in the cluster called `order-service,` `user-service` and `stock-service.` as well as https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway] is used as the (In K8s it is can be called ingress service) Application Load Balancer (ALB) and as well as the Reverse proxy server.
-The `order-service` act as the StackSaga xref://[orchestrator service here].
-As mentioned above, Eureka or any of Discovery clients are not used for Service-Discovery and Service-Registry.
-To overcome the capability of Service-Discovery, it is used inbuilt https://kubernetes.io/docs/concepts/services-networking/service/[Kubernetes Service].
+All the services that we are going to build.
+
+* api-cloud-gateway
+* eureka-service
+* utility servers
+** order-service
+** user-service
+** stock-service
+** payment-service
+
+Additionally `stackasga-admin-dashboard` is run monitoring the transactions.
+
+> source code is available on //[Github].
+
+This guide is divided into 3 sections for your convenience.
+
+[1] Implementation:: Guides for implementing all java classes. (focus the StackSaga concepts)
+[2] Deployment:: Guides for creating and connecting The API-gateway and eureka service with utility services with all the configurations.
+[3] Testing:: Testing the application by running all the applications together.
 
 == High-level Implementation Diagram.
 
