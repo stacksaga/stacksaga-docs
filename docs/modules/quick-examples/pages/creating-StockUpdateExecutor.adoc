@@ -108,11 +108,12 @@ public class StockService {
             throws
             RetryableExecutorException, NonRetryableExecutorException {
         try {
+            // <1>
             this.restTemplate.put(
                     "http://stock-service/stock",
                     requestBody
             );
-        } catch (HttpServerErrorException ex) {
+        } catch (HttpServerErrorException ex) { // <2>
             // This exception is thrown for HTTP 5xx errors (Server errors)
             // You can handle specific HTTP error codes here
             if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
@@ -121,7 +122,7 @@ public class StockService {
                 //502 , 503, 504, 509 etc.
                 throw RetryableExecutorException.buildWith(ex).build();
             }
-        } catch (RestClientException ex) {
+        } catch (RestClientException ex) { // <3>
             // This exception is a generic RestClientException
             // Handle other types of exceptions here
             throw ex;
@@ -131,11 +132,12 @@ public class StockService {
 
     public void restoreStock(RestoreStockDto.RequestBody requestBody) throws RetryableExecutorException {
         try {
+            // <4>
             this.restTemplate.put(
                     "http://stock-service/stock/restore",
                     requestBody
             );
-        } catch (HttpServerErrorException ex) {
+        } catch (HttpServerErrorException ex) { // <5>
             // This exception is thrown for HTTP 5xx errors (Server errors)
             // You can handle specific HTTP error codes here
             if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
@@ -144,7 +146,7 @@ public class StockService {
                 //502 , 503, 504, 509 etc.
                 throw RetryableExecutorException.buildWith(ex).build();
             }
-        } catch (RestClientException ex) {
+        } catch (RestClientException ex) { // <6>
             // This exception is a generic RestClientException
             // Handle other types of exceptions here
             throw ex;
@@ -152,3 +154,22 @@ public class StockService {
     }
 }
 ----
+
+This service is also pretty much the same as the service that has been created so far.
+
+*Highlights*
+
+<1> Call the endpoint to update the stock.
+
+<2> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*5xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
+Most probably 5xx errors can be retried, but there are some cases it can not.
+
+<3> Cathe the other exceptions (with 4xx errors as well).
+
+<4> Call the endpoint to restore the updated stock.
+
+<5> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*5xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
+Most probably 5xx errors can be retried, but there are some cases it can not.
+
+<6> Cathe the other exceptions (with 4xx errors as well).
+
