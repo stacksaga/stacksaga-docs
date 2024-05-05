@@ -91,3 +91,64 @@ It only can have `RetryableExecutorException`.
 *Related classes*
 
 === Creating StockService
+
+We called the `StockService` in the `StockUpdateExecutor`.
+The service `StockService` class is responsible for updating the stock or if there is an error, restore the stock by connecting with the utility `stock-service`.
+So let's create the service now.
+
+[source,java]
+----
+@Service
+@RequiredArgsConstructor
+public class StockService {
+
+    private final RestTemplate restTemplate;
+
+    public void updateStock(UpdateStockDto.RequestBody requestBody)
+            throws
+            RetryableExecutorException, NonRetryableExecutorException {
+        try {
+            this.restTemplate.put(
+                    "http://stock-service/stock",
+                    requestBody
+            );
+        } catch (HttpServerErrorException ex) {
+            // This exception is thrown for HTTP 5xx errors (Server errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                throw ex;
+            } else {
+                //502 , 503, 504, 509 etc.
+                throw RetryableExecutorException.buildWith(ex).build();
+            }
+        } catch (RestClientException ex) {
+            // This exception is a generic RestClientException
+            // Handle other types of exceptions here
+            throw ex;
+        }
+
+    }
+
+    public void restoreStock(RestoreStockDto.RequestBody requestBody) throws RetryableExecutorException {
+        try {
+            this.restTemplate.put(
+                    "http://stock-service/stock/restore",
+                    requestBody
+            );
+        } catch (HttpServerErrorException ex) {
+            // This exception is thrown for HTTP 5xx errors (Server errors)
+            // You can handle specific HTTP error codes here
+            if (ex.getStatusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+                throw ex;
+            } else {
+                //502 , 503, 504, 509 etc.
+                throw RetryableExecutorException.buildWith(ex).build();
+            }
+        } catch (RestClientException ex) {
+            // This exception is a generic RestClientException
+            // Handle other types of exceptions here
+            throw ex;
+        }
+    }
+}
+----
