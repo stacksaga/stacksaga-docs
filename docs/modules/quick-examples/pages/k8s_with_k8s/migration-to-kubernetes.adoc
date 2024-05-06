@@ -16,7 +16,7 @@ StackSaga provides a dependency called `stacksaga-connect-k8s-support`
 and it uses internally https://kubernetes.io/docs/concepts/architecture/leases/#leader-election[kubernetes lease leader election] for leader election.
 xref:framework:stacksaga_in_kubernetes.adoc[Read more..]
 
-So then you have to remove the `stacksaga-connect-eureka-support`
+So then you have to remove the `stacksaga-connect-eureka-support` and `spring-cloud-starter-netflix-eureka-client`
 and add the `stacksaga-connect-k8s-support`.
 
 Here is the updated `pom.xml` for `order-service`.
@@ -81,10 +81,11 @@ Here is the updated `pom.xml` for `order-service`.
             <artifactId>spring-boot-starter-aop</artifactId>
         </dependency>
 
-        <dependency>
+        <!--removed eureka clint-->
+        <!--<dependency>
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
-        </dependency>
+        </dependency>-->
 
 
         <dependency>
@@ -135,9 +136,10 @@ Now let's create a new profile and a configuration file for `k8s`.
 
 TIP: https://docs.spring.io/spring-boot/docs/1.2.0.M1/reference/html/boot-features-external-config.html#boot-features-external-config-profile-specific-properties[Spring Profiles] provide a way to segregate parts of your application configuration and make it only available in certain environments.
 
+.xref://[icon:github[role=black,size=2x] application-k8s.yaml]
 [source,yaml]
 ----
-services:
+services: # <1>
   payment-service: http://payment-service-service
   stock-service: http://stock-service-service
   user-service: http://user-service-service
@@ -149,22 +151,26 @@ spring:
     name: order-service
 
 stacksaga:
-  component-scan: org.example.aggregator
-  app-release-version: 1.0.0
+  component-scan: org.example.aggregator # <2>
+  app-release-version: 1.0.0 # <2>
   cloud:
     k8s:
-      namespace: default
-      service-host: http://${spring.application.name}-service
+      namespace: default # <3>
+      service-host: http://${spring.application.name}-service # <4>
+      # <5>
       leader-election:
         lease-duration: 3m
         renew-deadline: 1m
         retry-period: 30s
   connect:
+    # <6>
     admin-urls:
       - http://stacksaga-admin-server-service:4444
+    # <7>
     admin-username: order-service-application-user
     admin-password: dtj8lEfssVUCsaHe
   datasource:
+    # <8>
     mysql:
       jdbc-url: jdbc:mysql://localhost:3306/order-service?createDatabaseIfNotExist=true
       username: root
@@ -191,3 +197,35 @@ logging:
       springframework: debug
     root: info
 ----
+
+*Highlights*
+
+<1> The services' Urls that we access inside the service.
+The hosts should be the exact same with the k8s xref://[service name].
+If you have multiple instances for one service, the load-balancing part also does by kubernetes proxy.
+
+<2> The path for scans the aggregators.
+We have added the path to the aggregator layer.
+
+<3> `stacksaga-connect-k8s-support` xref://[fetches the pod's data] from the k8s control plane.
+so we have to provide which namespace the pod is deployed.
+
+<4> The host name (k8s service-name) of the order-service application in kubernetes.
+See the xref://[manifest].
+This is used for sharing the data across the siblings (If the current pod is the leader, spreads the execution with other followers).
+
+<5> To acquire the leader, all the pods try to update a lease object to the k8s.
+These properties say that how to update the lease.
+xref:framework:kubernetes-support-configuration-properties.adoc[See more details.]
+
+<6> The URL of the admin server.
+It can be provided a list of admin URLs for high-availability (HA).
+In case one admin server goes down, the request can be retried with other available services.
+See more xref://[how the admin-server interacts in Stacksaga architecture].
+
+<7> You know that to communicate with admin-server, and We have to create a user account for each service to communicate with the `admin-server`.
+After creating a user-account, you will have the username and password.
+See how to create a user account for utility service].
+
+<8> You have to provide the data sources properties for StackSaga xref:architecture:event_store.adoc[event-store].
+Due to you have selected xref://[stacksaga-mysql-support].
