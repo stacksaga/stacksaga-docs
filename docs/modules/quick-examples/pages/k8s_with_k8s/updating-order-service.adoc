@@ -1,0 +1,52 @@
+== Creating the kubernetes RBAC related manifest.
+
+You already know that we should create https://kubernetes.io/docs/reference/access-authn-authz/authentication/[kubernetes user-account] for accessing the kubernetes API to fetch some metadata and leader election.
+
+=== Creating UserAccount Manifest
+
+[source,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: order-service-service-account
+  namespace: default
+----
+
+=== Creating ClusterRole Manifest
+
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: leader-election-lease-role
+  namespace: default
+rules:
+  - apiGroups: [ "" ]
+    resources: [ "pods","nodes" ]
+    verbs: [ "get", ]
+  - apiGroups: [ "coordination.k8s.io" ]
+    resources: [ "leases"]
+    verbs: [ "get", "create", "update", "patch" ]
+----
+
+=== Creating ClusterRoleBinding Manifest
+
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: order-service-service-account-leader-election-lease-role
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: order-service-service-account
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: leader-election-lease-role
+----
+
+== Creating the kubernetes RBAC related manifest.
