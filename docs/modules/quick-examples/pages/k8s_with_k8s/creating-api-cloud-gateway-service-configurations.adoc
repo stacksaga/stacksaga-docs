@@ -1,0 +1,113 @@
+== Creating API-cloud-Gateway Server manifests.
+
+=== Creating a new k8s profile and property file.
+
+[source,yaml]
+----
+server:
+  port: 8080
+management:
+  info:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: 1.0.0
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOrigins:
+              - "*"
+            allowedMethods:
+              - "*"
+            allowedHeaders:
+              - "*"
+            exposedHeaders:
+              - "*"
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+      routes:
+        - id: api-user-service
+          uri: http://user-service
+          predicates:
+            - Path=/api/user-service/**
+          filters:
+            - RewritePath=/api/user-service/?(?<segment>.*), /$\{segment}
+          order: 0
+        - id: api-order-service
+          uri: http://order-service
+          predicates:
+            - Path=/api/order-service/**
+          filters:
+            - RewritePath=/api/order-service/?(?<segment>.*), /$\{segment}
+          order: 1
+logging:
+  level:
+    root: debug
+    org:
+      spring: debug
+----
+
+
+
+=== API-cloud-Gateway Deployment manifest
+
+[source,yaml]
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+spec:
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: mafeidev/stacksaga-k8s-demo-1-api-gateway:1.0.3
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: k8s
+            - name: SPRING_CLOUD_GATEWAY_DEFAULT-FILTERS
+              value: DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+            - name: SPRING_CLOUD_GATEWAY_GLOBALCORS_ADD-TO-SIMPLE-URL-HANDLER-MAPPING
+              value: "true"
+----
+
+=== API-cloud-Gateway Service manifest
+
+[source,yaml]
+----
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+spec:
+  type: LoadBalancer
+  selector:
+    app: api-gateway
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+      nodePort: 30000
+  sessionAffinity: None
+----
