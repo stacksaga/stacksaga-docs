@@ -38,19 +38,25 @@ Then let's see how the connection is established between the admin and available
 You know how you can access your server in the microservice architecture by using a reverse proxy server like spring cloud API gateway.
 As an example, if you want to access your order service, you can access it by using the api gateway like this.
 
-> * {host:port}/{service-name| https://docs.spring.io/spring-cloud-gateway/docs/current/reference/html/#the-rewritepath-gatewayfilter-factory[URL-alias]}/{rest-path}
-> * http://localhost:8080/order-service/place-order
+* Format: {host:port}/{service-name| https://docs.spring.io/spring-cloud-gateway/docs/current/reference/html/#the-rewritepath-gatewayfilter-factory[URL-alias]}/{rest-path}
+* Example: http://localhost:8080/order-service/place-order
 
-Stacksaga also follows this way to access the target service to fetch the data from the admin dashboard with the Stacksaga in-built endpoints.
-As an example in the dashboard, you want to see the transaction data from the order-service you have to provide the base url and the target service.
+Stacksaga also follows this way to access the target service to fetch the data from the admin dashboard with the xref://[Stacksaga in-built endpoints].
+As an example, If you want to see the transaction data from the order-service, you have to provide the root url and the target service.
 
-> * {host:port}/{service-name| https://docs.spring.io/spring-cloud-gateway/docs/current/reference/html/#the-rewritepath-gatewayfilter-factory[URL-alias]}/{rest-path}
-*Samples*
-> * http://localhost:8080/order-service/stacksaga/welcome
-> * http://example.com/order-service/stacksaga/welcome
-> * http://localhost:8080/user-service/stacksaga/welcome
-> * http://example.com/payment-service/stacksaga/welcome
-> * http://example.com/api/stock/stacksaga/welcome
+*Format*:::
+* {host:port}/{service-name| https://docs.spring.io/spring-cloud-gateway/docs/current/reference/html/#the-rewritepath-gatewayfilter-factory[URL-alias]}/{rest-path}
++
+image:stacksaga-admin-service-connector-ui.png[]
+
+*Samples*:::
+* http://localhost:8080/order-service/stacksaga/welcome
+* http://example.com/order-service/stacksaga/welcome
+* http://localhost:8080/user-service/stacksaga/welcome
+* http://example.com/payment-service/stacksaga/welcome
+* http://example.com/api/stock/stacksaga/welcome
++
+image:stacksaga-admin-login-successful.png[]
 
 WARNING: If you add security in your application (for the Gateway or individual services), make sure to permit the url pattern start from *`/stacksaga/**`*.
 StackSaga framework will take care of them.
@@ -59,14 +65,20 @@ Let's see how the endpoints are protected in this architecture.
 
 image:how-stacksaa-admin-fetch-transaction-data.svg[alt="how stacksaa admin fetch transaction data"]
 
-<1> After successfully login to the system the user can provide the target URL and the target service.
-(If you have an alis instead of service name it should be provided)
-+
-image:stacksaga-admin-login-successful.png[]
-<2>  When the connect button is clicked the cross border request goes to the target URL and the the api gateway or any proxy server will navigate the request to one of available instances of the target service with your user credentials that you logged to the admin dashboard.
-<3> After receiving the request in to the order service all the requests are filtered by Stacksaga if the request has the *`/stacksaga/..`* prefix.
-If it has the request catches by the Stacksaga framework, make a new request to the configured admin server with your credentials and as we as the server's credentials to verify both user and server has the authority to access the particular request.
-<4> sd.
-<5> Both user's token and service user credentials are validated
+The following numbers correspond to the image.
 
-6. Stacksaga framework grants the authority to access the event store through the Stacksaga endpoints if the credentials are valid.Or otherwise the request is rejected with the response that given by the admin backend to the admin dashboard back.
+<1> After successfully login to the system the user can provide the target URL and the target service (If you have an alis instead of service name, it should be provided).
++
+NOTE: If you are not the `super admin user` make sure to you have the access to the target service.
+[ xref://[See the RBAC] ]
+
+<2> When the connect button is clicked the cross border request goes to the target URL and the the api gateway or any proxy server will navigate the request to one of available instances of the target service with your user credentials that you logged to the admin dashboard.
+<3> The Proxy server forwards the request to one of the available target services.
+<4> After receiving the request in to the order service, all the requests are filtered by Stacksaga if the request has the *`/stacksaga/..`* prefix.
+If it contains, the request is caught by the Stacksaga framework and make a new request to the configured admin server with your credentials, and as we as the server's credentials to verify both user and server has the authority to access the particular request.
+<5> Both user's token and service user credentials are validated.
+<6> If both credentials are valid, Stacksaga framework grants the authority to access the event store through the Stacksaga endpoints.
+
+IF the request is failed due to some credential issue, tou are not able to access the data.
+
+NOTE:  The `/stacksaga/welcome` endpoint is the endpoint for checking the credential. After checking the credentials, if the request is success that target service is saved as your current target service. If you want to switch to another service, again enter the target service name with root url and check the credentials. If the request is success it will be saved as the current target service.
