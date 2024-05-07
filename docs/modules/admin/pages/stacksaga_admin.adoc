@@ -8,9 +8,19 @@ It consists of UI dashboard as well as the backend server.
 In brief,The Stacksaga Admin's features are as follows.
 
 * Transaction and Tracing GUI.
-* Role-based access control (RBAC) for each service.
+* Role-based access control (RBAC).
+** *User access control*
++
+User access control is provided to see the data in the dashboard.
+** *Service access control*
++
+Service access control is provided for the utility services.
+The reason is that all the Stacksaga configured services send the instance meta data at startup time with their credentials.
+And also this service ' credentials are used when a user tries to access the transaction tracing details and other data that provide through the Stacksaga endpoints by the individual services.
+
 * Maintaining instance data.
 * Maintaining Aggregator and executor's metadata. etc..
+
 
 === StackSaga Admin involvement in the StackSaga ecosystem.
 
@@ -18,27 +28,40 @@ To have a better understanding, let's have look how the involvement of `StackSag
 
 image:stack-saga-high-level-diagram.svg[alt="StackSaga Admin involvement in the StackSaga ecosystem"]
 
-StackSaga-Admin is a partial stateless application.
-Because, even though you can see the transaction tracing and other data in the dashboard, that data is not saved in the admin's database.
-The data coming from the Individual event-stores.
+Let's see how the *user's access control* and *service's access control* are used.
+You know that Stacksaga framework saves the transaction data on the separate databases called event store.
+It can either one event-store for all utility services, or most probably it could be a separate individual event-store for each utility service.
+These are the data that you can access through the Stacksaga admin dashboard.
+That means the showing data in the admin dashboard are in coming from the Stacksaga admin sever' database.
+To access the data from each and individual event-store Stacksaga, provides inbuilt rest endpoints internally.
+Then let's see how the connection is established between the admin and available services.
+You know how you can access your server in the microservice architecture by using a reverse proxy server like spring cloud API gateway.
+As an example, if you want to access your order service, you can access it by using the api gateway like this.
 
-You know that in StackSaga, StackSaga-framework uses an event-store for storing the transaction data.
-As per xref://[this article], it can be a single event-store or most probably, it can be multiple event-stores for each orchestrator service.
-The transaction's data is saved on those event-stores separately.
+> * http://localhost:8080/order-service/place-order
+> * {host:port}/{service-name| https://docs.spring.io/spring-cloud-gateway/docs/current/reference/html/#the-rewritepath-gatewayfilter-factory[URL-alias]}/{rest-path}
 
-Let's see how the StackSaga-Admin fetches the transaction data from the Individual event-stores.
+Stacksaga also follows this way to access the target service to fetch the data from the admin dashboard with the Stacksaga in-built endpoints.
+As an example in the dashboard, you want to see the transaction data from the order-service you have to provide the base url and the target service.
 
-When you add the StackSaga-framework in your utility services, it has inbuilt endpoints for expose the data to the outside world.
-[ See the xref://[endpoints here]. ]
+> * http://localhost:8080/order-service/stacksaga/welcome
+> * {host:port}/{service-name| https://docs.spring.io/spring-cloud-gateway/docs/current/reference/html/#the-rewritepath-gatewayfilter-factory[URL-alias]}/{rest-path}
+
+WARNING: If you add security in your application (for the Gateway or individual services), make sure to permit the url pattern start from *`/stacksaga/**`*.
+StackSaga framework will take care of them.
+
+Let's see how the endpoints are protected in this architecture.
 
 image:how-stacksaa-admin-fetch-transaction-data.svg[alt="how stacksaa admin fetch transaction data"]
 
-<1> After successfully login to the system the user can provide the target URL and the target service. (If you have a alis instead of service name it should be provided)
+<1> After successfully login to the system the user can provide the target URL and the target service.
+(If you have an alis instead of service name it should be provided)
 +
 image:stacksaga-admin-login-successful.png[]
 <2>  When the connect button is clicked the cross border request goes to the target URL and the the api gateway or any proxy server will navigate the request to one of available instances of the target service with your user credentials that you logged to the admin dashboard.
-<3> After receiving the request in to the order service all the requests are filtered by Stacksaga if the request has a /stacksaga/.. prefix. If it has the request catches by the Stacksaga framework make new request to the configured admin server with your credentials and as we as the server's credentials to verify both user and server has the authority to access the particular request.
+<3> After receiving the request in to the order service all the requests are filtered by Stacksaga if the request has the *`/stacksaga/..`* prefix.
+If it has the request catches by the Stacksaga framework make new request to the configured admin server with your credentials and as we as the server's credentials to verify both user and server has the authority to access the particular request.
 <4> sd.
 <5> Both user's token and service user credentials are validated
 
-6. Stacksaga framework grants the authority to access the event store through the Stacksaga endpoints if the credentials are valid. Or otherwise the request is rejected with the response that given by the admin backend to the admin dashboard back.
+6. Stacksaga framework grants the authority to access the event store through the Stacksaga endpoints if the credentials are valid.Or otherwise the request is rejected with the response that given by the admin backend to the admin dashboard back.
