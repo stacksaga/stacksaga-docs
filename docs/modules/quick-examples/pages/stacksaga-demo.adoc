@@ -222,6 +222,96 @@ include::creating-MakePaymentExecutor.adoc[]
 [[deployment]]
 == Deployment
 
+=== Updating Configuration Properties
+
+We have all 4 utility services and also other 2 services called api-gateway and eureka service to configure.
+But except the order-service and api-gateway, other services are regular spring-cloud services.
+Therefore, we are not going to deep diving to them.
+You can see get the Configuration Properties through these links.
+
+.Configuration Properties for regular services.
+* xref://[user-service]
+* xref://[stock-service]
+* xref://[payment-service]
+* xref://[eureka-service]
+
+NOTE: The above links are related to the default deployment approach.
+If you want
+to see
+how the applications are deployed
+by using xref://[docker-compose] or xref:quick-examples:migrating-to-k8s.adoc[kubernetes],
+reach these links.
+
+Let's see how to configure The most important service called order-service.
+
+[source,yaml]
+.application.yaml
+----
+services:
+  # <1>
+  payment-service: http://payment-service
+  stock-service: http://stock-service
+  user-service: http://user-service
+server:
+  port: 8081
+eureka:
+  client:
+    serviceUrl:
+      # <2>
+      defaultZone: http://localhost:8085/eureka/
+  instance:
+    hostname: localhost
+    # <3>
+    instance-id: ${spring.application.name}:${random.uuid}
+spring:
+  application:
+    # <4>
+    name: order-service
+  datasource:
+    username: root
+    password: mafei
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/stacksaga_place_order_demo_order_service?createDatabaseIfNotExist=true
+  liquibase:
+    # <5>
+    enabled: false
+# <7>
+stacksaga:
+  enable: true # <8>
+  component-scan: org.example.aggregator # <9>
+  app-release-version: 1.0.0 # <10>
+  connect:
+    admin-urls:
+      - http://localhost:4444 # <11>
+    admin-username: order-service-application-user # <12>
+    admin-password: ykLO89Irx2Q6Cf2j # <12>
+  datasource:
+    # <13>
+    mysql:
+      jdbc-url: jdbc:mysql://localhost:3306/order-service?createDatabaseIfNotExist=true
+      username: root
+      password: mafei
+      driver-class-name: com.mysql.cj.jdbc.Driver
+
+management:
+  endpoint:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: ${stacksaga.app-release-version}
+logging:
+  level:
+    org:
+      stacksaga: debug
+----
+
 [[testing]]
 == Testing
 
