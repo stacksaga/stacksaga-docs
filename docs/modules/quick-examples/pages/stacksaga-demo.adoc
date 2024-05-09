@@ -275,18 +275,18 @@ spring:
   liquibase:
     # <5>
     enabled: false
-# <7>
+# <6>
 stacksaga:
-  enable: true # <8>
-  component-scan: org.example.aggregator # <9>
-  app-release-version: 1.0.0 # <10>
+  enable: true # <7>
+  component-scan: org.example.aggregator # <8>
+  app-release-version: 1.0.0 # <9>
   connect:
     admin-urls:
-      - http://localhost:4444 # <11>
-    admin-username: order-service-application-user # <12>
-    admin-password: ykLO89Irx2Q6Cf2j # <12>
+      - http://localhost:4444 # <10>
+    admin-username: order-service-application-user # <11>
+    admin-password: ykLO89Irx2Q6Cf2j # <11>
   datasource:
-    # <13>
+    # <12>
     mysql:
       jdbc-url: jdbc:mysql://localhost:3306/order-service?createDatabaseIfNotExist=true
       username: root
@@ -311,6 +311,44 @@ logging:
     org:
       stacksaga: debug
 ----
+
+*Highlights*
+
+<1> We decided to obtain the service's hosts that we use inside the order service from the configuration file.
+Because the host nam will be different with other environments, (Direness profiles) like xref:stackSaga-demo-with-docker-and-docker-compose.adoc[docker-compose] and xref:migrating-to-k8s.adoc[kubernetes].
+<2> Due to we use xref://[Eureka service discovery], we have provided the URL of the eureka server.
+
+<3> To identify the eureka client (the instance,) you have to provide a unique id for each instance.
+
+<4> it is most important because the service-user account should be equal the `spring.application.name`.
+
+<5> `spring.liquibase.enabled` Even if you haven't added `liquibase` in your application, StackSaga uses  `liquibase` internally.
+Due to the `liquibase` dependency exists in the application spring tries to access the autoconfiguration.
+Then you will get an error.
+To avoid that exception, you have to disable it.
++
+WARNING: If you want to use `liquibase` in your application you are free to use as usual, and then you don't want to disable `liquibase` like above.
+
+<6> The section that StackSaga configurations started.
+
+<7> It is not enough to add the StackSaga dependencies.
+To enable StackSaga, you have to enable StackSaga.
+
+<8> We have to provide the packages to StackSaga where the `Aggregator` class are stored.
+In our example the package is `org.example.aggregator`.
+If you have multiple locations, you can provide a list of packages.
+
+<9> This will be helpful to identify the metadata from the admin dashboard.
+Because all the aggregator and executors metadata is saved under the `app-release-version`.
+As an example, if you want to see what are the aggregators and executors that have been configured, you select the version and see them.
+
+<10> The admin URL that the admin-server is running on.
+If multiple xref://[admin-server] instances are running, you can provide all the list of URLs.
+
+<11> The username and the password of the xref:admin:create_service_user.adoc[service-user] that you created for this `order-service`.
+
+<12> You have to provide the datasource for the event-store that you use.
+In this example we have used `stacksaga-mysql-support` dependency we have to provide the Mysql datasource configurations.
 
 [[testing]]
 == Testing
