@@ -103,10 +103,32 @@ eureka:
       defaultZone: http://localhost:8085/eureka/ # <1>
   instance:
     hostname: localhost
-    # <1>
+    # <2>
     instance-id: ${spring.application.name}:${random.uuid}
 server:
   port: 8080
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      globalcors:
+        # <3>
+        cors-configurations:
+          '[/*/stacksaga/**]':
+            allowedOrigins:
+              - "http://localhost:4444"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+      default-filters:
+        # <4>
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+      discovery:
+        locator:
+          # <5>
+          enabled: true
+          # <6>
+          lower-case-service-id: true
 management:
   info:
     env:
@@ -120,26 +142,24 @@ info:
     author: mafei
     name: ${spring.application.name}
     version: 1.0.0
-spring:
-  application:
-    name: api-gateway
-  cloud:
-    gateway:
-      globalcors:
-        # <2>
-        cors-configurations:
-          '[/*/stacksaga/**]':
-            allowedOrigins:
-              - "http://localhost:4444"
-            allowedMethods: "*"
-            allowedHeaders: "*"
-      default-filters:
-        # <2>
-        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
-      discovery:
-        locator:
-          # <3>
-          lower-case-service-id: true
-          # <4>
-          enabled: true
+
 ----
+
+*Highlights*
+<1> Provide the eureka service registry URL.
+<2> Due to the api gateway also a one eureka clients, you have to mention how it would be the instance id when the api gateway is registered with eureka service.
+
+<3> To avoid the cross-origin restrictions, you can permit the Admin-Dashboard URL.
+If you have a list of Admin-Dashboard URLs, you provide all.
+It permits all the requests for this pattern.
+/*/stacksaga/**
+
+<4> To avoid duplicate response headers exceptions, you can add these filters. (https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-mvc/filters/deduperesponseheader.html[Read spring doc])
+
+
+<5> Flag that enables DiscoveryClient gateway integration. (https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway/the-discoveryclient-route-definition-locator.html[Read spring doc])
+
+<6> Option to lower case serviceId in predicates and filters, defaults to false.
+Useful with eureka when it automatically uppercases serviceId.
+So MYSERIVCE, would match /myservice/**
+
