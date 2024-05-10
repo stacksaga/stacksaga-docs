@@ -1,0 +1,57 @@
+[[classification_of_saga_transactions]]
+== Classification of SAGA transactions
+
+According to the behaviors of the transaction, we can mainly identify 3 transaction types that can be happened when we use saga.
+
+* *Fully success transaction*
+* *Rollback/Compensation/Revert success transaction*
+* *Rollback/Compensation/Revert failed transaction*
+
+[[fully_success_transaction]]
+=== icon:circle[role=green,1x] Fully Success
+
+image:transaction-success.svg[alt="distributed transaction",height=300]
+
+As we discussed earlier, we had used a number of microservices for doing one single execution.
+Just assume we have used 5 microservices to be executed and all of them have been worked without any errors.
+Then there is no revert processes have been executed.
+That means all the microservices are up and running, and there haven't been occurred exceptions internally inside each microservice.
+
+[[revert_success_transaction]]
+=== icon:circle[role=yellow,1x] Compensation Success
+
+image:rollback-compensation-revert-success-transaction.svg[alt="revert success transaction",height=300]
+
+In this time, An exception has occurred when one of microservices get execute.
+Just assume the coordinator has been executed 3 microservices successfully, but at the 4th one, an error has occurred due to a network exception or whatever internal exception that the microservices have been thrown.
+Now the coordinator has to execute revert function regarding all microservices that executed earlier.
+So the coordinator will start to execute all the revert functions one by one as a sequence.
+If those revert functions have been executed successfully, these kinds of transactions are going to these types.
+Simply we did a set of transactions but unfortunately got an error, but all the revert processes are done successfully.
+
+[[revert_failed_transaction]]
+=== icon:circle[role=red,1x] Compensation Failed
+
+image:rollback-compensation-revert-failed-transaction.svg[alt="rollback compensation revert failed transaction",height=300]
+
+In this time, the coordinator tries to execute the transactions one by one.
+But while doing the execution, an error occurred after doing some executions, and the coordinator gets started to execute all the revert processes that regard to the microservices that previously executed.
+But unfortunately, while doing the revert executions, an error gets occurred because of a network issues.
+(Network issues means it can be happened because there is no endpoint in active at that time or kind of actual network problems)
+
+==== Classification of SAGA translations — Summary
+
+*Fully success transaction*
+
+image:fully-success-transaction-summary.svg[alt="Fully Success Transaction Summary",height=300]
+
+*Rollback/Compensation/Revert success transaction*
+
+image:revert-success-transaction-summary.svg[alt="Revert Success Transaction Summary",height=300]
+
+*Rollback/Compensation/Revert failed transaction*
+
+image:revert-failed-transaction-summary.svg[alt="Revert Failed Transaction Summary",height=300]
+
+
+
