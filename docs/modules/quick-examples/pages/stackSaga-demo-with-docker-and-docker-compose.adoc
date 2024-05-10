@@ -72,27 +72,27 @@ services:
       retries: 10
     networks:
       - stacksaga_admin # <7>
-  stacksaga-admin: # <9>
+  stacksaga-admin: # <8>
     container_name: stacksaga-admin
-    image: stacksaga/stacksaga_admin_mysql:1.0.0 # <10>
+    image: stacksaga/stacksaga_admin_mysql:1.0.0 # <9>
     restart: always
     ports:
-      - "4444:4444" # <11>
-    environment: # <12>
+      - "4444:4444" # <10>
+    environment: # <11>
       - SPRING_DATASOURCE_URL=jdbc:mysql://admin_db:3306/stacksaga_admin?createDatabaseIfNotExist=true
       - SPRING_DATASOURCE_USERNAME=root
       - SPRING_DATASOURCE_PASSWORD=mafei
     depends_on:
       admin_db:
-        condition: service_healthy # <13>
+        condition: service_healthy # <12>
     networks:
-      - stacksaga_admin # <14>
+      - stacksaga_admin # <13>
 volumes:
-  admin_mysql_data: # <15>
+  admin_mysql_data: # <14>
     driver: local
 
 networks:
-  stacksaga_admin: # <16>
+  stacksaga_admin: # <15>
     driver: bridge
 ----
 
@@ -113,7 +113,25 @@ This is the minimum version that supports StackSaga framework)
 Therefore, we have to confirm that the `stacksaga-admin` server run after successfully starting the `admin_db`.
 The command tha we have mentioned in the `test` will be called until it returns a success response.
 
-<7>
+<7> `admin_db` server has been added to the `stacksaga_admin` group. because the database and the `stacksaga-admin` should communicate via the host.
+
+<8> creating the `stacksaga-admin` service for deploying the `stacksaga_admin_mysql` image.
+
+<9> The `stacksaga/stacksaga_admin_mysql:1.0.0` is used for running the admin-server.
+
+<10> The port of the admin-server container is exposed to the outside with port `4444`.
+Then you can access the admin-dashboard via `localhost:4444`.
+
+<11> Passing the required configurations as environment variables.
+The database host and username and password of the database that we created above for the admin-server is added here.
+
+<12> Avoid running the admin-server before starting the mysql server successfully.
+
+<13> Add the `stacksaga-admin` server into the `stacksaga_admin` network group.
+
+<14> Creating the volume for storing the mysql database data in the allocated disk named `admin_mysql_data`.
+
+<15> Creating the network group that we used above named `stacksaga_admin`.
 
 [source,java]
 .application-docker.yml
