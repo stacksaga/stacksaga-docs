@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 2.0.20">
-<title>Migrate To Docker Environment.</title>
+<title>Introduction To Microservice</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:300,300italic,400,400italic,600,600italic%7CNoto+Serif:400,400italic,700,700italic%7CDroid+Sans+Mono:400,700">
 <style>
 /*! Asciidoctor default stylesheet | MIT License | https://asciidoctor.org */
@@ -436,533 +436,105 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </head>
 <body class="article">
 <div id="header">
-<h1>Migrate To Docker Environment.</h1>
+<h1>Introduction To Microservice</h1>
 </div>
 <div id="content">
 <div class="sect1">
-<h2 id="Overview">Overview</h2>
+<h2 id="_microservice_architecture">Microservice Architecture</h2>
 <div class="sectionbody">
 <div class="paragraph">
-<p>This will guide you to deploy your <a href="stacksaga-demo.html">entire demo system</a> in docker environment by creating docker images step by step.</p>
-</div>
-<div class="admonitionblock note">
-<table>
-<tr>
-<td class="icon">
-<i class="fa icon-note" title="Note"></i>
-</td>
-<td class="content">
-We only focus on the configuration files and manifest files for docker deployment and how the communication is happened in the docker environment.
-Please find the <a href="#//">full source code here</a>.
-</td>
-</tr>
-</table>
+<p>Before dive in to the framework, let&#8217;s have the basic idea of microservice architecture.
+A microservice' architecture consists of a collection of small, autonomous services.
+Each service is self-contained and should implement a single business capability within a bounded context.
+A bounded context is a natural division within a business and provides an explicit boundary within which a domain model exists.</p>
 </div>
 <div class="paragraph">
-<p>The steps are as follows.</p>
+<p><strong>What are microservices?</strong></p>
+</div>
+<div class="paragraph">
+<p>Microservices are a modern approach to software whereby application code is delivered in small, manageable pieces, independent of others.
+<a href="https://spring.io/microservices">Read more through spring microservices.</a></p>
+</div>
+<div class="paragraph">
+<p>Key characteristics of microservices include:</p>
 </div>
 <div class="olist arabic">
 <ol class="arabic">
 <li>
-<p>[Set up StackSaga-Admin server].</p>
+<p><strong>Modularity</strong>: Each microservice is a self-contained unit that can be developed, deployed, and scaled independently. This modularity allows for easier development and maintenance of complex systems.</p>
 </li>
 <li>
-<p>Updating <code>api-gateway</code> service.</p>
+<p><strong>Scalability</strong>: Since each service is independent, it can be scaled horizontally or vertically based on its specific requirements. This allows for better resource utilization and improved performance.</p>
 </li>
 <li>
-<p>Updating <code>eureka-service</code> service.</p>
+<p><strong>Resilience</strong>: Microservices are designed to be fault-tolerant and resilient. If one service fails, it does not necessarily affect the entire application, as other services can continue to function independently.</p>
 </li>
 <li>
-<p>Updating <code>order-service</code> service.</p>
+<p><strong>Flexibility</strong>: Microservices allow for flexibility in technology choices. Each service can be developed using the most suitable programming language, framework, or database for its requirements.</p>
 </li>
 <li>
-<p>Updating <code>user-service</code> service.</p>
+<p><strong>Decentralized Data Management</strong>: Instead of a single centralized database, each microservice can have its own database or data store. This allows for better isolation of data and reduces the risk of data corruption or loss.</p>
 </li>
 <li>
-<p>Updating <code>stock-service</code> service.</p>
-</li>
-<li>
-<p>Updating <code>payment-service</code> service.</p>
+<p><strong>Continuous Deployment</strong>: Microservices enable continuous deployment and delivery practices, as each service can be deployed independently without affecting others. This allows for faster release cycles and quicker time-to-market.</p>
 </li>
 </ol>
 </div>
-<div class="sect2">
-<h3 id="_set_up_stacksaga_admin_server_in_docker">Set up StackSaga-Admin server in Docker.</h3>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_database_per_service_pattern">Database Per Service Pattern</h2>
+<div class="sectionbody">
 <div class="paragraph">
-<p>Instead of running the executable jar fil in the local, you can use the <code>StackSaga-Admin-Server</code> image called <a href="https://hub.docker.com/r/stacksaga/stacksaga_admin_mysql">stacksaga/stacksaga_admin_mysql</a> from the docker-hub.</p>
+<p>One of the benefits of microservice architecture is that it lets us choose the technology stack per service.
+For instance, we can decide to use a relational database for service A and opt for a NoSQL database for service B. This model lets the services manage domain data independently on a data store that best suites its data types and schema.
+Further, it also lets the service scale its datastore on-demand and insulates it from the failures of other services.
+However, at times a transaction can span across multiple services, and ensuring data consistency across the service database is a challenge.
+In the next section, let us examine the challenge of distributed transaction management with an example.</p>
 </div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_distributed_transaction">Distributed Transaction</h2>
+<div class="sectionbody">
 <div class="paragraph">
-<p>Let&#8217;s create the docker-compose file for running the <code>StackSaga-Admin-Server</code> and configure the database for the <code>StackSaga-Admin-Server</code>.</p>
+<p>To demonstrate the use of distributed transactions, we’ll take an example of an e-commerce application that processes online orders and is implemented with microservice architecture.
+There is a microservice to create the orders, one that processes the payment, another that updates the inventory and the last one that delivers the order.
+Each of these microservices performs a local transaction to implement the individual functionalities:</p>
 </div>
-<div class="exampleblock">
+<div class="imageblock">
 <div class="content">
-<div class="admonitionblock tip">
-<table>
-<tr>
-<td class="icon">
-<i class="fa icon-tip" title="Tip"></i>
-</td>
-<td class="content">
-we create 3 different network groups in this example for grouping the services based on the communication.<br>
-</td>
-</tr>
-</table>
-</div>
-<div class="olist arabic">
-<ol class="arabic">
-<li>
-<p><code>stacksaga-admin-communicate</code> group</p>
-<div class="olist loweralpha">
-<ol class="loweralpha" type="a">
-<li>
-<p><code>admin_db</code> service. (from docker-compose.admin.yaml)</p>
-</li>
-<li>
-<p><code>stacksaga-admin</code> service. (from docker-compose.admin.yaml)</p>
-</li>
-<li>
-<p><code>order-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-</ol>
-</div>
-</li>
-<li>
-<p><code>api-gateway-communicate</code> group</p>
-<div class="olist loweralpha">
-<ol class="loweralpha" type="a">
-<li>
-<p><code>api-gateway</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>payment-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>user-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>order-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-</ol>
-</div>
-</li>
-<li>
-<p><code>utility-server-communicate</code> group</p>
-<div class="olist loweralpha">
-<ol class="loweralpha" type="a">
-<li>
-<p><code>db</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>eureka-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>api-gateway</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>order-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>user-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-<li>
-<p><code>payment-service</code> service. (from docker-compose.services.yaml)</p>
-</li>
-</ol>
-</div>
-</li>
-</ol>
-</div>
-</div>
-</div>
-<div class="listingblock">
-<div class="title">docker-compose.admin.yaml</div>
-<div class="content">
-<pre class="CodeRay highlight"><code data-lang="yaml"><span style="color:#606">version</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">'3.8'</span></span>
-<span style="color:#606">services</span>:
-  <span style="color:#606">admin_db</span>: <i class="conum" data-value="1"></i><b>(1)</b>
-    <span style="color:#606">container_name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">admin_db</span></span>
-    <span style="color:#606">image</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mysql:8.0 </span></span><i class="conum" data-value="2"></i><b>(2)</b>
-    <span style="color:#606">restart</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">always</span></span>
-    <span style="color:#606">environment</span>: <i class="conum" data-value="3"></i><b>(3)</b>
-      <span style="color:#606">MYSQL_ROOT_PASSWORD</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mafei</span></span>
-      <span style="color:#606">MYSQL_USER</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mafei</span></span>
-      <span style="color:#606">MYSQL_PASSWORD</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mafei</span></span>
-    <span style="color:#606">ports</span>:
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">3506:3306</span><span style="color:#710">&quot;</span></span> <i class="conum" data-value="4"></i><b>(4)</b>
-    <span style="color:#606">volumes</span>:
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">admin_mysql_data:/var/lib/mysql </span></span><i class="conum" data-value="5"></i><b>(5)</b>
-    <span style="color:#606">healthcheck</span>: <i class="conum" data-value="6"></i><b>(6)</b>
-      <span style="color:#606">test</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">[ &quot;CMD&quot;, &quot;mysqladmin&quot; ,&quot;ping&quot;, &quot;-h&quot;, &quot;localhost&quot; ]</span></span>
-      <span style="color:#606">timeout</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">20s</span></span>
-      <span style="color:#606">retries</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">10</span></span>
-    <span style="color:#606">networks</span>:
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">stacksaga_admin </span></span><i class="conum" data-value="7"></i><b>(7)</b>
-  <span style="color:#606">stacksaga-admin</span>: <i class="conum" data-value="8"></i><b>(8)</b>
-    <span style="color:#606">container_name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">stacksaga-admin</span></span>
-    <span style="color:#606">image</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">stacksaga/stacksaga_admin_mysql:1.0.0 </span></span><i class="conum" data-value="9"></i><b>(9)</b>
-    <span style="color:#606">restart</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">always</span></span>
-    <span style="color:#606">ports</span>:
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">4444:4444</span><span style="color:#710">&quot;</span></span> <i class="conum" data-value="10"></i><b>(10)</b>
-    <span style="color:#606">environment</span>: <i class="conum" data-value="11"></i><b>(11)</b>
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">SPRING_DATASOURCE_URL=jdbc:mysql://admin_db:3306/stacksaga_admin?createDatabaseIfNotExist=true</span></span>
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">SPRING_DATASOURCE_USERNAME=root</span></span>
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">SPRING_DATASOURCE_PASSWORD=mafei</span></span>
-    <span style="color:#606">depends_on</span>:
-      <span style="color:#606">admin_db</span>:
-        <span style="color:#606">condition</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">service_healthy </span></span><i class="conum" data-value="12"></i><b>(12)</b>
-    <span style="color:#606">networks</span>:
-      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">stacksaga_admin </span></span><i class="conum" data-value="13"></i><b>(13)</b>
-<span style="color:#606">volumes</span>:
-  <span style="color:#606">admin_mysql_data</span>: <i class="conum" data-value="14"></i><b>(14)</b>
-    <span style="color:#606">driver</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">local</span></span>
-
-<span style="color:#606">networks</span>:
-  <span style="color:#606">stacksaga_admin</span>: <i class="conum" data-value="15"></i><b>(15)</b>
-    <span style="color:#606">driver</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">bridge</span></span></code></pre>
+<img src="../images/distributed-transaction.png" alt="distributed transaction" height="300">
 </div>
 </div>
 <div class="paragraph">
-<p><strong>Highlights</strong></p>
-</div>
-<div class="colist arabic">
-<table>
-<tr>
-<td><i class="conum" data-value="1"></i><b>1</b></td>
-<td>Create a service for the database called <code>admin_db</code>.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="2"></i><b>2</b></td>
-<td>Mysql version 8 is used as the image.
-This is the minimum version that supports StackSaga framework)</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="3"></i><b>3</b></td>
-<td>Pass the initial username and password for creating the database server.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="4"></i><b>4</b></td>
-<td>Due to you many have run the local mysql the internal port exports in port <code>3506</code> for out of the docker environment.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="5"></i><b>5</b></td>
-<td>Use the volume <code>admin_mysql_data</code> that we created for saving the mysql-image&#8217;s data in the allocated disk.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="6"></i><b>6</b></td>
-<td>The <code>StackSaga-Admin-Server</code> should use the database that we are creating.
-Therefore, we have to confirm that the <code>stacksaga-admin</code> server run after successfully starting the <code>admin_db</code>.
-The command tha we have mentioned in the <code>test</code> will be called until it returns a success response.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="7"></i><b>7</b></td>
-<td><code>admin_db</code> server has been added to the <code>stacksaga_admin</code> group. because the database and the <code>stacksaga-admin</code> should communicate via the host.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="8"></i><b>8</b></td>
-<td>creating the <code>stacksaga-admin</code> service for deploying the <code>stacksaga_admin_mysql</code> image.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="9"></i><b>9</b></td>
-<td>The <code>stacksaga/stacksaga_admin_mysql:1.0.0</code> is used for running the admin-server.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="10"></i><b>10</b></td>
-<td>The port of the admin-server container is exposed to the outside with port <code>4444</code>.
-Then you can access the admin-dashboard via <code>localhost:4444</code>.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="11"></i><b>11</b></td>
-<td>Passing the required configurations as environment variables.
-The database host and username and password of the database that we created above for the admin-server is added here.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="12"></i><b>12</b></td>
-<td>Avoid running the admin-server before starting the mysql server successfully.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="13"></i><b>13</b></td>
-<td>Add the <code>stacksaga-admin</code> server into the <code>stacksaga_admin</code> network group.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="14"></i><b>14</b></td>
-<td>Creating the volume for storing the mysql database data in the allocated disk named <code>admin_mysql_data</code>.</td>
-</tr>
-<tr>
-<td><i class="conum" data-value="15"></i><b>15</b></td>
-<td>Creating the network group that we used above named <code>stacksaga_admin</code>.</td>
-</tr>
-</table>
-</div>
-<div class="listingblock">
-<div class="title">application-docker.yml</div>
-<div class="content">
-<pre class="CodeRay highlight"><code data-lang="java">eureka:
-  client:
-    serviceUrl:
-      defaultZone: http:<span style="color:#777">//eureka-service:8085/eureka/</span>
-  instance:
-    instance-id: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}:<span style="color:#F00;background-color:#FAA">$</span>{random.uuid}
-    prefer-ip-address: <span style="color:#069">true</span>
-server:
-  port: <span style="color:#00D">8080</span>
-management:
-  info:
-    env:
-      enabled: <span style="color:#069">true</span>
-  endpoints:
-    web:
-      exposure:
-        include: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-info:
-  app:
-    author: mafei
-    name: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}
-    version: <span style="color:#60E">1.0</span><span style="color:#60E">.0</span>
-spring:
-  application:
-    name: api-gateway
-  cloud:
-    gateway:
-      globalcors:
-        cors-configurations:
-          <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">'</span><span style="color:#D20">[/*/stacksaga/**]</span><span style="color:#710">'</span></span>:
-            allowedOrigins:
-              - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://localhost:4444</span><span style="color:#710">&quot;</span></span>
-            allowedMethods: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-            allowedHeaders: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-      <span style="color:#080;font-weight:bold">default</span>-filters:
-        - DedupeResponseHeader=Access-<span style="color:#0a8;font-weight:bold">Control</span>-Allow-Credentials Access-<span style="color:#0a8;font-weight:bold">Control</span>-Allow-Origin
-      discovery:
-        locator:
-          lower-<span style="color:#080;font-weight:bold">case</span>-service-id: <span style="color:#069">true</span>
-          enabled: <span style="color:#069">true</span></code></pre>
+<p>To ensure a successful order processing service, all four microservices must complete the individual local transactions. If any of the microservice fails to complete its local transaction, all the completed preceding transactions should roll back to ensure data integrity. This is an example of a distributed transaction as the transaction boundary crosses multiple services and databases.</p>
 </div>
 </div>
-<div class="listingblock">
-<div class="title">application-docker.yaml</div>
-<div class="content">
-<pre class="CodeRay highlight"><code data-lang="java">eureka:
-  client:
-    registerWithEureka: <span style="color:#069">false</span>
-    fetchRegistry: <span style="color:#069">false</span>
-server:
-  port: <span style="color:#00D">8085</span>
-
-management:
-  info:
-    env:
-      enabled: <span style="color:#069">true</span>
-  endpoints:
-    web:
-      exposure:
-        include: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-info:
-  app:
-    author: mafei
-    name: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}
-    version: <span style="color:#60E">1.0</span><span style="color:#60E">.0</span></code></pre>
 </div>
-</div>
-<div class="listingblock">
-<div class="title">application-docker.yaml</div>
-<div class="content">
-<pre class="CodeRay highlight"><code data-lang="java">services:
-  payment-service: http:<span style="color:#777">//payment-service</span>
-  stock-service: http:<span style="color:#777">//stock-service</span>
-  user-service: http:<span style="color:#777">//user-service</span>
-server:
-  port: <span style="color:#00D">8080</span>
-eureka:
-  client:
-    serviceUrl:
-      defaultZone: http:<span style="color:#777">//eureka-service:8085/eureka/</span>
-  instance:
-    instance-id: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}:<span style="color:#F00;background-color:#FAA">$</span>{random.uuid}
-    prefer-ip-address: <span style="color:#069">true</span>
-spring:
-  application:
-    name: order-service
-  datasource:
-    username: root
-    password: mafei
-    driver-<span style="color:#339;font-weight:bold">class</span>-<span style="color:#B06;font-weight:bold">name</span>: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql:<span style="color:#777">//db:3306/stacksaga_place_order_demo_order_service?createDatabaseIfNotExist=true</span>
-  liquibase:
-    enabled: <span style="color:#069">false</span>
-stacksaga:
-  component-scan: org.example.aggregator
-  app-release-version: <span style="color:#60E">1.0</span><span style="color:#60E">.0</span>
-  connect:
-    admin-urls:
-      - http:<span style="color:#777">//stacksaga-admin:4444</span>
-    admin-username: order-service-application-user
-    admin-password: ykLO89Irx2Q6Cf2j
-  datasource:
-    mysql:
-      jdbc-url: jdbc:mysql:<span style="color:#777">//db:3306/order-service?createDatabaseIfNotExist=true</span>
-      username: root
-      password: mafei
-      driver-<span style="color:#339;font-weight:bold">class</span>-<span style="color:#B06;font-weight:bold">name</span>: com.mysql.cj.jdbc.Driver
-  enable: <span style="color:#069">true</span>
-  cloud:
-    validate-internal-communication-on-start-up: <span style="color:#069">false</span>
-
-management:
-  endpoint:
-    env:
-      enabled: <span style="color:#069">true</span>
-  endpoints:
-    web:
-      exposure:
-        include: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-info:
-  app:
-    author: mafei
-    name: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}
-    version: <span style="color:#F00;background-color:#FAA">$</span>{stacksaga.app-release-version}
-logging:
-  level:
-    org:
-      stacksaga: debug</code></pre>
-</div>
-</div>
-<div class="listingblock">
-<div class="title">application-docker.yaml</div>
-<div class="content">
-<pre class="CodeRay highlight"><code data-lang="java">server:
-  port: <span style="color:#00D">8080</span>
-spring:
-  application:
-    name: payment-service
-  datasource:
-    username: root
-    password: mafei
-    driver-<span style="color:#339;font-weight:bold">class</span>-<span style="color:#B06;font-weight:bold">name</span>: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql:<span style="color:#777">//db:3306/stacksaga_place_order_demo_payment_service?createDatabaseIfNotExist=true</span>
-  jpa:
-    hibernate:
-      ddl-auto: update
-eureka:
-  client:
-    service-url:
-      defaultZone: http:<span style="color:#777">//eureka-service:8085/eureka/</span>
-  instance:
-    instance-id: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}:<span style="color:#F00;background-color:#FAA">$</span>{random.uuid}
-    prefer-ip-address: <span style="color:#069">true</span>
-management:
-  endpoint:
-    env:
-      enabled: <span style="color:#069">true</span>
-  endpoints:
-    web:
-      exposure:
-        include: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-info:
-  app:
-    author: mafei
-    name: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}
-    version: <span style="color:#60E">1.0</span><span style="color:#60E">.0</span>
-logging:
-  level:
-    org:
-      stacksaga: debug
-      springframework: debug
-    root: info</code></pre>
-</div>
-</div>
-<div class="listingblock">
-<div class="content">
-<pre class="CodeRay highlight"><code data-lang="java">server:
-  port: <span style="color:#00D">8080</span>
-spring:
-  application:
-    name: stock-service
-  datasource:
-    username: root
-    password: mafei
-    driver-<span style="color:#339;font-weight:bold">class</span>-<span style="color:#B06;font-weight:bold">name</span>: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql:<span style="color:#777">//db:3306/stacksaga_place_order_demo_stock_service?createDatabaseIfNotExist=true</span>
-  jpa:
-    hibernate:
-      ddl-auto: update
-eureka:
-  client:
-    service-url:
-      defaultZone: http:<span style="color:#777">//eureka-service:8085/eureka/</span>
-  instance:
-    instance-id: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}:<span style="color:#F00;background-color:#FAA">$</span>{random.uuid}
-    prefer-ip-address: <span style="color:#069">true</span>
-management:
-  endpoint:
-    env:
-      enabled: <span style="color:#069">true</span>
-  endpoints:
-    web:
-      exposure:
-        include: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-info:
-  app:
-    author: mafei
-    name: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}
-    version: <span style="color:#60E">1.0</span><span style="color:#60E">.0</span>
-logging:
-  level:
-    org:
-      stacksaga: debug
-      springframework: debug
-    root: info</code></pre>
-</div>
-</div>
-<div class="listingblock">
-<div class="content">
-<pre class="CodeRay highlight"><code data-lang="java">server:
-  port: <span style="color:#00D">8080</span>
-spring:
-  application:
-    name: user-service
-  datasource:
-    username: root
-    password: mafei
-    driver-<span style="color:#339;font-weight:bold">class</span>-<span style="color:#B06;font-weight:bold">name</span>: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql:<span style="color:#777">//db:3306/stacksaga_place_order_demo_user_service?createDatabaseIfNotExist=true</span>
-  jpa:
-    hibernate:
-      ddl-auto: update
-eureka:
-  client:
-    service-url:
-      defaultZone: http:<span style="color:#777">//eureka-service:8085/eureka/</span>
-  instance:
-    instance-id: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}:<span style="color:#F00;background-color:#FAA">$</span>{random.uuid}
-    prefer-ip-address: <span style="color:#069">true</span>
-management:
-  endpoint:
-    env:
-      enabled: <span style="color:#069">true</span>
-  endpoints:
-    web:
-      exposure:
-        include: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
-info:
-  app:
-    author: mafei
-    name: <span style="color:#F00;background-color:#FAA">$</span>{spring.application.name}
-    version: <span style="color:#60E">1.0</span><span style="color:#60E">.0</span>
-logging:
-  level:
-    org:
-      stacksaga: debug
-      springframework: debug
-    root: info</code></pre>
-</div>
-</div>
+<div class="sect1">
+<h2 id="_challenges_of_distributed_transaction">Challenges of Distributed Transaction</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>In the previous section, we’ve provided a real-life example of a distributed transaction.
+Distributed transactions in a microservice architecture pose two key challenges.
+The first one is maintaining ACID.
+To ensure the correctness of a transaction, it must be an atomic, consistent, isolated, and durable (ACID).
+The atomicity ensures that all or none of the steps of a transaction should complete.
+Consistency takes data from one valid state to another valid state.
+Isolation guarantees that concurrent transactions should produce the same result that sequentially transactions would have produced.
+Lastly, durability means that committed transactions remain committed irrespective of any type of system failure.
+In a distributed transaction scenario, as the transaction spans several services, it always remains a key concern to ensure ACID.
+The second one is managing the transaction isolation level.
+It specifies the amount of data that is visible in a transaction when the other services access the same data simultaneously.
+In other words, if one object in one of the microservices is persisted in the database while another request reads the data, should the service return the old or new data?</p>
 </div>
 </div>
 </div>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-05-10 23:42:10 +0530
+Last updated 2024-05-10 23:40:11 +0530
 </div>
 </div>
 </body>
