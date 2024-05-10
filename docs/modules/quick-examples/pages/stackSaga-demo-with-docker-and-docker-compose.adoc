@@ -1,28 +1,273 @@
-= Stack Saga Demo With Docker And Docker Compose
-:keywords: SatckSaga microservice,spring boot saga,spring cloud microservice saga, saga design pattern,saga orchestration spring boot
-:description: Spring boot StackSaga Quick Start demo
+= Migrate To Docker Environment.
+
+:keywords: SatckSaga microservice,spring boot saga,spring cloud microservice saga, saga design pattern,saga orchestration spring boot.
+:description: StackSaga example deployment in docker and docker-compose environment.
 
 [#Overview]
 == Overview
 
-This quick demo will guide you to build a StackSaga based microservice application with minimal requirements.
+[source,java]
+.application-docker.yml
+----
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://eureka-service:8085/eureka/
+  instance:
+    instance-id: ${spring.application.name}:${random.uuid}
+    prefer-ip-address: true
+server:
+  port: 8080
+management:
+  info:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: 1.0.0
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      globalcors:
+        cors-configurations:
+          '[/*/stacksaga/**]':
+            allowedOrigins:
+              - "http://localhost:4444"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+      discovery:
+        locator:
+          lower-case-service-id: true
+          enabled: true
+----
 
-*Use case:* __A customer place an order and the order request comes to the spring api-gateway and it foreword the request to one of the down stream services called `order-service`.
-The order service acts as the orchestrator service, and it handles the request by invoking other utility microservice services like  `user-service` , `order-service` , `stock-service` and so on with help of StackSaga.
+[source,java]
+.application-docker.yaml
+----
+eureka:
+  client:
+    registerWithEureka: false
+    fetchRegistry: false
+server:
+  port: 8085
 
-__
+management:
+  info:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: 1.0.0
+----
 
-The following steps are followed to overcome the quick start.
+[source,java]
+.application-docker.yaml
+----
+services:
+  payment-service: http://payment-service
+  stock-service: http://stock-service
+  user-service: http://user-service
+server:
+  port: 8080
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://eureka-service:8085/eureka/
+  instance:
+    instance-id: ${spring.application.name}:${random.uuid}
+    prefer-ip-address: true
+spring:
+  application:
+    name: order-service
+  datasource:
+    username: root
+    password: mafei
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://db:3306/stacksaga_place_order_demo_order_service?createDatabaseIfNotExist=true
+  liquibase:
+    enabled: false
+stacksaga:
+  component-scan: org.example.aggregator
+  app-release-version: 1.0.0
+  connect:
+    admin-urls:
+      - http://stacksaga-admin:4444
+    admin-username: order-service-application-user
+    admin-password: ykLO89Irx2Q6Cf2j
+  datasource:
+    mysql:
+      jdbc-url: jdbc:mysql://db:3306/order-service?createDatabaseIfNotExist=true
+      username: root
+      password: mafei
+      driver-class-name: com.mysql.cj.jdbc.Driver
+  enable: true
+  cloud:
+    validate-internal-communication-on-start-up: false
 
-. Set up the StackSaga Admin server in the local environment and create a user for the orchestrator service (`order-service`).
-. Initialize the `user-service` , `order-service` and `stock-service`.
-And add the StackSaga dependencies to the orchestrator service (`order-service`).
-. Create Aggregator and Executors.
-. Final Teasing.
+management:
+  endpoint:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: ${stacksaga.app-release-version}
+logging:
+  level:
+    org:
+      stacksaga: debug
+----
 
-=== Set up the StackSaga Admin server in the local environment.
 
-// todo download page should be linked
-You can set up the StackSaga Admin server In different ways as Standalone Jar or Docker Image.
+[source,java]
+.application-docker.yaml
+----
+server:
+  port: 8080
+spring:
+  application:
+    name: payment-service
+  datasource:
+    username: root
+    password: mafei
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://db:3306/stacksaga_place_order_demo_payment_service?createDatabaseIfNotExist=true
+  jpa:
+    hibernate:
+      ddl-auto: update
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka-service:8085/eureka/
+  instance:
+    instance-id: ${spring.application.name}:${random.uuid}
+    prefer-ip-address: true
+management:
+  endpoint:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: 1.0.0
+logging:
+  level:
+    org:
+      stacksaga: debug
+      springframework: debug
+    root: info
+----
 
-In this quick example Standalone Jar is used. go to the download page and download the latest version.
+
+[source,java]
+----
+server:
+  port: 8080
+spring:
+  application:
+    name: stock-service
+  datasource:
+    username: root
+    password: mafei
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://db:3306/stacksaga_place_order_demo_stock_service?createDatabaseIfNotExist=true
+  jpa:
+    hibernate:
+      ddl-auto: update
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka-service:8085/eureka/
+  instance:
+    instance-id: ${spring.application.name}:${random.uuid}
+    prefer-ip-address: true
+management:
+  endpoint:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: 1.0.0
+logging:
+  level:
+    org:
+      stacksaga: debug
+      springframework: debug
+    root: info
+----
+
+
+[source,java]
+----
+server:
+  port: 8080
+spring:
+  application:
+    name: user-service
+  datasource:
+    username: root
+    password: mafei
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://db:3306/stacksaga_place_order_demo_user_service?createDatabaseIfNotExist=true
+  jpa:
+    hibernate:
+      ddl-auto: update
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka-service:8085/eureka/
+  instance:
+    instance-id: ${spring.application.name}:${random.uuid}
+    prefer-ip-address: true
+management:
+  endpoint:
+    env:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+info:
+  app:
+    author: mafei
+    name: ${spring.application.name}
+    version: 1.0.0
+logging:
+  level:
+    org:
+      stacksaga: debug
+      springframework: debug
+    root: info
+----
