@@ -6,6 +6,115 @@
 [#Overview]
 == Overview
 
+This will guide you to deploy your xref:quick-examples:stacksaga-demo.adoc[entire demo system] in docker environment by creating docker images step by step.
+
+NOTE: We only focus on the configuration files and manifest files for docker deployment and how the communication is happened in the docker environment.
+Please find the xref://[full source code here].
+
+The steps are as follows.
+
+. [Set up StackSaga-Admin server].
+. Updating `api-gateway` service.
+. Updating `eureka-service` service.
+. Updating `order-service` service.
+. Updating `user-service` service.
+. Updating `stock-service` service.
+. Updating `payment-service` service.
+
+=== Set up StackSaga-Admin server in Docker.
+
+Instead of running the executable jar fil in the local, you can use the `StackSaga-Admin-Server` image called https://hub.docker.com/r/stacksaga/stacksaga_admin_mysql[stacksaga/stacksaga_admin_mysql] from the docker-hub.
+
+Let's create the docker-compose file for running the `StackSaga-Admin-Server` and configure the database for the `StackSaga-Admin-Server`.
+
+====
+TIP: we create 3 different network groups in this example for grouping the services based on the communication. +
+
+. `stacksaga-admin-communicate` group
+.. `admin_db` service. (from docker-compose.admin.yaml)
+.. `stacksaga-admin` service. (from docker-compose.admin.yaml)
+.. `order-service` service. (from docker-compose.services.yaml)
+. `api-gateway-communicate` group
+.. `api-gateway` service. (from docker-compose.services.yaml)
+.. `payment-service` service. (from docker-compose.services.yaml)
+.. `user-service` service. (from docker-compose.services.yaml)
+.. `order-service` service. (from docker-compose.services.yaml)
+. `utility-server-communicate` group
+.. `db` service. (from docker-compose.services.yaml)
+.. `eureka-service` service. (from docker-compose.services.yaml)
+.. `api-gateway` service. (from docker-compose.services.yaml)
+.. `order-service` service. (from docker-compose.services.yaml)
+.. `user-service` service. (from docker-compose.services.yaml)
+.. `payment-service` service. (from docker-compose.services.yaml)
+
+====
+
+[source,yaml]
+.docker-compose.admin.yaml
+----
+version: '3.8'
+services:
+  admin_db: # <1>
+    container_name: admin_db
+    image: mysql:8.0 # <2>
+    restart: always
+    environment: # <3>
+      MYSQL_ROOT_PASSWORD: mafei
+      MYSQL_USER: mafei
+      MYSQL_PASSWORD: mafei
+    ports:
+      - "3506:3306" # <4>
+    volumes:
+      - admin_mysql_data:/var/lib/mysql # <5>
+    healthcheck: # <6>
+      test: [ "CMD", "mysqladmin" ,"ping", "-h", "localhost" ]
+      timeout: 20s
+      retries: 10
+    networks:
+      - stacksaga_admin # <7>
+  stacksaga-admin: # <9>
+    container_name: stacksaga-admin
+    image: stacksaga/stacksaga_admin_mysql:1.0.0 # <10>
+    restart: always
+    ports:
+      - "4444:4444" # <11>
+    environment: # <12>
+      - SPRING_DATASOURCE_URL=jdbc:mysql://admin_db:3306/stacksaga_admin?createDatabaseIfNotExist=true
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=mafei
+    depends_on:
+      admin_db:
+        condition: service_healthy # <13>
+    networks:
+      - stacksaga_admin # <14>
+volumes:
+  admin_mysql_data: # <15>
+    driver: local
+
+networks:
+  stacksaga_admin: # <16>
+    driver: bridge
+----
+
+*Highlights*
+
+<1> Create a service for the database called `admin_db`.
+
+<2> Mysql version 8 is used as the image.
+This is the minimum version that supports StackSaga framework)
+
+<3> Pass the initial username and password for creating the database server.
+
+<4> Due to you many have run the local mysql the internal port exports in port `3506` for out of the docker environment.
+
+<5> Use the volume `admin_mysql_data` that we created for saving the mysql-image's data in the allocated disk.
+
+<6> The `StackSaga-Admin-Server` should use the database that we are creating.
+Therefore, we have to confirm that the `stacksaga-admin` server run after successfully starting the `admin_db`.
+The command tha we have mentioned in the `test` will be called until it returns a success response.
+
+<7>
+
 [source,java]
 .application-docker.yml
 ----
@@ -139,7 +248,6 @@ logging:
       stacksaga: debug
 ----
 
-
 [source,java]
 .application-docker.yaml
 ----
@@ -184,7 +292,6 @@ logging:
     root: info
 ----
 
-
 [source,java]
 ----
 server:
@@ -227,7 +334,6 @@ logging:
       springframework: debug
     root: info
 ----
-
 
 [source,java]
 ----
