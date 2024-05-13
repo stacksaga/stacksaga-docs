@@ -5,8 +5,6 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 2.0.20">
-<meta name="description" content="StackSaga Quick Start With Kubernetes">
-<meta name="keywords" content="SatckSaga Spring microservice,spring boot saga,spring cloud microservice saga, saga design pattern,saga orchestration spring boot">
 <title>StackSaga Demo (Core concept practice)</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:300,300italic,400,400italic,600,600italic%7CNoto+Serif:400,400italic,700,700italic%7CDroid+Sans+Mono:400,700">
 <style>
@@ -436,7 +434,7 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
 </head>
-<body class="article">
+<body id="_stacksaga_demo_core_concept_practice" class="article">
 <div id="header">
 <h1>StackSaga Demo (Core concept practice)</h1>
 </div>
@@ -551,7 +549,7 @@ These endpoints are provided by the <code>payment-service</code>.</p>
 </ul>
 </div>
 <div class="paragraph">
-<p>Additionally <code>stackasga-admin-dashboard</code> is run monitoring the transactions.</p>
+<p>Additionally <code>stacksaga-admin-dashboard</code> is run monitoring the transactions.</p>
 </div>
 <div class="quoteblock">
 <blockquote>
@@ -565,25 +563,22 @@ These endpoints are provided by the <code>payment-service</code>.</p>
 </div>
 <div class="dlist">
 <dl>
-<dt class="hdlist1">[1] Implementation</dt>
+<dt class="hdlist1">[1] <a href="#implementation">Implementation</a></dt>
 <dd>
 <p>Guides for implementing all java classes. (focus the StackSaga concepts)</p>
 </dd>
-<dt class="hdlist1">[2] Deployment</dt>
+<dt class="hdlist1">[2] <a href="#deployment">Deployment</a></dt>
 <dd>
 <p>Guides for creating and connecting The API-gateway and eureka service with utility services with all the configurations.</p>
 </dd>
-<dt class="hdlist1">[3] Testing</dt>
+<dt class="hdlist1">[3] <a href="#testing">Testing</a></dt>
 <dd>
 <p>Testing the application by running all the applications together.</p>
 </dd>
 </dl>
 </div>
-</div>
-</div>
-<div class="sect1">
-<h2 id="_high_level_implementation_diagram">High-level Implementation Diagram.</h2>
-<div class="sectionbody">
+<div class="sect2">
+<h3 id="_high_level_implementation_diagram">High-level Implementation Diagram.</h3>
 <div class="paragraph">
 <p>Here you can see what we are going to build in High-level.</p>
 </div>
@@ -607,8 +602,9 @@ These endpoints are provided by the <code>payment-service</code>.</p>
 </div>
 </div>
 </div>
+</div>
 <div class="sect1">
-<h2 id="_implementation">Implementation</h2>
+<h2 id="implementation">Implementation</h2>
 <div class="sectionbody">
 <div class="paragraph">
 <p>As the first step, we are going to create the Orchestrator Service called <code>order-service</code>.</p>
@@ -646,10 +642,16 @@ Selecting a service as an Orchestrator service or not depends on your rearmament
 <p><code>spring-boot-starter-web</code></p>
 </li>
 <li>
+<p><code>spring-cloud-starter-netflix-eureka-client</code></p>
+</li>
+<li>
 <p><code>spring-boot-starter-data-jpa</code></p>
 </li>
 <li>
 <p><code>mysql-connector-java</code></p>
+</li>
+<li>
+<p><code>spring-cloud-starter-loadbalancer</code></p>
 </li>
 <li>
 <p><code>lombok</code></p>
@@ -663,7 +665,9 @@ Selecting a service as an Orchestrator service or not depends on your rearmament
 <i class="fa icon-note" title="Note"></i>
 </td>
 <td class="content">
-In general, you would add <code>spring-eureka-client</code> but in this example eureka is not used.
+Due to that we are using eureka for service registry, we can use <code>spring-cloud-starter-loadbalancer</code> for internal client side load balancing.
+Due to we use just <code>RestTemplate</code> as the httpclient we have to annotate by <code>@LoadBalanced</code> annotation.<br>
+[ <a href="#//">RestTemplateConfig</a> ]
 </td>
 </tr>
 </table>
@@ -697,7 +701,7 @@ There are 3 dependencies to be added based on your implementation.</p>
 <div class="content">
 <pre class="CodeRay highlight"><code data-lang="xml"><span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
   <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.stacksaga<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
-  <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>stacksaga-spring-boot-2-starter<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+  <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>stacksaga-spring-boot-3-starter<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
   <span style="color:#070;font-weight:bold">&lt;version&gt;</span>1.0.0<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
 <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span></code></pre>
 </div>
@@ -708,10 +712,6 @@ There are 3 dependencies to be added based on your implementation.</p>
 </li>
 <li>
 <p>Due to the database has been selected as Mysql, you have to add <code>stacksaga-mysql-support</code> dependency.</p>
-<div class="dlist">
-<dl>
-<dt class="hdlist1">:</dt>
-<dd>
 <div class="listingblock">
 <div class="content">
 <pre class="CodeRay highlight"><code data-lang="xml"><span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
@@ -721,27 +721,17 @@ There are 3 dependencies to be added based on your implementation.</p>
 <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span></code></pre>
 </div>
 </div>
-</dd>
-</dl>
-</div>
 </li>
 <li>
-<p>Due to we are going to deploy the application in the Kubernetes cluster environment, <code>stacksaga-connect-k8s-support</code> dependency should be added.</p>
-<div class="dlist">
-<dl>
-<dt class="hdlist1">:</dt>
-<dd>
+<p>Due to we are going to Eureka as the discovery service, you have to add <code>stacksaga-connect-k8s-support</code> dependency.</p>
 <div class="listingblock">
 <div class="content">
 <pre class="CodeRay highlight"><code data-lang="xml"><span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
     <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.stacksaga<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
-    <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>stacksaga-connect-k8s-support<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>stacksaga-connect-eureka-support<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
     <span style="color:#070;font-weight:bold">&lt;version&gt;</span>1.0.0<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
 <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span></code></pre>
 </div>
-</div>
-</dd>
-</dl>
 </div>
 </li>
 </ul>
@@ -797,12 +787,140 @@ There are 3 dependencies to be added based on your implementation.</p>
 
         <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
             <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.stacksaga<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
-            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>stacksaga-connect-k8s-support<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>stacksaga-connect-eureka-support<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
             <span style="color:#070;font-weight:bold">&lt;version&gt;</span>1.0.0<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
         <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
 
     <span style="color:#070;font-weight:bold">&lt;/dependencies&gt;</span>
 <span style="color:#070;font-weight:bold">&lt;/project&gt;</span></code></pre>
+</div>
+</div>
+<div class="admonitionblock note">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-note" title="Note"></i>
+</td>
+<td class="content">
+Updating the configuration files related stuff will be discussed at the <a href="#deployment">Deployment</a> section.
+</td>
+</tr>
+</table>
+</div>
+</div>
+<div class="sect3">
+<h4 id="_order_service_overview">Order-Service Overview.</h4>
+<div class="paragraph">
+<p>You know that we have to access more services besides this <code>order-service</code> to fully complete the entire place-order request.
+To access those services in general, you would use <strong>service-layer</strong> and call those services manually by using any httpclient like RestTemplate, Feign client, Okhttp, and so on.
+Instead of that manual unorganized way, StackSaga offers better wrapper blocks for each execution.
+It is called as <code>executors</code>.</p>
+</div>
+<div class="quoteblock">
+<blockquote>
+<div class="paragraph">
+<p>Read the <a href="#//">reference documentation</a>
+to have a better understanding and best practices regarding the <code>SagaExecutors</code>.</p>
+</div>
+</blockquote>
+</div>
+<div class="paragraph">
+<p>According to the <a href="#//">Saga design pattern</a>, you know that we should have a compensation process for all the execution (All the executions that make some changes in a database).
+Due to the fact that the StackSaga framework is one of Saga implementations, it should be provided the primary execution and also a compensation execution to make a compensation when the entire process is failed at any point.</p>
+</div>
+<div class="paragraph">
+<p>Based on having a compensation or not, the executors are two types called <code>command-executor</code> and <code>query-executor</code>.
+<code>command-executor</code> have both primary execution and the compensation execution.
+If it is <code>query-executor</code>, it has only primary execution.</p>
+</div>
+</div>
+<div class="sect3">
+<h4 id="_how_stacksaga_combines_with_controller_service_and_repository_architecture">How StackSaga combines with Controller Service and Repository architecture?</h4>
+<div class="paragraph">
+<p>In spring applications we follow <code>controller</code>, <code>service</code> and <code>repository</code> layered architecture.
+StackSaga suggest another middle layer between the <code>controller</code> layer and the <code>service</code> layer called <mark><code>executor-layer</code></mark>.
+The <code>executor-layer</code> is the place the executors are created.
+Let&#8217;s see step by step how StackSaga involves the process.</p>
+</div>
+<div class="paragraph">
+<p>Here you can see the entire process in a diagram from based on the order-service (orchestrator-service).</p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-example-executors-architecture-in-order-service.drawio.svg" alt="stacksaga microservice example executors architecture in order service"></span></p>
+</div>
+<div class="paragraph">
+<p>In brief client makes an order place request and the request comes to the order-service via the api-cloud-gateway.
+And then we initialize a spacial object called <code>Aggregator</code>
+and it is handed over to the SEC (Saga Execution coordinator), and the SEC will handle the entire execution by executing each every atomic execution.
+The atomic executions have been provided inside the executors.</p>
+</div>
+<div class="paragraph">
+<p>Here you can see the summarized table for your convenience.</p>
+</div>
+<div class="openblock scrollable">
+<div class="content">
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 16.6666%;">
+<col style="width: 16.6666%;">
+<col style="width: 16.6666%;">
+<col style="width: 16.6666%;">
+<col style="width: 16.6666%;">
+<col style="width: 16.667%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Executor Class Name</th>
+<th class="tableblock halign-left valign-top">Execution_Requirement</th>
+<th class="tableblock halign-left valign-top">Target_Service</th>
+<th class="tableblock halign-left valign-top">Type</th>
+<th class="tableblock halign-left valign-top">Process-Execution</th>
+<th class="tableblock halign-left valign-top">Revert-Execution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>OrderInitializeExecutor</code></a></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Initialize the order at the first.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>order-service</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>initializeOrder()</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>cancelOrder()</code></p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>UserDetailExecutor</code></a></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Fetch the user&#8217;s details</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>user-service</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-green">QUERY_EXECUTOR</strong></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>getUserDetails</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">-</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>PreAuthExecutor</code></a></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Make the Pre-Auth process.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>payment-service</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>makePreAuth()</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>releasePreAuth()</code></p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>StockUpdateExecutor</code></a></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Update the stock from the store.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>stock-service</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>updateStock()</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>restoreStock()</code></p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>MakePaymentExecutor</code></a></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Finalize the order by making the real payment.</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>payment-service</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>makePayment()</code></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">?</p></td>
+</tr>
+</tbody>
+</table>
 </div>
 </div>
 </div>
@@ -921,106 +1039,6 @@ Those data will be updated time to time for each execution.</p>
 </div>
 <div class="paragraph">
 <p>Now the aggregator is ready to store and carry out the data throughout the entire process.</p>
-</div>
-</div>
-<div class="sect3">
-<h4 id="_creating_executors">Creating executors</h4>
-<div class="paragraph">
-<p>You know that we have to access more services except this <code>order-service</code> to fully complete the place-order request.
-To access those services in general, you would use <strong>service-layer</strong> and call those services by using any httpclient like RestTemplate, Feign client, Okhttp, and so on.
-But in the <a href="#//">Saga design pattern</a>, you know that we should have a compensation process for all the execution (All the executions that make some changes in a database).
-Due to the fact that the StackSaga framework is one of Saga implementations, it should be provided the main execution and also a compensation execution to make a compensation when the entire process is failed at any point.</p>
-</div>
-<div class="quoteblock">
-<blockquote>
-<div class="paragraph">
-<p>Read the <a href="#//">reference documentation</a>
-to have a better understanding and best practices regarding the <code>SagaExecutors</code>.</p>
-</div>
-</blockquote>
-</div>
-<div class="paragraph">
-<p>StackSaga doesn&#8217;t bother to that layer.
-In StackSaga, In addition to that layer you have to implement a new layer called <code><strong>executor-layer</strong></code>.
-In the executor-layer, you can create your executors.</p>
-</div>
-<div class="paragraph">
-<p>All the <strong>process-executions</strong> (The regular execution to make the process) and <strong>revert-executions</strong> (The compensation executions to undo the made changes by process-executions) with the relevant services are summarized in the following table and the diagram.</p>
-</div>
-<div class="openblock scrollable">
-<div class="content">
-<table class="tableblock frame-all grid-all stretch">
-<colgroup>
-<col style="width: 16.6666%;">
-<col style="width: 16.6666%;">
-<col style="width: 16.6666%;">
-<col style="width: 16.6666%;">
-<col style="width: 16.6666%;">
-<col style="width: 16.667%;">
-</colgroup>
-<thead>
-<tr>
-<th class="tableblock halign-left valign-top">Executor Class Name</th>
-<th class="tableblock halign-left valign-top">Execution_Requirement</th>
-<th class="tableblock halign-left valign-top">Target_Service</th>
-<th class="tableblock halign-left valign-top">Type</th>
-<th class="tableblock halign-left valign-top">Process-Execution</th>
-<th class="tableblock halign-left valign-top">Revert-Execution</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>OrderInitializeExecutor</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Initialize the order at the first.</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>order-service</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>initializeOrder()</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>cancelOrder()</code></p></td>
-</tr>
-<tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>UserDetailExecutor</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Fetch the user&#8217;s details</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>user-service</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-green">QUERY_EXECUTOR</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>getUserDetails</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">-</p></td>
-</tr>
-<tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>PreAuthExecutor</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Make the Pre-Auth process.</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>payment-service</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>makePreAuth()</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>releasePreAuth()</code></p></td>
-</tr>
-<tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>StockUpdateExecutor</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Update the stock from the store.</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>stock-service</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>updateStock()</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>restoreStock()</code></p></td>
-</tr>
-<tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#//"><code>MakePaymentExecutor</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">Finalize the order by making the real payment.</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>payment-service</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><strong class="badge-yellow">COMMAND_EXECUTOR</strong></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>makePayment()</code></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">?</p></td>
-</tr>
-</tbody>
-</table>
-</div>
-</div>
-<div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-example-executors.drawio.svg" alt="stacksaga-example executors digram."></span></p>
-</div>
-<div class="paragraph">
-<p>In the diagram, you can see cleanly what we are going to build inside the order-service and how they connect with other services.</p>
-</div>
-<div class="paragraph">
-<p>Even though the class creation should be started from the repository-layer, let&#8217;s get started from the executor-layer for your convenience to understand.</p>
 </div>
 </div>
 </div>
@@ -1143,7 +1161,8 @@ Here we mark the order as canceled.</p>
             <span style="color:#950">this</span>.orderService.initialize(
                     OrderEntity
                             .builder()
-                            .orderID(currentAggregator.getAggregatorTransactionId())
+                            .orderId(currentAggregator.getAggregatorTransactionId())
+                            .userId(currentAggregator.getUserId())
                             .createAt(LocalDateTime.now())
                             .isCancelled(<span style="color:#069">false</span>)
                             .items(objectMapper.writeValueAsString(currentAggregator.getItems()))
@@ -2214,24 +2233,747 @@ Just call the target utility service and handle the exception.</p>
 <p><strong>Related Classes' links</strong></p>
 </div>
 </div>
+<div class="sect2">
+<h3 id="_updating_configuration_properties">Updating Configuration Properties</h3>
+<div class="paragraph">
+<p>We have all 4 utility services and also other 2 services called api-gateway and eureka service to configure.
+But except the order-service and api-gateway, other services are regular spring-cloud services.
+Therefore, we are not going to deep diving to them.
+You can see get the Configuration Properties through these links.</p>
+</div>
+<div class="ulist">
+<div class="title">Configuration Properties for regular services.</div>
+<ul>
+<li>
+<p><a href="#//">user-service</a></p>
+</li>
+<li>
+<p><a href="#//">stock-service</a></p>
+</li>
+<li>
+<p><a href="#//">payment-service</a></p>
+</li>
+<li>
+<p><a href="#//">eureka-service</a></p>
+</li>
+</ul>
+</div>
+<div class="admonitionblock note">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-note" title="Note"></i>
+</td>
+<td class="content">
+The above links are related to the default deployment approach.
+If you want
+to see
+how the applications are deployed
+by using <a href="#//">docker-compose</a> or <a href="migrating-to-k8s.html">kubernetes</a>,
+reach these links.
+</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p>Let&#8217;s see how to configure The most important service called order-service.</p>
+</div>
+<div class="listingblock">
+<div class="title">application.yaml</div>
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="yaml"><span style="color:#606">services</span>:
+  <i class="conum" data-value="1"></i><b>(1)</b>
+  <span style="color:#606">payment-service</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">http://payment-service</span></span>
+  <span style="color:#606">stock-service</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">http://stock-service</span></span>
+  <span style="color:#606">user-service</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">http://user-service</span></span>
+<span style="color:#606">server</span>:
+  <span style="color:#606">port</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">8081</span></span>
+<span style="color:#606">eureka</span>:
+  <span style="color:#606">client</span>:
+    <span style="color:#606">serviceUrl</span>:
+      <i class="conum" data-value="2"></i><b>(2)</b>
+      <span style="color:#606">defaultZone</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">http://localhost:8085/eureka/</span></span>
+  <span style="color:#606">instance</span>:
+    <span style="color:#606">hostname</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">localhost</span></span>
+    <i class="conum" data-value="3"></i><b>(3)</b>
+    <span style="color:#606">instance-id</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">${spring.application.name}:${random.uuid}</span></span>
+<span style="color:#606">spring</span>:
+  <span style="color:#606">application</span>:
+    <i class="conum" data-value="4"></i><b>(4)</b>
+    <span style="color:#606">name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">order-service</span></span>
+  <span style="color:#606">datasource</span>:
+    <span style="color:#606">username</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">root</span></span>
+    <span style="color:#606">password</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mafei</span></span>
+    <span style="color:#606">driver-class-name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">com.mysql.cj.jdbc.Driver</span></span>
+    <span style="color:#606">url</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">jdbc:mysql://localhost:3306/stacksaga_place_order_demo_order_service?createDatabaseIfNotExist=true</span></span>
+  <span style="color:#606">liquibase</span>:
+    <i class="conum" data-value="5"></i><b>(5)</b>
+    <span style="color:#606">enabled</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">false</span></span>
+<i class="conum" data-value="6"></i><b>(6)</b>
+<span style="color:#606">stacksaga</span>:
+  <span style="color:#606">enable</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">true </span></span><i class="conum" data-value="7"></i><b>(7)</b>
+  <span style="color:#606">component-scan</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">org.example.aggregator </span></span><i class="conum" data-value="8"></i><b>(8)</b>
+  <span style="color:#606">app-release-version</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">1.0.0 </span></span><i class="conum" data-value="9"></i><b>(9)</b>
+  <span style="color:#606">connect</span>:
+    <span style="color:#606">admin-urls</span>:
+      - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">http://localhost:4444 </span></span><i class="conum" data-value="10"></i><b>(10)</b>
+    <span style="color:#606">admin-username</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">order-service-application-user </span></span><i class="conum" data-value="11"></i><b>(11)</b>
+    <span style="color:#606">admin-password</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">ykLO89Irx2Q6Cf2j </span></span><i class="conum" data-value="11"></i><b>(11)</b>
+  <span style="color:#606">datasource</span>:
+    <i class="conum" data-value="12"></i><b>(12)</b>
+    <span style="color:#606">mysql</span>:
+      <span style="color:#606">jdbc-url</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">jdbc:mysql://localhost:3306/order-service?createDatabaseIfNotExist=true</span></span>
+      <span style="color:#606">username</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">root</span></span>
+      <span style="color:#606">password</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mafei</span></span>
+      <span style="color:#606">driver-class-name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">com.mysql.cj.jdbc.Driver</span></span>
+
+<span style="color:#606">management</span>:
+  <span style="color:#606">endpoint</span>:
+    <span style="color:#606">env</span>:
+      <span style="color:#606">enabled</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">true</span></span>
+  <span style="color:#606">endpoints</span>:
+    <span style="color:#606">web</span>:
+      <span style="color:#606">exposure</span>:
+        <span style="color:#606">include</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
+<span style="color:#606">info</span>:
+  <span style="color:#606">app</span>:
+    <span style="color:#606">author</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mafei</span></span>
+    <span style="color:#606">name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">${spring.application.name}</span></span>
+    <span style="color:#606">version</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">${stacksaga.app-release-version}</span></span>
+<span style="color:#606">logging</span>:
+  <span style="color:#606">level</span>:
+    <span style="color:#606">org</span>:
+      <span style="color:#606">stacksaga</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">debug</span></span></code></pre>
+</div>
+</div>
+<div class="admonitionblock note">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-note" title="Note"></i>
+</td>
+<td class="content">
+Due to this approach is the default environment, you use the default profile.
+When we move to other environments (<a href="stackSaga-demo-with-docker-and-docker-compose.html">docker-compose</a> and <a href="migrating-to-k8s.html">kubernetes</a>), different profiles will be created.
+</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="colist arabic">
+<table>
+<tr>
+<td><i class="conum" data-value="1"></i><b>1</b></td>
+<td>We decided to obtain the service&#8217;s hosts that we use inside the order service from the configuration file.
+Because the host nam will be different with other environments, (spring profiles) like <a href="stackSaga-demo-with-docker-and-docker-compose.html">docker-compose</a> and <a href="migrating-to-k8s.html">kubernetes</a>.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="2"></i><b>2</b></td>
+<td>Due to we use <a href="#//">Eureka service discovery</a>, we have provided the URL of the eureka server.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="3"></i><b>3</b></td>
+<td>To identify the eureka client (the instance,) you have to provide a unique id for each instance.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="4"></i><b>4</b></td>
+<td>it is most important because the service-user account should be equal the <code>spring.application.name</code>.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="5"></i><b>5</b></td>
+<td><code>spring.liquibase.enabled</code> Even if you haven&#8217;t added <code>liquibase</code> in your application, StackSaga uses  <code>liquibase</code> internally.
+Due to the <code>liquibase</code> dependency exists in the application spring tries to access the autoconfiguration.
+Then you will get an error.
+To avoid that exception, you have to disable it.
+<div class="admonitionblock warning">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-warning" title="Warning"></i>
+</td>
+<td class="content">
+If you want to use <code>liquibase</code> in your application you are free to use it as usual, and then you don&#8217;t want to disable <code>liquibase</code> like above.
+</td>
+</tr>
+</table>
+</div></td>
+</tr>
+<tr>
+<td><i class="conum" data-value="6"></i><b>6</b></td>
+<td>The section that StackSaga configurations started.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="7"></i><b>7</b></td>
+<td>It is not enough to add the StackSaga dependencies.
+To enable StackSaga, you have to enable StackSaga.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="8"></i><b>8</b></td>
+<td>We have to provide the packages to StackSaga where the <code>Aggregator</code> class are stored.
+In our example the package is <code>org.example.aggregator</code>.
+If you have multiple locations, you can provide a list of packages.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="9"></i><b>9</b></td>
+<td>This will be helpful to identify the metadata from the admin dashboard.
+Because all the aggregator and executors metadata is saved under the <code>app-release-version</code>.
+As an example, if you want to see what are the aggregators and executors that have been configured, you select the version and see them.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="10"></i><b>10</b></td>
+<td>The admin URL that the admin-server is running on.
+If multiple <a href="#//">admin-server</a> instances are running, you can provide all the list of URLs.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="11"></i><b>11</b></td>
+<td>The username and the password of the <a href="../../admin/pages/create_service_user.html">service-user</a> that you created for this <code>order-service</code>.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="12"></i><b>12</b></td>
+<td>You have to provide the datasource for the event-store that you use.
+In this example we have used <code>stacksaga-mysql-support</code> dependency we have to provide the Mysql datasource configurations.</td>
+</tr>
+</table>
+</div>
+</div>
 </div>
 </div>
 <div class="sect1">
-<h2 id="_environment_deployment">Environment Deployment</h2>
+<h2 id="creating_api_cloud_gateway">Creating API-Cloud-Gateway</h2>
 <div class="sectionbody">
+<div class="paragraph">
+<p>Now we are going to create the api-cloud-gateway.</p>
+</div>
+<div class="paragraph">
+<p><strong>Road Map</strong></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../../admin/images/stacksaga-example-stacksaga-spring-cloud-api-gateway-demo-hight-level-2.drawio.svg" alt="admin:stacksaga example stacksaga spring cloud api gateway demo hight level 2.drawio"></span></p>
+</div>
+<div class="paragraph">
+<p>Same as before, visit to the <a href="https://start.spring.io/">spring initializr</a> and create a new project with the following dependencies.</p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>spring-boot-starter-webflux</p>
+</li>
+<li>
+<p>spring-cloud-starter-gateway</p>
+</li>
+<li>
+<p>spring-cloud-starter-netflix-eureka-client</p>
+</li>
+</ul>
+</div>
+<div class="admonitionblock important">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-important" title="Important"></i>
+</td>
+<td class="content">
+You don&#8217;t want to worry about StackSaga things because StackSaga doesn&#8217;t involve with the API-Gateway.
+But to avoid the cross-origin restrictions, you have to <a href="#//">allow the cross-requests</a> for the Admin-Dashboard URL(s).
+</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p>The pom.xml file will be like below.</p>
+</div>
+<div class="listingblock">
+<div class="title">pom.xml</div>
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="xml"><span style="color:#579">&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;</span>
+<span style="color:#070;font-weight:bold">&lt;project</span> <span style="color:#b48">xmlns</span>=<span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://maven.apache.org/POM/4.0.0</span><span style="color:#710">&quot;</span></span> <span style="color:#b48">xmlns:xsi</span>=<span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://www.w3.org/2001/XMLSchema-instance</span><span style="color:#710">&quot;</span></span>
+         <span style="color:#b48">xsi:schemaLocation</span>=<span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd</span><span style="color:#710">&quot;</span></span><span style="color:#070;font-weight:bold">&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;modelVersion&gt;</span>4.0.0<span style="color:#070;font-weight:bold">&lt;/modelVersion&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;parent&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-parent<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;version&gt;</span>2.7.0<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;relativePath</span><span style="color:#070;font-weight:bold">/&gt;</span> <span style="color:#777">&lt;!-- lookup parent from repository --&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/parent&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>com.example<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>api-gateway<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;version&gt;</span>0.0.1-SNAPSHOT<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;name&gt;</span>api-gateway<span style="color:#070;font-weight:bold">&lt;/name&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;description&gt;</span>api-gateway<span style="color:#070;font-weight:bold">&lt;/description&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;properties&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;maven.compiler.source&gt;</span>8<span style="color:#070;font-weight:bold">&lt;/maven.compiler.source&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;maven.compiler.target&gt;</span>8<span style="color:#070;font-weight:bold">&lt;/maven.compiler.target&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;project.build.sourceEncoding&gt;</span>UTF-8<span style="color:#070;font-weight:bold">&lt;/project.build.sourceEncoding&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;spring-cloud.version&gt;</span>2021.0.3<span style="color:#070;font-weight:bold">&lt;/spring-cloud.version&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/properties&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;dependencies&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.cloud<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-cloud-starter-gateway<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-webflux<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-actuator<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-test<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;scope&gt;</span>test<span style="color:#070;font-weight:bold">&lt;/scope&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.cloud<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-cloud-starter-netflix-eureka-client<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
 
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>io.projectreactor<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>reactor-test<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;scope&gt;</span>test<span style="color:#070;font-weight:bold">&lt;/scope&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/dependencies&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;dependencyManagement&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependencies&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.cloud<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-cloud-dependencies<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;version&gt;</span>${spring-cloud.version}<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;type&gt;</span>pom<span style="color:#070;font-weight:bold">&lt;/type&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;scope&gt;</span>import<span style="color:#070;font-weight:bold">&lt;/scope&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependencies&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/dependencyManagement&gt;</span>
+
+    <span style="color:#070;font-weight:bold">&lt;build&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;plugins&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;plugin&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-maven-plugin<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;/plugin&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/plugins&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/build&gt;</span>
+
+<span style="color:#070;font-weight:bold">&lt;/project&gt;</span></code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>To enable the Discovery client, annotate the main class by <code>@EnableDiscoveryClient</code> like below.</p>
+</div>
+<div class="listingblock">
+<div class="title">ApiGatewayApplication.class</div>
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span style="color:#080;font-weight:bold">package</span> <span style="color:#707;font-weight:bold">com.example.apigateway</span>;
+
+<span style="color:#080;font-weight:bold">import</span> <span style="color:#B44;font-weight:bold">org.springframework.boot.SpringApplication</span>;
+<span style="color:#080;font-weight:bold">import</span> <span style="color:#B44;font-weight:bold">org.springframework.boot.autoconfigure.SpringBootApplication</span>;
+<span style="color:#080;font-weight:bold">import</span> <span style="color:#B44;font-weight:bold">org.springframework.cloud.client.discovery.EnableDiscoveryClient</span>;
+
+<span style="color:#007">@SpringBootApplication</span>
+<span style="color:#007">@EnableDiscoveryClient</span>
+<span style="color:#088;font-weight:bold">public</span> <span style="color:#339;font-weight:bold">class</span> <span style="color:#B06;font-weight:bold">ApiGatewayApplication</span> {
+    <span style="color:#088;font-weight:bold">public</span> <span style="color:#088;font-weight:bold">static</span> <span style="color:#339;font-weight:bold">void</span> main(<span style="color:#0a8;font-weight:bold">String</span><span style="color:#339;font-weight:bold">[]</span> args) {
+        SpringApplication.run(ApiGatewayApplication.class, args);
+    }
+}</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>Next, let&#8217;s update the configuration file.</p>
+</div>
+<div class="listingblock">
+<div class="title">application.yaml</div>
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="yaml"><span style="color:#606">eureka</span>:
+  <span style="color:#606">client</span>:
+    <span style="color:#606">serviceUrl</span>:
+      <span style="color:#606">defaultZone</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">http://localhost:8085/eureka/ </span></span><i class="conum" data-value="1"></i><b>(1)</b>
+  <span style="color:#606">instance</span>:
+    <span style="color:#606">hostname</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">localhost</span></span>
+    <i class="conum" data-value="2"></i><b>(2)</b>
+    <span style="color:#606">instance-id</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">${spring.application.name}:${random.uuid}</span></span>
+<span style="color:#606">server</span>:
+  <span style="color:#606">port</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">8080</span></span>
+<span style="color:#606">spring</span>:
+  <span style="color:#606">application</span>:
+    <span style="color:#606">name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">api-gateway</span></span>
+  <span style="color:#606">cloud</span>:
+    <span style="color:#606">gateway</span>:
+      <span style="color:#606">globalcors</span>:
+        <i class="conum" data-value="3"></i><b>(3)</b>
+        <span style="color:#606">cors-configurations</span>:
+          <span style="color:#606"><span style="color:#404">'</span><span>[/*/stacksaga/**]</span><span style="color:#404">'</span></span>:
+            <span style="color:#606">allowedOrigins</span>:
+              - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://localhost:4444</span><span style="color:#710">&quot;</span></span>
+            <span style="color:#606">allowedMethods</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
+            <span style="color:#606">allowedHeaders</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
+      <span style="color:#606">default-filters</span>:
+        <i class="conum" data-value="4"></i><b>(4)</b>
+        - <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin</span></span>
+      <span style="color:#606">discovery</span>:
+        <span style="color:#606">locator</span>:
+          <i class="conum" data-value="5"></i><b>(5)</b>
+          <span style="color:#606">enabled</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">true</span></span>
+          <i class="conum" data-value="6"></i><b>(6)</b>
+          <span style="color:#606">lower-case-service-id</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">true</span></span>
+<span style="color:#606">management</span>:
+  <span style="color:#606">info</span>:
+    <span style="color:#606">env</span>:
+      <span style="color:#606">enabled</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">true</span></span>
+  <span style="color:#606">endpoints</span>:
+    <span style="color:#606">web</span>:
+      <span style="color:#606">exposure</span>:
+        <span style="color:#606">include</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">*</span><span style="color:#710">&quot;</span></span>
+<span style="color:#606">info</span>:
+  <span style="color:#606">app</span>:
+    <span style="color:#606">author</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">mafei</span></span>
+    <span style="color:#606">name</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">${spring.application.name}</span></span>
+    <span style="color:#606">version</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">1.0.0</span></span></code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="colist arabic">
+<table>
+<tr>
+<td><i class="conum" data-value="1"></i><b>1</b></td>
+<td>Provide the eureka service registry URL.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="2"></i><b>2</b></td>
+<td>Due to the api gateway also a one eureka clients, you have to mention how it would be the instance id when the api gateway is registered with eureka service.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="3"></i><b>3</b></td>
+<td>To avoid the cross-origin restrictions, you can permit the Admin-Dashboard URL.
+If you have a list of Admin-Dashboard URLs, you provide all.
+It permits all the requests for this pattern.
+/<strong>/stacksaga/</strong>*</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="4"></i><b>4</b></td>
+<td>To avoid duplicate response headers exceptions, you can add these filters. (<a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-mvc/filters/deduperesponseheader.html">Read spring doc</a>)</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="5"></i><b>5</b></td>
+<td>Flag that enables DiscoveryClient gateway integration. (<a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway/the-discoveryclient-route-definition-locator.html">Read spring doc</a>)</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="6"></i><b>6</b></td>
+<td>Option to lower case serviceId in predicates and filters, defaults to false.
+Useful with eureka when it automatically uppercases serviceId.
+So MYSERIVCE, would match /myservice/** (<a href="https://docs.spring.io/spring-cloud-gateway/docs/current/reference/html/appendix.html">Read spring doc</a>)</td>
+</tr>
+</table>
+</div>
 </div>
 </div>
 <div class="sect1">
-<h2 id="_testing">Testing</h2>
+<h2 id="creating_eureka_service">Creating Eureka-service</h2>
 <div class="sectionbody">
+<div class="paragraph">
+<p>Now we are going to create the eureka service.</p>
+</div>
+<div class="paragraph">
+<p><strong>Road Map</strong></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../../admin/images/stacksaga-example-stacksaga-spring-cloud-api-gateway-demo-hight-level-3.drawio.svg" alt="admin:stacksaga example stacksaga spring cloud api gateway demo hight level 3.drawio"></span></p>
+</div>
+<div class="paragraph">
+<p>Same as before, visit to the <a href="https://start.spring.io/">spring initializr</a> and create a new project with the following dependencies.</p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>spring-boot-starter-actuator (optional)</p>
+</li>
+<li>
+<p>spring-boot-starter-web</p>
+</li>
+<li>
+<p>spring-cloud-starter-netflix-eureka-server</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p>The pom.xml file will be like below.</p>
+</div>
+<div class="listingblock">
+<div class="title">pom.xml</div>
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="xml"><span style="color:#579">&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;</span>
+<span style="color:#070;font-weight:bold">&lt;project</span> <span style="color:#b48">xmlns</span>=<span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://maven.apache.org/POM/4.0.0</span><span style="color:#710">&quot;</span></span> <span style="color:#b48">xmlns:xsi</span>=<span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://www.w3.org/2001/XMLSchema-instance</span><span style="color:#710">&quot;</span></span>
+         <span style="color:#b48">xsi:schemaLocation</span>=<span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#710">&quot;</span><span style="color:#D20">http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd</span><span style="color:#710">&quot;</span></span><span style="color:#070;font-weight:bold">&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;modelVersion&gt;</span>4.0.0<span style="color:#070;font-weight:bold">&lt;/modelVersion&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;parent&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-parent<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;version&gt;</span>2.7.0<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;relativePath</span><span style="color:#070;font-weight:bold">/&gt;</span> <span style="color:#777">&lt;!-- lookup parent from repository --&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/parent&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>com.example<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>eureka-service<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;version&gt;</span>0.0.1-SNAPSHOT<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;properties&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;maven.compiler.source&gt;</span>8<span style="color:#070;font-weight:bold">&lt;/maven.compiler.source&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;maven.compiler.target&gt;</span>8<span style="color:#070;font-weight:bold">&lt;/maven.compiler.target&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;project.build.sourceEncoding&gt;</span>UTF-8<span style="color:#070;font-weight:bold">&lt;/project.build.sourceEncoding&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;spring-cloud.version&gt;</span>2021.0.3<span style="color:#070;font-weight:bold">&lt;/spring-cloud.version&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/properties&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;dependencies&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-actuator<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-web<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.cloud<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-cloud-starter-netflix-eureka-server<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
 
+        <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-starter-test<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;scope&gt;</span>test<span style="color:#070;font-weight:bold">&lt;/scope&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/dependencies&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;dependencyManagement&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;dependencies&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;dependency&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.cloud<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-cloud-dependencies<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;version&gt;</span>${spring-cloud.version}<span style="color:#070;font-weight:bold">&lt;/version&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;type&gt;</span>pom<span style="color:#070;font-weight:bold">&lt;/type&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;scope&gt;</span>import<span style="color:#070;font-weight:bold">&lt;/scope&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;/dependency&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/dependencies&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/dependencyManagement&gt;</span>
+
+    <span style="color:#070;font-weight:bold">&lt;build&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;plugins&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;plugin&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;groupId&gt;</span>org.springframework.boot<span style="color:#070;font-weight:bold">&lt;/groupId&gt;</span>
+                <span style="color:#070;font-weight:bold">&lt;artifactId&gt;</span>spring-boot-maven-plugin<span style="color:#070;font-weight:bold">&lt;/artifactId&gt;</span>
+            <span style="color:#070;font-weight:bold">&lt;/plugin&gt;</span>
+        <span style="color:#070;font-weight:bold">&lt;/plugins&gt;</span>
+    <span style="color:#070;font-weight:bold">&lt;/build&gt;</span>
+
+<span style="color:#070;font-weight:bold">&lt;/project&gt;</span></code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>To enable the Discovery Service, annotate the main class by <code>@EnableEurekaServer</code> like below.</p>
+</div>
+<div class="listingblock">
+<div class="title">EurekaServiceApplication.class</div>
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span style="color:#080;font-weight:bold">package</span> <span style="color:#707;font-weight:bold">com.example.sampleeurekaservice</span>;
+
+<span style="color:#080;font-weight:bold">import</span> <span style="color:#B44;font-weight:bold">org.springframework.boot.SpringApplication</span>;
+<span style="color:#080;font-weight:bold">import</span> <span style="color:#B44;font-weight:bold">org.springframework.boot.autoconfigure.SpringBootApplication</span>;
+<span style="color:#080;font-weight:bold">import</span> <span style="color:#B44;font-weight:bold">org.springframework.cloud.netflix.eureka.server.EnableEurekaServer</span>;
+
+<span style="color:#007">@SpringBootApplication</span>
+<span style="color:#007">@EnableEurekaServer</span>
+<span style="color:#088;font-weight:bold">public</span> <span style="color:#339;font-weight:bold">class</span> <span style="color:#B06;font-weight:bold">EurekaServiceApplication</span> {
+
+    <span style="color:#088;font-weight:bold">public</span> <span style="color:#088;font-weight:bold">static</span> <span style="color:#339;font-weight:bold">void</span> main(<span style="color:#0a8;font-weight:bold">String</span><span style="color:#339;font-weight:bold">[]</span> args) {
+        SpringApplication.run(EurekaServiceApplication.class, args);
+    }
+
+}</code></pre>
+</div>
+</div>
+<div class="listingblock">
+<div class="title">application.yaml</div>
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="yaml"><span style="color:#606">eureka</span>:
+  <span style="color:#606">client</span>:
+    <i class="conum" data-value="1"></i><b>(1)</b>
+    <span style="color:#606">registerWithEureka</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">false</span></span>
+    <span style="color:#606">fetchRegistry</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">false</span></span>
+<span style="color:#606">server</span>:
+  <span style="color:#606">port</span>: <span style="background-color:hsla(0,100%,50%,0.05)"><span style="color:#D20">8085</span></span></code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<table>
+<tr>
+<td><i class="conum" data-value="1"></i><b>1</b></td>
+<td>Due to that fact that the <code>eureka-server</code> dependency contains <code>eureka-client</code> dependency as well, the client tries to register and fetch the data as a client.
+But due to this service acts as the eureka-service, it is not appropriate server acts as a client too.
+Therefore, the client is disabled here.</td>
+</tr>
+</table>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="creating_user_service">Creating User Service</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>To reduce the length of the tutorial and due to the user-service is a regular spring-boot project, we skip taking step by step creating the user-service and, please find the <a href="#//">project here</a>.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="creating_payment_service">Creating Payment Service</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>To reduce the length of the tutorial and due to the <code>payment-service</code> is a regular spring-boot project, we skip taking step by step creating the user-service and, please find the <a href="#//">project here</a>.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="creating_stock_service">Creating Stock Service</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>To reduce the length of the tutorial and due to the <code>stock-service</code> is a regular spring-boot project, we skip taking step by step creating the user-service and, please find the <a href="#//">project here</a>.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="deployment">Deployment</h2>
+<div class="sectionbody">
+<div class="sect2">
+<h3 id="_application_running_order">Application Running order.</h3>
+<div class="paragraph">
+<p>Make sure to run the services following order.</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p><a href="#set_up_stacksaga_admin_server_and_dashboard">Run StackSaga Admin server</a>.</p>
+</li>
+<li>
+<p>Run Eureka Server.</p>
+</li>
+<li>
+<p>Run API Gateway Service.</p>
+</li>
+<li>
+<p>Run Order-Service</p>
+</li>
+<li>
+<p>Run User-Service</p>
+</li>
+<li>
+<p>Run Stock-Service</p>
+</li>
+<li>
+<p>Run Payment-Service</p>
+</li>
+</ol>
+</div>
+</div>
+<div class="sect2">
+<h3 id="set_up_stacksaga_admin_server_and_dashboard">Set up StackSaga Admin Server And Dashboard</h3>
+<div class="paragraph">
+<p><strong>Road Map</strong></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../../admin/images/stacksaga-example-stacksaga-spring-cloud-api-gateway-demo-hight-level-admin-server-current.drawio.svg" alt="admin:stacksaga example stacksaga spring cloud api gateway demo hight level admin server current.drawio"></span></p>
+</div>
+<div class="paragraph">
+<p>The first step of the deployment part is initializing the Admin Server And Dashboard and creating a service-user account for the order-service.</p>
+</div>
+<div class="paragraph">
+<p>We are not going to show each step here because there is a clear guide at the reference document.
+Please fallow these links.</p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p><a href="../../admin/pages/stacksaga_admin.html#admin_server_run">Initializing the Admin Server And Dashboard</a></p>
+</li>
+<li>
+<p><a href="../../admin/pages/stacksaga_admin.html#create_service_user">Creating a service-user account</a> for order-service.
+Make sure to create the order-service user as <code>order-service-application-user</code>.
+Because we have added the username in <a href="#mentioning_service_user_credential">application.yaml</a> file at the <code>order-service</code>.)</p>
+</li>
+</ul>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_run_the_utility_services">Run the utility services</h3>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="shell">$ mvn spring-boot:run</code></pre>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_verifying_the_running_services">Verifying the running services</h3>
+<div class="paragraph">
+<p><span class="image"><img src="../images/eureka-dashboard-stacksaga.png" alt="quick examples:eureka dashboard stacksaga"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/service-connected-succesfull-stacksaga.png" alt="quick examples:service connected succesfull stacksaga"></span></p>
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="testing">Testing</h2>
+<div class="sectionbody">
+<div class="admonitionblock tip">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-tip" title="Tip"></i>
+</td>
+<td class="content">
+After running all the services, if you want to test all the endpoints, go and test your endpoints <a href="https://documenter.getpostman.com/view/10011188/2sA3JNc1NB">here</a> with your Postman.
+</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p>Let&#8217;s make a request for placing an order.</p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="file:///C:/MAFEI/stacksaga/new/stacksaga-docs/docs/modules/quick-examples/images/place-order-api-test.png" alt="place order api test"></span></p>
+</div>
+<div class="paragraph">
+<p>After making the request, you will have a response like below.
+You can see the <code>order_id</code> has been created successfully.
+Now let&#8217;s move to the admin dashboard and see the trace of the transaction.
+Go to the tracing menu and find your transaction tracing data by providing the <code>transaction id</code> that stacksaga generated.
+)</p>
+</div>
+<div class="admonitionblock important">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-important" title="Important"></i>
+</td>
+<td class="content">
+If you didn&#8217;t test your order-service connectivity through the <code>Service Connector</code> window, make sure to go and <a href="../../admin/pages/stacksaga_admin.html#validate_your_connectivity">validate your connectivity</a> by providing target <strong>root URL</strong> and <strong>service-name</strong> (Or Aliased name).
+</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-place-order-api-test-executor-summary.png" alt="stacksaga place order api test executor summary"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-place-order-api-test-tracing-summary.png" alt="stacksaga place order api test tracing summary"></span></p>
+</div>
 </div>
 </div>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-05-05 22:22:01 +0530
+Last updated 2024-05-13 20:35:31 +0530
 </div>
 </div>
 </body>
