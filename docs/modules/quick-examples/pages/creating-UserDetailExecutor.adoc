@@ -129,6 +129,8 @@ public class UserService {
             throw ex; // <10>
         } catch (IllegalArgumentException illegalArgumentException) { // <11>
             throw RetryableExecutorException.buildWith(illegalArgumentException).build();
+        } catch (RunT) { // <11>
+            throw RetryableExecutorException.buildWith(illegalArgumentException).build();
         }
     }
 }
@@ -177,6 +179,12 @@ Therefore, that error just throws without wrapping with `NonRetryableExecutorExc
 IF you want to wrap, you can do as usual but is not required if you don't consider those errors.
 Because internally the framework wraps the all `RuntimeExceptions` with `NonRetryableExecutorException` by default.
 
+<11> Due to we are using `spring-cloud-load-balancer`, when we make a request via the `RestTemplate` internally load balancer check is there any registered services in the local cache.
+Then, if there is no instance in the cache, it throws and exception with `IllegalArgumentException`.
+But in our case, actuality it is also a retryable exception.
+Because when an instance is registered, that execution can be invoked.
+Therefore, that error is thrown as `RetryableExecutorException`.
+
 [[exception_tip]]
 ====
 TIP: The reason for handling the exception is that this is where the http client does the invocation and the spacial this is most probably the exceptions are different to each other even though the http status code is the same.
@@ -187,6 +195,3 @@ But in this way nothing to do anything.
 
 Case-2::: If you have to change the protocol like HttpRest to GRPC, you have nothing to do in the executor layer.
 ====
-
-
-

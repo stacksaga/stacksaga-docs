@@ -182,6 +182,9 @@ public class PaymentService {
             throw ex;
         } catch (IllegalArgumentException illegalArgumentException) {
             throw RetryableExecutorException.buildWith(illegalArgumentException).build();
+        } catch (RuntimeException restOfExceptions) { // <18>
+            log.error("Unhanded exception : {}", restOfExceptions.getMessage());
+            log.warn("Unhanded exception was occurred and ignored while releasing pre-auth: {}", restOfExceptions.getMessage());
         }
     }
 }
@@ -240,3 +243,9 @@ Most probably 5xx errors can be retried, but there are some cases it can not.
 Therefore, that error just throws without wrapping with `NonRetryableExecutorException`.
 IF you want to wrap, you can do as usual but is not required if you don't consider those errors.
 Because internally the framework wraps the all `RuntimeExceptions` with `NonRetryableExecutorException` by default.
+
+<18> Ignore other all unknown (Unhandled) exceptions to avoid the transaction termination.
+
+[[tip_for_avoid_transaction_termination]]
+TIP: If you think that, even if the revert execution is failed for some reason (due to an unhandled exception,) the rest of revert executions should be run without terminating the transaction, you can flow this.
+
