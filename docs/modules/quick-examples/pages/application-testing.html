@@ -457,6 +457,35 @@ After running all the services, if you want to test all the endpoints, go and te
 <p>Let&#8217;s make a request for placing an order.</p>
 </div>
 <div class="paragraph">
+<p>The place order process testing is done in three ways.</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>Fully successful transaction</p>
+</li>
+<li>
+<p>Revert successful transaction</p>
+</li>
+<li>
+<p>Revert failed transaction</p>
+</li>
+</ol>
+</div>
+<div class="sect2">
+<h3 id="_fully_successful_transaction_testing">Fully successful transaction Testing</h3>
+<div class="paragraph">
+<p>Let&#8217;s see by making a request that can be fulfilled the entire process successfully.</p>
+</div>
+<div class="paragraph">
+<p>The user1 has enough money in his wallet.
+And also the stocks are available, and all the utility services are working well.
+So our request&#8217;s all primary executions should be successful as we expect.</p>
+</div>
+<div class="paragraph">
+<p>You can see here as we expected, the transaction has been invoked through all the executors successfully.</p>
+</div>
+<div class="paragraph">
 <p><span class="image"><img src="../images/place-order-api-test.png" alt="place order api test"></span></p>
 </div>
 <div class="paragraph">
@@ -479,17 +508,169 @@ If you didn&#8217;t test your order-service connectivity through the <code>Servi
 </table>
 </div>
 <div class="paragraph">
+<div class="title"><strong>Summary Of the transaction</strong></div>
 <p><span class="image"><img src="../images/stacksaga-place-order-api-test-tracing-summary.png" alt="stacksaga place order api test tracing summary"></span></p>
 </div>
 <div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>In this section, you can see all the things regarding the transaction like transaction data,current status, whether it has some exception or not., what is the instance that transaction was executed, region and zone etc.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<div class="title"><strong>Execution Summary of the transaction</strong></div>
 <p><span class="image"><img src="../images/stacksaga-place-order-api-test-executor-summary.png" alt="stacksaga place order api test executor summary"></span></p>
+</div>
+<div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>In this section, you can see all the executors that were executed one by one.
+Ant the time they were executed, and how long each executor has spent to execute.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p>By clicking each executor, you will be able to see each executor in detail like how the aggregator updated and how many times the executor was executed, etc.</p>
+</div>
+<div class="paragraph">
+<div class="title"><strong>INIExecutorDefault</strong></div>
+<p><span class="image"><img src="../images/stacksaga-demo-executor-1.png" alt="stacksaga demo executor 1"></span></p>
+</div>
+<div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>Any transaction in StackSaga has initial executor details, and it shows the initial state of the aggregator.
+(If the executor is INIExecutorDefault one all the time, the entered aggregator snapshot and modified aggregator snapshot are the same).</p>
+</li>
+<li>
+<p>We can see the initial data that we updated from the <a href="#//">OrderController</a> class in here, and the rest of the data will be updated on the next executors.
+In addition to that, there are two properties called <code>aggregatorTransactionId</code> and <code>initializedVersion</code>.
+You know the <code>aggregatorTransactionId</code> is updated after handing over the execution to the <a href="#//">SEC</a>.
+The <code>initializedVersion</code> is provided what was the version of the aggregator (The version that you mention at <code>@SagaAggregator</code> in your Custom Aggregator) when the transaction is started.
+This will help to make the decisions when update your aggregator in the feature. [ See  <a href="../../architecture/pages/version_casting_architecture.html">Aggregator Casting</a> ]</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p><em>As we navigated in the controller, the next executor should be <code>UserDetailExecutor</code>.</em></p>
+</div>
+<div class="paragraph">
+<div class="title"><strong>UserDetailExecutor Aggregator State</strong></div>
+<p><span class="image"><img src="../images/stacksaga-demo-executor-2.png" alt="stacksaga demo executor 2"></span></p>
+</div>
+<div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>The entered aggregator state is the one that came to the executor after the last execution.
+Therefore, the <code>delivery_details</code> is <code>null</code> when.
+And on the right side you can see the modified aggregator state after executing the <code>UserDetailExecutor</code>.
+There you can see the <code>delivery_details</code> was updated due to the UserDetailExecutor has been executed successfully.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p><em>As we navigated in the <code>UserDetailExecutor</code>, the next executor should be <code>OrderInitializeExecutor</code>.</em></p>
+</div>
+<div class="paragraph">
+<div class="title"><strong>OrderInitializeExecutor Aggregator State</strong></div>
+<p><span class="image"><img src="../images/stacksaga-demo-executor-3.png" alt="stacksaga demo executor 3"></span></p>
+</div>
+<div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>UserDetailExecutor</code>.
+And after executing the <code>OrderInitializeExecutor</code> you cannot see any different because we only executed the executor, and we did not make any changes into the aggregator.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p><em>As we navigated in the <code>OrderInitializeExecutor</code>, the next executor should be <code>PreAuthExecutor</code>.</em></p>
+</div>
+<div class="paragraph">
+<div class="title"><strong>PreAuthExecutor Aggregator State</strong></div>
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4.png" alt="stacksaga demo executor 4"></span></p>
+</div>
+<div class="paragraph">
+<p><strong>Highlights</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>OrderInitializeExecutor</code>.
+And after successfully executing the <code>PreAuthExecutor</code> you can see that the <code>pre_auth_ref</code> was updated at the modified aggregator state.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p><em>As we navigated in the <code>PreAuthExecutor</code>, the next executor should be <code>StockUpdateExecutor</code>.</em></p>
+</div>
+<div class="paragraph">
+<div class="title"><strong>StockUpdateExecutor Aggregator State</strong></div>
+<p><span class="image"><img src="../images/stacksaga-demo-executor-5.png" alt="stacksaga demo executor 5"></span></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>PreAuthExecutor</code>.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-6.png" alt="stacksaga demo executor 6"></span></p>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_revert_success_transaction">Revert Success Transaction</h3>
+<div class="paragraph">
+<p><span class="image"><img src="../images/place-order-api-test-revert-success.png" alt="place order api test revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-place-order-api-test-tracing-summary-revert-success.png" alt="stacksaga place order api test tracing summary revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-1-revert-success.png" alt="stacksaga demo executor 1 revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-2-revert-success.png" alt="stacksaga demo executor 2 revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-3-revert-success.png" alt="stacksaga demo executor 3 revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4-revert-success.png" alt="stacksaga demo executor 4 revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4-1-revert-success.png" alt="stacksaga demo executor 4 1 revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4-revert-success.png" alt="stacksaga demo executor 4 revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4-2-revert-success.png" alt="stacksaga demo executor 4 2 revert success"></span></p>
+</div>
 </div>
 </div>
 </div>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-05-13 20:41:03 +0530
+Last updated 2024-05-14 13:41:51 +0530
 </div>
 </div>
 </body>
