@@ -553,11 +553,13 @@ Ant the time they were executed, and how long each executor has spent to execute
 (If the executor is INIExecutorDefault one all the time, the entered aggregator snapshot and modified aggregator snapshot are the same).</p>
 </li>
 <li>
-<p>We can see the initial data that we updated from the <a href="#//">OrderController</a> class in here, and the rest of the data will be updated on the next executors.
+<p>We can see the initial data that we updated from the <a href="#//">OrderController</a> class.
+And the rest of the data will be updated on the next executors.
 In addition to that, there are two properties called <code>aggregatorTransactionId</code> and <code>initializedVersion</code>.
 You know the <code>aggregatorTransactionId</code> is updated after handing over the execution to the <a href="#//">SEC</a>.
 The <code>initializedVersion</code> is provided what was the version of the aggregator (The version that you mention at <code>@SagaAggregator</code> in your Custom Aggregator) when the transaction is started.
-This will help to make the decisions when update your aggregator in the feature. [ See  <a href="../../architecture/pages/version_casting_architecture.html">Aggregator Casting</a> ]</p>
+This will help to make the decisions when update your aggregator in the feature.
+See  <a href="../../architecture/pages/version_casting_architecture.html">Aggregator Casting</a> ]</p>
 </li>
 </ul>
 </div>
@@ -575,9 +577,9 @@ This will help to make the decisions when update your aggregator in the feature.
 <ul>
 <li>
 <p>The entered aggregator state is the one that came to the executor after the last execution.
-Therefore, the <code>delivery_details</code> is <code>null</code> when.
-And on the right side you can see the modified aggregator state after executing the <code>UserDetailExecutor</code>.
-There you can see the <code>delivery_details</code> was updated due to the UserDetailExecutor has been executed successfully.</p>
+Therefore, the <code>delivery_details</code> is <code>null</code> and <code>executions</code> list has only one data.
+And on the right side, you can see the modified aggregator state after executing the <code>UserDetailExecutor</code>.
+There you can see the <code>delivery_details</code> was updated, and the name of the executor was added to the <code>executions</code> list (The 2nd one) due to the UserDetailExecutor has been executed successfully.</p>
 </li>
 </ul>
 </div>
@@ -595,7 +597,7 @@ There you can see the <code>delivery_details</code> was updated due to the UserD
 <ul>
 <li>
 <p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>UserDetailExecutor</code>.
-And after executing the <code>OrderInitializeExecutor</code> you cannot see any different because we only executed the executor, and we did not make any changes into the aggregator.</p>
+And after executing the <code>OrderInitializeExecutor</code>, the name of the executor was added to the <code>executions</code> list (The 3rd one).</p>
 </li>
 </ul>
 </div>
@@ -613,7 +615,8 @@ And after executing the <code>OrderInitializeExecutor</code> you cannot see any 
 <ul>
 <li>
 <p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>OrderInitializeExecutor</code>.
-And after successfully executing the <code>PreAuthExecutor</code> you can see that the <code>pre_auth_ref</code> was updated at the modified aggregator state.</p>
+And after successfully executing the <code>PreAuthExecutor</code> you can see that the <code>pre_auth_ref</code> was updated at the modified aggregator state.
+And the name of the executor was added to the <code>executions</code> list (The 4th one)</p>
 </li>
 </ul>
 </div>
@@ -627,21 +630,47 @@ And after successfully executing the <code>PreAuthExecutor</code> you can see th
 <div class="ulist">
 <ul>
 <li>
-<p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>PreAuthExecutor</code>.</p>
+<p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>PreAuthExecutor</code>.
+And after successfully executing the <code>StockUpdateExecutor</code> you can see that the name of the executor was added to the <code>executions</code> list (The 5th one).</p>
 </li>
 </ul>
 </div>
 <div class="paragraph">
+<p><em>As we navigated in the <code>StockUpdateExecutor</code>, the next executor should be <code>MakePaymentExecutor</code>.</em></p>
+</div>
+<div class="paragraph">
+<div class="title"><strong>MakePaymentExecutor Aggregator State</strong></div>
 <p><span class="image"><img src="../images/stacksaga-demo-executor-6.png" alt="stacksaga demo executor 6"></span></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>The entered state of the aggregator is equal to the modified aggregator state of the last executor called <code>StockUpdateExecutor</code>.
+And after successfully executing the <code>MakePaymentExecutor</code> you can see that the <code>payment_id</code> was updated.
+And name of the executor was added to the <code>executions</code> list (The 6th one).</p>
+</li>
+</ul>
 </div>
 </div>
 <div class="sect2">
 <h3 id="_revert_success_transaction">Revert Success Transaction</h3>
 <div class="paragraph">
+<p>Let&#8217;s look at such a scenario one of primary executions is fielded with non-retryable exception.
+You can remember that in the <code>PreAuthExecutor</code> we caught the <code>FORBIDDEN</code> exception that sends by the <code>payment-service</code>
+if the user&#8217;s wallet has no balance to make the pre-auth.
+In this testing, let&#8217;s place an order with a higher amount than the wallet has.</p>
+</div>
+<div class="paragraph">
 <p><span class="image"><img src="../images/place-order-api-test-revert-success.png" alt="place order api test revert success"></span></p>
 </div>
 <div class="paragraph">
 <p><span class="image"><img src="../images/stacksaga-place-order-api-test-tracing-summary-revert-success.png" alt="stacksaga place order api test tracing summary revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-1-revert-success-error-log.png" alt="stacksaga demo executor 1 revert success error log"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-place-order-api-test-execution-summary-revert-success.png" alt="stacksaga place order api test execution summary revert success"></span></p>
 </div>
 <div class="paragraph">
 <p><span class="image"><img src="../images/stacksaga-demo-executor-1-revert-success.png" alt="stacksaga demo executor 1 revert success"></span></p>
@@ -659,10 +688,13 @@ And after successfully executing the <code>PreAuthExecutor</code> you can see th
 <p><span class="image"><img src="../images/stacksaga-demo-executor-4-1-revert-success.png" alt="stacksaga demo executor 4 1 revert success"></span></p>
 </div>
 <div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-demo-executor-4-revert-success.png" alt="stacksaga demo executor 4 revert success"></span></p>
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4-2-revert-success.png" alt="stacksaga demo executor 4 2 revert success"></span></p>
 </div>
 <div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-demo-executor-4-2-revert-success.png" alt="stacksaga demo executor 4 2 revert success"></span></p>
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4-3-revert-success.png" alt="stacksaga demo executor 4 3 revert success"></span></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-demo-executor-4-4-revert-success.png" alt="stacksaga demo executor 4 4 revert success"></span></p>
 </div>
 </div>
 </div>
@@ -670,7 +702,7 @@ And after successfully executing the <code>PreAuthExecutor</code> you can see th
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-05-14 13:41:51 +0530
+Last updated 2024-05-14 15:46:20 +0530
 </div>
 </div>
 </body>
