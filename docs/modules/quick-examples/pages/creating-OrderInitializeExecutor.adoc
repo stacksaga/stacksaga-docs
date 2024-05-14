@@ -24,6 +24,7 @@ public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggreg
     @Override // <4>
     public ProcessStepManager<PlaceOrderAggregator> doProcess(PlaceOrderAggregator currentAggregator, ProcessStepManagerUtil<PlaceOrderAggregator> stepManager) throws RetryableExecutorException, NonRetryableExecutorException {
         try {
+            currentAggregator.getExecutions().add(this.getClass().getSimpleName() + ":" + LocalDateTime.now());
             // <5>
             this.orderService.initialize(
                     OrderEntity
@@ -47,6 +48,15 @@ public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggreg
         // <7>
         this.orderService.cancelOrder(finalAggregatorState.getAggregatorTransactionId());
         // <8>
+        revertHintStore.put(
+                String.valueOf(System.currentTimeMillis()),
+                this.getClass().getSimpleName() + ":doRevert"
+        );
+        // <9>
+        if (finalAggregatorState.getHasRevertError()) {
+            throw new RuntimeException("dummy error for revert-failed.");
+        }
+        // <10>
         return OrderStatus.CANCELED_ORDER.name();
     }
 }

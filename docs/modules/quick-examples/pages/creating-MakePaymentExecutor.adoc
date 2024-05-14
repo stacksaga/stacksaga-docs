@@ -18,6 +18,7 @@ public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator
                 PlaceOrderAggregator currentAggregator,
                 ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        currentAggregator.getExecutions().add(this.getClass().getSimpleName()+":"+ LocalDateTime.now());
         // <4>
         String paymentId = this.paymentService.makePayment(
                 MakePaymentDto
@@ -115,6 +116,8 @@ To make the payment, we have to create a new method in the existing `PaymentServ
             // This exception is a generic RestClientException
             // Handle other types of exceptions here
             throw ex;
+        } catch (IllegalArgumentException illegalArgumentException) {
+            throw RetryableExecutorException.buildWith(illegalArgumentException).build();
         }
     }
 ----

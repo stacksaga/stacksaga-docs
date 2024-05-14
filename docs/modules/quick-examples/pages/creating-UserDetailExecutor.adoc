@@ -23,6 +23,7 @@ public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> {
     ) throws
     RetryableExecutorException, NonRetryableExecutorException // <6>
     {
+        currentAggregator.getExecutions().add(this.getClass().getSimpleName()+":"+ LocalDateTime.now());
         // <7>
         UserDetailDto.ResponseBody userDetails = this.userService.getUserDetails(currentAggregator.getUserId());
         // <8>
@@ -126,6 +127,8 @@ public class UserService {
             // This exception is a generic RestClientException
             // Handle other types of exceptions here
             throw ex; // <10>
+        } catch (IllegalArgumentException illegalArgumentException) { // <11>
+            throw RetryableExecutorException.buildWith(illegalArgumentException).build();
         }
     }
 }

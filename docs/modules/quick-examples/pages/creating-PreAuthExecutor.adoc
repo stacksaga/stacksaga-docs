@@ -18,7 +18,7 @@ public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> { 
             PlaceOrderAggregator currentAggregator, // <3>
             ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
-
+        currentAggregator.getExecutions().add(this.getClass().getSimpleName()+":"+ LocalDateTime.now());
         // <4>
         final String preAuthRef = this.paymentService.makePreAuth(
                 PreAuthDto
@@ -151,6 +151,8 @@ public class PaymentService {
             // Handle other types of exceptions here
             // <11>
             throw ex;
+        } catch (IllegalArgumentException illegalArgumentException) {
+            throw RetryableExecutorException.buildWith(illegalArgumentException).build();
         }
 
     }
@@ -178,6 +180,8 @@ public class PaymentService {
             // You can handle specific HTTP error codes here
             // <17>
             throw ex;
+        } catch (IllegalArgumentException illegalArgumentException) {
+            throw RetryableExecutorException.buildWith(illegalArgumentException).build();
         }
     }
 }

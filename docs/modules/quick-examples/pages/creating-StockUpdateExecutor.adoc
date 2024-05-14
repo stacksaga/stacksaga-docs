@@ -20,6 +20,7 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
             ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
     )
     throws RetryableExecutorException, NonRetryableExecutorException {
+        currentAggregator.getExecutions().add(this.getClass().getSimpleName()+":"+ LocalDateTime.now());
         // <4>
         this.stockService.updateStock(
                 UpdateStockDto.RequestBody
@@ -58,6 +59,11 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
                         .build()
         );
         // <8>
+        revertHintStore.put(
+                String.valueOf(System.currentTimeMillis()),
+                this.getClass().getSimpleName() + ":doRevert"
+        );
+        // <9>
         return OrderStatus.RESTORED_STOCK.name();
     }
 }
