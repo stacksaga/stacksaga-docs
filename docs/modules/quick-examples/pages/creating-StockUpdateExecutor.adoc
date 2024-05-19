@@ -39,7 +39,7 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
                         .build()
         );
         // <5>
-        return stepManager.next(MakePaymentExecutor.class, OrderStatus.UPDATED_STOCK.name());
+        return stepManager.next(MakePaymentExecutor.class, OrderStatus.UPDATED_STOCK);
     }
 
     @Override
@@ -64,7 +64,7 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
                 this.getClass().getSimpleName() + ":doRevert"
         );
         // <9>
-        return OrderStatus.RESTORED_STOCK.name();
+        return OrderStatus.RESTORED_STOCK;
     }
 }
 ----
@@ -92,11 +92,13 @@ It only can have `RetryableExecutorException`.
 
 <7> Calling the StockService's `restoreStock()` method to restoring the items that has been reduced in the `doProcess()` method.
 To restore the Stock, we have to pass a reason.
-Due to we have put a reason all the possible times
-when an `NonRetryableExecutorException` is occurred in `doProcess` executions.
+Due to we have put a reason all the possible times when an `NonRetryableExecutorException` is occurred in `doProcess` executions.
 If the value doesn't exist in the exception object we have passed just empty `String` there.
 
-<8> Reruns the status as `RESTORED_STOCK` finally.
+<8> Update the hint-store object by adding current millisecond and the revert method name with the executor name while the revert process.  +
+In your real application, xref://[the hint-store] can be used for adding some data regarding the revert process. It can be accessed from the next revert process.
+
+<9> Reruns the status as `RESTORED_STOCK` finally.
 
 *Related classes*
 

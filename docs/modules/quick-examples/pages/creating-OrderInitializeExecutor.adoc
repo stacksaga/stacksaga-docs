@@ -2,12 +2,11 @@
 === Creating OrderInitializeExecutor
 
 You know that the request comes to the `OrderController`
-and the request is transferred to the `OrderInitializeExecutor` as the first step.
-And next, we want to decide what OrderInitializeExecutor class type should be.
-That means that there are two executor types in StackSga called xref:framework:command_executor.adoc[CommandExecutor] and xref:framework:query_executor.adoc[QueryExecutor].
+and the request is transferred to the `UserDetailExecutor` as the first step to collect the user details.
+And next, we are going to initiate the order in the own service (order-service).
+To initiate the order will be creating an executor called `OrderInitializeExecutor`.
 
-The OrderInitializeExecutor should be a command-executor because if a failure occurred at some point after executing the order initialization process, it should be recovered again.
-Here we mark the order as canceled.
+The OrderInitializeExecutor should be a command-executor because the primary execution (updating order database) makes some changes in the database, and then if a failure occurred at some point after executing the order initialization process, it should be recovered again.
 
 .https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/executor/OrderInitializeExecutor.java[icon:github[role=black,size=2x] OrderInitializeExecutor.class]
 [source,java]
@@ -40,11 +39,11 @@ public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggreg
             throw new RuntimeException(e);
         }
         // <6>
-        return stepManager.next(UserDetailExecutor.class, OrderStatus.INITIALIZED_ORDER.name());
+        return stepManager.next(PreAuthExecutor.class, OrderStatus.INITIALIZED_ORDER);
     }
 
-    @Override // <4>
-    public String doRevert(NonRetryableExecutorException processException, PlaceOrderAggregator finalAggregatorState, RevertHintStore revertHintStore) throws RetryableExecutorException {
+    @Override
+    public SagaExecutionEventName doRevert(NonRetryableExecutorException processException, PlaceOrderAggregator finalAggregatorState, RevertHintStore revertHintStore) throws RetryableExecutorException {
         // <7>
         this.orderService.cancelOrder(finalAggregatorState.getAggregatorTransactionId());
         // <8>
@@ -57,7 +56,7 @@ public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggreg
             throw new RuntimeException("dummy error for revert-failed.");
         }
         // <10>
-        return OrderStatus.CANCELED_ORDER.name();
+        return OrderStatus.CANCELED_ORDER;
     }
 }
 ----
@@ -73,8 +72,20 @@ Read more about xref:framework:saga_executors.adoc#command_executor[`CommandExec
 (`ObjectMapper` has been Autowired just for getting the JSON string)
 <4> Overridden the `doProcess` and `doRevert` methods.
 
-<5> Calling the initialize-method to invoke the execution.
-(This method is invoked by the framework with different thread-pool.)
+<5> Initialize the order-details by calling the orderService.
 
-<6> After invoking the execution successfully, `stepManager.next` command guides the framework what is the next execution after this execution.
-Our next execution should be make
+<6> After Initializing the order successfully, SEC is navigated to the next executor by using `stepManager.next`.
+The next executor is `PreAuthExecutor` and also the current executed is marked as `INITIALIZED_ORDER` in the event-store.
+
+<7> The order is marked as `canceled` one if the primary execution should be reverted.
+
+<8> Update the hint-store object by adding current millisecond and the revert method name with the executor name while the revert process.  +
+In your real application, xref://[the hint-store] can be used for adding some data regarding the revert process.
+It can be accessed from the next revert process.
+
+<9> We used a variable called `hasRevertError` in the aggregator to xref:stacksaga-demo.adoc#revert_failed_transaction[test] a `revert-failed` transaction.
+If we have passed the `hasRevertError` value as `true`, throw an exception to terminate the transaction.
++
+IMPORTANT: This is for totally testing the application in your real application make sure to do not throw an exception from the doRevert method unless `RetryableExecutorException`.
+
+<10> If the canceling process is successfully executed, return the event name as CANCELED_ORDER.

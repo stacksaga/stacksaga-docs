@@ -1,7 +1,9 @@
 === Creating PreAuthExecutor (Command-Executor)
 
-`PreAuthExecutor` is responsible for making `PreAuth` by calling to the utility  `payment-service`.
+After initiating the order details, next we will be creating an executor called `PreAuthExecutor`.
+It is responsible for making `PreAuth` by calling to the utility `payment-service`.
 Due to the execution should be reverted if the entire process is not successful as wished, the `PreAuthExecutor` is implemented from the `CommandExecutor` interface.
+
 TO make the PreAuth request, we should provide the `userId`, `amount` and `orderId`.
 And to revert the process we have to provide the `PreAuthRef` back.
 
@@ -32,11 +34,11 @@ public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> { 
         // <5>
         currentAggregator.setPreAuthRef(preAuthRef);
         // <6>
-        return stepManager.next(StockUpdateExecutor.class, OrderStatus.MADE_PRE_AUTH.name());
+        return stepManager.next(StockUpdateExecutor.class, OrderStatus.MADE_PRE_AUTH);
     }
 
     @Override
-    public String doRevert(
+    public SagaExecutionEventName doRevert(
             NonRetryableExecutorException processException,
             PlaceOrderAggregator finalAggregatorState,
             RevertHintStore revertHintStore
@@ -51,7 +53,12 @@ public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> { 
                         .reason(processException.get("reason").orElse(""))
                         .build()
         );
-        return OrderStatus.RELEASED_PRE_AUTH.name(); // <10>
+        revertHintStore.put(
+                String.valueOf(System.currentTimeMillis()),
+                this.getClass().getSimpleName() + ":doRevert"
+        );// <10>
+
+        return return OrderStatus.RELEASED_PRE_AUTH; // <11>
     }
 }
 ----
@@ -84,7 +91,12 @@ Therefore, that contains the `pareAuthRef` and we can access it from the `finalA
 All the time the process can be failed (With  `NonRetryableExecutorException`)we have added a data called `reason` with the `NonRetryableExecutorException`.
 This is the time that can be used.
 
-<10> Return the status as `RELEASED_PRE_AUTH`  finally.
+<10> Update the hint-store object by adding current millisecond and the revert method name with the executor name while the revert process.  +
+In your real application, xref://[the hint-store] can be used for adding some data regarding the revert process.
+It can be accessed from the next revert process.
+
+
+<11> Return the status as `RELEASED_PRE_AUTH`  finally.
 
 === Creating PaymentService
 
@@ -93,7 +105,6 @@ Due to the `payment-service` is another utility service we have to call it throu
 This example's `payment-service` also support http endpoint to access the API.
 Therefore, we will be using rest template as http client.
 But you can use any Http client like Feign-client, Okhttp, Spring-webclient and so on.
-
 
 TIP: The relationship between the executor and service should not be *one-to-one*.
 A service can be used for many executors.
