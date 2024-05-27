@@ -42,26 +42,32 @@ image:stacksaga-diagram-Microservice-architecture-style-database-per-service.dra
 
 == Distributed Transaction
 
-In a microservice architecture, a distributed transaction refers to a transaction that spans multiple microservices.
+In the microservice architecture, a distributed transaction refers to a transaction that spans multiple microservices.
 Traditional monolithic applications often use a single database and ACID (Atomicity, Consistency, Isolation, Durability) transactions to ensure data integrity within a single transaction.
-However, in a microservices environment, each microservice typically has its own database or data store, and transactions may need to span multiple services.
+However, in the microservice environment, each microservice typically has its own database or data store, and transactions may need to span multiple services.
 
-As an example, there is an e-commerce application that processes online orders, and it has been implemented with microservice architecture.
-The entire system has the following microservices.
+As an example, Just imagine that there is an e-commerce application that makes online orders, and it has been implemented with microservice architecture.
+In general, the following microservices can be involved to make the entire order placing request.
 
-* Initialize the order at the first (order-service)
-* Make Pre-Auth (payment-service)
-* Update the stock (stock-service)
-* Make Payment (payment-service)
+* order-service
+** initialize the order.
+** update the order status
+* payment-service
+** make pre-auth
+** make real payment
+* Stock-service
+** update the inventory, and so on.
 
-Each of these microservices performs a signal local transaction to implement the individual functionalities.
+Even though the entire transaction is pace-order, that transaction has many sub atomic-transactions.
+Those transactions have been distributed along with many microservices.
+Each service performs a signal local transaction to implement the individual functionalities.
 
 image:stacksaga-diagram-distributed-transaction.drawio.svg[alt="distributed transaction"]
 
-To make a successful transaction, all three microservices must complete the individual local transactions.
-If any of the microservice fails to complete its local transaction, all the completed transactions (So far) should be rolled back to ensure data integrity.
-As per the example, if the *make-payment* atomic transaction is failed, all other successfully executed transactions should be rolled back to ensure data integrity.
-This is an example of a distributed transaction as the transaction boundary crosses multiple services and databases.
+To make a successful transaction, all 4 atomic-transactions (three microservices) must be completed.
+If any of the microservices fails to complete one of the local transactions, all the completed atomic transactions until where the failure happened should be rolled back to ensure data integrity.
+
+As per the example, if the *make-payment* atomic transaction (transaction-4) is failed, all other successfully executed transactions should be rolled back to ensure data integrity.
 
 == Challenges of Distributed Transaction
 
@@ -82,5 +88,3 @@ In a distributed transaction scenario, as the transaction spans several services
 It specifies the amount of data that is visible in a transaction when the other services access the same data simultaneously.
 In other words, if one object in one of the microservices is persisted in the database while another request reads the data, should the service return the old or new data?
 
-To overcome the Distributed Transaction Challenge, we can follow the Saga design pattern.
-Let's dive into the deep Saga design pattern next.
