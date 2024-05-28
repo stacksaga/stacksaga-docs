@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 2.0.20">
-<title>Introduction To Microservice</title>
+<title>Introduction to the Saga Design Pattern</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:300,300italic,400,400italic,600,600italic%7CNoto+Serif:400,400italic,700,700italic%7CDroid+Sans+Mono:400,700">
 <style>
 /*! Asciidoctor default stylesheet | MIT License | https://asciidoctor.org */
@@ -436,55 +436,110 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </head>
 <body class="article">
 <div id="header">
-<h1>Introduction To Microservice</h1>
+<h1>Introduction to the Saga Design Pattern</h1>
 </div>
 <div id="content">
 <div class="sect1">
-<h2 id="_microservice_architecture">Microservice Architecture</h2>
+<h2 id="_overview">Overview</h2>
 <div class="sectionbody">
 <div class="paragraph">
-<p>Before dive in to the framework, let&#8217;s have the basic idea of microservice architecture.
-A microservice' architecture consists of a collection of small, autonomous services.
-Each service is self-contained and should implement a single business capability within a bounded context.
-A bounded context is a natural division within a business and provides an explicit boundary within which a domain model exists.</p>
+<p>In modern distributed systems, handling <strong>long-running transactions</strong> across multiple microservices is a significant challenge.
+The Saga pattern offers a robust solution for managing distributed transactions by breaking them into a series of smaller, isolated transactions that can be individually committed and compensated.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="what_is_saga_architecture_pattern">What is the Saga Pattern?</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>The Saga pattern is a microservices architectural pattern that ensures data consistency across multiple services without relying on distributed transactions.
+A saga is a sequence of local transactions where each transaction updates data within a single service.
+If a transaction fails, a series of compensating transactions are executed to undo the changes made by the previous transactions, thereby maintaining consistency.
+In the Saga pattern, a compensating transaction must be important and retryable.
+These two principles ensure that a transaction can be managed without any manual intervention.
+The Saga Execution Coordinator (SEC) ensures guarantees those principles.</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img src="../images/compensating-transaction.svg" alt="distributed transaction saga, stacksaga" height="300">
+</div>
 </div>
 <div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-diagram-Microservice-architecture-style.drawio.svg" alt="stacksaga diagram  microservice architecture style"></span></p>
+<p>The above diagram shows how to visualize the Saga pattern for the previously discussed online order processing scenario.</p>
 </div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_types_of_saga">Types of Saga</h2>
+<div class="sectionbody">
 <div class="paragraph">
-<p><strong>What are microservices?</strong></p>
+<p>There are two primary types of saga implementations:</p>
 </div>
-<div class="paragraph">
-<p>Microservices are a modern approach to software whereby application code is delivered in small, manageable pieces, independent of others.
-<a href="https://spring.io/microservices">Read more through spring microservices.</a></p>
-</div>
-<div class="sect2">
-<h3 id="_key_characteristics_of_microservices_include">Key characteristics of microservices include</h3>
 <div class="olist arabic">
 <ol class="arabic">
 <li>
-<p><strong>Modularity</strong>: Each microservice is a self-contained unit that can be developed, deployed, and scaled independently.
-This modularity allows for easier development and maintenance of complex systems.</p>
+<p><strong>Choreography-based Saga</strong></p>
+<div class="ulist">
+<ul>
+<li>
+<p>In this approach, each service involved in the saga performs its local transaction and publishes an event.
+Other services listen to these events and react accordingly, performing their transactions and emitting subsequent events.
+This continues until all transactions in the saga are complete.</p>
 </li>
 <li>
-<p><strong>Scalability</strong>: Since each service is independent, it can be scaled horizontally or vertically based on its specific requirements.
-This allows for better resource utilization and improved performance.</p>
+<p><strong>Pros</strong>: No central coordination needed, leading to simpler scalability.</p>
 </li>
 <li>
-<p><strong>Resilience</strong>: Microservices are designed to be fault-tolerant and resilient.
-If one service fails, it does not necessarily affect the entire application, as other services can continue to function independently.</p>
+<p><strong>Cons</strong>: Increased complexity in managing the flow of events and handling failures.</p>
+</li>
+</ul>
+</div>
 </li>
 <li>
-<p><strong>Flexibility</strong>: Microservices allow for flexibility in technology choices.
-Each service can be developed using the most suitable programming language, framework, or database for its requirements.</p>
+<p><strong>Orchestration-based Saga</strong></p>
+<div class="ulist">
+<ul>
+<li>
+<p>This approach introduces a central coordinator or orchestrator that manages the entire saga.
+The orchestrator sends commands to each service to perform its transaction and waits for their responses.
+If a transaction fails, the orchestrator triggers compensating transactions to revert the changes.</p>
 </li>
 <li>
-<p><strong>Decentralized Data Management</strong>: Instead of a single centralized database, each microservice can have its own database or data store.
-This allows for better isolation of data and reduces the risk of data corruption or loss.</p>
+<p><strong>Pros</strong>: Centralized control simplifies management and error handling.</p>
 </li>
 <li>
-<p><strong>Continuous Deployment</strong>: Microservices enable continuous deployment and delivery practices, as each service can be deployed independently without affecting others.
-This allows for faster release cycles and quicker time-to-market.</p>
+<p><strong>Cons</strong>: The orchestrator can become a single point of failure and may require sophisticated state management.</p>
+</li>
+</ul>
+</div>
+</li>
+</ol>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="saga_orchestration_pattern">Saga Orchestration Pattern</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p><strong>Saga Orchestration</strong> involves a central orchestrator that controls the flow of a saga, dictating the order of operations and handling any necessary compensations in case of failure.
+The orchestrator takes on the responsibility of managing the entire transaction process, making decisions about which steps to execute next and how to handle errors.</p>
+</div>
+<div class="sect2">
+<h3 id="_key_characteristics">Key Characteristics:</h3>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p><strong>Centralized Control</strong>: The orchestrator centrally manages the saga, ensuring that each step is executed in the correct order and coordinating compensations if a step fails.</p>
+</li>
+<li>
+<p><strong>Simplified Microservices</strong>: Microservices do not need to be aware of the overall transaction flow.
+They simply perform their individual tasks and report back to the orchestrator.</p>
+</li>
+<li>
+<p><strong>Error Handling</strong>: The orchestrator manages error handling and compensations, simplifying the logic in individual services.</p>
+</li>
+<li>
+<p><strong>Execution Flow</strong>: The orchestrator sends commands to services to perform actions, waits for their responses, and then decides the next step based on those responses.</p>
 </li>
 </ol>
 </div>
@@ -492,126 +547,197 @@ This allows for faster release cycles and quicker time-to-market.</p>
 </div>
 </div>
 <div class="sect1">
-<h2 id="_database_per_service_pattern">Database Per Service Pattern</h2>
+<h2 id="eventual_consistency">Eventual Consistency</h2>
 <div class="sectionbody">
 <div class="paragraph">
-<p>One of the benefits of microservice architecture is that it lets us choose the technology stack per service.
-For instance, we can decide to use a relational database for service A and opt for a NoSQL database for service B. This model lets the services manage domain data independently on a data store that best suites its data types and schema.
-Further, it also lets the service scale its datastore on-demand and insulates it from the failures of other services.
-However, at times a transaction can span across multiple services, and ensuring data consistency across the service database is a challenge.</p>
+<p><strong>Definition:</strong> Eventual consistency guarantees that, if no new updates are made to a given piece of data, eventually all accesses to that data will return the last updated value.
+Over time, the system will converge to a consistent state, but it does not provide immediate consistency after an update.</p>
 </div>
 <div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-diagram-Microservice-architecture-style-database-per-service.drawio.svg" alt="stacksaga diagram  microservice architecture style database per service"></span></p>
+<p><strong>Characteristics:</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p><strong>Latency:</strong> Eventual consistency allows for lower latency as updates can propagate in the background.</p>
+</li>
+<li>
+<p><strong>Availability:</strong> High availability is often achieved since the system can operate even if some nodes are temporarily unreachable.</p>
+</li>
+<li>
+<p><strong>Partition Tolerance:</strong> It can handle network partitions more gracefully, ensuring the system remains operational despite disruptions.</p>
+</li>
+<li>
+<p><strong>Use Cases:</strong> Suitable for systems where immediate consistency is not critical, such as DNS, web caches, and some NoSQL databases (e.g., Cassandra, DynamoDB).</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p><strong>Example:</strong> A social media platform where user profiles may not immediately reflect the latest changes across all servers.
+Eventually, all servers will have the same profile data, but there might be a delay.</p>
+</div>
+<div class="admonitionblock note">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-note" title="Note"></i>
+</td>
+<td class="content">
+Eventual consistency is often used in the saga design pattern, particularly in the context of distributed systems and microservices architectures.
+</td>
+</tr>
+</table>
 </div>
 </div>
 </div>
 <div class="sect1">
-<h2 id="_distributed_transaction">Distributed Transaction</h2>
+<h2 id="_eventual_consistency_in_sagas">Eventual Consistency in Sagas</h2>
 <div class="sectionbody">
 <div class="paragraph">
-<p>In the microservice architecture, a distributed transaction refers to a transaction that spans multiple microservices.
-Traditional monolithic applications often use a single database and ACID (Atomicity, Consistency, Isolation, Durability) transactions to ensure data integrity within a single transaction.
-However, in the microservice environment, each microservice typically has its own database or data store, and transactions may need to span multiple services.</p>
-</div>
-<div class="paragraph">
-<p>As an example, Just imagine that there is an e-commerce application that makes online orders, and it has been implemented with microservice architecture.
-In general, the following microservices can be involved to make the entire order placing request.</p>
+<p><strong>Nature of Sagas:</strong></p>
 </div>
 <div class="ulist">
 <ul>
 <li>
-<p>order-service</p>
-<div class="ulist">
-<ul>
-<li>
-<p>initialize the order.</p>
+<p><strong>Distributed Transactions:</strong> Sagas break down a large transaction into a series of smaller, independent transactions that can be managed separately across different services.</p>
 </li>
 <li>
-<p>update the order status</p>
-</li>
-</ul>
-</div>
-</li>
-<li>
-<p>payment-service</p>
-<div class="ulist">
-<ul>
-<li>
-<p>make pre-auth</p>
-</li>
-<li>
-<p>make real payment</p>
-</li>
-</ul>
-</div>
-</li>
-<li>
-<p>Stock-service</p>
-<div class="ulist">
-<ul>
-<li>
-<p>update the inventory, and so on.</p>
-</li>
-</ul>
-</div>
+<p><strong>Compensating Actions:</strong> If a transaction in the saga fails, compensating actions are triggered to revert the previous transactions.</p>
 </li>
 </ul>
 </div>
 <div class="paragraph">
-<p>Even though the entire transaction is pace-order, that transaction has many sub atomic-transactions.
-Those transactions have been distributed along with many microservices.
-Each service performs a signal local transaction to implement the individual functionalities.</p>
+<p><strong>Eventual Consistency:</strong></p>
 </div>
-<div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-diagram-distributed-transaction.drawio.svg" alt="distributed transaction"></span></p>
-</div>
-<div class="paragraph">
-<p>To make a successful transaction, all three microservices must complete the individual local transactions.
-If any of the microservice fails to complete its local transaction, all the completed transactions (So far) should be rolled back to ensure data integrity.
-As per the example, if the <strong>make-payment</strong> atomic transaction is failed, all other successfully executed transactions should be rolled back to ensure data integrity.
-This is an example of a distributed transaction as the transaction boundary crosses multiple services and databases.</p>
+<div class="ulist">
+<ul>
+<li>
+<p><strong>Asynchronous Execution:</strong> Because transactions in a saga are executed asynchronously and independently, immediate consistency is not guaranteed.
+Instead, the system achieves eventual consistency as each step in the saga completes and as compensating actions resolve any issues from failed steps.</p>
+</li>
+<li>
+<p><strong>Consistency Model:</strong> Eventual consistency is a natural fit for sagas, as it allows for high availability and partition tolerance.
+The system remains operational and available even as it progresses towards a consistent state.</p>
+</li>
+<li>
+<p><strong>Recovery and Retries:</strong> Sagas often include mechanisms for retrying failed transactions and handling transient errors, further supporting the eventual consistency model.</p>
+</li>
+</ul>
 </div>
 </div>
 </div>
 <div class="sect1">
-<h2 id="_challenges_of_distributed_transaction">Challenges of Distributed Transaction</h2>
+<h2 id="classification_of_saga_transactions">Classification of SAGA transactions</h2>
 <div class="sectionbody">
 <div class="paragraph">
-<p>Distributed transactions in a microservice architecture pose two key challenges.
-The first one is maintaining ACID.</p>
+<p>According to the behaviors of the transaction, we can mainly identify 3 transaction types that can be happened when we use saga.</p>
 </div>
 <div class="ulist">
 <ul>
 <li>
-<p><strong>Atomicity across services</strong> (maintaining ACID)</p>
-<div class="paragraph">
-<p>To ensure the correctness of a transaction, it must be an atomic, consistent, isolated, and durable (ACID).
-The atomicity ensures that all or none of the steps of a transaction should complete.
-Consistency takes data from one valid state to another valid state.
-Isolation guarantees that concurrent transactions should produce the same result that sequentially transactions would have produced.
-Lastly, durability means that committed transactions remain committed irrespective of any type of system failure.
-In a distributed transaction scenario, as the transaction spans several services, it always remains a key concern to ensure ACID.</p>
-</div>
+<p><strong>Fully success transaction</strong></p>
 </li>
 <li>
-<p><strong>Managing the transaction isolation level.</strong></p>
-<div class="paragraph">
-<p>It specifies the amount of data that is visible in a transaction when the other services access the same data simultaneously.
-In other words, if one object in one of the microservices is persisted in the database while another request reads the data, should the service return the old or new data?</p>
+<p><strong>Rollback/Compensation/Revert success transaction</strong></p>
+</li>
+<li>
+<p><strong>Rollback/Compensation/Revert failed transaction</strong></p>
+</li>
+</ul>
 </div>
+<div class="sect2">
+<h3 id="fully_success_transaction"><span class="icon green"><i class="fa fa-circle"></i></span> Fully Success</h3>
+<div class="paragraph">
+<p><span class="image"><img src="../images/transaction-success.svg" alt="distributed transaction" height="300"></span></p>
+</div>
+<div class="paragraph">
+<p>As we discussed earlier, we had used a number of microservices for doing one single execution.
+Just assume we have used 5 microservices to be executed and all of them have been worked without any errors.
+Then there is no revert processes have been executed.
+That means all the microservices are up and running, and there haven&#8217;t been occurred exceptions internally inside each microservice.</p>
+</div>
+<hr>
+</div>
+<div class="sect2">
+<h3 id="revert_success_transaction"><span class="icon yellow"><i class="fa fa-circle"></i></span> Compensation Success</h3>
+<div class="paragraph">
+<p><span class="image"><img src="../images/rollback-compensation-revert-success-transaction.svg" alt="revert success transaction" height="300"></span></p>
+</div>
+<div class="paragraph">
+<p>In this time, An exception has occurred when one of microservices get execute.
+Just assume the coordinator has been executed 3 microservices successfully, but at the 4th one, an error has occurred due to a network exception or whatever internal exception that the microservices have been thrown.
+Now the coordinator has to execute revert function regarding all microservices that executed earlier.
+So the coordinator will start to execute all the revert functions one by one as a sequence.
+If those revert functions have been executed successfully, these kinds of transactions are going to these types.
+Simply we did a set of transactions but unfortunately got an error, but all the revert processes are done successfully.</p>
+</div>
+<hr>
+</div>
+<div class="sect2">
+<h3 id="revert_failed_transaction"><span class="icon red"><i class="fa fa-circle"></i></span> Compensation Failed</h3>
+<div class="paragraph">
+<p><span class="image"><img src="../images/rollback-compensation-revert-failed-transaction.svg" alt="rollback compensation revert failed transaction" height="300"></span></p>
+</div>
+<div class="paragraph">
+<p>In this time, the coordinator tries to execute the transactions one by one.
+But while doing the execution, an error occurred after doing some executions, and the coordinator gets started to execute all the revert processes that regard to the microservices that previously executed.
+But unfortunately, while doing the revert executions, an error gets occurred because of a network issues.
+(Network issues means it can be happened because there is no endpoint in active at that time or kind of actual network problems)</p>
+</div>
+<hr>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_saga_translations_summary">SAGA translations — Summary</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p><strong>Fully success transaction</strong></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/fully-success-transaction-summary.svg" alt="Fully Success Transaction Summary" height="300"></span></p>
+</div>
+<hr>
+<div class="paragraph">
+<p><strong>Rollback/Compensation/Revert success transaction</strong></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/revert-success-transaction-summary.svg" alt="Revert Success Transaction Summary" height="300"></span></p>
+</div>
+<hr>
+<div class="paragraph">
+<p><strong>Rollback/Compensation/Revert failed transaction</strong></p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/revert-failed-transaction-summary.svg" alt="Revert Failed Transaction Summary" height="300"></span></p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_challenges_and_considerations_of_using_saga">Challenges and Considerations Of using Saga</h2>
+<div class="sectionbody">
+<div class="ulist">
+<ul>
+<li>
+<p><strong>Complexity</strong>: Implementing and managing sagas requires careful planning and design, especially for failure recovery.</p>
+</li>
+<li>
+<p><strong>Idempotency</strong>: Ensuring that compensating transactions are idempotent (safe to run multiple times) is crucial to avoid inconsistent states.</p>
+</li>
+<li>
+<p><strong>State Management</strong>: Keeping track of the state of the saga and handling retries can add complexity, particularly in orchestration-based sagas.</p>
 </li>
 </ul>
 </div>
 <div class="paragraph">
-<p>To overcome the Distributed Transaction Challenge in Microservice Architecture, we can follow the Saga design pattern.
-Let&#8217;s dive into the deep Saga design pattern next.</p>
+<p>StackSaga framework provides an easy way to overcome these Challenges along with more additional features.</p>
 </div>
 </div>
 </div>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-05-27 17:08:58 +0530
+Last updated 2024-05-28 18:56:21 +0530
 </div>
 </div>
 </body>
