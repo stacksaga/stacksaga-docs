@@ -1,9 +1,9 @@
 [[revert_success_transaction_scenario]]
-= icon:circle[role=yellow,1x] Compensation Success Transaction
+= icon:circle[role=yellow,1x] Compensating Success Transaction
 
-here, the SEC hasn't successfully executed all the executors. an error occurred while after some processing. therefore, the transaction has a compensation/revert executions.
+here, the SEC hasn't successfully executed all the executors. an error occurred while after some processing. therefore, the transaction has a Compensating/revert executions.
 
-image::Architecture-Stacksaga-revert-success-transaction-scenario.drawio.svg[alt="Compensation/Revert success transaction scenario",height=300]
+image::Architecture-Stacksaga-revert-success-transaction-scenario.drawio.svg[alt="Compensating/Revert success transaction scenario",height=300]
 
 
 * pass:[<span class="rounded-number">1</span>] as the first step the users make the request and the *OrderController* catch the request.
@@ -20,12 +20,12 @@ Before invoking the executor that you provided as the *start-executor* SEC saves
 #Due to this executor is a query executor, there is no status update process have been executed here.#
 
 * pass:[<span class="rounded-number">6</span>] SEC executes the *[Command] PaymentExecutor* executor that you provided. pass:[<span class="rounded-number">6.1</span>] due to the executing the process method by the SEC, the *ExternalPaymentService's* *makePayment()* method will be invoked. pass:[<span class="rounded-number">6.2</span>] the *ExternalPaymentService* will call the *payment-service* and make a request to make-payment process. at this time, the request failed due to an exception.
-* pass:[<span class="rounded-number">7</span>] the SEC will invoke *onProcessException* method of the handler class that you provided. there you can get notified about the *process failure.* the transaction can't be executed forward anymore, the compensation process will start from this point.
+* pass:[<span class="rounded-number">7</span>] the SEC will invoke *onProcessException* method of the handler class that you provided. there you can get notified about the *process failure.* the transaction can't be executed forward anymore, the Compensating process will start from this point.
 +
 **if you want to update the order status or update the customer, you can invoke your code here. in this example, it hasn't been implemented.
-* pass:[<span class="rounded-number">8</span>] due to the final successful executed *OrderExecutor* (There is no compensation because the UserExecutor is a query executor.) SEC invokes the *doRevert* method of the *OrderExecutor*. pass:[<span class="rounded-number">8.1</span>] due to the executing of the *doRevert* method, *createOrderRevert* method will be invoked and do the revert process of the make-payment. pass:[<span class="rounded-number">8.2</span>] in the compensation process if you want to store some data regarding the revert process, you can store them into the [hint-store] the framework provides. that stored data is saved at this step. pass:[<span class="rounded-number">8.4</span>] after invoking successfully the revert, the SEC will invoke *onEachRevertPerformed* method regarding the revert process. pass:[<span class="rounded-number">8.4</span>] the customer will be notified about the revert process. (if you want to update the order status, you can invoke your code here as well. that part hasn't been implemented in this example.)
-* pass:[<span class="rounded-number">9</span>] StackSaga state-machine knows that the compensation is done. therefore, SEC invokes the *onTransactionCompleted* method as *REVERT_SUCCESS*. pass:[<span class="rounded-number">9.1</span>] you can update the status of the place-order regarding the revert was processed. pass:[<span class="rounded-number">9.2</span>] after that the customer will be notified about the revert success process of their order.
+* pass:[<span class="rounded-number">8</span>] due to the final successful executed *OrderExecutor* (There is no Compensating because the UserExecutor is a query executor.) SEC invokes the *doRevert* method of the *OrderExecutor*. pass:[<span class="rounded-number">8.1</span>] due to the executing of the *doRevert* method, *createOrderRevert* method will be invoked and do the revert process of the make-payment. pass:[<span class="rounded-number">8.2</span>] in the Compensating process if you want to store some data regarding the revert process, you can store them into the [hint-store] the framework provides. that stored data is saved at this step. pass:[<span class="rounded-number">8.4</span>] after invoking successfully the revert, the SEC will invoke *onEachRevertPerformed* method regarding the revert process. pass:[<span class="rounded-number">8.4</span>] the customer will be notified about the revert process. (if you want to update the order status, you can invoke your code here as well. that part hasn't been implemented in this example.)
+* pass:[<span class="rounded-number">9</span>] StackSaga state-machine knows that the Compensating is done. therefore, SEC invokes the *onTransactionCompleted* method as *REVERT_SUCCESS*. pass:[<span class="rounded-number">9.1</span>] you can update the status of the place-order regarding the revert was processed. pass:[<span class="rounded-number">9.2</span>] after that the customer will be notified about the revert success process of their order.
 
-NOTE: To keep the overall state of the transaction eventually consistent, the revert processes (compensation processes) can be retryable.
-Because all the compensations must be invoked.
+NOTE: To keep the overall state of the transaction eventually consistent, the revert processes (Compensating processes) can be retryable.
+Because all the Compensatings must be invoked.
 To have knowledge about how retry works of revert-processes in StackSaga, please refer to https://mafei-dev.github.io/stacksaga-doc/architecture/1.0/topics/retryable-exception-vs-non-retryable-exception.html#how-retry-works-in-the-revert-process[this].
