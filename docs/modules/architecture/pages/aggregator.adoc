@@ -1,7 +1,27 @@
 = Saga Aggregator.
 
-The *aggregator* object is the main place that all the data is stored for the entire transaction.
-According to the Place-order example, the entire process has a set of sub processes like
+The *aggregator* object is the main component that all the data is stored for the entire transaction.
+It acts as the data bucket that you bring the data to each executor by updating time to time.
+As well as bringing the data into the executors, each executor can update the aggregator with new data while the executor's scope.
+Then the next upcoming executors can use that updated data in their executor scope.
+
+
+The aggregator data is updated time to time, and that data is stored each and every event happens.
+That means, At the initial the data that you update to aggregator, it is saved as the initial state in the xref:event_store.adoc[event-store].
+And after executing the 1st executor, the aggregator state is updated.
+Again, that state is saved in the event-store with the name of the executor.
+It is called aggregator event sourcing.
+
+There are two major reasons for aggregator event sourcing.
+
+. xref:replay-transaction.adoc[To Event Replay] (Replay the executors).
+- You know that all the atomic executions are retryable in case of resource-unavailable situations (If the execution is failed due to connection issue while the communication).
+Then the xref:SEC.adoc[SEC] has to replay the execution again with the same data (Same aggregator state) after a while (based on the configured xref://[configurations]).
+
+. To View transaction trace via dashboard.
+- Due to the aggregator event sourcing, you can debug all the changes that have been made by each executor via the admin dashboard like what is the aggregator state that was when the particular executor is started and how the aggregator state looks like after executing that particular executor.
+
+According to the Place-order example, the entire process has a set of sub processes like:
 
 . Fetching user's details.
 . Initialize order.
@@ -9,27 +29,18 @@ According to the Place-order example, the entire process has a set of sub proces
 . Update the stock.
 . Finalize the order by making the real payment.
 
-
 While executing those atomic processes, you have to store some data regarding the transaction.
 For instance, at the initially you can store the order-related data in the aggregator like username of the customer, the total amount, the items that the customer bought, etc.
 After that as the 1st execution, the user's data is fetched from the user-service.
-to fetch the user's more details, we have to use the username that has been stored in the aggregator object.
-and also the user's details are stored in the aggregator object to be used upcoming executions.
+To fetch the user's more details, we have to use the username that has been stored in the aggregator object.
+And also the user's details are stored in the aggregator object to be used upcoming executions.
 That stored user's data will be used for *Initialize order* and *Pre-Auth process*.
-and after making the *Pre-Auth process*, a reference ID will be returned from the payment-service for make the real payment.
-that reference ID also saved in the aggregator object to
+And after making the *Pre-Auth process*, a reference ID will be returned from the payment-service for make the real payment.
+That reference ID also saved in the aggregator object to.
 
-The process is started from creating order.
-After creating the order, you have a data to be kept.
-As a response, you will get the order id.
-You have to keep it, and you have to reuse it in your whole process.
-After creating the order, you check the user activeness.
-Then the user service is called and get the response of user's activeness and keep that data as user is active at the time of the process started.
-Likewise, each and every process will return you to data.
-Those data you have to keep in one location.
-That location called as the aggregator.
-At the start, you have to declare the variables, and after doing each process, you can update the values in the aggregator.
-On the other hand, we can say it is the data bucket that you bring the data to each executor.
+Here is How the aggregator changes while the transaction on each executor.
+
+image:stacksaga-diagram-aggregator-state.drawio.svg[alt="stacksaga diagram aggregator state"]
 
 Another special thing is that the aggregator is used as the key of your entire transaction.
 That means the executors are identified by the aggregator class that you use.
@@ -40,6 +51,14 @@ It contains many sub processes like create order, check user ect.
 Each process is introduced to the framework by using executors.
 So, for each process have separate executors.
 When you create each executor, you should mention what ks the aggregator that you want to use in that executor.
+
+== Saga Aggregator life cycle summary
+
+- The Saga Aggregator object is created when you start the transaction by accessing the saga orchestration engine.
+- After that, the aggregator is updated continuously from time to time by the executors as needed.
+- each and every update is saved in the event-store after executing each executor by serializing as a JSON object.
+- if the transaction is failed as a retryable one, the aggregator object is restored by the orchestration engine when the transaction is trying to invoke.
+
 
 NOTE: You can store/update the data in the aggregator by using the process execution only (doProcess()).
 If you want to keep some metadata while your revert/Compensating processes, you can use the hint-store that the framework provides.
