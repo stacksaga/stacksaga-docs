@@ -1,17 +1,34 @@
 = Saga execution coordinator. (SEC) [[SEC]]
 
-The Saga Execution Coordinator (SEC) is the core component for implementing a successful Saga flow.
-It maintains a Saga log that contains the sequence of events of a particular flow.
-If a failure occurs within any of the components, the SEC queries the logs and helps identify which components are impacted and in which sequence the compensating transactions must be executed.
-Essentially, the SEC helps maintain an eventually consistent state of the overall process.
+Due to the reason of Stacksaga is one of Saga orchestration framework, a central orchestration engine is required to handle the workflow based on the programatical navigation. Other than that Saga Execution Coordinator perform the following duties.
 
-If the SEC component itself fails, it can read the SEC logs when coming back up to identify which of the components are successfully rolled back, identify which ones were pending, and start calling them in reverse chronological order.
+1. Navigate the transaction work flow.
+2. Retrying the transactions
+3. Scheduling the executions
+4. Managing dual consistency problem
+5. State management
+6. Event publishing
+7. Aggregator states serialization and Deserialization
 
-* Stores & interpret a Saga’s state machine
-* Executes the Requests of a Saga by talking to other services
-* Handle failure recovery by executing Compensating Requests
+Let's see the fundamental involvement of SEC in the framework with an example.
+Let's get the same example that E-Commerce application.
+Then you know we have to create an aggregator for storing necessary data.
+And also we have to create the executors for each atomic transaction.
+Creating aggregator and executors is not enough to start the execution.
+To run the execution, we have to notify SEC with the starting executor and the starting aggregator.
+Then the SEC will execute each executor one by one based on the navigation that each executor does.
+As an example, if we provide the starting executor as order-init executor, it's started from that executor, and when it's executed, that particular executor will navigate to the next executor based on the logic.
+(Providing the execution flow is fully dynamic in Stacksaga.
+It shouldn't be a pre-defined one)
 
 image:stack-saga-e-store-example-SEC.drawio.svg[alt="StackSaga  Saga Execution Coordinator (SEC)",width=100%,opts=interactive,scaledwidth=100%]
+
+Here you can see how the SEC does work for managing work flow and publishing events in high-level.
+
+. You can access the orchestration engine and start the process by providing the initial aggregator data and initial executor.
+. Then coordinator coordinates and manages the work flow based on the navigation that you command in the executors.
+Each executor will be invoked by SEC, and then your methods will be called for communicating with target services.
+. If there's a primary execution error, Handle the failure recovery by executing Compensating Requests.
 
 NOTE: If you want to see how SEC works for each transaction mode in detail, please refer <<stack_saga_transaction_type,StackSaga Transaction Types>>.
 It will give you a better understanding of StackSaga framework as well.
