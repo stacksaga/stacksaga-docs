@@ -1,71 +1,128 @@
 = Saga Executor
 
-According to the saga design pattern, you have to separate your entire transaction in to small atomic transactions.
-In general, each atomic execution can have two executions called *process execution* and *Compensating execution*.
+The executor is the where that your atomic transaction should be implemented.
+You know that the entire transaction consists of multiple steps (multiple atomic transactions) in the saga design pattern.
+To execute each atomic transaction, you have to communicate with other microservices or third party APIs.
+In Stacksaga, there's a specific location that should implement that communicating process.
+It is called as Executor.
 
-. *Process Execution / Main Execution*
-- The main execution that you want to archive the atomic transaction. +
- +
-As an example, In your <<what_is_stacksaga,place order example>> you had multiple individual processes to overcome the entire transaction like checking use's validation, checking stock's availability, updating stock, making payment, dispatching the order.
-Those executions that caused to start the atomic processes are called as *Process execution*. +
-Those are going forward [icon:arrow-circle-right[1x,role=green]].
+For instance, there were 5 sub executions for completing the entire transaction.
+To execute those 5 executions, we have to implement 5 executors in Stacksaga.
+
+When it's considered the atomic executions, it can be divided into two types based on the atomic transaction has a compensating execution or not.
+If the execution is a read only operation, it doesn't impact on the database state.
+That means there's nothing to undo.
+
+For instance, in our placing order example, there was an atomic execution for fetching the user's details by calling the user service.
+Due to the fetching the user's details from the service, the impact on the user-service's database is zero.
+We just fetched the data.
+
+In general, an atomic execution can have two executions called *primary-execution* and *compensating-execution*.
+
+. *Primary Execution / Main Execution*
+- Primary Execution refers to the main operations that are part of a long-running transaction.
+Each primary execution is a step in the overall business process and performs a specific action that moves the process towards its completion.
+These operations are typically idempotent and isolated, meaning that they can be executed independently of each other without causing side effects.
++
+For example, In your place order example you had multiple individual transactions to overcome the entire transaction like fetching user's details, initialize the order, making the pre-auth, updating the stock, and make the real payment.
+
+- Those sets of primary executions are moved towards. [icon:arrow-circle-right[1x,role=green]].
 
 . *Compensating Execution / Revert Execution*
-- Most of the *Main Executions* can have a revert process to undo the executions that were done before If you want to get state back of your changed data (Because you can't do rollback just like you do in the Monolithic application).
-The executions that are used for the reverting the done-process before are called as *Compensating Executions*. +
- +
-As an example, If the stock-updating process was done successfully but due to one of the next atomic executions' failures, the stock-updating execution should be restored (Undo the process or get the state back). +
-If the main execution has a revert execution, Those are going backward [icon:arrow-circle-left[1x,role=green]].
+- Compensating Execution refers to the operations that are performed to undo the effects of a previously completed primary execution if a subsequent step fails.
+Each primary execution has a corresponding compensating execution designed to reverse its effect.
+This ensures that the system can revert to a consistent state even if part of the transaction fails.
+
+- Those sets of compensating executions are moved backward. [icon:arrow-circle-left[1x,role=green]].
+
+== Executor types
+
+Based on the above classification, the saga executors are two types in StackSaga.
+
+* xref:architecture:command_executor_architecture.adoc[Command executors]
++
+If some atomic execution has both primary execution and compensating, those kinds of atomic transactions should be implemented inside the command executor. +
+In *Command executor* has two methods for making the primary execution and making the compensating execution.
+(See the command executor xref:framework:command_executor.adoc[implementation] or xref:framework:command_executor.adoc[read more])
++
+*Examples*:
++
+** initialize order
+** make pre-auth
+** update stock
+** make real payment
 
 
-NOTE: Even though most of the executions can have a Compensating Execution / Revert Execution, Sometimes it is not.
-It is based on your nature of the execution.
-It can be explained by the CRUD operations.
-If your atomic execution cased to a database's state change, That kind of executions can have a revert execution to get the state back.  +
-As an example, In the above example, *checking use's validation, checking stock's availability* executions have no revert executions.
-Because that were only read operations. +
+* xref:architecture:query_executor_architecture.adoc[Query executors]
++
+If the atomic execution has only the primary execution, those kinds of executions should be implemented inside the Query executor.
++
+In *Query Executor* has only one method for making the primary execution.
+(See the query executor xref:framework:query_executor.adoc[implementation] or xref:framework:query_executor.adoc[read more])
++
+*Example*:
++
+** collecting user delivery details
+
+The below diagram shows the Executors types and what are the methods they have.
+
+image:stack-saga-e-store-example-executor-types-in-stacksaga.drawio.svg[alt="Stacksaga Executors",height=300]
+
+== Executions Classifying Tips
+
+When you are creating the executors, you have to decide that whether the executor is a *command-executor* or *query-executor*.
+To determine that the following chart will be helpful (from the database prospective).
+
+The summary of the chart is that if the atomic execution is a *read-only* one, it should be implemented in a *query-executor*, and if the atomic operation does some state change on any database, that atomic operation should be implemented in a *command-executor*.
 
 |===
-|Process Execution |Has a Revert
+|Operation |Has a Revert | Executor Type
 
 |*C* - Create
 |*YES*
+|Command-Executor
+
 
 |*R* - Read
 |*NO*
+|Query-Executor
 
 |*U* - Update
 |*YES*
+|Command-Executor
 
 |*D* - delete
 |*YES*
+|Command-Executor
 |===
 
-To hand over your set of atomic transactions regarding the entire transaction to the <<SEC,SEC>>, you have to identify whether the atomic transaction has a revert operation or not.
-Because StackSaga framework does provide tow Codespace types for setting up each atomic execution.
+For instance, let's classify the executions that we have in our placing-order example.
 
-According to the framework, those *Codespaces* are called as *Executors*.
+|===
+|Execution |Executor Type | Reason
 
-. <<query_executor_architecture,Query executors>>
-- If some atomic process has no Compensating (query execution), those kinds of processes are used in a query executor. +
-— In *Query Executor* has only one <<query_executor,method>> for making the main process.
-+
-*Example*: If you want to check, the user is active at the time of the transaction happen, and you want to keep the user's activeness until the end of the transaction. +
- +
-<<query_executor,Implementation>>|<<query_executor_architecture,Read More>>
-. <<command_executor_architecture,Command executors>>
-- If some atomic process has a Compensating (command execution), those kinds of processes are used in a command executor. +
-— In *Command executor* has two <<command_executor,methods>> for making the main process and making the revert process.
-+
-*Example*: Think that you want to create an order and order process is done successfully.
-But after the make-payment process is failed.
-Then the Compensating process will be started.
-Now you must have a Compensating against the creating order.
-So create an order process is a command process, and it goes to a command executor. +
- +
-<<command_executor,Implementation>> | <<command_executor_architecture,Read More>>
+|Collecting user's delivery details
+|Query-Executor
+|Fetching data doesn't make an impact on the user-service's database.
 
-The below diagram shows the Executors types and what are the methods they have.
-To see how you can implement these executors, <<saga_executors,read here>>.
+|Initialzie the order
+|Command-Executor
+|The order should be canceled if any upcoming atomic transaction is failed after initializing the order.
 
-image:stack-saga-e-store-example-executor-types-in-stacksaga.drawio.svg[alt="Stacksaga Executors",height=300]
+|Making Pre-Auth
+|Command-Executor
+|The Pre-Auth should be canceled if any upcoming atomic transaction is failed after making the Pre-Auth.
+
+|Updating The Stock
+|Command-Executor
+|The Stock should be restored if any upcoming atomic transaction is failed after reducing the stock.
+
+|Making Real Payment
+|Command-Executor
+|The Payment should be refunded if any upcoming atomic transaction is failed after making the payment.
+
+|===
+
+NOTE: In the placing-order example, there is no any atomic operation after making the payment.
+But as the theory, making payment execution should be executed withing a command-executor.
+because, for instance, if a new another atomic process is added in the future after making the payment, you must implement the compensating execution for making the payment.
