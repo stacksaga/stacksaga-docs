@@ -1,4 +1,18 @@
-= Saga Executors
+= Overview
+
+Before dive in to the executor component, you should have an awareness about the atomic operations (atomic transaction/atomic execution).
+
+== What's an atomic transaction (atomic operation)?
+
+An atomic transaction refers to a set of operations that must either all succeed or all fail as a single unit.
+In microservices, that kind of single unit is called as an atomic execution.
+
+For instance, in the placing-order example, there were 5 atomic operations.
+Those 5 atomic executions can consist of many sets of operations at service level.
+
+image:stacksaga-diagram-atomic-transaction.drawio.svg[]
+
+== Saga Executors
 
 The executor is the where that your atomic transaction should be implemented.
 You know that the entire transaction consists of multiple steps (multiple atomic transactions) in the saga design pattern.
@@ -6,7 +20,8 @@ To execute each atomic transaction, you have to communicate with other microserv
 In Stacksaga, there's a specific location that should implement that communicating process.
 It is called as Executor.
 
-For instance, there were 5 sub executions for completing the entire transaction.
+For instance, let's have a look at the placing-order example.
+There were 5 sub executions for completing the entire transaction.
 To execute those 5 executions, we have to implement 5 executors in Stacksaga.
 
 When it's considered the atomic executions, it can be divided into two types based on the atomic transaction has a compensating execution or not.
@@ -67,6 +82,29 @@ In *Query Executor* has only one method for making the primary execution.
 The below diagram shows the Executors types and what are the methods they have.
 
 image:stack-saga-e-store-example-executor-types-in-stacksaga.drawio.svg[alt="Stacksaga Executors",height=300]
+
+== Guidelines for creating executors.
+
+The execution that is implemented in the saga executor should be an atomic transaction.
+That means you cannot implement multiple transactions in the same executor.
+The reason for one executor can have only one atomic transaction is that the executor is the wrapper component that is used for retrying by the saga orchestration engine.
+Then, if you have added many atomic transactions inside the executor saga, the SEC doesn't know that what was exactly failed previously.
+Because, for instance, if the executor had 3 atomic transactions, the first two executions might have been executed successfully.
+But due to the failure of the 3rd one, the executor is retired.
+The worst thing that can happen is that both 1st and 2nd atomic transactions are executed again and again until the 3rd execution is executed successfully if the 3rd execution is failed due to a resource-unavailable issue (Retractable issue).
+
+This can lead to data redundancy and potential problems with data integrity and consistency.
+And the other thing is that if it's wanted to execute the compensating transaction, the SEC has no awareness about what specific atomic transaction should be undone.
+Because the SEC considered an executor as a single atomic operation.
+
+TIP: There are two possibilities to implement multiple atomic operations in the saga executor.
+You know already there are two types of atomic executions in Stacksaga called command executions and query executions.
+The query executions can sometimes be used together in the same executor based on the use case. +
+Using multiple read only atomic operations inside the same executor can reduce the event sourcing overhead.
+Because you know that after each executor, the new state of the aggregator is stored as a new event in the database by the Saga engine.
+For instance, if you implement 3 read only atomic transactions in the same executor, you can reduce the event sourcing overhead by 2.
+Because if we added those 3 executions to the 3 executors, 3 times the event store is updated after each execution.
+// todo :add more
 
 == Executions Classifying Tips
 
