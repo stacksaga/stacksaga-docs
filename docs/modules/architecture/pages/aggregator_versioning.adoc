@@ -1,14 +1,41 @@
 = Aggregator Versioning
 
-In StackSaga, versioning is the most important thing for you as the developer.
-All the applications are being updated with new versions ever.
-In StackSaga, you have to manage your versioning for each aggregator.
-Because any kind of changes that you make regarding the aggregator, it caused for a version update.
+Aggregator versioning is the most important thing in StackSaga.
+All the applications are being updated with new features time to time.
+Any kind of changes that you make regarding the entire transaction, it caused for a version update of the particular aggregator.
+
+*Why it's necessary to update the aggregator version?*
+
+You already know that Stacksaga does support event sourcing and xref:replay-transaction.adoc[event retrying] to overcome the eventual consistency.
+To identify the xref:aggregator_versioning.adoc#what_is_the_events_version[event's version] is most important when the event is retired.
+Because all the time the aggregator state that comes to the executor is not equal to the current version of the aggregator.
+Therefore, You should know sometimes what is the aggregator version that transaction has been initialized.
+
+For instance, just imagine that a transaction is initiated with aggregator version 1.0.0 and the transaction is failed while executing due to a network issue.
+Then the transaction is temporally stooped for a while until the scheduler is triggered.
+just think a new version will be
+
+====
+[[what_is_the_events_version]]
+*What is the event's version?*
+
+The first event of the aggregator is saved with the version of the aggregator when the transaction is initialized.
+It is called as event's version.
+That means what was the aggregator version that was when the transaction is initialized.
+====
+
+For instance, let's have a look at the placing order example.
+
+The aggregator version can be updated due to two main reasons.
+Changing the aggregator structure, Changing the executor structure
+
 Not only the aggregators, even if you make some changes in one of the executors, It also causes a version update.
 Because every change you make related to the aggregator, it will change the aggregator state.
 If the aggregator-state is changed, the version must be updated.
 
 As an example, if you have PlaceOrderAggregator, the following changes can be caused to a version update.
+
+////
 
 *Old Aggregator version Structure.*
 
@@ -38,3 +65,69 @@ image:stacksaga-executor-class-change.drawio.svg[Stacksaga Making Executors Chan
 +
 - Compared to the old version, Some changes have been made for some existing executors without changing any executors.
 This will cause a version update.
+////
+
+
+== When the aggregator version should be updated
+
+* xref:aggregator_versioning.adoc#aggregator_structure_changing[Aggregator Structure Changing]
+** xref:aggregator_versioning.adoc#adding_new_data[Adding new data]
+** xref:aggregator_versioning.adoc#removing_existing_data[Removing existing data]
+* xref:aggregator_versioning.adoc#executor_changing[Executor Changing]
+** xref:aggregator_versioning.adoc#changing_something_inside_the_existing_executor[Changing something inside the existing executor]
+** xref:aggregator_versioning.adoc#changing_executors_count[Changing Executors count]
+*** xref:aggregator_versioning.adoc#adding_new_executor[Adding new executor(s)]
+*** xref:aggregator_versioning.adoc#removing_existing_executor[Removing existing executor(s)]
+
+[[aggregator_structure_changing]]
+=== Aggregator Structure Changing
+
+If the aggregator's data set is changed, the aggregator version should be updated.
+
+IMPORTANT: Changing the Structure is the reason for the xref:version_casting_architecture.adoc[event-casting].
+
+[[adding_new_data]]
+==== Adding new data to the aggregator
+
+If some new data is added to the aggregator object, the aggregator version should be updated.
+Changing the structure of the aggregator by adding new data is the reason for xref:version_casting_architecture.adoc#aggregator_oriented_up_casting[event-upcasting]
+
+image:stacksaga-diagram-aggregator-change-add-new-data.drawio.svg[alt="stacksaga diagram aggregator change add new data"]
+
+[[removing_existing_data]]
+==== Removing existing data from the aggregator
+
+If some existing data is removed from the aggregator object, the aggregator version should be updated.
+Changing the structure of the aggregator by removing the existing data is the reason for xref:version_casting_architecture.adoc#aggregator_oriented_down_casting[event-down-casting]
+
+image:stacksaga-diagram-aggregator-change-remove-data.drawio.svg[alt="stacksaga diagram aggregator change remove data"]
+
+[[executor_changing]]
+=== Executor Changing
+
+Without changing the aggregator structure, if it makes some changes related to the executors, at this time also the aggregator version should be updated.
+It can be happened both changing the count of executors or changing something in existing executor(s).
+
+IMPORTANT: It is possible to change an existing *query-executor* to *command-executor*.
+But it is not possible to *command-executor* to *query-executor*.
+Even it is possible to update *query-executor* to *command-executor*, StackSag team does not recommend changing the existing executor type.
+
+[[changing_something_inside_the_existing_executor]]
+=== Changing something inside the existing executor
+
+image:stacksaga-diagram-executor-change.drawio.svg[alt="stacksaga diagram executor change"]
+
+[[changing_executors_count]]
+=== Changing Executors count
+
+[[adding_new_executor]]
+==== Adding new executor(s)
+
+image:stacksaga-diagram-executor-adding.drawio.svg[alt="stacksaga diagram executor adding"]
+
+
+[[removing_existing_executor]]
+==== Removing existing executor(s)
+
+image:stacksaga-diagram-executor-removing.drawio.svg[alt="stacksaga diagram executor removing"]
+
