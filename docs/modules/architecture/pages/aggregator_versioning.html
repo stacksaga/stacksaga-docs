@@ -451,13 +451,13 @@ Any kind of changes that you make regarding the entire transaction, it caused fo
 </div>
 <div class="paragraph">
 <p>You already know that Stacksaga does support event sourcing and <a href="replay-transaction.html">event retrying</a> to overcome the eventual consistency.
-To identify the <a href="#what_is_the_events_version">event&#8217;s version</a> is most important when the event is retired.
+To identify the <a href="#what_is_the_events_version">event&#8217;s version</a> is most important when the event is retried.
 Because all the time the aggregator state that comes to the executor is not equal to the current version of the aggregator.
 Therefore, You should know sometimes what is the aggregator version that transaction has been initialized.</p>
 </div>
 <div class="paragraph">
 <p>For instance, just imagine that a transaction is initiated with aggregator version 1.0.0 and the transaction is failed while executing due to a network issue.
-Then the transaction is temporally stooped for a while until the scheduler is triggered.
+Then the transaction is temporally stopped for a while until the scheduler is triggered.
 just think a new version will be</p>
 </div>
 <div class="exampleblock">
@@ -583,9 +583,9 @@ It can be happened both changing the count of executors or changing something in
 <i class="fa icon-important" title="Important"></i>
 </td>
 <td class="content">
-It is possible to change an existing <strong>query-executor</strong> to <strong>command-executor</strong>.
-But it is not possible to <strong>command-executor</strong> to <strong>query-executor</strong>.
-Even it is possible to update <strong>query-executor</strong> to <strong>command-executor</strong>, StackSag team does not recommend changing the existing executor type.
+It is possible to update an existing <strong>query-executor</strong> to <strong>command-executor</strong>.
+But it is not possible to update <strong>command-executor</strong> to <strong>query-executor</strong>.<br>
+Even it is possible to update <strong>query-executor</strong> to <strong>command-executor</strong>, The StackSaga team does not recommend changing the existing executor type.
 </td>
 </tr>
 </table>
@@ -594,19 +594,55 @@ Even it is possible to update <strong>query-executor</strong> to <strong>command
 <div class="sect2">
 <h3 id="changing_something_inside_the_existing_executor">Changing something inside the existing executor</h3>
 <div class="paragraph">
+<p>If you make some changes inside the existing executor, It also can be a cause for a version update.
+It depends based on your requirement.
+If the new update should not be impacted on the old events that are remains to be executed, you have to change the aggregator version.
+Then you can filter the old event from the new events.
+If the changes that you made are for all events, there is a possibility to ignore the updating.</p>
+</div>
+<div class="paragraph">
+<p>The following diagram shows some change has been done inside the command-executor 3 than the old one.</p>
+</div>
+<div class="paragraph">
 <p><span class="image"><img src="../images/stacksaga-diagram-executor-change.drawio.svg" alt="stacksaga diagram executor change"></span></p>
 </div>
 </div>
 <div class="sect2">
 <h3 id="changing_executors_count">Changing Executors count</h3>
+<div class="paragraph">
+<p>If the executor count is changed for an aggregator, it should be a cause for an aggregator version update.</p>
+</div>
 <div class="sect3">
 <h4 id="adding_new_executor">Adding new executor(s)</h4>
+<div class="paragraph">
+<p>If some new executor(s) are added to the entire transaction, it should be a cause for an aggregator version update.
+It can be any executor either <strong>command-executor</strong> or <strong>query-executor</strong> or any <strong>sub-executor</strong>.</p>
+</div>
+<div class="paragraph">
+<p>The following diagram shows that a new <strong>command-executor</strong> has been added called <strong>command-executor-4</strong>.</p>
+</div>
 <div class="paragraph">
 <p><span class="image"><img src="../images/stacksaga-diagram-executor-adding.drawio.svg" alt="stacksaga diagram executor adding"></span></p>
 </div>
 </div>
 <div class="sect3">
 <h4 id="removing_existing_executor">Removing existing executor(s)</h4>
+<div class="admonitionblock important">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-important" title="Important"></i>
+</td>
+<td class="content">
+Removing existing executor is one of the most important.
+Because it should be done carefully.
+The reason is that all the executors are exposed to event-retrying.
+If there are some old events related to the executor that you are going to remove, the old events can not be run without that executor.
+Therefore, it is recommended to keep the executor as it is even though if it&#8217;s not used for the new version.
+</td>
+</tr>
+</table>
+</div>
 <div class="paragraph">
 <p><span class="image"><img src="../images/stacksaga-diagram-executor-removing.drawio.svg" alt="stacksaga diagram executor removing"></span></p>
 </div>
@@ -617,7 +653,7 @@ Even it is possible to update <strong>query-executor</strong> to <strong>command
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-06-01 01:18:10 +0530
+Last updated 2024-06-01 15:44:25 +0530
 </div>
 </div>
 </body>
