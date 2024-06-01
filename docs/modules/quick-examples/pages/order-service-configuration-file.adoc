@@ -83,6 +83,9 @@ info:
     name: ${spring.application.name}
     version: ${stacksaga.app-release-version}
 logging:
+  pattern:
+    # <13>
+    level: "%5p [${spring.application.name:},%X{aggregatorId:-}]"
   level:
     org:
       stacksaga: debug
@@ -129,3 +132,22 @@ If multiple xref://[admin-server] instances are running, you can provide all the
 
 <12> You have to provide the datasource for the event-store that you use.
 In this example we have used `stacksaga-mysql-support` dependency we have to provide the Mysql datasource configurations.
+
+<13> due to stacksaga adding the aggregator id in to Mapped Diagnostic Context (MDC) for monitoring the transaction log, you can update your logging pattern like this.
+then you can see all the logs regarding the specific transaction.
+the output will be like this.
++
+image:stacksaga-transaction-id-log-with-pattern.png[]
++
+`SA-1717265615759-382463295016275` is the transaction if of that particular transaction.
+
+====
+NOTE: If you are using spring tracing implementation, you can keep the log pattern like this
+
+[source,shell]
+----
+%5p [${spring.application.name:},%X{traceId:-},%X{spanId:-},%X{aggregatorId:-}]
+----
+
+====
+
