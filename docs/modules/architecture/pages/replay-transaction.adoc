@@ -1,14 +1,62 @@
 = Transaction Replay. [[replay_transaction]]
 
-Transaction Replay concept is help to re-invoke the transaction that stopped for some reason in the past.
-Even though all the transactions can not be re-invoked, some transactions/executions can be re-invoked.
-Specially in the microservice architecture, a transaction can be deviated in to small atomic operations.
-Therefore, that atomic process can be failed at any time for some reason.
-But we have to be careful with that error if we are in a *distributed transaction*.
-It is not like in a standalone application with a single database.
-After executing some atomic operations successfully, reverting that executed executions is quite complicated than doing rollback in a single database.
-Even though Saga provides the way to have the Compensating, we can not give up the entire transaction easily.
-Therefore, it should be identified whether the transaction can be re-invoked or not.
+The Transaction-Replay helps to re-invoke the transaction that stopped due to xref:replay-transaction.adoc#resource-unavailable[resource-unavailable] issues.
+It guarantees eventual consistency.
+
+[[resource-unavailable]]
+====
+*Resource-Unavailable* term in the Microservice Architecture
+
+In a microservice architecture, a *"resource-unavailable"* issue typically refers to a situation where one microservice is unable to access a necessary resource.
+This resource could be another microservice, a database, a third-party API, or any other external system or service that the microservice depends on.
+====
+
+If a task is failed due to Resource Unavailable, it can be retried most of the time instead of stopping the task with en exception.
+Because It is not easy like in a standalone application with a single database.
+If one of atomic transactions is failed, other all atomic transactions that have been successfully executed should state back (undo).
+Replaying tasks (transactions/operations) helps to have the eventual consistency.
+
+For identifying the operation is a retryable operation or not, it is used xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException] and xref:framework:retryable_executor_exception.adoc[RetryableExecutorException].
+If the executor throws and `RetryableExecutorException` the saga engine keep the transaction in the event-store for retrying.
+
+NOTE: Other that the Stacksaga engine also might face for resource-unavailable issues most rarely due to using a database as the event-store.
+It's a most important problem when you use a saga orchestration engine with event sourcing.
+Stacksaga provides a reliable solution for that too.
+That is discussed under the xref:dual_consistency_problem_of_sec_in_microservice.adoc[dual-consistency] problem topic.
+
+== How to manage replaying?
+
+Replaying transactions is a batch process that executes with a scheduler.
+To replay the transactions, A schedule is used that you can configure.
+
+In the event-store, there can have transactions that waiting to be replayed, and those transactions are exposed for replaying when the scheduler is triggered.
+But as per architecture, who does trigger the scheduler within the running on instances?
+Due to the replaying is batch process, it can not be done in parallel by the many instances.
+That means all the available instances can't execute the transactions that are waiting to be replayed.
+
+====
+
+IMPORTANT: Sometimes you might think that why can't run the transactions by the own instance of each individual transaction at the same time? +
+The short answer is it can't be done due the instances are xref:replay-transaction.adoc#ephemeral[Ephemeral] in nature in the microservice architecture. +
+For instance, just imagine there are 10 instances running on, and there are 100 transactions have been stopped temporarily by them due to some network issues.
+After a while, the scheduler is triggered for replying the transactions on each instance.
+At that moment it can have different instances count due to scaling up or scaling down based on the load.
+Just imagine there was instance called "a" that made some retryable transactions before triggering the scheduler at it is might not be running when the scheduler is triggered.
+Then the transactions that made by the instance called "a" cannot be run ever.
+(Because the instance is identified with a random generated id and the transaction is stored with that instance id when the transaction is initiated).
+Then some transactions can be missing.
+This is one of the major reasons that replaying cannot involve all available instances at the same time.
+
+====
+
+[[ephemeral]]
+====
+*Ephemeral* behavior of the instances.
+
+In the context of microservices, ephemeral refers to the principle that a microservice can be created, destroyed, and replenished on-demand on a target easily, quickly, and with no side effects.
+====
+
+////
 
 The following reasons are caused to Transaction Replay.
 
@@ -51,3 +99,5 @@ After becoming as the master node, the instance has a special responsibility oth
 Here there is an allocation process by the master for other instances in the zone.
 
 The slaves try to invoke the *allocated* retryable transactions for that particular instance by the master node.
+////
+
