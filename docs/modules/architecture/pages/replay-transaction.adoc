@@ -24,7 +24,7 @@ It's a most important problem when you use a saga orchestration engine with even
 Stacksaga provides a reliable solution for that too.
 That is discussed under the xref:dual_consistency_problem_of_sec_in_microservice.adoc[dual-consistency] problem topic.
 
-== How to manage replaying?
+== Who is responsible for replaying?
 
 Replaying transactions is a batch process that executes with a scheduler.
 To replay the transactions, A schedule is used that you can configure.
@@ -38,8 +38,8 @@ Instead of using one instance for doing all replaying related, StackSaga uses a 
 
 There are 2 types of implementations for retrying transactions in StackSaga.
 
-* Master and Slave architecture.
-* Static Master and Slave architecture.
+. Master and Slave architecture.
+. Static Master and Slave architecture.
 
 ====
 
@@ -86,6 +86,7 @@ All the transactions are saved in the event-store with the following data.
 * Instance id: the instance that the transaction was initialized.
 * Region: the region that instance was located
 * Zone: the zone that instance was located
+* serviceName: the name of the service
 
 NOTE: You can see all the above metadata in the dashboard.
 
@@ -94,13 +95,42 @@ If the transaction was initiated in region-1 the transaction will be exposed to 
 
 Electing the leader is done based on your environment.
 
-== Service-Agent and Slave architecture for retrying
+== Service-Agent and Slaves architecture for retrying
 
-image:stacksaga-diagram-public-agent-leader-election.drawio.svg[alt="stacksaga diagram public agent leader election"]
+Service agent architecture refers to having a desperate service for doing the replay instead of selecting one of available instances like master and slaves architecture.
 
 image:stacksaga-diagram-agent-slaves-leader-election.drawio.svg[alt="stacksaga diagram agent slaves leader election"]
 
+NOTE: In this way, the retry dependencies shouldn't be added to the applications.
+Instead of that, just run the *saga-service-agent* standalone application by mentioning the target service name(s).
 
+Service agent architecture can be used in 2 ways.
+
+. Agent for service
+
+Your system can have multiple servers like order service, delivery service, customer service and so on.
+From those services, some of them have Stacksaga implemented on it.
+Just imagine the order service and delivery service use Stacksaga.
+So then those services should have agents for process replaying.
+We can deploy 2 agent services separately called order-service-agent and *delivery-service-agent*.
+In this way, the relationship between the service and the agent is one to one.
+
+image:stacksaga-diagram-seperate-agent-leader-election.drawio.svg[alt="stacksaga diagram seperate agent leader election"]
+
+Here you can see the order-service and delivery-service has separate services called *order-service-agent* and *delivery-service-agent*.
+
+. Agent for services
+
+Instead of having separate service agents, it's delayed a single service for many services.
+The relationship between the agent and service is *one-to-many*.
+One agent can have many services connected ro retrying.
+
+image:stacksaga-diagram-public-agent-leader-election.drawio.svg[alt="stacksaga diagram public agent leader election"]
+
+IMPORTANT: *Agent for services* can be used only if you use a single xref:event_store.adoc[even-store] for the services that are connected to the agent service.
+The reason is only one event-store can be configured into the agent service.
+For instance, if you want to deploy a single service age for both order-service and delivery-service, both services should use the same event-store.
+Refer the xref:event_store.adoc[even-store] to see the ways that you can use event-store.
 
 ////
 
