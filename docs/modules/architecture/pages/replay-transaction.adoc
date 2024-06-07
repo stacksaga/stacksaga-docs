@@ -148,13 +148,17 @@ When filtering the retryable transactions, the following things are considered.
 [[transaction_lifetime]]
 == Transaction Lifetime
 
+All the transactions are retired within a specific duration that you configured.
+It ensures not accumulating the transactions that cannot be invoked successfully by invoking many times.
+
+TIP: In the admin dashboard, you can see the expired transactions.
+And also after fixing the issue, you can extend the time for exposing to the retrying process again.
+
 In the below, you can see it with diagram.
 The transaction is initiated at the first after initialization the transaction can be exposed to the schedulers withing the specific time period.
 After the time period, the transaction is not exposed to re-invoking.
 
 image:stacksaga-diagram-transaction-retry-life-time.drawio.svg[alt="stacksaga diagram transaction retry life time"]
-
-TIP: In case, if you want to restore the transaction as can be exposed to the replaying, it is possible by using the admin dashboard.
 
 [[transaction_leisure_time]]
 == Transaction Leisure time
@@ -187,8 +191,37 @@ Before collecting the transactions that should be retried, the leader checks tha
 
 image:stacksaga-diagram-tx-retry-stucked-retention.drawio.svg[alt="stacksaga diagram tx retry stucked retention"]
 
-image:stacksaga-diagram-retry-leisure-time-crash.drawio.svg[alt="stacksaga diagram retry leisure time crash"]
+*What happens if a transaction is retried after being declared as crashed?*
 
+That means that due to the retention time is exceeded, the engine decides to expose the transaction for retrying.
+Then the transaction will be shared to one of the available instances. +
+While then that instance which received the transaction for retrying previously (before the latest expose) invokes the transaction accidentally.
+
+Just imagine the instance has been stuck for 10 hours due to memory issues or kind of situation. +
+After 10 hours the that transaction will be executed by the instance that was stuck.
+
+Then there are two situations can be happened.
+
+1. The transaction can be still in the replying status (even though exposed many times after the retention time.
+2. The transaction already executed successfully.
+(By using other instance(s).
+
+In the first scenario, you may think that the transaction can be executed two times.
+Because the old instance again has started to execute the collected transaction to the queue.
+And the transaction can be in another instance's queue for executing due to the engine exposed the transaction for retrying after exceeding in the retention time.
+Even though There is a one-in-a-billion chance of that happening, it is not invoked two times at all.
+
+Because along with every retry notification, a toke is passed when the execution is shared.
+The token number is an integer number that increased one by one every time the transaction is exposed for retrying.
+
+In our case, the old instance's queue can have a less number for the retry notification event than the new instance's queue has.
+Therefore, the engine will allow only the token that recently issued.
+Then the old transaction is rejected executing.
+The diagram shows how it works.
+Here you can see that only the execution that contains the latest value is executed (the latest token should be the same as the value in the event-store).
+Any other executions are rejected.
+
+image:stacksaga-diagram-retry-leisure-time-crash.drawio.svg[alt="stacksaga diagram retry leisure time crash"]
 
 ////
 
