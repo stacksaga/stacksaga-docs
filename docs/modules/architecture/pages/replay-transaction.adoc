@@ -132,6 +132,64 @@ The reason is only one event-store can be configured into the agent service.
 For instance, if you want to deploy a single service age for both order-service and delivery-service, both services should use the same event-store.
 Refer the xref:event_store.adoc[even-store] to see the ways that you can use event-store.
 
+== Filtering Retryable transactions from the event-store.
+
+You know already that the replay process is done by running schedulers.
+When the scheduler is triggered, the master node fetches the transactions that should be retired from the event-store.
+
+When filtering the retryable transactions, the following things are considered.
+
+. Region: The transactions are filtered for the region of the master instance.
+. Transaction status: The transaction status should be *reverting* or *processing*
+. xref:replay-transaction.adoc#transaction_lifetime[Transaction Lifetime]
+. xref:replay-transaction.adoc#transaction_leisure_time[Transaction Leisure time]
+. xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction Restore Retention Time]
+
+[[transaction_lifetime]]
+== Transaction Lifetime
+
+In the below, you can see it with diagram.
+The transaction is initiated at the first after initialization the transaction can be exposed to the schedulers withing the specific time period.
+After the time period, the transaction is not exposed to re-invoking.
+
+image:stacksaga-diagram-transaction-retry-life-time.drawio.svg[alt="stacksaga diagram transaction retry life time"]
+
+TIP: In case, if you want to restore the transaction as can be exposed to the replaying, it is possible by using the admin dashboard.
+
+[[transaction_leisure_time]]
+== Transaction Leisure time
+
+After exposing the transaction to be retired, the transaction is shared to one of available instances immediately to execute.
+After the executing by that particular instance, if the transaction is failed again due to a network issues, the transaction can be exposed to the same scheduler nearly. +
+There is no point in executing the transaction again and again within a small amount of time while the target service is unavailable. +
+You can configure how long time a transaction should be kept at leisure without exposing to the scheduler.
+That time is called as Transaction Leisure time.
+
+In the below, you can see it with diagram.
+After initiating the transaction, the transaction has been exposed to retrying.
+After exposing the transaction, the transaction is frozen for a while (based on your configuration) as leisure time.
+While that time, no one can access the data for retrying.
+After the end of that leisure time, the transaction is exposed for replaying if the transaction is still one of running status (processing or reverting).
+
+image:stacksaga-diagram-retry-leisure-time.drawio.svg[alt="stacksaga diagram retry leisure time"]
+
+[[transaction_restore_retention_time]]
+== Transaction Restore Retention Time
+
+How long the transaction should be kept waiting to determine whether the transaction unexpectedly crashed.
+The value should be in hours.
+If there are some transactions in the event-store that have been shared for replaying but even after 12-hours (configured time,) that transaction has not been retried with that token.
+This is a very rare case.
+For instance, after receiving the transaction for replaying by the one of available instances, the instance goes down due to a power cut without executing the transaction.
+But the leader has been updated as the transaction has been shared to an instance for doing replay.
+Due to that, the leader doesn't invoke those transactions again until the transaction is updated by the received instance or the `crashedTransactionRestoreRetentionHours` is exceeded.
+Before collecting the transactions that should be retried, the leader checks that if there are some transactions that exceed the `crashedTransactionRestoreRetentionHours` time and those transactions update again as to be eligible for retrying.
+
+image:stacksaga-diagram-tx-retry-stucked-retention.drawio.svg[alt="stacksaga diagram tx retry stucked retention"]
+
+image:stacksaga-diagram-retry-leisure-time-crash.drawio.svg[alt="stacksaga diagram retry leisure time crash"]
+
+
 ////
 
 The following reasons are caused to Transaction Replay.
