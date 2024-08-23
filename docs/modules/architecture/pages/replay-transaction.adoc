@@ -1,60 +1,28 @@
 = Transaction Replay. [[replay_transaction]]
 
-The Transaction-Replay helps to re-invoke the transaction that stopped due to xref:replay-transaction.adoc#resource-unavailable[resource-unavailable] issues.
-It guarantees eventual consistency.
+The Transaction-Replaying helps to re-invoke the transaction that stopped due to
+xref:replay-transaction.adoc#resource-unavailable[resource-unavailable] issues.
+It guarantees eventual consistency of the entire task.
 
 [[resource-unavailable]]
 ====
 *Resource-Unavailable* term in the Microservice Architecture
 
-In a microservice architecture, a *"resource-unavailable"* issue typically refers to a situation where one microservice is unable to access a necessary resource.
+In microservice architecture, a *"resource-unavailable"* issue typically refers to a situation where one microservice is unable to access a necessary resource.
 This resource could be another microservice, a database, a third-party API, or any other external system or service that the microservice depends on.
 ====
 
-If a task is failed due to Resource Unavailable, it can be retried most of the time instead of stopping the task with en exception.
-Because It is not easy like in a standalone application with a single database.
-If one of atomic transactions is failed, other all atomic transactions that have been successfully executed should state back (undo).
-Replaying tasks (transactions/operations) helps to have the eventual consistency.
+If a sub-task is failed due to Resource Unavailable, it can be retried most of the time instead of stopping the task with en exception in microservice environment.
+Because you know that giving up the task due to an exception is not easy in microservice environment like in a standalone application with a single database. it may cause to data inconsistency most of the time due to one task consist of multiple sub-tasks (multiple atomic transactions).
+If one of atomic transactions is failed, other all atomic transactions that have been successfully executed so far should be state back (undo).
 
-For identifying the operation is a retryable operation or not, it is used xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException] and xref:framework:retryable_executor_exception.adoc[RetryableExecutorException].
+If there is an exception while the executing main consideration is that we should identify the exception type.
+Whether the exception is *Resource Unavailable* or not. if the execution is a *Resource Unavailable* exception it will be resolved soon and then the execution can execute successfully.
+As mentioned above if we can identify the exception as a *Resource Unavailable* exception we can wait some time and re-invoke the executions.
+Replaying tasks (transactions/operations) helps to have the eventual consistency without giving up the transaction.
+
+For identifying the exceptions as a retryable or not, it is used xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException] and xref:framework:retryable_executor_exception.adoc[RetryableExecutorException].
 If the executor throws and `RetryableExecutorException` the saga engine keep the transaction in the event-store for retrying.
-
-NOTE: Other that the Stacksaga engine also might face for resource-unavailable issues most rarely due to using a database as the event-store.
-It's a most important problem when you use a saga orchestration engine with event sourcing.
-Stacksaga provides a reliable solution for that too.
-That is discussed under the xref:dual_consistency_problem_of_sec_in_microservice.adoc[dual-consistency] problem topic.
-
-== Who is responsible for replaying?
-
-Replaying transactions is a batch process that executes with a scheduler.
-To replay the transactions, A schedule is used that you can configure.
-
-In the event-store, there can have transactions that waiting to be replayed, and those transactions are exposed for replaying when the scheduler is triggered.
-But as per architecture, who does trigger the scheduler within the running on instances?
-Due to the replaying is batch process, it can not be done in parallel by the many instances.
-That means all the available instances can't execute at the same time the transactions that are waiting to be replayed.
-One service should execute the replaying process.
-Instead of using one instance for doing all replaying related, StackSaga uses a hybrid way.
-
-There are 2 types of implementations for retrying transactions in StackSaga.
-
-. Master and Slaves architecture.
-. Service-agent and Slaves architecture.
-
-====
-
-IMPORTANT: Sometimes you might think that why can't run the transactions by the own instance of each individual transaction at the same time? +
-The short answer is it can't be done due the instances are xref:replay-transaction.adoc#ephemeral[Ephemeral] in nature in the microservice architecture. +
-For instance, just imagine there are 10 instances running on, and there are 100 transactions have been stopped temporarily by them due to some network issues.
-After a while, the scheduler is triggered for replying the transactions on each instance.
-At that moment it can have different instances count due to scaling up or scaling down based on the load.
-Just imagine there was instance called "a" that made some retryable transactions before triggering the scheduler at it is might not be running when the scheduler is triggered.
-Then the transactions that made by the instance called "a" cannot be run ever.
-(Because the instance is identified with a random generated id and the transaction is stored with that instance id when the transaction is initiated).
-Then some transactions can be missing.
-This is one of the major reasons that replaying cannot involve all available instances at the same time.
-
-====
 
 [[ephemeral]]
 ====
@@ -62,6 +30,72 @@ This is one of the major reasons that replaying cannot involve all available ins
 
 In the context of microservices, ephemeral refers to the principle that a microservice can be created, destroyed, and replenished on-demand on a target easily, quickly, and with no side effects.
 ====
+
+== StackSaga Agent
+
+Stacksaga agent is the application that invokes for retrying the transactions.
+You already know that if the transaction is failed with a network exception (*Resource Unavailable*) the transaction can be retired.
+That retrying part is done by the Stacksaga agent service.
+
+=== Retrying Transactions with StackSaga Agent
+
+You know that the transactions are executed by the StackSaga framework.
+If the transaction is not able to process due to some *Resource Unavailable* exception, the transaction is kept in the event-store for retrying.
+for instance, while make-order process an exception is occurred in the MakePaymentExecutor due to the payment-services are not available for some reason.
+then order-service saves the transaction with the help of StackSaga framework in the event-store for retrying.
+With the given configurations the agent application trigger the schedulers for gathering the transaction that should be retried.
+The transactions that are eligible for retrying are caught by the agent and the agent distributes the transactions for the available instances for retrying.
+
+====
+[[why-instance-does-not-involve-directly-for-retrying]]
+IMPORTANT: Sometimes you might think that why can't be re-invoked the transactions by the own instance without an agent? +
+The short answer is it can't be done due the instances are xref:replay-transaction.adoc#ephemeral[Ephemeral] in nature in the microservice architecture. +
+For instance, just imagine there are 10 instances running on, and there are 100 transactions have been saved temporarily by them due to some network issues.
+After a while, the scheduler is triggered for replying the transactions on each instance.
+At that moment it can have different instances count due to scaling up or scaling down based on the load.
+Just imagine there was an instance called "a" that made some retryable transactions before triggering the scheduler, and that instance might not be running when the scheduler is triggered for retrying.
+Then the transactions that made by the instance called "a" cannot be run ever.
+(Because the instance is identified with a random generated id and the transaction is stored with that instance id when the transaction is initiated).
+Then some transactions can be missing.
+This is one of the major reasons that replaying cannot involve all available instances at the same time.
+
+In the below diagram you can see there are 7 translations that should be exposed for retrying that have been run by 3 instances.
+but the problem is when the scheduler is triggered for retrying in each instance, only 2 instances are being running called *instance:3491465* and *instance:3491425*. the *instance:3400001* was destroyed. then that transaction can not be exposed for retrying.
+
+image:stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt="why instance does not involve directly for retrying in StackSaga"]
+====
+
+Here you can see how the StackSaga Agent involves and distributes the transactions within available instances in high-level.
+
+image:stacksaga-diagram-how-stacksaga-agent-distribute-transactions.drawio.svg[alt="how stacksaga agent distribute transactions"]
+
+Here you can see it does not matter which instance initiated the transaction. all the transaction that should be retried are scanned by the agent and those are distributed with the available services.
+The communication happens via the In-built Http endpoints that has been provided by `stacksaga-spring-boot-starter`.
+
+== StackSaga agent deployment in Cloud environment
+
+You know that if we are in the cloud environment we have to make our deployment by adapting to the geographically distributed system.
+Then we mainly deal with *regions* and *zones*.
+In stacksaga ecosystem, it is very important for identifying the distributed deployments geographically to enhance the performance and balance the load between the target nodes.
+You can deploy the StackSaga Agents in tow was based on the geographical distribution.
+
+=== Regional Agent Architecture
+
+The StackSaga agent works for only one region by default.
+For instance, if your `order-service` has been deployed in multiple regions called `region-1` and `region-2`, you have to deploy tow StackSaga-agent services for both `region-1` and `region-2` separately.
+
+image:stacksaga-diagram-stacksaga-agent-default-deployment-in-cloud-env-with-multiple-db-replications.drawio.svg[alt="stacksaga agent default deployment in cloud environment"]
+
+<1> Fetches the transactions that should be retried from the event-store based on the particular region that the agent instance running on and add to the queue for sharing for retrying.
+
+<2> distribute the transactions for the available instances in the same region.
+
+In general, if the system is a large one, the database is replicated based on the region like in the diagram.
+even the database has not been replicated physically StackSaga agent fetched the transactions related to the region like below.
+
+image:stacksaga-diagram-stacksaga-agent-default-deployment-in-cloud-env-with-one-db.drawio.svg[alt="how stacksaga agent distribute transactions"]
+
+=== Zonal Agent Architecture
 
 == Master and Slaves architecture for retrying
 
