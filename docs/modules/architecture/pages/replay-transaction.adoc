@@ -97,6 +97,41 @@ image:stacksaga-diagram-eureka-service-registry-zonal-architecture-standalone-mo
 
 === Cluster Mode
 
+If multiple instances of Stacksaga service agent applications are deployed in an isolation group it's called cluster mode.
+It helps to scale the system horizontally based on the demand for retrying the transaction.
+The difference between standalone mode and cluster mode is that in cluster mode, all transactions that should be retried are divided within the available service agent instances based on the token range that each agent service is responsible for.
+The token generated based on the *transaction-id* by using https://en.wikipedia.org/wiki/MurmurHash[Murmur3 hashing algorithm].
+the token will be a hash between -2^63 to +2^63-1.
+
+For instance, if you have 4 instances in the cluster (withing the transaction isolation group ) the entire range is divided into 4 ranges evenly. the range as follows:
+
+.Token Range For Each Node
+|===
+|Node (Agent Instance) |Token Range
+
+|order-service-agent-0
+|*-9223372036854775808* TO *-4611686018427387905*
+
+|order-service-agent-1
+|*-4611686018427387904* TO *-1*
+
+|order-service-agent-2
+|*0* TO *4611686018427387903*
+
+|order-service-agent-3
+|*4611686018427387904* TO *9223372036854775807*
+
+|===
+
+image:stacksaga-diagram-transaction-range-in-cluster-mode.drawio.svg[alt="stacksaga diagram transaction range in cluster mode"]
+
+Cluster mode also can be deployed in two different ways as the regional isolation or zonal isolation.
+
+Follow the following links to see how the token range is allocated for each instance in cluster mode in different environments.
+
+* Eureka environment
+* Kubernetes environment
+
 ==== Regional Isolation In Cluster Mode
 
 Regional isolation means that the transactions are managed based on the region.
