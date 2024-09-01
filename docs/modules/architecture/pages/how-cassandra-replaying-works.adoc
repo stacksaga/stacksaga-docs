@@ -1,0 +1,172 @@
+= How the Transaction-Replay Works in Cassandra implementation?
+
+To manage the Transaction-Replay process it requires the service application(The service that uses StackSaga framework) and the agent application.
+Even the components are the same for replaying the transaction process the approach is quite different for each implementation.
+The main purpose of using Cassandra database for handling high throughput systems.
+therefore there are some limitations and differences in Cassandra implementation than the relational database implementation.
+In this section, it is described how the Transaction-Replay process works in the Cassandra implementation.
+
+== How the transactions are saved in the Cassandra database?
+
+All the transactions are saved in 4 tables in Cassandra database.
+
+. `es_transaction` table
+. `es_transaction_tryout` table.
+. `es_transaction_retention` table.
+. `es_transaction_retry_bucket_$+{bucket_number}+` table.
+
+=== es_transaction table
+
+es_transaction is the main table that transaction data meta-data is saved in based on the *transaction-Id* as the *Partition-Key*.
+all the transactions are saved in this table as *https://cassandra.apache.org/doc/stable/cassandra/data_modeling/data_modeling_refining.html[Single-Row Partition]*.
+Single-Row Partition approach refers to handling millions of transactions without making Hotspot in your Cassandra database's nodes.
+because the transactions are shared withing the all available nodes efficiently.
+
+image:stacksaga-diagram-cassandra-managing-throughput.drawio.svg[alt="StackSaga cassandra managing throughput"]
+
+Event Single-Row Partition helps to overcome the hotspot problem, It can not retrieve the data without knowing the exact transaction key.
+it makes a trouble for fetching the data that should be retried from all the transactions from the entire table.
+
+=== es_transaction_tryout table
+
+*es_transaction_tryout* is the table that transaction's tryout-data is saved in based on the *transaction-Id* as the *Partition-Key*.
+transaction tryouts are saved under the *transaction-Id* with *Multi-Row Partition* approach.
+due to the tryout data is saved based on the *transaction-Id*, tryout data is also saved in the same node that the transaction has been saved.
+it helps to optimize the network latency.
+
+image:stacksaga-diagram-cassandra-es-transaction-tryout-table.drawio.svg[alt="StackSaga cassandra managing throughput"]
+
+== es_transaction_retention table.
+
+es_transaction_retention table is responsible for keeping the transactions data until the transaction is completed successfully.
+It helps to track the missing transactions. even if it is a very rare case the transaction can be missed for some reason like computers are not shut down gracefully.
+we talked above already that we can not identify the transaction based on the status like in SQL databases due to the structure of the transaction data is saved.
+this table keep the transaction data until the transaction is completed. and if some transactions were missed for some reason those transactions can be identified.
+
+There are two tables are called `es_transaction_retention_odd` and `es_transaction_retention_even`. the names are based on when the tables are scanned for identifying the missing transactions.
+if the transaction is initiated in odd date, the transaction saves in the `es_transaction_retention_even` table.
+and if the transactions is initiated in even date, the transaction saves in the `es_transaction_retention_odd` table.
+the reason is that after initiating the transaction it should be kept some period for ending the transaction.
+this is called as the retention time. in stacksaga cassandra implementation the retention time can be minimum 24 hours to maximum 48 hours based on the transaction initializing time.
+
+== es_transaction_retry_bucket table
+
+the *es_transaction_retry_bucket* tables are created based on the given configuration for `stacksaga.cloud.agent.retry-fixed-delay`.
+the default fixed-delay value is 2 minutes.
+that mean the retry scheduler is triggered every 2 minutes so withing one hour the retry scheduler is triggered 30 times.
+then 30 tables are created when the application is started if the tables are not existed like, +
+
+. *es_transaction_retry_bucket_0*
+. *es_transaction_retry_bucket_2*
+. *es_transaction_retry_bucket_4*
+. *es_transaction_retry_bucket_6*
+. *es_transaction_retry_bucket_8*
+. *es_transaction_retry_bucket_10*
+. *es_transaction_retry_bucket_12*
+. *es_transaction_retry_bucket_14*
+. *es_transaction_retry_bucket_16*
+. *es_transaction_retry_bucket_18*
+. *es_transaction_retry_bucket_20*
+. *es_transaction_retry_bucket_22*
+. *es_transaction_retry_bucket_24*
+. *es_transaction_retry_bucket_26*
+. *es_transaction_retry_bucket_28*
+. *es_transaction_retry_bucket_30*
+. *es_transaction_retry_bucket_32*
+. *es_transaction_retry_bucket_34*
+. *es_transaction_retry_bucket_36*
+. *es_transaction_retry_bucket_38*
+. *es_transaction_retry_bucket_40*
+. *es_transaction_retry_bucket_42*
+. *es_transaction_retry_bucket_44*
+. *es_transaction_retry_bucket_46*
+. *es_transaction_retry_bucket_48*
+. *es_transaction_retry_bucket_50*
+. *es_transaction_retry_bucket_52*
+. *es_transaction_retry_bucket_54*
+. *es_transaction_retry_bucket_56*
+. *es_transaction_retry_bucket_58*
+
+For instance, if you customize the `stacksaga.cloud.agent.retry-fixed-delay` value as 10, the table count will be 6 (60/10).
+
+Let's see how the table is selected when the transaction is saved in one of es_transaction_retry_bucket tables.
+
+When a transaction is initiated by the stacksaga-framework, the transaction is saved on es_transaction and es_transaction_tryout tables.
+after that the transaction should be saved in one of the es_transaction_retry_bucket tables.
+just imagine if the transaction is initiated at `2022-01-01 00:00:00.000` the transaction is saved on the farthest es_transaction_retry_bucket table from that time.
+according to this transaction the table will be *es_transaction_retry_bucket_60*.
+
+IMPORTANT: The reason for selecting the farthest table is that still the framework has not identified the transaction has a *retryable-error* even the transaction is saved a table that can be exposed for retrying.
+and the reason for adding every transaction to one of the es_transaction_retry_bucket tables is that the transaction can not be caught based on the STATUS of the transaction due to StackSaga doesn't save the transaction based on the Transaction status.
+Saving the transaction based on the status can be increased the network latency, StackSaga is responsible for saving the metadata in maximum performance to reduce the overhead of using a third-party framework for managing a transaction.
+and also Saving the transaction based on the status can be caused to having a hotspot issue if the system is a large one. +
+For instance, if one million concurrent transactions come to the system and those transactions are failed due to a utility service's failure, the framework has to add a metadata of each transaction to a table.
+the problem is that due to the time exact same (The token that Cassandra generates will be the same) for all transactions that one million transactions goes to the same node.
+then it can lead to a hotspot issue.
+
+if the transaction is processed successfully without any retryable error, the record will be deleted from the table at the end of the transaction.
+but if there is an
+
+es_transaction_retry_bucket_* table is used for identifying the retryable transactions.
+This table is used in StackSaga in a quite different approach from the regular approach that a table used.
+This table is used as a data bucket. that means the data that stored in this table is deleted after using.
+
+es_transaction_retry_bucket is a not a single table. it's actually the prefix of the table name.
+
+you know that already prefixed tables are used for identifying the retryable transactions.
+so when a transaction is initiated it is saved in the es_transaction_retry_bucket table apart from the es_transaction and es_transaction_tryout table.
+
+== Agent per database architecture
+
+If you have referred the SQL implementation you may have noticed that you can use one shared database for many services as the even-store, and also you can deploy agent service for each service separately. for instance, if you use a single (shared) database for order-service and payment-service as the event-store you can deploy separate agent-service for each service like order-service-agent and payment-service-agent.
+but in Cassandra implementation you can not deploy different agent services separately for each services of you have shared one database for those services.
+if we consider the example, if you are using single Cassandra database for the order-service and payment-service you cannot deploy separate agent services for each of them like order-service-agent and payment-service-agent. you must deploy only one agent for order-service and payment-service with a given name as you prefer.
+
+NOTE: single-agent doesn't mean you can deploy only one instance to manage the retrying. it's taking about the logical entity. you can deploy any amount of instances as you want.
+but the consideration is that you cannot have agent per service architecture. you should focus agent per database.
+
+IMPORTANT: You can bypass this architecture by changing the keyspace name instead of using the default keyspace name that Stacksaga provide.
+but this approach is not recommended if you wish to use a single shared physical database for a lot of servers.
+because even you can bypass the concept you can not get rid of impact of high memory usage. because Cassandra uses mem-tables for storing th data at first, and if are a lot of tables in the entire physical database it generates a bad impact on the Cassandra node.
+
+== Regional isolation VS Zonal isolation
+
+=== Regional isolation
+
+Regional isolation means that the transactions are managed based on the region.
+The transactions are saved and retried based on the region that your service instance is located and if there are some transaction for retrying the retrying is managed based on the region.
+For instance, if you deploy a service called order-service in the *us-region* and *asia-region*, the transactions are saved on the tables that related to that specific region.
+and you have to deploy service-agent applications for both region separately. if you deployed service-agent application on only one region, other region's transaction are not exposed for the service-agent application.
+because that service-agent application considers only the data that related to the regain it is running on.
+
+By default, StackSaga supports Regional isolation architecture.
+
+
+image:stacksaga-diagram-eureka-service-registry-regional-architecture.drawio.svg[alt="stacksaga diagram eureka service registry regional architecture"]
+
+=== Zonal isolation
+
+Zonal isolation refers to isolate the transactions within the zone.
+for instance if you deploy your order-service application in different zones in the same region by default StackSaga isolate all the services withing the region as one group.
+but if you use Zonal isolation architecture the instances are isolated into each zone. then you have to deploy at least one service-agent application for each zone.
+
+image:stacksaga-diagram-eureka-service-registry-zonal-architecture.drawio.svg[alt="stacksaga diagram eureka service registry zonal architecture"]
+
+=== Why Zonal isolation architecture?
+
+If your system is being large with adding more and more instances and adding more and more services, sharing the services registry can be complex withing the available services through the entire region.
+specially if you are using Eureka service registry. because, each service tries to fetch all the instances' service-registry data from the eureka-service as a client.
+for instance, in there are 1000 services are running on your system and each service has 10 instance in one region.
+that means 10000 instances are running in the entire region. then each instance should fetch all the service-registry data from the eureka-service.
+
+=== Is it possible to migrate regional architecture to zonal architecture?
+
+The answer is yes.
+But it's not simple like in relational database implementations.
+If you are migrating to zonal architecture from regional architecture, you can redeploy the service application and service agent application by mentioning the isolation architecture type as *zonal*.
+Then Stacksaga creates new tablets (retrying related tables and retention tables) based on the zone name and store the new transactions on it (For retrying and retention).
+
+IMPORTANT: The consideration is that when you shift to zonal architecture, the old tablets which are related to the region are still exist, and they can have some data for retrying or identifying the missing transactions.
+therefore, you have to keep the service-agent application(s) up and running for some while until the existing transactions are completed.
+because old transaction that initiated under regional architecture will not be process by the new agent that deployed under zonal architecture.
+

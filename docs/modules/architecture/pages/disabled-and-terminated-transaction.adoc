@@ -1,0 +1,42 @@
+= Disabled Transactions VS Terminated Transactions
+
+== Disabled Transactions
+
+If some transactions are expired after retrying withing the transaction lifetime these transactions are disabled transactions.
+
+What are the reasons for expiring transactions without completing?
+
+. *Some executors may have been changed during the transaction execution period.* +
+For instance, Just imagine that a transaction is initiated at service version 1.0.0, and it keeps some time for retrying due to the target service not available and if a new version is deployed during the time without the executor that transaction can not be executed.
+even if the transaction is passed for retrying the transaction is not executed due to the executor not existing.
+Even if the executor is not found at that moment the transaction is re-scheduled again for retrying again and again until reaching the end of the transaction lifetime.
+After the end of the lifetime, the transaction is marked as a disabled transaction. +
++
+NOTE: The reason for rescheduling the transaction even if the executor is not found is that the team can recognise the issue and fix them before reaching the lifetime.
+Because if there is this kind of error, Stacksaga framework notifies the issue into the admin dashboard. +
+
+. *The target service host is not found*. +
+If the target host is not found again and again until the lifetime is exceeded the transaction is marked as a disabled transaction after the end of the lifetime.
++
+NOTE: At this moment the system doesn't warn you through the admin dashboard board because resources unavailable are accepted by the framework.
+
+== Terminated Transactions
+
+If a transaction is failed while reverting, the transaction is marked as a terminated transaction. because revert process cannot be failed except a RetryableException in StackSaga.
+The difference between a terminated transaction and a disabled transaction is that the transaction is stooped without reaching the lifetime.
+
+== How to restore the Disabled Transactions and Terminated Transactions?
+
+The bugs of the Disabled transactions and Terminated Transactions should be discovered manually by the team.
+and after readying for execute that transactions you can restore the transaction for retrying.
+
+There are 2 endpoints for handle the Disabled Transactions and Terminated Transactions.
+
+. *Fetching the Disabled Transactions and Terminated Transactions.* +
+You can collect the Disabled Transactions and Terminated Transactions through this endpoint for analyzing the errors or issues.
+
+. *Restoring the Disabled Transactions and Terminated Transactions.* +
+You can restore the Disabled Transactions and Terminated Transactions through this endpoint by extending the transaction lifetime.
+
+// todo add the endpoints links
+NOTE: The endpoints are different from each implementation. and find the relevant endpoint here as per the implementation that you are using.
