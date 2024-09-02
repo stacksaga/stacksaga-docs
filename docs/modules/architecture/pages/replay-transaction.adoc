@@ -72,32 +72,76 @@ The communication happens via the In-built Http endpoints that has been provided
 In the context of microservices, ephemeral refers to the principle that a microservice can be created, destroyed, and replenished on-demand on a target easily, quickly, and with no side effects.
 ====
 
+== Cluster grouping of StackSaga agent
+
+You can isolate (group) the StackSaga agent applications in different isolation levels.
+the reason for to Isolate the agent applications is that to share the load between the available clusters without any collision when the data is accessed by the agent.
+Cluster is the logical entity that share the token range.
+if the cluster has only one node the entire range is acquired by the single node. of if the cluster has multiple nodes, the token range is divided withing the lavaliere multiple nodes.
+
+. *Regional Clustering*
++
+The service agent application(s) grouped by the region in the Regional Clustering architecture.
+in this way all the service agent nodes that spreads in the entre region are grouped as a cluster.
+even one region can have multiple zones it is considered as a one cluster.
++
+For instance, if your application is deployed in tow different regions you will have two clusters.
+and the transaction's data is saved with the relevant region.
+if there are 10_000 transaction in *region-1* and 12_000 transactions are in the *region-2*, the agent node(s) in the *region-1-cluster* will take cre of 10_000 transaction in *region-1*.
+and the agent node(s) in the *region-2-cluster* will take care of 12_000 transactions in *region-2*.
++
+NOTE: Regional Clustering is the default mode StackSaga support by default. but you can change the Cluster Grouping Mode in the agent application.
+If you are using Cassandra implementation, you have to change the mode in both service and agent application.
+
++
+IMPORTANT: You can change the Cluster grouping mode as you want without eny extra effect in Relational database's implementations.
+But if you are using Cassandra implementation make sure to decide at the first what is the Cluster grouping mode.
+because you will have to take some effort to change the Cluster grouping mode due to the data structure.
+
+. *Zonal Clustering*
+
+Agent application(s) are grouped by the zone in the Zonal Clustering architecture.
+for instance if you deploy the *order-service* in 2 different zones in the same region, you have to deploy tow *order-service-agent* applications for each zone separately.
+
+IMPORTANT: If you deploy two agent node for separately by changing the mode in one agent application as *Zonal* and other one as *Regional* by mistake, It leads to collisions.
+because one agent access to one relevant zone's transaction and other agent access the entire transactions in the region.
+then some transactions are exposed to two clusters. the rule is that only one transaction should be exposed for one cluster.
+
 == How StackSaga agent deployment modes in Cloud environment
 
-IMPORTANT: The concepts are discussed here for database-per-service architecture. If you are using shared database withing the multiple services as the event-store, based on your database implementation may have some limitations or different approaches. +
+IMPORTANT: The concepts are discussed here for database-per-service architecture.
+If you are using shared database withing the multiple services as the event-store, based on your database implementation may have some limitations or different approaches. +
 specially if you are using Cassandra implementation. [xref:how-cassandra-replaying-works.adoc[Cassandra Service Agent], xref:how-cassandra-replaying-works.adoc[MYSQL Service Agent]]
 
 You know that if we are in the cloud environment we have to make our deployment by adapting to the geographically distributed system.
 Then we mainly deal with *regions* and *zones*.
 In stacksaga ecosystem, it is very important for identifying the distributed deployments geographically to enhance the performance and balance the load between the target nodes.
 
-. Standalone Mode
-.. Regional Isolation
-.. Zonal Isolation
-. Cluster Mode
-.. Regional Isolation
-.. Zonal Isolation
+. xref:#standalone-mode[Standalone Mode]
+.. xref:#regional-standalone-mode[Regional Isolation]
+.. xref:#zonal-standalone-mode[Zonal Isolation]
+. xref:#cluster-mode[Cluster Mode]
+.. xref:#regional-cluster-mode[Regional Isolation]
+.. xref:#zonal-cluster-mode[Zonal Isolation]
 
+[[standalone-mode]]
 === Standalone Mode
 
+In Standalone Mode there is only one instance of Stacksaga service agent application for an isolated group.
+it can be either one agent instance for the region or one agent instance for the zone.
+it depends on what *transaction isolation level* you use.
+
+[[regional-standalone-mode]]
 ==== Regional Isolation In Standalone Mode
 
 image:stacksaga-diagram-eureka-service-registry-regional-architecture-standalone-mode.drawio.svg[alt="stacksaga diagram eureka service registry regional architecture standalone mode"]
 
+[[zonal-standalone-mode]]
 ==== Zonal Isolation In Standalone Mode
 
 image:stacksaga-diagram-eureka-service-registry-zonal-architecture-standalone-mode.drawio.svg[alt="stacksaga diagram eureka service registry zonal architecture standalone mode"]
 
+[[cluster-mode]]
 === Cluster Mode
 
 If multiple instances of Stacksaga service agent applications are deployed in an isolation group it's called cluster mode.
@@ -135,6 +179,7 @@ Follow the following links to see how the token range is allocated for each inst
 * Eureka environment
 * Kubernetes environment
 
+[[regional-cluster-mode]]
 ==== Regional Isolation In Cluster Mode
 
 Regional isolation means that the transactions are managed based on the region.
@@ -147,6 +192,7 @@ By default, StackSaga supports Regional isolation architecture.
 
 image:stacksaga-diagram-eureka-service-registry-regional-architecture-cluster-mode.drawio.svg[alt="stacksaga diagram eureka service registry regional architecture cluster mode"]
 
+[[zonal-cluster-mode]]
 ==== Zonal Isolation In Cluster Mode
 
 Zonal isolation refers to isolate the transactions within the zone.

@@ -585,16 +585,6 @@ Replaying tasks (transactions/operations) helps to have the eventual consistency
 <p>For identifying the exceptions as a retryable or not, it is used <a href="../../framework/pages/non_retryable_executor_exception.html">NonRetryableExecutorException</a> and <a href="../../framework/pages/retryable_executor_exception.html">RetryableExecutorException</a>.
 If the executor throws and <code>RetryableExecutorException</code> the saga engine keep the transaction in the event-store for retrying.</p>
 </div>
-<div id="ephemeral" class="exampleblock">
-<div class="content">
-<div class="paragraph">
-<p><strong>Ephemeral</strong> behavior of the instances.</p>
-</div>
-<div class="paragraph">
-<p>In the context of microservices, ephemeral refers to the principle that a microservice can be created, destroyed, and replenished on-demand on a target easily, quickly, and with no side effects.</p>
-</div>
-</div>
-</div>
 </div>
 </div>
 <div class="sect1">
@@ -631,7 +621,7 @@ After a while, the scheduler is triggered for replying the transactions on each 
 At that moment it can have different instances count due to scaling up or scaling down based on the load.
 Just imagine there was an instance called "a" that made some retryable transactions before triggering the scheduler, and that instance might not be running when the scheduler is triggered for retrying.
 Then the transactions that made by the instance called "a" cannot be run ever.
-(Because the instance is identified with a random generated id and the transaction is stored with that instance id when the transaction is initiated).
+(Because the instance is identified with a unique id and the transaction is stored with that instance id when the transaction is initiated).
 Then some transactions can be missing.
 This is one of the major reasons that replaying cannot involve all available instances at the same time.
 </td>
@@ -639,7 +629,7 @@ This is one of the major reasons that replaying cannot involve all available ins
 </table>
 </div>
 <div class="paragraph">
-<p>In the below diagram you can see there are 7 translations that should be exposed for retrying that have been run by 3 instances.
+<p>In the below diagram you can see there are 7 transactions that should be exposed for retrying that have been run by 3 instances.
 but the problem is when the scheduler is triggered for retrying in each instance, only 2 instances are being running called <strong>instance:3491465</strong> and <strong>instance:3491425</strong>. the <strong>instance:3400001</strong> was destroyed. then that transaction can not be exposed for retrying.</p>
 </div>
 <div class="paragraph">
@@ -647,50 +637,51 @@ but the problem is when the scheduler is triggered for retrying in each instance
 </div>
 </div>
 </div>
+<div class="paragraph">
+<p>Here you can see how the StackSaga Agent involves and distributes the transactions within available instances in high-level.</p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-diagram-how-stacksaga-agent-distribute-transactions.drawio.svg" alt="how stacksaga agent distribute transactions"></span></p>
+</div>
+<div class="paragraph">
+<p>Here you can see it does not matter which instance initiated the transaction. all the transaction that should be retried are scanned by the agent and those are distributed with the available services.
+The communication happens via the In-built Http endpoints that has been provided by <code>stacksaga-spring-boot-starter</code>.</p>
+</div>
+<div id="ephemeral" class="exampleblock">
+<div class="content">
+<div class="paragraph">
+<p><strong>Ephemeral</strong> behavior of the instances.</p>
+</div>
+<div class="paragraph">
+<p>In the context of microservices, ephemeral refers to the principle that a microservice can be created, destroyed, and replenished on-demand on a target easily, quickly, and with no side effects.</p>
+</div>
+</div>
+</div>
 </div>
 </div>
 </div>
 <div class="sect1">
-<h2 id="_master_and_slaves_architecture_for_retrying">Master and Slaves architecture for retrying</h2>
+<h2 id="_cluster_grouping_of_stacksaga_agent">Cluster grouping of StackSaga agent</h2>
 <div class="sectionbody">
 <div class="paragraph">
-<p>This method refers to electing a leader (Master instance) withing the available instances.
-For instance, there can have 10 instances in your cluster for <strong>order-service</strong>.
-StackSaga framework has to select one of them as the leader for executing the retrying.
-This is where the leader-election comes into the picture.</p>
+<p>You can isolate (group) the StackSaga agent applications in different isolation levels.
+the reason for to Isolate the agent applications is that to share the load between the available clusters without any collision when the data is accessed by the agent.
+Cluster is the logical entity that use the entire token range.</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p><strong>Regional Clustering</strong></p>
+<div class="paragraph">
+<p>The service agent application(s) grouped by the region in the Regional Clustering architecture.
+in this way all the service agent nodes that spreads in the entre region are grouped as a cluster.
+even one region can have multiple zones it is considered as a one cluster.</p>
 </div>
 <div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-diagram-master-slaves-leader-election.drawio.svg" alt="stacksaga diagram master slaves leader election"></span></p>
-</div>
-<div class="paragraph">
-<p>In The above diagram, it has been mentioned 2 regions.
-Transactions replaying is done based on the regional metadata.
-A leader is appointed for one region.
-That means in a region can have only one leader.
-If you have deployed applications in many regions, each region will have one leader.</p>
-</div>
-<div class="paragraph">
-<p>How is the transaction replaying done?
-First of all, let&#8217;s have an understanding what metadata is saved with the transaction in the event store.</p>
-</div>
-<div class="paragraph">
-<p>All the transactions are saved in the event-store with the following data.</p>
-</div>
-<div class="ulist">
-<ul>
-<li>
-<p>Instance id: the instance that the transaction was initialized.</p>
-</li>
-<li>
-<p>Region: the region that instance was located</p>
-</li>
-<li>
-<p>Zone: the zone that instance was located</p>
-</li>
-<li>
-<p>serviceName: the name of the service</p>
-</li>
-</ul>
+<p>For instance, if your application is deployed in tow different regions you will have two clusters.
+and the transaction&#8217;s data is saved with the relevant region.
+if there are 10_000 transaction in <strong>region-1</strong> and 12_000 transactions are in the <strong>region-2</strong>, the agent node(s) in the <strong>region-1-cluster</strong> will take cre of 10_000 transaction in <strong>region-1</strong>.
+and the agent node(s) in the <strong>region-2-cluster</strong> will take care of 12_000 transactions in <strong>region-2</strong>.</p>
 </div>
 <div class="admonitionblock note">
 <table>
@@ -699,80 +690,10 @@ First of all, let&#8217;s have an understanding what metadata is saved with the 
 <i class="fa icon-note" title="Note"></i>
 </td>
 <td class="content">
-You can see all the above metadata in the dashboard.
+Regional Clustering is the default mode StackSaga support by default. but you can change the Cluster Grouping Mode in the agent application.
 </td>
 </tr>
 </table>
-</div>
-<div class="paragraph">
-<p>Due to keeping the transaction with the region data, the engine can determine which leader should access which transactions.
-If the transaction was initiated in region-1 the transaction will be exposed to the region-1&#8217;s leader.</p>
-</div>
-<div class="paragraph">
-<p>Electing the leader is done based on your environment.</p>
-</div>
-</div>
-</div>
-<div class="sect1">
-<h2 id="_service_agent_and_slaves_architecture_for_retrying">Service-Agent and Slaves architecture for retrying</h2>
-<div class="sectionbody">
-<div class="paragraph">
-<p>Service agent architecture refers to having a desperate service for doing the replay instead of selecting one of available instances like master and slaves architecture.</p>
-</div>
-<div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-diagram-agent-slaves-leader-election.drawio.svg" alt="stacksaga diagram agent slaves leader election"></span></p>
-</div>
-<div class="admonitionblock note">
-<table>
-<tr>
-<td class="icon">
-<i class="fa icon-note" title="Note"></i>
-</td>
-<td class="content">
-In this way, the retry dependencies shouldn&#8217;t be added to the applications.
-Instead of that, just run the <strong>saga-service-agent</strong> standalone application by mentioning the target service name(s).
-</td>
-</tr>
-</table>
-</div>
-<div class="paragraph">
-<p>Service agent architecture can be used in 2 ways.</p>
-</div>
-<div class="olist arabic">
-<ol class="arabic">
-<li>
-<p>Agent for service</p>
-</li>
-</ol>
-</div>
-<div class="paragraph">
-<p>Your system can have multiple servers like order service, delivery service, customer service and so on.
-From those services, some of them have Stacksaga implemented on it.
-Just imagine the order service and delivery service use Stacksaga.
-So then those services should have agents for process replaying.
-We can deploy 2 agent services separately called order-service-agent and <strong>delivery-service-agent</strong>.
-In this way, the relationship between the service and the agent is one to one.</p>
-</div>
-<div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-diagram-seperate-agent-leader-election.drawio.svg" alt="stacksaga diagram seperate agent leader election"></span></p>
-</div>
-<div class="paragraph">
-<p>Here you can see the order-service and delivery-service has separate services called <strong>order-service-agent</strong> and <strong>delivery-service-agent</strong>.</p>
-</div>
-<div class="olist arabic">
-<ol class="arabic">
-<li>
-<p>Agent for services</p>
-</li>
-</ol>
-</div>
-<div class="paragraph">
-<p>Instead of having separate service agents, it&#8217;s delayed a single service for many services.
-The relationship between the agent and service is <strong>one-to-many</strong>.
-One agent can have many services connected ro retrying.</p>
-</div>
-<div class="paragraph">
-<p><span class="image"><img src="../images/stacksaga-diagram-public-agent-leader-election.drawio.svg" alt="stacksaga diagram public agent leader election"></span></p>
 </div>
 <div class="admonitionblock important">
 <table>
@@ -781,13 +702,211 @@ One agent can have many services connected ro retrying.</p>
 <i class="fa icon-important" title="Important"></i>
 </td>
 <td class="content">
-<strong>Agent for services</strong> can be used only if you use a single <a href="event_store.html">even-store</a> for the services that are connected to the agent service.
-The reason is only one event-store can be configured into the agent service.
-For instance, if you want to deploy a single service age for both order-service and delivery-service, both services should use the same event-store.
-Refer the <a href="event_store.html">even-store</a> to see the ways that you can use event-store.
+You can change the Cluster grouping mode as you want without eny extra effect in Relational database&#8217;s implementations.
+But if you are using Cassandra implementation make sure to decide at the first what is the Cluster grouping mode.
+because you will have to take some effort to change the Cluster grouping mode due to the data structure.
 </td>
 </tr>
 </table>
+</div>
+</li>
+<li>
+<p><strong>Zonal Clustering</strong></p>
+</li>
+</ol>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_how_stacksaga_agent_deployment_modes_in_cloud_environment">How StackSaga agent deployment modes in Cloud environment</h2>
+<div class="sectionbody">
+<div class="admonitionblock important">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-important" title="Important"></i>
+</td>
+<td class="content">
+The concepts are discussed here for database-per-service architecture.
+If you are using shared database withing the multiple services as the event-store, based on your database implementation may have some limitations or different approaches.<br>
+specially if you are using Cassandra implementation. [<a href="how-cassandra-replaying-works.html">Cassandra Service Agent</a>, <a href="how-cassandra-replaying-works.html">MYSQL Service Agent</a>]
+</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p>You know that if we are in the cloud environment we have to make our deployment by adapting to the geographically distributed system.
+Then we mainly deal with <strong>regions</strong> and <strong>zones</strong>.
+In stacksaga ecosystem, it is very important for identifying the distributed deployments geographically to enhance the performance and balance the load between the target nodes.</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p><a href="#standalone-mode">Standalone Mode</a></p>
+<div class="olist loweralpha">
+<ol class="loweralpha" type="a">
+<li>
+<p><a href="#regional-standalone-mode">Regional Isolation</a></p>
+</li>
+<li>
+<p><a href="#zonal-standalone-mode">Zonal Isolation</a></p>
+</li>
+</ol>
+</div>
+</li>
+<li>
+<p><a href="#cluster-mode">Cluster Mode</a></p>
+<div class="olist loweralpha">
+<ol class="loweralpha" type="a">
+<li>
+<p><a href="#regional-cluster-mode">Regional Isolation</a></p>
+</li>
+<li>
+<p><a href="#zonal-cluster-mode">Zonal Isolation</a></p>
+</li>
+</ol>
+</div>
+</li>
+</ol>
+</div>
+<div class="sect2">
+<h3 id="standalone-mode">Standalone Mode</h3>
+<div class="paragraph">
+<p>In Standalone Mode there is only one instance of Stacksaga service agent application for an isolated group.
+it can be either one agent instance for the region or one agent instance for the zone.
+it depends on what <strong>transaction isolation level</strong> you use.</p>
+</div>
+<div class="sect3">
+<h4 id="regional-standalone-mode">Regional Isolation In Standalone Mode</h4>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-diagram-eureka-service-registry-regional-architecture-standalone-mode.drawio.svg" alt="stacksaga diagram eureka service registry regional architecture standalone mode"></span></p>
+</div>
+</div>
+<div class="sect3">
+<h4 id="zonal-standalone-mode">Zonal Isolation In Standalone Mode</h4>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-diagram-eureka-service-registry-zonal-architecture-standalone-mode.drawio.svg" alt="stacksaga diagram eureka service registry zonal architecture standalone mode"></span></p>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 id="cluster-mode">Cluster Mode</h3>
+<div class="paragraph">
+<p>If multiple instances of Stacksaga service agent applications are deployed in an isolation group it&#8217;s called cluster mode.
+It helps to scale the system horizontally based on the demand for retrying the transaction.
+The difference between standalone mode and cluster mode is that in cluster mode, all transactions that should be retried are divided within the available service agent instances based on the token range that each agent service is responsible for.
+The token generated based on the <strong>transaction-id</strong> by using <a href="https://en.wikipedia.org/wiki/MurmurHash">Murmur3 hashing algorithm</a>.
+the token will be a hash between -2^63 to +2^63-1.</p>
+</div>
+<div class="paragraph">
+<p>For instance, if you have 4 instances in the cluster (withing the transaction isolation group ) the entire range is divided into 4 ranges evenly. the range as follows:</p>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<caption class="title">Table 1. Token Range For Each Node</caption>
+<colgroup>
+<col style="width: 50%;">
+<col style="width: 50%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">Node (Agent Instance)</th>
+<th class="tableblock halign-left valign-top">Token Range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">order-service-agent-0</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong>-9223372036854775808</strong> TO <strong>-4611686018427387905</strong></p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">order-service-agent-1</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong>-4611686018427387904</strong> TO <strong>-1</strong></p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">order-service-agent-2</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong>0</strong> TO <strong>4611686018427387903</strong></p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">order-service-agent-3</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><strong>4611686018427387904</strong> TO <strong>9223372036854775807</strong></p></td>
+</tr>
+</tbody>
+</table>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-diagram-transaction-range-in-cluster-mode.drawio.svg" alt="stacksaga diagram transaction range in cluster mode"></span></p>
+</div>
+<div class="paragraph">
+<p>Cluster mode also can be deployed in two different ways as the regional isolation or zonal isolation.</p>
+</div>
+<div class="paragraph">
+<p>Follow the following links to see how the token range is allocated for each instance in cluster mode in different environments.</p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>Eureka environment</p>
+</li>
+<li>
+<p>Kubernetes environment</p>
+</li>
+</ul>
+</div>
+<div class="sect3">
+<h4 id="regional-cluster-mode">Regional Isolation In Cluster Mode</h4>
+<div class="paragraph">
+<p>Regional isolation means that the transactions are managed based on the region.
+The transactions are saved and retried based on the region that your service instance is located and if there are some transaction for retrying the retrying is managed based on the region.
+For instance, if you deploy a service called order-service in the <strong>us-region</strong> and <strong>asia-region</strong>, the transactions are saved on the tables that related to that specific region.
+and you have to deploy service-agent applications for both region separately. if you deployed service-agent application on only one region, other region&#8217;s transaction are not exposed for the service-agent application.
+because that service-agent application considers only the data that related to the regain it is running on.</p>
+</div>
+<div class="paragraph">
+<p>By default, StackSaga supports Regional isolation architecture.</p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-diagram-eureka-service-registry-regional-architecture-cluster-mode.drawio.svg" alt="stacksaga diagram eureka service registry regional architecture cluster mode"></span></p>
+</div>
+</div>
+<div class="sect3">
+<h4 id="zonal-cluster-mode">Zonal Isolation In Cluster Mode</h4>
+<div class="paragraph">
+<p>Zonal isolation refers to isolate the transactions within the zone.
+for instance if you deploy your order-service application in different zones in the same region by default StackSaga isolate all the services withing the region as one group.
+but if you use Zonal isolation architecture the instances are isolated into each zone. then you have to deploy at least one service-agent application for each zone.</p>
+</div>
+<div class="paragraph">
+<p><span class="image"><img src="../images/stacksaga-diagram-eureka-service-registry-zonal-architecture-cluster-mode.drawio.svg" alt="stacksaga diagram eureka service registry zonal architecture cluster mode"></span></p>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_stacksaga_agent_supports_environments">StackSaga agent supports environments</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Stacksaga agent application can be run in both <strong>Eureka service discovery environment</strong> and also <strong>Kubernetes service discovery</strong> environment.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_stacksaga_agent_in_the_eureka_environment">Stacksaga agent in the Eureka environment.</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>In the Eureka environment Stacksaga agent acts as a eureka client application.
+That means you have to provide the eureka server details for fetching the registry and punishing the health.
+There is nothing to highlight if you run only one service agent application.
+But let&#8217;s understand how multiple service agent applications are running together for managing the transactions.</p>
+</div>
+<div class="sect2">
+<h3 id="_leader_election_for_agent_services_in_the_eureka_environment">Leader election for agent services in the Eureka environment.</h3>
+<div class="paragraph">
+<p>You know already that the agent acquires the transaction based on their token range for managing.
+When multiple instances are available in the cluster the agent should know exactly what the token range is.
+To calculate their token range the agent application should know what is the position the application is running on.
+To calculate the position there should be a master-instance within the agent services.
+This is where the leader election comes into the picture.</p>
+</div>
 </div>
 </div>
 </div>
@@ -942,7 +1061,7 @@ Any other executions are rejected.</p>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-08-23 22:45:51 +0530
+Last updated 2024-09-02 17:51:45 +0530
 </div>
 </div>
 <script>
