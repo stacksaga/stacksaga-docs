@@ -1,0 +1,30 @@
+=== SagaRetryTransactionThreadPoolTaskExecutor [[saga_retry_transaction_thread_pool_task_executor]]
+
+`RetryTransactionThreadPool` is responsible for retrying the transactions that receive from the StackSaga agent.
+
+— In case if you want to customize the default configuration such as pool size, name, and so on, you can update the default configuration as follows:
+
+[source,java]
+----
+@Component //<1>
+public class CustomSagaRetryTransactionThreadPoolTaskExecutorProvider
+    implements SagaRetryTransactionThreadPoolTaskExecutorProvider { //<2>
+
+    @Override
+    public ThreadPoolTaskExecutor getTaskExecutor() {
+        //<3>
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(Runtime.getRuntime().availableProcessors() * 5);
+        ...
+        return executor;
+    }
+}
+----
+
+<1> Mark the class as a spring `@Component` (bean).
+<2> Implement the custom task-executor provider class from `SagaRetryTransactionThreadPoolTaskExecutorProvider` and override the `getTaskExecutor()` method.
+<3> Provide your custom task-executor configurations by creating a new instance of https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/scheduling/concurrent/ThreadPoolTaskExecutor.html[`ThreadPoolTaskExecutor`].
+
+NOTE: Even though you change the prefix of the thread-pool when the task-executor is created, the prefix is changed internally as `saga-R-tx-`  for maintaining the thread-name uniqueness.
+
+'''
