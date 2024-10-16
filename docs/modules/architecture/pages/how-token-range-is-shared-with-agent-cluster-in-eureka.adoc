@@ -1,0 +1,58 @@
+=== How token range is shared with the available agents dynamically in Eureka environment [[how-token-range-is-shared-with-agent-cluster-in-eureka]]
+
+You already know that Stacksaga Agent can be deployed in the kubernetes environment and also in the eureka environment.
+If you are in the Eureka environment, you can use the *eureka-mode* when the agent application is deployed.
+In the Eureka environment also the agent application can be scaled horizontally based on the load like in the kubernetes environment, and then the entire token range is shared between available agent instances in the cluster.
+That task is done the master instance of the cluster.
+That means in the *eureka-mode* the agent applications are deployed master and slave architecture.
+The master agent service is responsible for updating the token ranges for each available instance in the cluster, and also it acts as a slave.
+
+==== How does master server calculate the token range? [[how-master-server-calculates-the-token-range]]
+
+All agent applications are registered with the eureka server in eureka environment. so the master service will have all other agent instances' details through the eureka server.
+the master server periodically checks the changes of the instance based on the local eureka service registry cache and updates the database with the relevant token range for each instance.
+the position of each instance is sored based on the instance started time.
+for instance, if there are 5 SatackSaga-agent instances in the cluster, the token range is divided with the help of Murmur3 Partition algorithm as follows:
+
+image:How-token-range-is-shared-with-agent-cluster-in-eureka.drawio.svg[alt="How token range is shared with the available agents in Eureka dynamically",width=100%,opts=interactive,scaledwidth=100%]
+
+Steps:
+
+<1> Master fetch the cache from the eureka server.
+(It can be a single eureka server or peers)
+<2> Calculate the range for each instance periodically based on their timetamps and updates the ranges into the database.
+Even the scheduler gets triggered time to time, The database update is done only if the instance state is changed compared to the previous state.
++
+For instance, if there is no instance change on the next schedule, the database is not updated. or some instances may have changed, so the range is re-arranged and updated in the database by the master agent instance.
+<3> All agent instances fetch their token range from the database periodically based on the given configurations.
+
+Finally, all the agent applications will fetch the transactions that should be retried based on the token range from the event-store.
+
+==== How to configure the application as master and slave? [[how-the-agent-application-configured-as-master-and-slave]]
+
+* *In the Master instance:*
++
+Set the `instance-type` as `MASTER` and Eureka instance ID as a fixed (Static ID) value in the property file like this.
++
+[source,properties]
+----
+stacksaga.cloud.agent.eureka.instance-type=MASTER
+eureka.instance.instance-id=order-service-agent-us-east-master
+----
++
+IMPORTANT: It is recommended to use this format for the master instance ID. +
+Format: `*${service-name}-agent-${region}-master*`  +
+Using the service name in the master instance ID helps to avoid the collision if you are using same event-store for multiple services.
+Because the slaves identify the master instance in the database by the master instance ID. and adding the region to the master instance ID guarantees the region-based uniqueness.
+* *In the Slave instance:*
++
+Set the `instance-type` as `SLAVE`  and set the Master's Static ID for `stacksaga.cloud.agent.master-id` in the slave instance's property file like this.
++
+[source,properties]
+----
+stacksaga.cloud.agent.eureka.instance-type=SLAVE
+stacksaga.cloud.agent.eureka.master-id=order-service-agent-us-east-master
+eureka.instance.instance-id=${spring.application.name}:${random.uuid}
+----
++
+NOTE: For the slave instances, you can use any random ID as the instance id as you prefer.
