@@ -36,8 +36,9 @@ The steps are as follows.
 
 * xref:creating_the_orchestrator_service[Creating the orchestrator service (order-service).]
 * xref:adding_stacksaga_dependencies_to_the_existing_order_service_project[Adding required stacksaga dependencies and update the required configuration properties.]
-* Create an aggregator class
-* Create the executors
+* xref:creating_an_aggregator[Creating an aggregator]
+* xref:creating_executors[Creating the executors]
+* xref:creating_executors[Creating the endpoint]
 * Run and test
 
 [[creating_the_orchestrator_service]]
@@ -57,9 +58,8 @@ Go to the https://start.spring.io[spring initializr] and create a new project wi
 
 After creating the project, it is necessary to add the required stacksaga dependencies in the dependencies section.
 
-stacksaga-spring-boot-starter::
-The core of the framework.
-+
+stacksaga-spring-boot-starter:: The core of the framework.
+
 [source,xml]
 ----
 <dependency>
@@ -69,9 +69,8 @@ The core of the framework.
 </dependency>
 ----
 
-stacksaga-mysql-support::
-The Mysql database supports implementation for the framework.
-+
+stacksaga-mysql-support:: The Mysql database supports implementation for the framework.
+
 [source,xml]
 ----
 <dependency>
@@ -105,4 +104,269 @@ stacksaga:
 <4> The application release version
 <5> The database configuration for accessing the mysql database as the event-store.
 
+[[creating_an_aggregator]]
+=== Creating an aggregator
 
+Creating an xref:architecture:aggregator.adoc[Aggregator] is one of the main steps in the stacksaga framework implementation.
+Because it is the container that holds the states of each execution's data until the transaction is completed.
+
+create the aggregator class in the `demo.quickdemo.aggregators` package with the fields that you want to store the data while the entire transaction.
+
+PlaceOrderAggregator.java::
+
+[source,java]
+----
+package demo.quickdemo.aggregators;
+
+import lombok.*;
+import org.stacksaga.Aggregator;
+import org.stacksaga.SagaSerializable;
+import org.stacksaga.annotation.SagaAggregator;
+import org.stacksaga.annotation.SagaAggregatorVersion;
+
+@SagaAggregator(
+        version = @SagaAggregatorVersion(major = 1, minor = 0, patch = 0),
+        name = "PlaceOrderAggregator",
+        sagaSerializable = PlaceOrderAggregatorSagaSerializable.class
+)
+@Getter
+@Setter
+public class PlaceOrderAggregator extends Aggregator {
+    private String orderId;
+    private double amount;
+    private String userId;
+    private boolean isPaid;
+    private String paymentId;
+
+    public PlaceOrderAggregator() {
+        super(PlaceOrderAggregator.class);
+    }
+
+}
+
+class PlaceOrderAggregatorSagaSerializable extends SagaSerializable<PlaceOrderAggregator> {
+    public PlaceOrderAggregatorSagaSerializable() {
+        this.put("Sample-1", new PlaceOrderAggregator());
+    }
+}
+----
+
+[[creating_executors]]
+=== Creating executors
+
+Create the executors in the `demo.quickdemo.executors` package.
+For this quick-start example, four executors are created to make individual atomic executions to the relevant services.
+
+. *xref:PlaceOrderInitExecutor[PlaceOrderInitExecutor]* for *order-service* (itself)
+. *xref:GetUserDetailsExecutor[GetUserDetailsExecutor]* for *user-service*
+. *xref:MakePaymentExecutor[MakePaymentExecutor]* for *payment-service*
+. *xref:StockUpdateExecutor[StockUpdateExecutor]* for *stock-service*
+
+[[PlaceOrderInitExecutor]]
+==== PlaceOrderInitExecutor
+
+[source,java]
+----
+package demo.quickdemo.executors;
+
+import demo.quickdemo.aggregators.PlaceOrderAggregator;
+import lombok.SneakyThrows;
+import org.stacksaga.ProcessStepManager;
+import org.stacksaga.ProcessStepManagerUtil;
+import org.stacksaga.RevertHintStore;
+import org.stacksaga.annotation.SagaExecutor;
+import org.stacksaga.core.SagaExecutionEventName;
+import org.stacksaga.exception.RetryableExecutorException;
+import org.stacksaga.exception.execution.NonRetryableExecutorException;
+import org.stacksaga.executor.CommandExecutor;
+
+import java.util.Random;
+
+@SagaExecutor(
+        executeFor = "order-service",
+        value = "PlaceOrderInitExecutor"
+)
+public class PlaceOrderInitExecutor implements CommandExecutor<PlaceOrderAggregator> {
+
+    @SneakyThrows
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        // TODO: execute place order process here
+        Thread.sleep(new Random().nextLong(1000, 3000));
+        {
+            //updates the aggregator with the order id
+            currentAggregator.setOrderId(currentAggregator.getAggregatorTransactionId());
+        }
+        return stepManager.next(GetUserDetailsExecutor.class, () -> "INITIATED_ORDER");
+    }
+
+    @Override
+    public SagaExecutionEventName doRevert(NonRetryableExecutorException processException,
+                                           PlaceOrderAggregator finalAggregatorState,
+                                           RevertHintStore revertHintStore,
+                                           String idempotencyKey
+    ) throws RetryableExecutorException {
+
+        // TODO: execute place order revert process here
+        return () -> "ORDER_CANCELLED";
+    }
+}
+----
+
+[[GetUserDetailsExecutor]]
+==== GetUserDetailsExecutor
+
+[source,java]
+----
+package demo.quickdemo.executors;
+
+import demo.quickdemo.aggregators.PlaceOrderAggregator;
+import lombok.SneakyThrows;
+import org.stacksaga.ProcessStepManager;
+import org.stacksaga.ProcessStepManagerUtil;
+import org.stacksaga.annotation.SagaExecutor;
+import org.stacksaga.exception.RetryableExecutorException;
+import org.stacksaga.exception.execution.NonRetryableExecutorException;
+import org.stacksaga.executor.QueryExecutor;
+
+import java.util.Random;
+
+@SagaExecutor(
+        executeFor = "user-service",
+        value = "GetUserDetailsExecutor"
+)
+public class GetUserDetailsExecutor implements QueryExecutor<PlaceOrderAggregator> {
+
+    @SneakyThrows
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // TODO: Get user details from user-service
+        Thread.sleep(new Random().nextLong(1000, 3000));
+        {
+            //updates the aggregator with the user details
+            currentAggregator.setUserId("mafei");
+        }
+        return stepManager.next(MakePaymentExecutor.class, () -> "PLACED_ORDER");
+    }
+}
+----
+
+[[MakePaymentExecutor]]
+==== MakePaymentExecutor
+
+[source,java]
+----
+package demo.quickdemo.executors;
+
+import demo.quickdemo.aggregators.PlaceOrderAggregator;
+import lombok.SneakyThrows;
+import org.stacksaga.ProcessStepManager;
+import org.stacksaga.ProcessStepManagerUtil;
+import org.stacksaga.RevertHintStore;
+import org.stacksaga.annotation.SagaExecutor;
+import org.stacksaga.core.SagaExecutionEventName;
+import org.stacksaga.exception.RetryableExecutorException;
+import org.stacksaga.exception.execution.NonRetryableExecutorException;
+import org.stacksaga.executor.CommandExecutor;
+
+import java.util.Random;
+
+@SagaExecutor(
+        executeFor = "payment-service",
+        value = "MakePaymentExecutor"
+)
+public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator> {
+
+    @SneakyThrows
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // TODO: execute payment process here
+        Thread.sleep(new Random().nextLong(1000, 3000));
+        {
+            //updates the aggregator with the payment id
+            currentAggregator.setPaymentId("payment-1");
+            currentAggregator.setPaid(true);
+        }
+        return stepManager.next(StockUpdateExecutor.class, () -> "MADE_PAYMENT");
+    }
+
+    @Override
+    public SagaExecutionEventName doRevert(NonRetryableExecutorException processException,
+                                           PlaceOrderAggregator finalAggregatorState,
+                                           RevertHintStore revertHintStore,
+                                           String idempotencyKey
+    ) throws RetryableExecutorException {
+        // TODO: execute payment revert process here
+        return () -> "PAYMENT_REFUNDED";
+    }
+}
+----
+
+[[StockUpdateExecutor]]
+==== StockUpdateExecutor
+
+[source,java]
+----
+package demo.quickdemo.executors;
+
+import demo.quickdemo.aggregators.PlaceOrderAggregator;
+import lombok.SneakyThrows;
+import org.stacksaga.ProcessStepManager;
+import org.stacksaga.ProcessStepManagerUtil;
+import org.stacksaga.RevertHintStore;
+import org.stacksaga.annotation.SagaExecutor;
+import org.stacksaga.core.SagaExecutionEventName;
+import org.stacksaga.exception.RetryableExecutorException;
+import org.stacksaga.exception.execution.NonRetryableExecutorException;
+import org.stacksaga.executor.CommandExecutor;
+
+import java.util.Random;
+
+@SagaExecutor(
+        executeFor = "stock-service",
+        value = "StockUpdateExecutor"
+)
+public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator> {
+
+    @SneakyThrows
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // TODO: execute stock update process here
+        Thread.sleep(new Random().nextLong(1000, 3000));
+        return stepManager.complete(() -> "STOCK_UPDATED");
+    }
+
+    @Override
+    public SagaExecutionEventName doRevert(NonRetryableExecutorException processException,
+                                           PlaceOrderAggregator finalAggregatorState,
+                                           RevertHintStore revertHintStore,
+                                           String idempotencyKey
+    ) throws RetryableExecutorException {
+
+        // TODO: execute stock revert process here
+        return () -> "STOCK_REVERTED";
+    }
+}
+----
+
+[[creating_the_endpoint]]
+=== Creating the endpoint
