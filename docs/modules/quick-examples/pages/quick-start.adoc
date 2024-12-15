@@ -39,7 +39,7 @@ The steps are as follows.
 * xref:creating_an_aggregator[Creating an aggregator]
 * xref:creating_executors[Creating the executors]
 * xref:creating_executors[Creating the endpoint]
-* Run and test
+* xref:run_and_test[Run and test]
 
 [[creating_the_orchestrator_service]]
 === Creating the orchestrator service
@@ -369,4 +369,75 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
 ----
 
 [[creating_the_endpoint]]
-=== Creating the endpoint
+=== Creating Endpoint
+
+PlaceOrderDto::
+
+[source,java]
+----
+package demo.quickdemo.dto;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+
+public class PlaceOrderDto {
+    @Data
+    public static class Request {
+        private double amount;
+    }
+
+    @Data
+    @AllArgsConstructor
+    public static class Response {
+        @JsonProperty("order_id")
+        private final String orderId;
+    }
+}
+----
+
+PlaceOrderController::
+
+[source,java]
+----
+package demo.quickdemo.controller;
+
+import demo.quickdemo.aggregators.PlaceOrderAggregator;
+import demo.quickdemo.dto.PlaceOrderDto;
+import demo.quickdemo.executors.PlaceOrderInitExecutor;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.stacksaga.core.SagaTemplate;
+
+@RequestMapping("/order")
+@RestController
+@RequiredArgsConstructor
+public class PlaceOrderController {
+
+    private final SagaTemplate<PlaceOrderAggregator> placeOrderAggregatorSagaTemplate;
+
+    @PostMapping("/place")
+    public PlaceOrderDto.Response placeOrder(@RequestBody PlaceOrderDto.Request request) {
+        final PlaceOrderAggregator placeOrderAggregator = new PlaceOrderAggregator();
+        placeOrderAggregator.setAmount(request.getAmount());
+        final String orderId = this.placeOrderAggregatorSagaTemplate.process(placeOrderAggregator, PlaceOrderInitExecutor.class);
+        return new PlaceOrderDto.Response(orderId);
+    }
+}
+----
+
+[[run_and_test]]
+=== Run and Test
+
+Run the application and make a place order request via Postman and get the `order_id` (transaction-id).
+
+image:make-request-via-postman.png[]
+
+After https://docs.stacksaga.org/StackSaga-framework/1.0.0/admin/stacksaga-cloud-window.html[connecting the Stacksaga Cloud-Window] successfully, go to the transaction-tracing page and enter the `order_id` and see the transaction tracing details.
+
+image:stacksaga-quick-demo-transaction-tracing.jpeg[]
+
+Congratulations! You have successfully completed the quick demo.
