@@ -1,0 +1,79 @@
+= Sperm Theory Of Distributed Transactions
+
+The Sperm Theory of Distributed Transactions explores the potential failure stages and probabilities within distributed transactions, along with their respective impacts on distributed systems.
+While the occurrence of certain failures may be negligible in terms of frequency or impact under typical circumstances, they cannot be dismissed outright.
+These edge cases, though rare, demand careful consideration during system implementation to ensure overall robustness and resilience.
+
+As a widely adopted industry solution, the SAGA design pattern serves as a cornerstone for ensuring consistency across distributed systems, often in collaboration with complementary design patterns and architectural frameworks.
+However, at the implementation level, certain rare but critical failures can still be observed, emphasizing the need for robust failure-handling strategies and continuous monitoring.
+
+image:sperm-theory-of-distributed-transactions.svg[alt="sperm theory of distributed transactions",width=400]
+
+As you can see, most of the transactions are successful in general.
+As well as a tiny portion is exposed for some issues like the tail. if we consider the sperm as all the transactions, the head of the sperm is the successful transactions it acquires a huge percentage of the total.
+
+The following is the list of the most common failures.
+
+. Successful transactions
+. Primary-Execution failed transactions.
+. Incomplete transactions
+. Retry-Timeout transactions
+. Missing transactions
+. Revert-Failed transactions.
+
+
+== 1. Successful transactions.
+
+These are transactions that complete as intended, achieving the desired outcome without errors.
+In most systems, the majority of transactions fall into this category.
+From the Stacksaga perspective, a transaction is considered successful when all executors complete their tasks without encountering any exceptions or failures.
+
+== 2. Primary-Execution failed transactions
+
+Based on the logical conditions in the code, some transactions may have a primary execution failure.
+(These errors are not considered as errors.
+Because it is used for stopping to forward the transaction and to start the compensation process.) In stacksaga perspective, a non-retryable exception is thrown through one of the executors while the transaction is being executed.
+
+== 3. Reverting-Failed Transactions.
+
+If the transaction is failed during the compensation process due to some unhandled exception, it is called as reverting failed transactions.
+
+[[incomplete_transactions]]
+== 4. Incomplete transactions. (Crashed transaction)
+
+In microservices architecture, one business transaction consists of multiple sub-transactions (atomic-transactions).
+So if one atomic transaction is crashed (the crash can be occurred due to various reasons like Power Outage, hardware failure, etc.) without any update (fallback), the entire transaction is stuck.
+Because the atomic transactions of the business transaction are executed in sequence order in general.
+
+// === Involvement of Stacksaga in crashed transaction.
+
+[[missing_transactions]]
+== 5. Missing transactions
+
+In the asynchronous retrying process, the transactions are transformed for retrying to the available services (it can be via a queue or http request or any other mechanism). while the process of the transaction can be missing without being executed.
+
+In asynchronous retry processes, transactions are transferred for execution to available services through mechanisms such as queues, HTTP requests, or other communication channels.
+However, during this process, a transaction may be lost or fail to execute due to issues like message loss, queue mismanagement, or communication failures.
+These missing transactions can lead to inconsistencies and require careful monitoring and recovery strategies.
+
+NOTE: xref:incomplete_transactions[Incomplete-Transactions] and xref:missing_transactions[Missing transactions] are quite similar at first glance.
+But *Incomplete-transactions* term forces the dual-consistency problem.
+That means the consistency between the event-store and the real database.
+But *Missing Transactions* term forces the transactions that are missing without achieving both of them.
+
+At first glance, Incomplete Transactions and Missing Transactions may appear similar, but they address distinct challenges:
+
+Incomplete Transactions highlight the dual-consistency problem, focusing on the lack of consistency between the event store and the primary database.
+In these cases, the transaction partially progresses but leaves the system in an inconsistent state.
+
+Missing Transactions, on the other hand, refer to transactions that fail to execute entirely.
+These transactions are neither recorded in the event store nor reflected in the primary database, effectively vanishing without leaving a trace.
+(The event-store and the primary database)
+
+== 6. Retry-Timeout transactions
+
+In distributed systems, transactions are retried within a specific time frame.
+If the retry limit is exceeded, the transaction is frozen and will not be retried automatically.
+This can happen due to long service downtimes, network issues, or high system load.
+To resolve these transactions, manual intervention is needed to identify and fix the problem before reactivating the transaction.
+
