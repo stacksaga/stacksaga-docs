@@ -8,6 +8,8 @@
 This guide demonstrates how to set up and run a microservice using the StackSaga framework with minimal configuration.
 It focuses on a common use case where a microservice communicates with multiple other microservices to fulfill a single business logic.
 
+== Basic implementation
+
 === Use Case: Placing an Order
 
 In this scenario, we have a microservice called *Order Service*, which needs to interact with the following microservices to place an order successfully:
@@ -103,6 +105,15 @@ stacksaga:
 <3> The package path of the aggregators that are localed in.
 <4> The application release version
 <5> The database configuration for accessing the mysql database as the event-store.
+
+====
+See more,
+
+* `stacksaga-spring-boot-starter` xref:framework:core-configuration-properties.adoc[configuration properties]
+* `stacksaga-mysql-support` xref:framework:sql-datasource-configuration-properties.adoc[configuration properties]
+
+
+====
 
 [[creating_an_aggregator]]
 === Creating an aggregator
@@ -440,4 +451,88 @@ After https://docs.stacksaga.org/StackSaga-framework/1.0.0/admin/stacksaga-cloud
 
 image:stacksaga-quick-demo-transaction-tracing.jpeg[]
 
-Congratulations! You have successfully completed the quick demo.
+*Congratulations!* +
+You have successfully implemented the major part of the quick demo.
+It was about the successful scenario.
+Let's move on to the next part.
+It focuses on xref:architecture:replay-transaction.adoc[Transaction Retrying].
+
+== Retrying with StackSaga Agent
+
+As per the stacksaga architecture, we have to deploy an agent-service for retrying the transaction for the *target orchestrator service* (order-service).
+
+The steps are as follows:
+
+. xref:creating_a_new_project[Create a new project with spring boot web support]
+. xref:add_stacksaga_agent_dependency[Add `stacksaga-agent-*-starter` dependency.]
+. xref:customizing_the_configuration[Customize the configuration].
+
+
+[[creating_a_new_project]]
+=== Creating a New Project
+
+[[add_stacksaga_agent_dependency]]
+== Adding StackSaga Agent Dependency
+
+Add the `stacksaga-agent-mysql-starter` dependency to the `pom.xml` file.
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-agent-mysql-starter</artifactId>
+    <version>1.0.0</version>
+</dependency>
+----
+
+NOTE: According to this example, we have used mysql database implementation for the event store.
+Therefore, the agent dependency should be the `stacksaga-agent-support-mysql`.
+If you have used another database implementation, please change the dependency accordingly.
+
+[[customizing_the_configuration]]
+== Customize the configuration
+
+After adding the dependency, in the main class of the application, replace `StackSagaAgentRunner` class with `SpringApplication`.
+
+[source,java]
+----
+public static void main(String[] args) {
+    //replace StackSagaAgentRunner with SpringApplication
+    StackSagaAgentRunner.run(QuickStartApplication.class, args);
+}
+----
+
+And then update the `application.yml` file as follows with your configuration.
+
+[source,yaml]
+----
+server:
+  port: 5566 //<1>
+spring:
+  profiles:
+    active: eureka //<2>
+  application:
+    name: order-service-agent-eureka //<3>
+  datasource: //<4>
+    username: username
+    password: password
+    url: jdbc:mysql://localhost:3306/order-service
+    driver-class-name: com.mysql.jdbc.Driver
+stacksaga:
+  agent:
+    retry-batch-size: 10000 //<4>
+    target-service: order-service //<5>
+    target-service-host: order-service //<6>
+    act-master-as-slave: true //<7>
+    retry-pool:
+      pool-size: 10 //<8>
+    eureka:
+      instance-type: master //<9>
+      token-range-update-delay: 10000 //<10>
+      token-range-update-initial-delay: 10000 //<11>
+      token-range-valid-duration: 150000 //<12>
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/ //<13>
+----
