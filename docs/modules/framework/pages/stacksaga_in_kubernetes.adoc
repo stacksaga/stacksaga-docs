@@ -2,101 +2,109 @@
 
 == Overview
 
-When your application is deployed in Kubernetes with StackSaga, the core architecture is changed a bit.
-in the StackSaga architecture, there is a spacial part called xref:architecture:replay-transaction.adoc[transaction replay (retry)].
-you know already that to get the responsibility and perform retrying, there should be one leader for the given cluster of servers. in simple, StackSaga should select one of the services (within the same service name) for perform the retrying.
-it is called leader election. the leader election part was quite simple when you are in the spring pure microservice environment.
-It was used the Eureka service registry for electing the leader. but if we move to the Kubernetes environment, the best practices and the recommended way is using built-in https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/[service discovery capabilities.]
+If your system is deployed in Kubernetes, the following changes should be made to the adaptation.
 
-NOTE: If you prefer to go with default pure spring cloud architecture with Eureka, it also can be done without any doubt as usual.
+. xref:orchestrator-service-changes[Orchestrator service related changes]
+. xref:agent-service-changes[Agent service related changes]
 
-If you are going with kubernetes' built-in service discovery capabilities, Eureka-Server is not used anymore (https://docs.spring.io/spring-cloud-kubernetes/reference/discovery-client.html[read Spring DiscoveryClient for Kubernetes,]) and the leader election part is done by using the https://kubernetes.io/docs/concepts/architecture/leases/[Kubernetes Leases Leader election]. to overcome that inside of the StackSaga, the framework uses https://github.com/kubernetes-client/java[kubernetes-client] internally.
 
-== Migrating to StackSaga kubernetes discover
+[[orchestrator-service-changes]]
+=== Orchestrator Service Changes
 
-In general architecture `stack-saga-discovery-client` dependency has been used for discover related things. when you are moving with kubernetes discover, `stack-saga-k8s-discovery` dependency is replaced.
+Based on the running environment, it can be chosen one of environment support dependencies.
+Due to we are now in eureka environment, the `stacksaga-connect-k8s-support` dependency should be added to the `pom.xml` of the orchestrator service.
 
 [source,xml]
 ----
 <dependency>
     <groupId>org.stacksaga</groupId>
-    <artifactId>stack-saga-k8s-discovery</artifactId>
-    <version>1.0.0</version>
+    <artifactId>stacksaga-connect-k8s-support</artifactId>
+    <version>${stacksaga-version}</version>
 </dependency>
 ----
 
-IMPORTANT: In general architecture, a kubernetes service is created to make the Internal communication within the services.
-(Service to Service communication and Api-Gateway to other downstream services).
-Due to the eureka is not used in kubernetes.
-By default, the framework uses the service name as the host to communicate to other instances.
-When you create the https://kubernetes.io/docs/concepts/services-networking/service/:[kubernetes service], the service name that is used for the service (`metadata.name`) is different to application name (`spring.application.name`) make sure to mention it by using xref:kubernetes-support-configuration-properties.adoc[`stacksaga.cloud.k8s.serviceHost`] property.
+After adding the dependency, you have to provide a service account with roles to access the kubernetes API.
+because `stacksaga-connect-k8s-support` dependency access the kubernetes endpoint internally to get some meta-data like the service name, pod ID, etc.
 
-This dependency helps to leader election part and retrying by connect with kubernetes' API. due to accessing the kubernetes' API (https://kubernetes.io/docs/reference/access-authn-authz/rbac/[RBAC Authorization]), you have to bind a https://kubernetes.io/docs/concepts/security/service-accounts/[service account] with https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-and-clusterrole[a ClusterRole].
+[[service_account]]
+**ServiceAccount Manifest**
 
-
-[#Leader-Election-based-configuration]
-== Leader Election-based configuration
-
-**ServiceAccount**
+Create the https://kubernetes.io/docs/concepts/security/service-accounts/[service account] for the orchestrator service.
 
 [source,yaml]
 ----
-
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: order-service-service-account #the name of the service account.
+  name: demo-order-service-service-account #the name of the service account.
   namespace: default #the namespace the application is deployed.
 ----
 
-*ClusterRole*
+[[role]]
+*Role Manifest*
+
+Create a https://kubernetes.io/docs/reference/access-authn-authz/rbac/[role] for granting access to the pods and nodes.
 
 [source,yaml]
 ----
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: leader-election-lease-role #the name of the role.
+  name: demo-order-service-role
+  namespace: default
 rules:
-  - apiGroups: [ "","coordination.k8s.io" ] # <1>
-    resources: [ "endpoints","leases" ]
-    verbs: [ "get", "list", "watch", "create", "update", "patch", "delete" ]
+  - apiGroups: [ "" ]
+    resources: [ "pods","nodes" ]
+    verbs: [ "get" ]
 ----
 
-IMPORTANT: Due to the fact that the Kubernetes java client uses leases for leader election, `coordination.k8s.io` api-group should be added into the `apiGroups` array. because the lease object related data is provided through the `"coordination.k8s.io"` api. https://kubernetes.io/docs/concepts/architecture/leases/[read more...] +
-See in your console. *`#$ kubectl api-resources | grep leases#`*
+*RoleBinding Manifest*
 
-
-
-*ClusterRoleBinding*
+https://kubernetes.io/docs/reference/access-authn-authz/rbac/#kubectl-create-rolebinding[Bind the role] with the service account.
 
 [source,yaml]
 ----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: order-service-service-account-leader-election-lease-role
+  name: demo-order-service-service-account-role
   namespace: default
-#bind the service account with role
 subjects:
   - kind: ServiceAccount
-    name: order-service-service-account
+    name: demo-order-service-service-account
     namespace: default
 roleRef:
-  kind: Role
-  name: leader-election-lease-role
+  kind: RoleBinding
+  name: demo-order-service-role
   apiGroup: rbac.authorization.k8s.io
 ----
 
-After creating the user account-related necessary manifests, make sure to bind the user account with the Deployment. ( https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account[configure-service-account in k8s] )
+After binding the role with the service-account, configure the service-account with the deployment.
 
-// todo: put and example for adding the service account fro the Deployment.
+[source,yaml]
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-application
+spec:
+  selector:
+    matchLabels:
+      app: sample-application
+  template:
+    metadata:
+      labels:
+        app: sample-application
+    spec:
+      serviceAccountName: demo-order-service-service-account #mention the service account name here
+      automountServiceAccountToken: true
+      containers:
+        - name: order-service
+          image: mafeidev/sample-service:1.0.0
+      #.... rest of properties
+----
 
-IMPORTANT: StackSga leader election is elected based on the region and also the service-name. and also kubernetes leader election supports only for withing the cluster. therefore, one region only can have one kubernetes cluster.
-for instance, just imagine that you run 2 clusters and in both clusters your run the same service with the same database. then both clusters will have two different leaders for the same service at the same time. that means you brake the leader rule. the problem with it is that the leader fetches the retryable data for retrying (The retrying process is done batch vise) from the database related to the region and the service name. then, at the same time, both leaders can catch the same transaction. then the transactions can be crashed due to the parallel execution.
-
-NOTE: If you want to use https://docs.spring.io/spring-cloud-kubernetes/reference/leader-election.html[spring leader election dependency], you are totally free to use that as usual. Because Stacksaga does not use spring's leader-election object to leader election. And also, any spring leader election dependency is not used internally in StackSaga. Therefore, you can implement your own leader election requirement.
-
+See the application configuration properties regarding the `stacksaga-connect-k8s-support` xref:#[here].
 
 ====
 TIP:  After adding `stack-saga-k8s-discovery` you can use it to access the *pod metadata*  and as well as the *node metadata* that kubernetes provides.
@@ -136,4 +144,98 @@ public class InstanceDetailService {
 <3> cast the object in to `KubernetesSagaInstanceInfo` object.
 <4> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Pod.md[V1Pod] object.
 <5> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Node.md[V1Node] object.
+====
+
+[[agent-service-changes]]
+=== Agent service
+
+NOTE: If you have already created the xref:quick-examples:quick-start.adoc#retrying_with_stacksaga_agent[agent-service with eureka profile], just change the profile to `k8s` in the `application.yml` file and remove other configuration properties related to eureka. see the changes xref:update_existing_eureka_profile[here]
+
+'''
+
+If you are creating the agent-service from the beginning, first, create the agent-service with one of the xref:#[stacksaga-agent implementations] and then chose the profile as `k8s`.
+
+After that, grant accessing the API for the agent application with a service account and the role.
+
+NOTE: If you prefer to configure the same service-account with the role, you can use the xref:service_account[same service-account] that has been created for the orchestrator service.
+Or otherwise, you can create a separate one with the same xref:role[access control].
+
+After binding the role with the service-account, configure the service-account with the deployment.
+
+[source,yaml]
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-order-service-agent
+spec:
+  selector:
+    matchLabels:
+      app: demo-order-service-agent
+  template:
+    metadata:
+      labels:
+        app: demo-order-service-agent
+    spec:
+      serviceAccountName: demo-order-service-service-account #mention the service account name here
+      automountServiceAccountToken: true
+      containers:
+        - name: order-service
+          image: mafeidev/sample-service:1.0.0
+      #.... rest of properties
+----
+
+'''
+
+=== Eureka profile to Kubernetes profile
+
+[[update_existing_eureka_profile]]
+====
+
+[source,yaml]
+----
+
+server:
+  port: 5566
+spring:
+  profiles:
+    active: k8s #<1>
+  application:
+    name: order-service-agent-eureka
+  datasource:
+    username: root
+    password: mafei
+    url: jdbc:mysql://mysql_host:3306/order-service-db
+    driver-class-name: com.mysql.cj.jdbc.Driver
+stacksaga:
+  agent:
+    retry-batch-size: 10000
+    target-service: order-service
+    target-service-host: order-service
+    act-master-as-slave: true
+    retry-pool:
+      pool-size: 10
+#<2>
+
+#    eureka:
+#      instance-type: master
+#      token-range-update-delay: 10000
+#      token-range-update-initial-delay: 10000
+#      token-range-valid-duration: 150000
+#eureka:
+#  client:
+#    service-url:
+#      defaultZone: http://localhost:8077/eureka/
+#  instance:
+#    metadata-map:
+#      stacksagaRegion: myRegion
+#      stacksagaZone: myZone
+
+----
+
+'''
+
+
+<1> Changed the profile to `k8s`.
+<2> Removed all the eureka related properties.
 ====

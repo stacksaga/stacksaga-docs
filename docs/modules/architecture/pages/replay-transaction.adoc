@@ -1,6 +1,7 @@
-= Transaction Retrying. [[replay_transaction]]
+[[replay_transaction]]
+= Transaction Retrying.
 
-In general, In microservices architecture, retry is a mechanism used to handle transient failures by automatically reattempting an operation that has failed.
+In general, In microservices architecture, retry is a mechanism used to handle transaction failures by automatically reattempting an operation that has failed.
 Transient failures are short-lived issues that are expected to resolve themselves after a short delay, such as network timeouts, temporary xref:replay-transaction.adoc#resource-unavailable[resource unavailability], or overloaded systems.
 
 [[resource-unavailable]]
@@ -22,7 +23,7 @@ Immediate Retry is the approach that you use https://github.com/spring-projects/
 This is the retry strategy that handles retries synchronously and immediately after the initial failure.
 You can use Immediate-Retry in Stacksaga as usual without any disruption.
 +
-Even after the Immediate Retry, the request cannot be achieved dua to a resource-unavailable issue you can transfer the request to Stacksaga framework to handle the request with Asynchronous Retry.
+Even after the Immediate Retry, the request cannot be achieved due to a resource-unavailable issue you can transfer the request to Stacksaga framework to handle the request with Asynchronous Retry.
 
 2. *Asynchronous Retry:*
 +
@@ -32,7 +33,7 @@ In this section, we will discuss the asynchronous retry approach that provides b
 
 === Why Asynchronous Retrying
 
-You know already that most of the time there are multiple atomic transactions(multiple subtasks) may consist of one single transaction in microservice.
+You know already that most of the time there are multiple atomic transactions(multiple subtasks) may consist of one single transaction (business transaction) in microservice.
 That means even we make a single request, internally, it may consist of multiple subtasks that should be completed by communicating with other microservices.
 
 While executing all atomic transactions, If one of the subtasks is failed due to Resource Unavailable, it can be retried most of the time instead of stopping the task with en exception in microservice environment.
@@ -42,8 +43,8 @@ If one of atomic transactions is failed, other all atomic transactions that have
 
 If there is an exception while the executing main consideration is that we should identify the exception type.
 Whether the exception is *Resource Unavailable* or not.
-If the execution is a *Resource Unavailable* exception, it will be resolved soon and then the execution can execute successfully.
-As mentioned above, if we can identify the exception as a *Resource Unavailable* exception we can wait some time and re-invoke the executions.
+If the execution is a *Resource-Unavailable* exception, it will be resolved soon and then the execution can execute successfully.
+As mentioned above, if we can identify the exception as a *Resource-Unavailable* exception, we can wait some time and re-invoke the executions.
 Replaying tasks (transactions/operations) helps to have the eventual consistency without giving up the transaction.
 
 For identifying the exceptions as a retryable or not, it is used xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException] and xref:framework:retryable_executor_exception.adoc[RetryableExecutorException].
@@ -250,11 +251,9 @@ image:stacksaga-diagram-eureka-service-registry-zonal-architecture-cluster-mode.
 
 Stacksaga agent application can be run in both *Eureka service discovery environment* and also *Kubernetes service discovery* environment.
 
-
 == Stacksaga agent in the Eureka environment.
 
 include::how-token-range-is-shared-with-agent-cluster-in-eureka.adoc[]
-
 
 == Filtering Retryable transactions from the event-store.
 
