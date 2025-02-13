@@ -2,7 +2,7 @@
 
 == Overview
 
-Proportional Analysis of Long-Running Transactions in Saga refers to assessing potential failures by comparing different aspects of long-running transactions in a Saga-based system.
+Proportional Analysis of Long-Running Transactions in Saga refers to assessing potential failures by comparing different aspects of long-running transactions in a Saga-based system and what are the solutions that StackSaga provides for those potential failures.
 Even in a well-structured microservice architecture using the Saga pattern, failures can still occur.
 While the Saga pattern ensures eventual consistency, it does not eliminate all failures.
 However, at the implementation level, certain rare but critical failures can still be observed, emphasizing the need for robust failure-handling strategies and continuous monitoring.
@@ -73,13 +73,14 @@ Then those transactions are exposed to the next schedule for re-executing where 
 [[asynchronous_retry_timeouts]]
 == 4. Asynchronous retry Timeouts
 
-While communicating with other services some services can not be accessed sometimes due to connection issues.
-As a best practice if you are using a circuit breaker or synchronous retrying in your application, after a few attempts the transaction is frozen for some period of time and the transaction is scheduled for asynchronous retrying.
-If the transaction fails even after a few Asynchronous retrying, the I asynchronous retrying period of the transaction is exceeded.
+While communicating with other services, some services cannot be accessed sometimes due to connection issues.
+As a best practice if you are using a resilience and fault tolerance pattern like a circuit breaker in your application, after a few attempts the transaction is frozen for some period of time and the transaction is scheduled for asynchronous retrying.
+But the case is that if the transaction fails even after a few Asynchronous retrying, the asynchronous retrying period of the transaction is exceeded.
 Then the transaction will not be exposed to re-invoking.
-In simple terms every transaction has a time period for retrying asynchronously.
-After exceeding that time the transaction will be frozen.
+In simple terms, every transaction has a time period for retrying asynchronously.
+After exceeding that time, the transaction will be frozen.
 
+////
 Asynchronous Retry Timeouts
 
 When communicating with other services, temporary connection issues may prevent access to certain services.
@@ -91,19 +92,35 @@ Once this threshold is reached, the transaction is no longer eligible for furthe
 
 In simpler terms, each transaction has a limited time window for asynchronous retries.
 Once this period is exceeded, the transaction is permanently frozen and will not be retried.
+////
 
 TIP: Stacksaga solution.
 Even if these transactions are frozen due to the threshold has been reached, you are able to restore those transactions by fixing the relevant issue with a manual intervention.
-You can find out the transactions batch wise from the event store via the endpoint that Stacksaga provides.
-After collecting the transactions it can be restored by calling again the restore endpoint that Stacksaga provides.
+You can find the transactions from the event store batch wise via the endpoint that Stacksaga provides.
+After collecting the transactions, it can be restored by calling again the restore endpoint that Stacksaga provides.
 Then those transactions are exposed to the next schedule for re-executing where the transaction was stopped.
 
 [[incomplete_transactions]]
-== 4. Incomplete transactions. (Crashed transaction)
+== 4. Crashed transaction.
 
 In microservices architecture, one business transaction consists of multiple sub-transactions (atomic-transactions).
-So if one atomic transaction is crashed (the crash can be occurred due to various reasons like Power Outage, hardware failure, etc.) without any update (fallback), the entire transaction is stuck.
+And as well as another extra atomic transaction is made by the SEC behind the scene for storing the state of the transaction in the event store.
+
+So if one atomic transaction is crashed, (the crash can be occurred due to various reasons like Power Outage, hardware failure, etc.) without any update (fallback), the entire transaction is stuck.
 Because the atomic transactions of the business transaction are executed in sequence order in general.
+
+These kinds of failures may occur in mainly two forms.
+
+1. The Application is crashed while processing the atomic execution to the event-store by the SEC.
+It leads to a xref:dual_consistency_problem_of_sec_in_microservice.adoc[dual-consistency problem].
+2. The Application is crashed while processing one of the xref:executor_architecture.adoc[executors] (one of atomic transactions of the business transaction).
+
+TIP: Stacksaga solution.
+In the case of a crash of the transactions, the SEC has no idea where the transaction is stuck exactly.
+Because the execution process got killed without announcing to the SEC.
+StackSaga is ready for handling these crashes as well.
+Each time the transaction is updated in the event store by the SEC, SEC updates the xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction Restore Retention Time,]
+and in case if the transaction got crashed, the transaction will be caught for retrying after exceeding the *Transaction Restore Retention Time.*
 
 // === Involvement of Stacksaga in crashed transaction.
 
@@ -117,24 +134,18 @@ In asynchronous retry processes, transactions are transferred for execution to a
 However, during this process, a transaction may be lost or fail to execute due to issues like message loss, queue mismanagement, or communication failures.
 These missing transactions can lead to inconsistencies and require careful monitoring and recovery strategies.
 
-NOTE: xref:incomplete_transactions[Incomplete-Transactions] and xref:missing_transactions[Missing transactions] are quite similar at first glance.
-But *Incomplete-transactions* term forces the dual-consistency problem.
+NOTE: xref:incomplete_transactions[Crashed-transaction] and xref:missing_transactions[Missing transactions] are quite similar at first glance.
+But *Crashed-transaction* term forces the dual-consistency problem.
 That means the consistency between the event-store and the real database.
-But *Missing Transactions* term forces the transactions that are missing without achieving both of them.
+But *Missing Transactions* term forces the transactions that are missing without achieving both of them (The event-store and the primary database).
 
-At first glance, Incomplete Transactions and Missing Transactions may appear similar, but they address distinct challenges:
-
-Incomplete Transactions highlight the dual-consistency problem, focusing on the lack of consistency between the event store and the primary database.
-In these cases, the transaction partially progresses but leaves the system in an inconsistent state.
-
-Missing Transactions, on the other hand, refer to transactions that fail to execute entirely.
-These transactions are neither recorded in the event store nor reflected in the primary database, effectively vanishing without leaving a trace.
-(The event-store and the primary database)
-
+////
 == 6. Retry-Timeout transactions
 
 In distributed systems, transactions are retried within a specific time frame.
 If the retry limit is exceeded, the transaction is frozen and will not be retried automatically.
 This can happen due to long service downtimes, network issues, or high system load.
 To resolve these transactions, manual intervention is needed to identify and fix the problem before reactivating the transaction.
+////
+
 
