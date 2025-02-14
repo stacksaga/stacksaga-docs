@@ -20,9 +20,8 @@ It does not say that every time these errors can occur, but there is a possibili
 . xref:Successful_transactions[Successful transactions.]
 . xref:primary_execution_failed_transactions[Primary-Execution failed transactions.]
 . xref:compensation_failed_transactions[Compensation Failed Transactions]
-. Incomplete transactions
-. Retry-Timeout transactions
-. Missing transactions
+. xref:crashed_transaction[Crashed transactions]
+. xref:missing_transactions[Missing transactions]
 
 [[Successful_transactions]]
 == 1. Successful transactions.
@@ -47,7 +46,7 @@ Because it is used for stopping to forward the transaction and to start the comp
 ////
 
 If one of primary executions fails while going forward and the compensation process is successfully done after the primary execution failure, these transactions are considered as compensation success transactions.
-According to the saga design pattern, competition, successful transactions are not considered as failed transactions.
+According to the saga design pattern, successful transactions are not considered as failed transactions.
 Because, the transaction has overcome the eventual consistency.
 
 ====
@@ -100,7 +99,7 @@ You can find the transactions from the event store batch wise via the endpoint t
 After collecting the transactions, it can be restored by calling again the restore endpoint that Stacksaga provides.
 Then those transactions are exposed to the next schedule for re-executing where the transaction was stopped.
 
-[[incomplete_transactions]]
+[[crashed_transaction]]
 == 4. Crashed transaction.
 
 In microservices architecture, one business transaction consists of multiple sub-transactions (atomic-transactions).
@@ -117,7 +116,7 @@ It leads to a xref:dual_consistency_problem_of_sec_in_microservice.adoc[dual-con
 
 TIP: Stacksaga solution.
 In the case of a crash of the transactions, the SEC has no idea where the transaction is stuck exactly.
-Because the execution process got killed without announcing to the SEC.
+Because the execution process got killed without announcing anything to the SEC.
 StackSaga is ready for handling these crashes as well.
 Each time the transaction is updated in the event store by the SEC, SEC updates the xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction Restore Retention Time,]
 and in case if the transaction got crashed, the transaction will be caught for retrying after exceeding the *Transaction Restore Retention Time.*
@@ -127,17 +126,18 @@ and in case if the transaction got crashed, the transaction will be caught for r
 [[missing_transactions]]
 == 5. Missing transactions
 
+////
 In the asynchronous retrying process, the transactions are transformed for retrying to the available services (it can be via a queue or http request or any other mechanism).
 While the process of the transaction can be missing without being executed.
+////
 
 In asynchronous retry processes, transactions are transferred for execution to available services through mechanisms such as queues, HTTP requests, or other communication channels.
 However, during this process, a transaction may be lost or fail to execute due to issues like message loss, queue mismanagement, or communication failures.
 These missing transactions can lead to inconsistencies and require careful monitoring and recovery strategies.
 
-NOTE: xref:incomplete_transactions[Crashed-transaction] and xref:missing_transactions[Missing transactions] are quite similar at first glance.
-But *Crashed-transaction* term forces the dual-consistency problem.
-That means the consistency between the event-store and the real database.
-But *Missing Transactions* term forces the transactions that are missing without achieving both of them (The event-store and the primary database).
+TIP: Stacksaga solution.
+In this case, the same *Transaction-Restore-Retention-Time* logic is applied as the solution.
+If the transaction has no any sign after sending for retrying, after some configured xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction-Restore-Retention-Time], the transaction is re-exposed for retrying automatically.
 
 ////
 == 6. Retry-Timeout transactions
