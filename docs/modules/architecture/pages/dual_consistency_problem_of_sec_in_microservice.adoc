@@ -1,14 +1,29 @@
-= Dual-Consistency problem of SEC in microservice. [[dual_consistency_problem_of_sec_in_microservice]]
+= Dual-Consistency problem of SEC in Saga im. [[dual_consistency_problem_of_sec_in_microservice]]
+
+== Introduction
 
 In the microservice architecture, It is highly concerned about the data consistency.
-As a result of that, you had to move in to the <<introduction_to_saga,SAGA design pattern,>> and it ensures eventual consistency.
+As a result of that, you had to move in to the xref:introduction-to-stacksaga.adoc[SAGA design pattern,] and it ensures xref:saga-architecture.adoc#eventual_consistency[eventual consistency].
 
-But you know that <<SEC,SEC>> also uses a database internally for storing the event data for retry purpose in StackSaga.
-SEC is also another program that supports for your execution as a middleware framework.
-That means that all the executions are saved in the database as an event by the StackSaga framework before the real execution.
-Because, in case your atomic transaction is failed for some reason, the atomic transaction should be retried by the SEC.
-To do re-play, the old state should be in the hand of the StackSaga.
+But the xref:SEC.adoc[SEC] also uses a database internally for storing the event data for retry purpose in StackSaga.
+SEC is also another program that supports for invoking your executions as a middleware framework.
+That means that all the execution data is saved in the database as events by the StackSaga framework before the real execution behind the scenes.
 
+Because, in case your atomic transaction is failed for some reason, the atomic transaction should be rerun asynchronously.
+To retry the transaction, the old state of the transaction that the transaction was stopped should be persisted in the event-store.
+
+According to the above definition, when an atomic transaction of the long-running transaction is executed by the SEC, the SEC creates an additional atomic transaction in its event store.
+However, since the SEC accesses the event store separately and has no control over the execution of the original atomic transaction, both transactions are executed independently.
+If the SEC fails to save its data in the database after successfully executing the original atomic transaction of the long-running transaction, it can break the Atomicity rule.
+This inconsistency arises due to the primary transaction is committed, but the SEC's state remains incomplete, leading to potential data integrity issues.
+
+In brief, The responsibility of protecting both data-consistencies of internal event-store and your transaction’s data-consistency is known as the Dual consistency problem of SEC.
+
+read xref:stack_saga_transaction_type.adoc[this] for having a better understanding of how the SEC works.
+
+== How StackSaga overcomes the Dual-Consistency Problem
+
+////
 Just imagine that Your entire domain (<<quick_understanding_example,place order example>>) can have 5 atomic transactions inside the <<executor_architecture,executors>>.
 After calling the execution through the <<saga_template,`SagaTemplate`>>, StackSaga starts execution one by one as you configured order by the developer.
 Then, before executing the transaction, the transaction should be initialized in the event-store.
@@ -18,6 +33,7 @@ And after that, your 1st executor will be executed by the SEC.
 After executing your 1st atomic transaction, again the updated state is saved in the event-store by SEC.
 Like so, all the time your state is saved in the event-store.
 Then just think that after executing the 2nd atomic transaction (execution) SEC going to update the event-store and then an error is occurred due to connection issues of the event-store database.
+////
 
 Then the framework is failed to provide the data consistency by themselves of their side.
 But the real fact, the first reason is for choosing a framework is to overcome the data consistency.
@@ -25,7 +41,6 @@ But If the framework is not capable of handling the data consistency by itself, 
 
 ##In brief, The responsibility of protecting both data-consistency of internal event-store and your transaction's data-consistency is known as the Dual consistency problem of SEC.
 ##
-
 
 ////
 Even though it is not possible technically to handle by the database side, StackSaga provides a best solution for that.
