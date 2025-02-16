@@ -1,12 +1,19 @@
 = Quick Start
 :keywords: satcksaga microservice,spring boot saga,spring cloud microservice saga, saga design pattern,saga orchestration spring boot
-:description: spring boot stacksaga quick start demo
+:description: stacksaga  quick start demo
 
 [[Overview]]
 == Overview
 
-This guide demonstrates how to set up and run a microservice using the StackSaga framework with minimal configuration.
+This guide demonstrates how to easily set up the StackSaga framework in microservice architecture with minimal configuration.
 It focuses on a common use case where a microservice communicates with multiple other microservices to fulfill a single business logic.
+
+NOTE: Due to stacksaga should be added only to the order-service (orchestrator service), other microservices are not implemented here, and this guide shows how StackSaga works with workflow of your LRT.
+
+////
+The goal is to demonstrate how the StackSaga framework simplifies the process of coordinating communication between these microservices to implement the business logic for order placement.
+////
+
 
 == Basic implementation
 
@@ -14,17 +21,49 @@ It focuses on a common use case where a microservice communicates with multiple 
 
 In this scenario, we have a microservice called *Order Service*, which needs to interact with the following microservices to place an order successfully:
 
-Payment Service:: Handles payment processing.
+[.scrollable]
+--
+[cols=".no-wrap, .normal, .no-wrap, .no-wrap, .no-wrap, .no-wrap"]
+|===
+|Executor Class Name| Execution_Requirement | Target_Service | Type | Primary-Execution |  Compensating-Execution
 
-Stock Service:: Manages inventory checks and updates.
+|xref:GetUserDetailsExecutor[`GetUserDetailsExecutor`]
+|Fetch the user's details
+|`user-service`
+|[.badge-green]*QUERY_EXECUTOR*
+|`getUserDetails`
+| -
 
-User Service:: Retrieves and verifies user information.
+|xref:OrderInitializeExecutor[`OrderInitializeExecutor`]
+|Initialize the order at the first.
+|`order-service`
+|[.badge-yellow]*COMMAND_EXECUTOR*
+|`initializeOrder`
+|`cancelOrder`
 
-The goal is to demonstrate how the StackSaga framework simplifies the process of coordinating communication between these microservices to implement the business logic for order placement.
+|xref://[`PreAuthExecutor`]
+|Make the Pre-Auth process.
+|`payment-service`
+|[.badge-yellow]*COMMAND_EXECUTOR*
+|`makePreAuth`
+|`releasePreAuth`
 
-=== Prerequisites
+|xref://[`StockUpdateExecutor`]
+|Update the stock from the store.
+|`stock-service`
+|[.badge-yellow]*COMMAND_EXECUTOR*
+|`updateStock`
+|`restoreStock`
 
-Before you begin, ensure the following:
+|xref://[`MakePaymentExecutor`]
+|Finalize the order by making the real payment.
+|`payment-service`
+|[.badge-yellow]*COMMAND_EXECUTOR*
+|`makePayment`
+| `refundPayment`
+|===
+
+--
 
 === Creating the orchestrator service
 
@@ -63,26 +102,23 @@ After creating the project, it is necessary to add the required stacksaga depend
 
 stacksaga-spring-boot-starter:: The core of the framework.
 
-:versiosn: {page-component-version}
-
-[source,xml]
+[source,xml,subs="+attributes"]
 ----
 <dependency>
    <groupId>org.stacksaga</groupId>
    <artifactId>stacksaga-spring-boot-starter</artifactId>
-   <version>{versiosn}</version>
+   <version>{page-component-version}</version>
 </dependency>
 ----
 
-
 stacksaga-mysql-support:: The Mysql database supports implementation for the framework.
 
-[source,xml]
+[source,xml,subs="+attributes"]
 ----
 <dependency>
    <groupId>org.stacksaga</groupId>
    <artifactId>stacksaga-mysql-support</artifactId>
-   <version>1.0.0</version>
+   <version>{page-component-version}</version>
 </dependency>
 ----
 
@@ -102,6 +138,7 @@ stacksaga:
     username: database_username
     password: database_password
     driver-class-name: com.mysql.cj.jdbc.Driver
+  environment: dev #<6>
 ----
 
 <1> The name of the application is required for stacksaga
@@ -109,6 +146,8 @@ stacksaga:
 <3> The package path of the aggregators that are localed in.
 <4> The application release version
 <5> The database configuration for accessing the mysql database as the event-store.
+<6> The environment of the application has been updated as `dev`.
+It allows you to update (adding or removing) executors without changing the xref:architecture:aggregator_versioning.adoc[aggregator version and the application release version] due to development environment.
 
 ====
 See more,
@@ -120,7 +159,7 @@ See more,
 ====
 
 [[creating_an_aggregator]]
-=== Creating an aggregator
+=== Creating the Aggregator
 
 Creating an xref:architecture:aggregator.adoc[Aggregator] is one of the main steps in the stacksaga framework implementation.
 Because it is the container that holds the states of each execution's data until the transaction is completed.
@@ -133,16 +172,15 @@ PlaceOrderAggregator.java::
 ----
 package demo.quickdemo.aggregators;
 
-import lombok.*;
+import lombok.Getter;
+import lombok.Setter;
 import org.stacksaga.Aggregator;
-import org.stacksaga.SagaSerializable;
 import org.stacksaga.annotation.SagaAggregator;
 import org.stacksaga.annotation.SagaAggregatorVersion;
 
 @SagaAggregator(
         version = @SagaAggregatorVersion(major = 1, minor = 0, patch = 0),
-        name = "PlaceOrderAggregator",
-        sagaSerializable = PlaceOrderAggregatorSagaSerializable.class
+        name = "PlaceOrderAggregator"
 )
 @Getter
 @Setter
@@ -151,17 +189,11 @@ public class PlaceOrderAggregator extends Aggregator {
     private double amount;
     private String userId;
     private boolean isPaid;
+    private String preAuthRefId;
     private String paymentId;
 
     public PlaceOrderAggregator() {
         super(PlaceOrderAggregator.class);
-    }
-
-}
-
-class PlaceOrderAggregatorSagaSerializable extends SagaSerializable<PlaceOrderAggregator> {
-    public PlaceOrderAggregatorSagaSerializable() {
-        this.put("Sample-1", new PlaceOrderAggregator());
     }
 }
 ----
@@ -172,13 +204,14 @@ class PlaceOrderAggregatorSagaSerializable extends SagaSerializable<PlaceOrderAg
 Create the executors in the `demo.quickdemo.executors` package.
 For this quick-start example, four executors are created to make individual atomic executions to the relevant services.
 
-. *xref:PlaceOrderInitExecutor[PlaceOrderInitExecutor]* for *order-service* (itself)
+. *xref:OrderInitializeExecutor[OrderInitializeExecutor]* for *order-service* (itself)
 . *xref:GetUserDetailsExecutor[GetUserDetailsExecutor]* for *user-service*
+. *xref:PreAuthExecutor[PreAuthExecutor]* for *payment-service*
 . *xref:MakePaymentExecutor[MakePaymentExecutor]* for *payment-service*
 . *xref:StockUpdateExecutor[StockUpdateExecutor]* for *stock-service*
 
-[[PlaceOrderInitExecutor]]
-==== PlaceOrderInitExecutor
+[[OrderInitializeExecutor]]
+==== OrderInitializeExecutor
 
 [source,java]
 ----
@@ -199,9 +232,9 @@ import java.util.Random;
 
 @SagaExecutor(
         executeFor = "order-service",
-        value = "PlaceOrderInitExecutor"
+        value = "OrderInitializeExecutor"
 )
-public class PlaceOrderInitExecutor implements CommandExecutor<PlaceOrderAggregator> {
+public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggregator> {
 
     @SneakyThrows
     @Override
@@ -225,7 +258,6 @@ public class PlaceOrderInitExecutor implements CommandExecutor<PlaceOrderAggrega
                                            RevertHintStore revertHintStore,
                                            String idempotencyKey
     ) throws RetryableExecutorException {
-
         // TODO: execute place order revert process here
         return () -> "ORDER_CANCELLED";
     }
@@ -270,7 +302,49 @@ public class GetUserDetailsExecutor implements QueryExecutor<PlaceOrderAggregato
             //updates the aggregator with the user details
             currentAggregator.setUserId("mafei");
         }
-        return stepManager.next(MakePaymentExecutor.class, () -> "PLACED_ORDER");
+        return stepManager.next(PreAuthExecutor.class, () -> "USER_DETAILS_FETCHED");
+    }
+}
+----
+
+[[PreAuthExecutor]]
+==== PreAuthExecutor
+
+[source,java]
+----
+package demo.quickdemo.executors;
+
+import demo.quickdemo.aggregators.PlaceOrderAggregator;
+import lombok.SneakyThrows;
+import org.stacksaga.ProcessStepManager;
+import org.stacksaga.ProcessStepManagerUtil;
+import org.stacksaga.RevertHintStore;
+import org.stacksaga.annotation.SagaExecutor;
+import org.stacksaga.core.SagaExecutionEventName;
+import org.stacksaga.exception.RetryableExecutorException;
+import org.stacksaga.exception.execution.NonRetryableExecutorException;
+import org.stacksaga.executor.CommandExecutor;
+
+import java.util.Random;
+
+@SagaExecutor(executeFor = "payment-service", value = "PreAuthExecutor")
+public class PreAuthExecutor implements CommandExecutor<PlaceOrderAggregator> {
+    @SneakyThrows
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(PlaceOrderAggregator currentAggregator, ProcessStepManagerUtil<PlaceOrderAggregator> stepManager, String idempotencyKey) throws RetryableExecutorException, NonRetryableExecutorException {
+        // TODO: make the pre-auth from payment-service
+        Thread.sleep(new Random().nextLong(1000, 3000));
+        {
+            //updates the pre-auth reference ID
+            currentAggregator.setPreAuthRefId("822343439413136");
+        }
+        return stepManager.next(MakePaymentExecutor.class, () -> "MADE_PRE_AUTH");
+    }
+
+    @Override
+    public SagaExecutionEventName doRevert(NonRetryableExecutorException processException, PlaceOrderAggregator finalAggregatorState, RevertHintStore revertHintStore, String idempotencyKey) throws RetryableExecutorException {
+        // TODO: execute pre-auth compensation process here by calling the payment-service
+        return () -> "PRE_AUTH_RELEASED";
     }
 }
 ----
@@ -310,6 +384,7 @@ public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
         // TODO: execute payment process here
+        // access the preAuthRefId from the aggregator to making the request
         Thread.sleep(new Random().nextLong(1000, 3000));
         {
             //updates the aggregator with the payment id
@@ -419,7 +494,7 @@ package demo.quickdemo.controller;
 
 import demo.quickdemo.aggregators.PlaceOrderAggregator;
 import demo.quickdemo.dto.PlaceOrderDto;
-import demo.quickdemo.executors.PlaceOrderInitExecutor;
+import demo.quickdemo.executors.OrderInitializeExecutor;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -438,7 +513,7 @@ public class PlaceOrderController {
     public PlaceOrderDto.Response placeOrder(@RequestBody PlaceOrderDto.Request request) {
         final PlaceOrderAggregator placeOrderAggregator = new PlaceOrderAggregator();
         placeOrderAggregator.setAmount(request.getAmount());
-        final String orderId = this.placeOrderAggregatorSagaTemplate.process(placeOrderAggregator, PlaceOrderInitExecutor.class);
+        final String orderId = this.placeOrderAggregatorSagaTemplate.process(placeOrderAggregator, OrderInitializeExecutor.class);
         return new PlaceOrderDto.Response(orderId);
     }
 }
@@ -459,7 +534,7 @@ image:stacksaga-quick-demo-transaction-tracing.jpeg[]
 You have successfully implemented the major part of the quick demo.
 It was about the successful scenario.
 Let's move on to the next part.
-It focuses on xref:architecture:replay-transaction.adoc[Transaction Retrying].
+It focuses on xref:architecture:transaction-retrying.adoc[Transaction Retrying].
 
 [[retrying_with_stacksaga_agent]]
 == Retrying with StackSaga Agent
@@ -469,7 +544,7 @@ As per the stacksaga architecture, we have to deploy an agent-service for retryi
 The steps are as follows:
 
 . xref:creating_a_new_project[Create a new project with spring boot web support]
-. xref:add_stacksaga_agent_dependency[Add `stacksaga-agent-*-starter` dependency.]
+. xref:add_stacksaga_agent_dependency[Add `stacksaga-agent-{{database}}-starter` dependency.]
 . xref:customizing_the_configuration[Customize the configuration].
 
 
@@ -512,32 +587,32 @@ And then update the `application.yml` file as follows with your configuration.
 [source,yaml]
 ----
 server:
-  port: 5566 //<1>
+  port: 5566 #<1>
 spring:
   profiles:
-    active: eureka //<2>
+    active: eureka #<2>
   application:
-    name: order-service-agent-eureka //<3>
-  datasource: //<4>
+    name: order-service-agent-eureka #<3>
+  datasource: #<4>
     username: username
     password: password
     url: jdbc:mysql://localhost:3306/order-service
     driver-class-name: com.mysql.jdbc.Driver
 stacksaga:
   agent:
-    retry-batch-size: 10000 //<4>
-    target-service: order-service //<5>
-    target-service-host: order-service //<6>
-    act-master-as-slave: true //<7>
+    retry-batch-size: 10000 #<4>
+    target-service: order-service #<5>
+    target-service-host: order-service #<6>
+    act-master-as-slave: true #<7>
     retry-pool:
-      pool-size: 10 //<8>
+      pool-size: 10 #<8>
     eureka:
-      instance-type: master //<9>
-      token-range-update-delay: 10000 //<10>
-      token-range-update-initial-delay: 10000 //<11>
-      token-range-valid-duration: 150000 //<12>
+      instance-type: master #<9>
+      token-range-update-delay: 10000 #<10>
+      token-range-update-initial-delay: 10000 #<11>
+      token-range-valid-duration: 150000 #<12>
 eureka:
   client:
     service-url:
-      defaultZone: http://localhost:8761/eureka/ //<13>
+      defaultZone: http://localhost:8761/eureka/ #<13>
 ----
