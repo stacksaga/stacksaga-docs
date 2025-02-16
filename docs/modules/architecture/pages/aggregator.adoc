@@ -1,12 +1,9 @@
-= Saga Aggregator.
-
-:1
+= StackSaga Aggregator
 
 The *aggregator* object is the main component that all the data is stored for the entire transaction.
 It acts as the data bucket that you bring the data to each executor by updating time to time.
 As well as bringing the data into the executors, each executor can update the aggregator with new data while the executor's scope.
 Then the next upcoming executors can use that updated data in their executor scope.
-
 
 The aggregator data is updated time to time, and that data is stored each and every event happens.
 That means, At the initial the data that you update to aggregator, it is saved as the initial state in the xref:event_store.adoc[event-store].
@@ -14,16 +11,16 @@ And after executing the 1st executor, the aggregator state is updated.
 Again, that state is saved in the event-store with the name of the executor.
 It is called aggregator event sourcing.
 
-There are two major reasons for aggregator event sourcing.
+*There are two major reasons for aggregator event sourcing.*
 
-. xref:replay-transaction.adoc[To Event Replay] (Replay the executors).
+. xref:transaction-retrying.adoc[To Transaction Retry] (Replay the executors).
 - You know that all the atomic executions are retryable in case of resource-unavailable situations (If the execution is failed due to connection issue while the communication).
 Then the xref:SEC.adoc[SEC] has to replay the execution again with the same data (Same aggregator state) after a while (based on the configured xref://[configurations]).
 
 . To View transaction trace via dashboard.
 - Due to the aggregator event sourcing, you can debug all the changes that have been made by each executor via the admin dashboard like what is the aggregator state that was when the particular executor is started and how the aggregator state looks like after executing that particular executor.
 
-According to the Place-order example, the entire process has a set of sub processes like:
+According to the Place-order example, the entire process has a set of sub atomic-transactions like:
 
 . Fetching user's details.
 . Initialize order.
@@ -49,10 +46,10 @@ That means the executors are identified by the aggregator class that you use.
 Because your entire transaction can have only one aggregator.
 Therefore, the aggregator class is used in each and every time by representing the transaction.
 For instance, according to the StackSaga example, the place order is the entire process.
-It contains many sub processes like initialize order, check user, etc.
+It contains many sub atomic-transactions like initialize order, check user, etc.
 Each process is introduced to the framework by using executors.
 So, for each process have separate executors.
-When you create each executor, you should mention what ks the aggregator that you want to use in that executor.
+When you create each executor, you should mention what is the aggregator that you want to use in that executor.
 
 == Saga Aggregator life cycle summary
 
