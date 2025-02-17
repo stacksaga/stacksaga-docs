@@ -1,35 +1,35 @@
 ==== Order-Service Overview.
 
 You know that we have to access more services besides this `order-service` to fully complete the entire place-order request.
-To access those services in general, you would use *service-layer* and call those services manually by using any httpclient like RestTemplate, Feign client, Okhttp, and so on.
-Instead of that manual unorganized way, StackSaga offers better wrapper blocks for each execution.
-It is called as `executors`.
+To access those services in general, you would use the *service-layer* and call those services manually by using any httpclient like RestTemplate, Feign client, Okhttp, and so on.
 
-> Read the xref://[reference documentation]
-to have a better understanding and best practices regarding the `SagaExecutors`.
+Instead of that manual unorganized way, StackSaga offers better template for each execution.
+It is called as xref:architecture:executor_architecture.adoc[executors].
 
-According to the xref://[Saga design pattern], you know that we should have a Compensating process for all the execution (All the executions that make some changes in a database).
+According to the xref:architecture:saga-architecture.adoc[Saga design pattern], you know that we should have a Compensating process for all the atomic executions.
+(All the executions that make some changes in a database).
 Due to the fact that the StackSaga framework is one of Saga implementations, it should be provided the primary execution and also a Compensating execution to make a Compensating when the entire process is failed at any point.
 
-Based on having a Compensating or not, the executors are two types called `command-executor` and `query-executor`.
-`command-executor` have both primary execution and the Compensating execution.
-If it is `query-executor`, it has only primary execution.
+Based on having a Compensating or not, the executors are two types called xref:architecture:command_executor_architecture.adoc[command-executor] and xref:architecture:query_executor_architecture.adoc[query-executor].
+`command-executor` have both *Primary execution* and the *Compensating execution*.
+If it is `query-executor`, it has only *Primary execution*.
 
 ==== How StackSaga combines with Controller Service and Repository architecture?
 
 In spring applications we follow `controller`, `service` and `repository` layered architecture.
-StackSaga suggest another middle layer between the `controller` layer and the `service` layer called #`executor-layer`#.
-The `executor-layer` is the place the executors are created.
+StackSaga suggest another middle layer between the `controller` layer and the `service` layer called `executor-layer`.
+The `executor-layer` is the place the xref:architecture:executor_architecture.adoc[executors] are created.
+
 Let's see step by step how StackSaga involves the process.
 
-Here you can see the entire process in a diagram from based on the order-service (orchestrator-service).
+Here you can see the entire process in a diagram how StackSaga works in the order-service (orchestrator-service).
 
 image:stacksaga-example-executors-architecture-in-order-service.drawio.svg[alt="stacksaga microservice example executors architecture in order service"]
 
-In brief, The client makes an order place request and the request comes to the order-service via the api-cloud-gateway.
-And then we initialize a special object called `Aggregator`
-and it is handed over to the SEC (Saga Execution coordinator), and the SEC will handle the entire execution by executing each every atomic execution.
-The atomic executions have been provided inside the executors.
+In brief, The client makes an order place request and the request comes to the *order-service* via the *API-Cloud-Gateway*.
+And then we initialize a special object called xref:architecture:aggregator.adoc[`Aggregator`]
+and it is handed over to the xref:architecture:SEC.adoc[SEC] (Saga Execution coordinator), and the SEC will handle the entire execution by executing each executor.
+The atomic executions for communicating with other services have been provided inside the executors.
 
 Here you can see the summarized table for your convenience.
 

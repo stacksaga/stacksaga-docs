@@ -1,4 +1,3 @@
-[#_stacksaga_demo_core_concept_practice]
 = StackSaga Demo (Core concept practice)
 
 :keywords: SatckSaga Spring microservice,spring boot saga,spring cloud microservice saga, saga design pattern,saga orchestration spring boot
@@ -6,57 +5,62 @@
 
 == Overview
 
-In this demo, we are focusing on how to implement the StackSaga things in the spring boot in microservice architecture.
+In this demo, we're going to use StackSaga for the orchestrator service called `order-service` and see how the StackSaga works in detail like exception handling transaction retrying etc.
 
 > IF you are new to StackSaga, it is recommended to read the xref:architecture:aggregator.adoc[architecture] and xref:framework:create-aggregator.adoc[reference documentation]
 for reading individual components.
 
 In this example, we have 4 utility microservices called `order-service`, `user-service`, `payment-service`, and `stock-service.` in addition to that,
 https://spring.io/projects/spring-cloud-gateway[Spring Cloud Api Gateway] is used as the proxy server and as well as the Application Load Balancer (ALB).
-and also Eureka Discovery is used for service registry.
+And also Eureka Discovery is used for service registry.
 
-The use-case is that the clients can place an order, and then the order request should be completed go through these 4 services.
+The use-case is that the client can place an order, and then the order request should be completed go through these 4 services.
 
 Each services' responsibilities as follows.
 
 [horizontal]
-`*order-service*`:: Order service is responsible for accepting the place order request and managing the entire transaction as the xref://[orchestrator].
-and also as a utility service, the service is responsible for storing the order related specific data in the order-service database.
-According to this use-case, This is the service that stacksaga is added.
+`*order-service*`:: Order service is responsible for accepting the place order request and managing the entire transaction as the xref:architecture:saga-architecture.adoc#saga_orchestration_pattern[orchestrator].
+And also it as a utility service, the service is responsible for storing the order related specific data in the order-service database.
+According to this use-case, This is the service that stacksaga is added. other services will act as just regular services due to they are not responsible for managing an entire workflow (The entire transaction).
 
-`*user-service*`:: To make the process we want to have the user details like delivery address.
+`*user-service*`:: To make the place order, we want to have the user details like delivery address, phone number, etc.
 `user-service` managing the user-related data, and it provides endpoints to fetch the user's data.
 
 `*payment-service*`:: In the placing order process, the utility `payment-service` involves to two main tasks.
 +
-. To make the *Pre-Auth* before doing the real transaction and to check that the payment can be done or not.
-. To make the payment (Real transaction).
-All the steps are done smoothly finally, the reserved transaction should be made.
+. *Pre-Auth*: To make the *Pre-Auth* before doing the real transaction and to check that the payment can be done or not.
+. *Make-Payment*: To make the payment (Real transaction).
+If all the steps are done smoothly finally, the reserved transaction should be made.
 These endpoints are provided by the `payment-service`.
 
-`*stock-service*`:: After making the pre-auth process, we should update the real stock.
-`stock-service` is responsible for providing endpoints to update the real stock and restore the update.
+`*inventory-service*`:: After making the pre-auth process, the real stock should be updated to reduce the quantity.
+`inventory-service` is responsible for providing endpoints to update the real stock and restore the update in case of compensation.
 
-
-All the services that we are going to build.
+All the services that we are going to build as follows.
 
 * API-cloud-gateway
-* eureka-service
-* utility services
+* Eureka-service
+* Utility services
 ** order-service
 ** user-service
 ** stock-service
 ** payment-service
 
-Additionally `stacksaga-admin-dashboard` is run for monitoring the transactions.
+Additionally, https://live.stacksaga.org/[Stacksaga Cloud-Window] is used for monitoring the transaction tracing details and reviewing any errors related to transactions.
 
-> source code is available on //[Github].
+> Source code is available on https://github.com/stacksaga/stacksaga-examples/tree/main/stacksaga-demo-default[Github].
 
-This guide is divided into 3 sections for your convenience.
+*This guide is divided into three sections for your convenience.*
 
-[1] xref:stacksaga-demo.adoc#implementation[Implementation]:: Guides for implementing all java classes. (focus the StackSaga concepts)
-[2] xref:stacksaga-demo.adoc#deployment[Deployment]:: Guides for creating and connecting The API-gateway and eureka service with utility services with all the configurations.
-[3] xref:stacksaga-demo.adoc#testing[Testing]:: Testing the application by running all the applications together.
+. xref:stacksaga-demo.adoc#implementation[Implementation]
++
+Guides for implementing all java classes. (focus the StackSaga concepts)
+. xref:stacksaga-demo.adoc#deployment[Deployment]
++
+Guides for creating and connecting The API-gateway and eureka service with utility services with all the configurations.
+. xref:stacksaga-demo.adoc#runnning_and_monitoring[Running And Monitoring]
++
+Monitoring the transaction data via the StackSaga Cloud-Window by running all the applications together.
 
 === High-level Implementation Diagram.
 
@@ -64,29 +68,28 @@ Here you can see what we are going to build in High-level.
 
 image::stacksaga-example-stacksaga-eureka-spring-cloud-api-gateway-demo-hight-level.drawio.svg[alt="stacksaga example stacksaga eureka spring cloud api gateway microservice demo hight level."]
 
-* In the diagram, StackSaga icons image:stack-saga-icon.svg[width=20] are shown which parts StackSaga interact.
-* Red lines are shown how the StackSaga Admin interacts with the process and the request-flow.
-* Black lines are shown how the regular http requests are done.
+* In the diagram, StackSaga icons image:stack-saga-icon.svg[width=20] are shown which parts are interacted with StackSaga.
 
 [[implementation]]
 == Implementation
 
-As the first step, we are going to create the Orchestrator Service called `order-service`.
+As the first step, we are going to create the Orchestrator Service.
+According to the use-case, the Orchestrator is `order-service`.
 
-NOTE: Even if there are 4 utility services in the diagram, we mainly focus the order service only.
-Other services are traditional spring boot services, and there is nothing to discuss. +
-You can download the full source code from //here.
+NOTE: Even if there are 4 utility services are involved to make the place order process, we mainly focus the *order-service* only.
+Because, Other services are traditional spring boot services, and there is nothing to discuss. +
+You can download the full source code from https://github.com/stacksaga/stacksaga-examples/tree/main/stacksaga-demo-default[here].
+
+TIP: Selecting a service as an Orchestrator service or not, depends on your requirement.
+If you want to manage the work flows of a long-running transaction inside a service, then you can make it as an Orchestrator service by adding StackSaga.
 
 === Create Order-Service (Orchestrator Service)
 
-The `order-service` is little bit special than the other utility services, because the `order-service` is the responsible for managing the entire transaction here.
-That's why it called as xref://[Orchestrator Service].
-And the next reason is that StackSaga involves that kind of service in your entire system.
-Selecting a service as an Orchestrator service or not depends on your requirement.
-
-====  Create order the project with spring initializer
+====  Create the project with spring initializer
 
 Go to the https://start.spring.io/[spring initializer] and create your project with the following Dependencies.
+
+NOTE: StackSaga supports for spring-boot 3.X and above.
 
 * `spring-boot-starter-web`
 * `spring-cloud-starter-netflix-eureka-client`
@@ -96,60 +99,49 @@ Go to the https://start.spring.io/[spring initializer] and create your project w
 * `lombok`
 
 NOTE: Due to that we are using eureka for service registry, we can use `spring-cloud-starter-loadbalancer` for internal client side load balancing.
-Due to we use just `RestTemplate` as the httpclient we have to annotate by `+@LoadBalanced+` annotation. +
-[ xref://[RestTemplateConfig] ]
+Due to we use just `RestTemplate` as the httpclient, we have to annotate by `+@LoadBalanced+` annotation. +
+[ https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-default/order-service/src/main/java/org/example/config/RestTemplateConfig.java[RestTemplateConfig] ]
 
 After creating your project, add the StackSaga dependencies in the dependencies section.
-There are 3 dependencies to be added based on your implementation.
 
-* You can add the `stacksaga-spring-boot-starter` dependency based on the spring version that you wish to use.
-#In this example, we will be using spring2.X.#
-Spring 2.X::
+There are 3 dependencies to be added based on your application as per the stacksaga architecture to work as an Orchestrator service.
+
+stacksaga-spring-boot-starter:: The core of the framework.
 +
-[source,xml]
+[source,xml,subs="+attributes"]
 ----
 <dependency>
-  <groupId>org.stacksaga</groupId>
-  <artifactId>stacksaga-spring-boot-2-starter</artifactId>
-  <version>1.0.0</version>
-</dependency>
-----
-Spring 3.X::
-+
-[source,xml]
-----
-<dependency>
-  <groupId>org.stacksaga</groupId>
-  <artifactId>stacksaga-spring-boot-3-starter</artifactId>
-  <version>1.0.0</version>
+   <groupId>org.stacksaga</groupId>
+   <artifactId>stacksaga-spring-boot-starter</artifactId>
+   <version>${org.stacksaga.version}</version>
 </dependency>
 ----
 
-* Due to the database has been selected as Mysql, you have to add `stacksaga-mysql-support` dependency.
+stacksaga-mysql-support:: `stacksaga-mysql-support` is used for mysql database support for the event-store. due to we are using mysql as the primary database of the service, it is recommended to add the relevant event-store support implementation as a best practice. it helps to reduce the extra resources allocations and reduce the latency. because you are able to use the same physical database as an event-store with a different schema.
 +
-[source,xml]
+[source,xml,subs="+attributes"]
 ----
 <dependency>
-    <groupId>org.stacksaga</groupId>
-    <artifactId>stacksaga-mysql-support</artifactId>
-    <version>1.0.0</version>
+   <groupId>org.stacksaga</groupId>
+   <artifactId>stacksaga-mysql-support</artifactId>
+   <version>${org.stacksaga.version}</version>
 </dependency>
 ----
 
-* Due to we are going to Eureka as the discovery service, you have to add `stacksaga-connect-k8s-support` dependency.
+stacksaga-connect-eureka-support:: due to the fact that we are in the eureka-based discovery environment, we need to use the `stacksaga-connect-eureka-support` dependency. it provides the instance related geographical (region, zone, instance ID, etc.) data to the SEC. it requires keeping the transactions in the event-store separately for in case of retrying with the help of xref:architecture:transaction-retrying.adoc#stacksaga_agent[stacksaga-agent].
 +
 [source,xml]
 ----
 <dependency>
     <groupId>org.stacksaga</groupId>
     <artifactId>stacksaga-connect-eureka-support</artifactId>
-    <version>1.0.0</version>
+    <version>${org.stacksaga.version}</version>
 </dependency>
 ----
 
-Finally, the `pom.xml` file will be like below.
+Finally, the `pom.xml` file of the order-service will be like below.
 
-.https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/pom.xml[icon:github[role=black,size=2x]] pom.xml
+.https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/pom.xml[icon:github[role=black,size=2x]]
 [source,xml]
 ----
 <?xml version="1.0" encoding="UTF-8"?>
@@ -180,12 +172,12 @@ Finally, the `pom.xml` file will be like below.
 
         ...
         ...
-        <!--othe dependencies-->
+        <!--Other dependencies-->
 
-        <!--StackSaga related dependacies -->
+        <!--StackSaga related dependencies -->
         <dependency>
             <groupId>org.stacksaga</groupId>
-            <artifactId>stacksaga-spring-boot-2-starter</artifactId>
+            <artifactId>stacksaga-spring-boot-starter</artifactId>
             <version>1.0.0</version>
         </dependency>
 

@@ -1,11 +1,18 @@
 ====  Creating the aggregator
 
-You know that the request comes to the order-service at the first (for downstream services), and it tries to handle the entire request by calling to other utility services.
-To start the execute the request, the `order-service` should have an Aggregator class that extend from the `SagaAggregator` class.
-And as well as to verify the aggregator object is serializable well or not, we should provide a xref:framework:aggregator_serialization.adoc[sagaSerializable]'s implementation.
+You know that the request comes to the order-service first (for downstream services), and it tries to handle the entire request by calling other utility services one by one in a sequence order.
+To start the execute the request, the `order-service` should have an xref:architecture:aggregator.adoc[Aggregator] class that extend from the `SagaAggregator` class.
+The custom aggregator class contains all the data which used for all the atomic transactions.
 
-> Read the xref://[reference documentation]
-to have a better understanding and best practices regarding the `SagaAggregator`.
+In addition to that, to verify whether the aggregator object is serializable or not, we should provide a xref:framework:aggregator_serialization.adoc[SagaSerializable] implementation.
+It ensures that the aggregator can be serialized and deserialized when the application is started.
+The advantages of providing the `SagaSerializable` is that if there is any issue when the aggregator is serialized and deserialized, it will be indicated when the application is started.
+Otherwise, the error comes when a transaction is being processed.
+
+Furthermore, to verify whether the aggregator object is serializable, it is recommended to provide a xref:framework:aggregator_serialization.adoc[SagaSerializable] implementation for the relevant aggregator.
+This ensures that the aggregator can be correctly serialized and deserialized during application startup.
+The primary advantage of providing a SagaSerializer is that any serialization or deserialization issues will be detected at startup, rather than during transaction processing, thereby preventing runtime failures.
+If you don't provide the `SagaSerializer`, the default SagaSerializer is used. it also checks whether the aggregator is serializable or not by creating an object internally. but if you are using more complex data structure, it is recommended to provide the `SagaSerializable` implementation for the relevant aggregator.
 
 [source,java]
 ----
