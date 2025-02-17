@@ -1,6 +1,8 @@
 === Creating OrderController (API Endpoint).
 
-As per the diagram, you know that the request comes to the `/order/place` endpoint and also the handing over the execution to the stacksaga is happened in this controller class.
+As per the xref:quick-examples:stacksaga-demo.adoc#demo_diagram[diagram], the request comes to the `/order/place` endpoint.
+And also the request is transferred to the SEC by accessing the `SagaTemplate`.
+
 [[orderController_source]]
 [source,java]
 ----
@@ -46,16 +48,28 @@ public class OrderController {
 }
 ----
 
-<1> Autowire the xref:framework:saga_template.adoc[SagaTemplate] for handing over the execution to the framework.
-Your target aggregator class should be provided to the `SagaTemplate` as a type.
+<1> Autowire the xref:framework:saga_template.adoc[SagaTemplate] for handing over the request to the framework for further execution.
+Your target aggregator class should be provided to the `SagaTemplate` as the type.
 <2> Initialize the xref:quick-examples:creating-aggregator.adoc[PlaceOrderAggregator]  [https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/aggregator/PlaceOrderAggregator.java[icon:github[role=black]]] and set the data that should be added initially.
-In our case, the necessary data that are given from the endpoint are added to the aggregator object.
+In our case, the necessary data given from the request's payload is added to the aggregator object before handing over the execution to the SEC.
+// todo: fix the link
 You can see the initialized data at the dashboard xref://[like this].
-<3> Handing over the execution to the framework by passing the initialized aggregator object, and the executor class that the execution should be started.
-From here the execution will be handled by the StackSaga execution coordinator xref://[(SEC)] asynchronously.
 
-<4> Build the response object to the client by using the `aggregatorTransactionId`.
-`aggregatorTransactionId` can access through your aggregator object due to that id comes from the `Aggregator` super.
+<3> Handing over the request to the framework by passing the initialized ``placeOrderAggregator `` object, and the executor class that the execution should be started.
+As per the usecase, the execution should be started by fetching the user details from the user-service.
+Therefore, the starting executor should be the `UserDetailExecutor`.
+
+<4> Build the response object by using the `aggregatorTransactionId`.
+`aggregatorTransactionId` can access through your aggregator object due to that id comes from the super `Aggregator` class.
+It only can be accessed after invoking the `sagaTemplate.process()` method.
+
+IMPORTANT: After handing over the request to the SEC, the request is executed in a separate thread-pool, and it will be completed asynchronously.
+Due to the execution is done asynchronously, no need to wait for the response until the entire execution is completed.
+After handing over the request to the SEC, the transaction is initiated in the event-store behind the scenes.
+Ones the transaction is saved successfully in the even-store, the response will be returned immediately, and can access the `aggregatorTransactionId` and build your response with help of the `aggregatorTransactionId`. `aggregatorTransactionId` is the reference for your transaction. +
+*Then how do you get to know when the transaction is done?* +
+Since the request is executed in a separate thread-pool asynchronously, the SEC notifies you when the transaction is done.
+Not only that. you can be notified by using `xref:framework:saga_event_handler.adoc[ExecutionEventListener]`.
 
 Related Classes' links
 
