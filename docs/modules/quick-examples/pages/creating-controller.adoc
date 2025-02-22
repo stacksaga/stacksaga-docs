@@ -6,19 +6,34 @@ And also the request is transferred to the SEC by accessing the `SagaTemplate`.
 [[orderController_source]]
 [source,java]
 ----
+package org.example.api;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.aggregator.PlaceOrderAggregator;
+import org.example.dto.PlaceOrderDto;
+import org.example.handler.PlaceOrderHandler;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDateTime;
+import java.util.List;
 
 @RestController
 @RequestMapping("/order")
 @RequiredArgsConstructor
+@Slf4j
 public class OrderController {
 
-    // <1>
-    private final SagaTemplate<PlaceOrderAggregator> placeOrderAggregatorSagaTemplate;
+    //<1>
+    private final PlaceOrderHandler placeOrderHandler;
 
-    @PostMapping("/place")
+    //<2>
+    @PostMapping
     @ResponseStatus(HttpStatus.ACCEPTED)
     public PlaceOrderDto.ResponseBody createOrder(@RequestBody PlaceOrderDto.RequestBody requestBody) {
-        // <2>
+        log.debug("requestBody:{}", requestBody);
+        //<3>
         final PlaceOrderAggregator placeOrderAggregator = new PlaceOrderAggregator();
         placeOrderAggregator.setUserId(requestBody.getUserId());
         placeOrderAggregator.setItems(requestBody.getItems());
@@ -29,51 +44,30 @@ public class OrderController {
                         .mapToDouble(Double::doubleValue)
                         .sum()
         );
-
         placeOrderAggregator.setHasRevertError(requestBody.getHasRevertError());
         placeOrderAggregator.getExecutions().add("INIT:" + LocalDateTime.now());
         log.debug("placeOrderAggregator:{}", placeOrderAggregator);
-
-        // <3>
-        placeOrderAggregatorSagaTemplate.process(
-                placeOrderAggregator,
-                UserDetailExecutor.class
-        );
-        // <4>
+        //<4>
+        final String transactionId = this.placeOrderHandler.process(placeOrderAggregator);
         return PlaceOrderDto.ResponseBody.builder()
-                .orderId(placeOrderAggregator.getAggregatorTransactionId())
+                .orderId(transactionId)
                 .message("order has been submitted successfully")
                 .build();
+    }
+    //<5>
+    @GetMapping("/status")
+    public List<String> getCurrentStatus(@RequestParam("order_id") String orderId) {
+        return this.placeOrderHandler.getAggregatorState(orderId);
     }
 }
 ----
 
-<1> Autowire the xref:framework:saga_template.adoc[SagaTemplate] for handing over the request to the framework for further execution.
-Your target aggregator class should be provided to the `SagaTemplate` as the type.
-<2> Initialize the xref:quick-examples:creating-aggregator.adoc[PlaceOrderAggregator]  [https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/aggregator/PlaceOrderAggregator.java[icon:github[role=black]]] and set the data that should be added initially.
-In our case, the necessary data given from the request's payload is added to the aggregator object before handing over the execution to the SEC.
-// todo: fix the link
-You can see the initialized data at the dashboard xref://[like this].
+<1> Autowire the xref:creating-stacksaga-handler-class.adoc#PlaceOrderHandler[`PlaceOrderHandler`] for handing over the request to the framework for further execution.
 
-<3> Handing over the request to the framework by passing the initialized ``placeOrderAggregator `` object, and the executor class that the execution should be started.
-As per the usecase, the execution should be started by fetching the user details from the user-service.
-Therefore, the starting executor should be the `UserDetailExecutor`.
+<2> Create your endpoint to receive the place order request.
 
-<4> Build the response object by using the `aggregatorTransactionId`.
-`aggregatorTransactionId` can access through your aggregator object due to that id comes from the super `Aggregator` class.
-It only can be accessed after invoking the `sagaTemplate.process()` method.
+<3> Create a `PlaceOrderAggregator` object with the initial data (initial payload) to pass the request to the SEC.
 
-IMPORTANT: After handing over the request to the SEC, the request is executed in a separate thread-pool, and it will be completed asynchronously.
-Due to the execution is done asynchronously, no need to wait for the response until the entire execution is completed.
-After handing over the request to the SEC, the transaction is initiated in the event-store behind the scenes.
-Ones the transaction is saved successfully in the even-store, the response will be returned immediately, and can access the `aggregatorTransactionId` and build your response with help of the `aggregatorTransactionId`. `aggregatorTransactionId` is the reference for your transaction. +
-*Then how do you get to know when the transaction is done?* +
-Since the request is executed in a separate thread-pool asynchronously, the SEC notifies you when the transaction is done.
-Not only that. you can be notified by using `xref:framework:saga_event_handler.adoc[ExecutionEventListener]`.
+<4> Call the `process` method in the `PlaceOrderHandler` to process the request and get the `transactionId` to build the repose.
 
-Related Classes' links
-
-- [ https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/aggregator/PlaceOrderAggregator.java[icon:github[role=black]] ] xref:creating-aggregator.adoc[PlaceOrderAggregator]
-- [ https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/executor/UserDetailExecutor.java[icon:github[role=black]] ] xref:creating-UserDetailExecutor.adoc#creating_user_detail_executor [UserDetailExecutor]
-- [ https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/dto/PlaceOrderDto.java[icon:github[role=black]] ] `PlaceOrderDto.RequestBody`
-- [ https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/dto/PlaceOrderDto.java[icon:github[role=black]] ] `PlaceOrderDto.ResponseBody`
+<5> Create a method to get the status of the transaction from the event-store and invoke the xref:creating-stacksaga-handler-class.adoc#PlaceOrderHandler[`getAggregatorState`] method.
