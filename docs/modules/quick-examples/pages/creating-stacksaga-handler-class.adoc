@@ -1,0 +1,153 @@
+=== Creating Handler class
+
+As per the xref:architecture:Saga-CHES-architecture.adoc[CHES&D] layered architecture, "H" represents the Handler.
+The Handler class plays a crucial role in managing transaction execution by delegating control to the SEC (Saga Execution Coordinator).
+Additionally, it acts as an event listener, continuously monitoring and responding to events emitted by the SEC throughout the transaction lifecycle.
+It helps to keep your code clean and maintainable.
+
+[source,java]
+----
+package org.example.handler;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.aggregator.PlaceOrderAggregator;
+import org.example.executor.UserDetailExecutor;
+import org.example.types.OrderStatus;
+import org.stacksaga.RevertHintStore;
+import org.stacksaga.TransactionCompletedDetail;
+import org.stacksaga.TransactionSummary;
+import org.stacksaga.annotation.SagaExecutionEventListener;
+import org.stacksaga.core.CompleteStatus;
+import org.stacksaga.core.SagaTemplate;
+import org.stacksaga.core.listener.ExecutionEventListener;
+import org.stacksaga.exception.execution.NonRetryableExecutorException;
+import org.stacksaga.exception.execution.TransactionTerminationDetail;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Slf4j
+@SagaExecutionEventListener //<1>
+@RequiredArgsConstructor
+public class PlaceOrderHandler implements ExecutionEventListener<PlaceOrderAggregator> { //<2>
+
+    private final SagaTemplate<PlaceOrderAggregator> placeOrderAggregatorSagaTemplate; //<3>
+
+    //<4>
+    public String process(PlaceOrderAggregator placeOrderAggregator) {
+        placeOrderAggregatorSagaTemplate.process(
+                placeOrderAggregator,
+                UserDetailExecutor.class
+        );
+        log.debug("AggregatorTransactionId:{}", placeOrderAggregator.getAggregatorTransactionId());
+        return placeOrderAggregator.getAggregatorTransactionId();
+    }
+
+
+    //<5>
+    public List<String> getAggregatorState(String orderId) {
+        TransactionSummary<PlaceOrderAggregator> transactionSummary = placeOrderAggregatorSagaTemplate.getTransactionSummary(orderId);
+        return transactionSummary
+                .getEventHistory()
+                .entrySet()
+                .stream()
+                .map(localDateTimeStringEntry -> {
+
+                            if (localDateTimeStringEntry.getValue().getEvent().equals(OrderStatus.INITIALIZED_ORDER)) {
+                                System.out.println("Yes : " + localDateTimeStringEntry.getValue().getEvent());
+                            }
+                            return String.format("%s: %s",
+                                    localDateTimeStringEntry.getKey().toString(),
+                                    localDateTimeStringEntry.getValue()
+                            );
+                        }
+                )
+                .collect(Collectors.toList());
+    }
+
+
+
+    //<6>
+    @Override
+    public void onEachPrimaryExecutionPerformed(String executedExecutor, PlaceOrderAggregator currentAggregator) {
+        //send a notification to the customer on each primary execution performed
+    }
+
+    //<7>
+    @Override
+    public void onPrimaryExecutionException(PlaceOrderAggregator finalAggregatorState, NonRetryableExecutorException exception, String executedExecutor) {
+        //send a notification to the customer on primary execution exception
+    }
+
+    //<8>
+    @Override
+    public void onEachRevertPerformed(String revertedExecutor, PlaceOrderAggregator finalAggregatorState, NonRetryableExecutorException nonRetryableExecutorException, RevertHintStore revertHintStore) {
+        //send a notification to the customer on each revert performed
+    }
+
+    //<9>
+    @Override
+    public void onTransactionCompleted(TransactionCompletedDetail<PlaceOrderAggregator> transactionCompletedDetail, CompleteStatus completeStatus) {
+        //send a notification to the customer when the transaction is completed
+    }
+
+    //<10>
+    @Override
+    public void onTransactionTerminated(TransactionTerminationDetail<PlaceOrderAggregator> transactionTerminationDetail) {
+        //send a notification to the customer when if the transaction is terminated.
+    }
+}
+----
+
+<1> Annotate the handler class with `@SagaExecutionEventListener` to make the handler class a spring bean.
++
+TIP: It's not required to use the `@SagaExecutionEventListener` annotation to make the handler class a spring bean, you are free to use the traditional way by creating a bean by using `@Component`.
+But there is a tiny difference between the two.
+If you are using just the `@Component` annotation, *the thread will be the same* that the transaction is being executed when the handler class is invoked.
+That means the SEC invokes the Listener-methods by using the same thread which is used for executing the executor.
+For instance, if `onEachPrimaryExecutionPerformed` is invoked after executing an executor, SEC has to wait sometimes until you completed your `onEachPrimaryExecutionPerformed` method. +
+// todo: mention the thread pool
+If you use `@SagaExecutionEventListener` annotation for the handler class, the `onEachPrimaryExecutionPerformed` method is invoked in separate thread-pool. +
+It is important if you have multiple listeners for a specific aggregator to invoke the executors faster and maintain the cross-cutting concerns in a separate thread-pool.
+
+<2> Implement the `PlaceOrderHandler` by the `ExecutionEventListener` to make the handler a listener. +
+the `ExecutionEventListener` interface provides xref:framework:saga_event_handler.adoc[five listener methods] to be updated by the SEC.
+
+<3> Autowire the `SagaTemplate` by passing the `PlaceOrderAggregator` as the type. the `SagaTemplate` is used for handing over the execution to the SEC and check the aggregator state from the event-store.
+
+<4> In addition to the overridden methods from the `ExecutionEventListener` interface, we create an extra method for delegating the execution to the SEC.
+This method is called from the `OrderController` class.
+When the method is called, the execution is handed over to the SEC with the initial aggregator and the starting executor.
++
+IMPORTANT: After handing over the request to the SEC, the request is executed in a separate thread-pool, and it will be completed asynchronously.
+Due to the execution is done asynchronously, no need to wait for the response until the entire execution is completed.
+After handing over the request to the SEC, the transaction is initiated in the event-store behind the scenes.
+Ones the transaction is saved successfully in the even-store, the response will be returned immediately.
+Then you are able to access the `aggregatorTransactionId` from the `placeOrderAggregator` object (until the transaction is initialized by the SEC the `aggregatorTransactionId` is `null`.
+After handing over the execution to the SEC via the `process()` method, the `aggregatorTransactionId` is set internally by the SEC). `aggregatorTransactionId` is the reference for your transaction. +
+Since the request is executed in a separate thread-pool asynchronously, the SEC notifies each event via the overridden methods from the `ExecutionEventListener` interface.
+
+<5> Create another extra method for retrieving the aggregator state from the event-store (it is called from the `OrderController`).
+After delegating the transaction to the SEC, the execution (LRT) is run asynchronously.
+While then, if we want to check where TRL is being processed at any given time, we can get the state of the aggregator from the event-store.
+
+<6> The `onEachPrimaryExecutionPerformed` method is invoked after each primary execution is performed by the SEC asynchronously.
+this can be used for updating your client time to time asynchronously by using methods like push notification or email. +
+xref:framework:saga_event_handler.adoc#onEachPrimaryExecutionPerformed[read more]
+
+<7> The `onPrimaryExecutionException` method is invoked an error occurs while executing one of primary executions.
+it notifies you about the starting compensation process. this method also can be used for updating your client asynchronously.
++
+xref:framework:saga_event_handler.adoc#onPrimaryExecutionException[read more]
+
+<8> The `onEachRevertPerformed` method is invoked after each compensation execution is performed by the SEC after the primary execution exception occurs.
+this method also can be used for updating your client asynchronously.
++
+xref:framework:saga_event_handler.adoc#onEachRevertPerformed[read more]
+
+<9> The `onTransactionTerminated` method is invoked in case of compensation failure.
+this method is useful to the administration to identify the unhandled compensation errors.
+because in Saga, compensation executions cannot have errors except resource-unavailable exceptions.
++
+xref:framework:saga_event_handler.adoc#onEachRevertPerformed[read more]
