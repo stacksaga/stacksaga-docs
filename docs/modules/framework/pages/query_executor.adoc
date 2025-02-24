@@ -5,24 +5,28 @@ Here you can see how you can create a Query-Executor for your `<<creating_aggreg
 
 [source,java]
 ----
-// <1>
+//<1>
 @SagaExecutor(
-        executeFor = "user-service", // <2>
-        liveCheck = true, // <3>
-        value = "CheckUserExecutor" // <4>
+        executeFor = "user-service",
+        value = "UserDetailExecutor"
 )
-public class CheckUserExecutor implements QueryExecutor<PlaceOrderAggregator> { // <5>
+public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> { //<2>
 
-    // <6>
+    //<3>
     @Override
     public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            ProcessStack processStack,
-            PlaceOrderAggregator aggregator,
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManagerUtil
-    ) throws RetryableExecutorException, NonRetryableExecutorException {
-        //execute the service and check the conndtion.
-
-        //return or throw // <7>
+            PlaceOrderAggregator currentAggregator, //<4>
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager, //<5>
+            String idempotencyKey //<6>
+    ) throws
+        RetryableExecutorException, //<7>
+        NonRetryableExecutorException //<8>
+    {
+        {
+            //do what you want
+        }
+        //<9>
+        return stepManager.next(OrderInitializeExecutor.class, OrderStatus.USER_DETAILS_FETCHED);
     }
 }
 ----

@@ -9,29 +9,6 @@ Fetching user details doesn't change any data.
 [source,java]
 ----
 // <1>
-@SagaExecutor(executeFor = "user-service", liveCheck = false, value = "UserDetailExecutor")
-@RequiredArgsConstructor
-public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> { // <2>
-
-    // <3>
-    private final UserService userService;
-
-    @Override
-    public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            PlaceOrderAggregator currentAggregator, //<4>
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager //<5>
-    ) throws
-    RetryableExecutorException, NonRetryableExecutorException // <6>
-    {
-        currentAggregator.getExecutions().add(this.getClass().getSimpleName()+":"+ LocalDateTime.now());
-        // <7>
-        UserDetailDto.ResponseBody userDetails = this.userService.getUserDetails(currentAggregator.getUserId());
-        // <8>
-        currentAggregator.setDeliveryDetails(userDetails.getDeliveryDetails());
-        return stepManager.next(OrderInitializeExecutor.class, OrderStatus.USER_DETAILS_FETCHED); // <9>
-    }
-}
-// <1>
 @SagaExecutor(executeFor = "user-service", value = "UserDetailExecutor")
 @RequiredArgsConstructor
 public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> { // <2>

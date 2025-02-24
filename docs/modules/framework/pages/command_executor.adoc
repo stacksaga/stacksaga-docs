@@ -2,37 +2,43 @@
 
 [source,java]
 ----
-// <1>
 @SagaExecutor(
-        executeFor = "delivery-service", // <2>
-        liveCheck = true, // <3>
-        value = "DispatchOrderExecutor" // <4>
+        executeFor = "order-service",
+        value = "OrderInitializeExecutor"
 )
-public class DispatchOrderExecutor implements CommandExecutor<PlaceOrderAggregator> { // <5>
+@RequiredArgsConstructor
+public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggregator> {
 
-    // <6>
     @Override
     public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            ProcessStack processStack, // <7>
-            PlaceOrderAggregator aggregator, // <8>
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager // <9>
-    ) throws RetryableExecutorException, NonRetryableExecutorException {
-        //execute the service and check the conndtion.
-        ...
-        //return or throw // <10>
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws
+        RetryableExecutorException,
+        NonRetryableExecutorException
+    {
+        {
+            //do what you want
+        }
+        return stepManager.next(PreAuthExecutor.class, OrderStatus.INITIALIZED_ORDER);
     }
 
-    @RevertBefore(startFrom = DispatchRevertNotifierExecutor.class) // <11>
-    @RevertAfter(startFrom = DispatchRevertCompleteLogExecutor.class) // <12>
     @Override
-    public void doRevert(
-            ProcessStack processStack,// <13>
-            NonRetryableExecutorException nonRetryableExecutorException,// <14>
-            PlaceOrderAggregator aggregator, // <15>
-            RevertHintStore revertHintStore // <16>
-    ) throws RetryableExecutorException {
-        //call the atomic process that you want to as the Compensating,
-        ...
+    @RevertBefore(startFrom = SampleSubBeforeExeInit.class)
+    @RevertAfter(startFrom = SampleSubAfterExeInit.class)
+    public SagaExecutionEventName doRevert(
+            NonRetryableExecutorException processException,
+            PlaceOrderAggregator finalAggregatorState,
+            RevertHintStore revertHintStore,
+            String idempotencyKey
+    ) throws
+        RetryableExecutorException {
+
+        {
+            //do what you want
+        }
+        return OrderStatus.CANCELED_ORDER;
     }
 }
 ----
