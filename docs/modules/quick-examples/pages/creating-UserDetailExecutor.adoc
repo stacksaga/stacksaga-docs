@@ -31,21 +31,42 @@ public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> {
         return stepManager.next(OrderInitializeExecutor.class, OrderStatus.USER_DETAILS_FETCHED); // <9>
     }
 }
+// <1>
+@SagaExecutor(executeFor = "user-service", value = "UserDetailExecutor")
+@RequiredArgsConstructor
+public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> { // <2>
+
+    //<3>
+    private final UserService userService;
+
+    //<4>
+    @Override
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(PlaceOrderAggregator currentAggregator, ProcessStepManagerUtil<PlaceOrderAggregator> stepManager, String idempotencyKey) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        currentAggregator.getExecutions().add(this.getClass().getSimpleName() + ":" + LocalDateTime.now());//<5>
+        UserDetailDto.ResponseBody userDetails = this.userService.getUserDetails(currentAggregator.getUserId());//<6>
+        currentAggregator.setDeliveryDetails(userDetails.getDeliveryDetails());//<7>
+        return stepManager.next(OrderInitializeExecutor.class, OrderStatus.USER_DETAILS_FETCHED);//<8>
+
+    }
+}
+
 ----
 
 <1> Annotate the `UserDetailExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
 +
 > Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
-<2> Implement the `UserDetailExecutor` from the `QueryExecutor` by passing the target Aggregator.
+<2> Implement the `UserDetailExecutor` from the `QueryExecutor` by passing the target Aggregator due to fetching user details has no any compensation.
 +
 > Read more about xref:framework:saga_executors.adoc#query_executor[`QueryExecutor<A>`] interface.
 
-<3> Autowire the https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/service/external/UserService.java[`UserService`]
+<3> Autowire the xref:#creating_user_service[`UserService`]
 to make the execution by calling the `user-service`.
 
-<4> you will have the `currentAggregator` object through the method parameter. due to this executor is the 1st executor, the `currentAggregator` object contains the initialized values from the xref:creating-controller.adoc#orderController_source[OrderController] class.
+<4> Override the `doProcess()` method and write the code that you want to execute when the executor is executed.
 
-<5> `stepManager` helps you to navigate the execution to the next executor.
+<5> Adding some metadata to the aggregator to see what executor is executed.
+(Just for see in StackSaga Cloud-Window)
 
 <6> If you throw an exception, that is how the framework knows that the executor has an exception at this moment.
 Based on the exception type that you have thrown, The framework decides that the process should be started the revert process or either process should be stopped temporally.
@@ -71,7 +92,7 @@ Therefore, you can access the user's detail within the next executor.
 Due to the `user-service` is another utility service we have to call it through http or any other protocol that target service supports (Most probably API endpoints are exposed by http protocol).
 This example's `user-service` also support http endpoint to access the API.
 Therefore, we will be using rest template as http client.
-But you can use any Http client like Feign-client, Okhttp, Spring-webclient and so on.
+But you can use any Http client like the Feign-client, Okhttp, Spring-webclient and so on.
 
 [source,java]
 ----
@@ -188,7 +209,7 @@ Therefore, that error is thrown as `RetryableExecutorException`.
 ====
 TIP: The reason for handling the exception is that this is where the http client does the invocation and the special this is most probably the exceptions are different to each other even though the http status code is the same.
 
-Case-1::: IF you change the Rest-Client (For instance, you move to RestTemplate to Feign-client), all the exceptions are changed.
+Case-1::: IF you change the Rest-Client, (For instance, you move to RestTemplate to Feign-client), all the exceptions are changed.
 Then you have to change all the codes in the executor if you have handled the exceptions inside the executor.
 But in this way nothing to do anything.
 
