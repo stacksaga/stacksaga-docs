@@ -1,7 +1,7 @@
 === Creating OrderController (API Endpoint).
 
 As per the xref:quick-examples:stacksaga-demo.adoc#demo_diagram[diagram], the request comes to the `/order/place` endpoint.
-And also the request is transferred to the SEC by accessing the `SagaTemplate`.
+And also it is called to the `PlaceOrderHandler` to transfer the request to the SEC.
 
 [[orderController_source]]
 [source,java]
@@ -44,9 +44,11 @@ public class OrderController {
                         .mapToDouble(Double::doubleValue)
                         .sum()
         );
+        //this value is set for testing purposes only. (to check the revert error in StackSaga Cloud-Window)
         placeOrderAggregator.setHasRevertError(requestBody.getHasRevertError());
         placeOrderAggregator.getExecutions().add("INIT:" + LocalDateTime.now());
         log.debug("placeOrderAggregator:{}", placeOrderAggregator);
+
         //<4>
         final String transactionId = this.placeOrderHandler.process(placeOrderAggregator);
         return PlaceOrderDto.ResponseBody.builder()
@@ -54,6 +56,7 @@ public class OrderController {
                 .message("order has been submitted successfully")
                 .build();
     }
+
     //<5>
     @GetMapping("/status")
     public List<String> getCurrentStatus(@RequestParam("order_id") String orderId) {
@@ -62,9 +65,9 @@ public class OrderController {
 }
 ----
 
-<1> Autowire the xref:creating-stacksaga-handler-class.adoc#PlaceOrderHandler[`PlaceOrderHandler`] for handing over the request to the framework for further execution.
+<1> Autowire the `PlaceOrderHandler` that we created.
 
-<2> Create your endpoint to receive the place order request.
+<2> Create the endpoint to receive the place order request.
 
 <3> Create a `PlaceOrderAggregator` object with the initial data (initial payload) to pass the request to the SEC.
 
