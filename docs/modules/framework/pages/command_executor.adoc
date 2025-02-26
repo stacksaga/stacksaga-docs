@@ -2,26 +2,40 @@
 
 [source,java]
 ----
+//<1>
 @SagaExecutor(
         executeFor = "order-service",
         value = "OrderInitializeExecutor"
 )
 @RequiredArgsConstructor
-public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggregator> {
+public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggregator> { //<2>
 
+    //<3>
     @Override
     public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            PlaceOrderAggregator currentAggregator,
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
-            String idempotencyKey
+            PlaceOrderAggregator currentAggregator, //<4>
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager, //<5>
+            String idempotencyKey //<6>
     ) throws
-        RetryableExecutorException,
-        NonRetryableExecutorException
+        RetryableExecutorException, //<7>
+        NonRetryableExecutorException //<8>
     {
-        {
-            //do what you want
+        try {
+            //<9>
+            //call the target endpoint by calling the service
+            //update the aggregator state or accesses the data from current aggregator state
+            return stepManager.next(NextExecutor.class, () -> "ORDER_INITIALIZED"); //<10>
+        } catch (NetworkException e) {
+            //<11>
+            throw RetryableExecutorException.buildWith(e).build();
+        } catch (OtherException e) {
+            //<12>
+            throw NonRetryableExecutorException
+                                    .buildWith(e)
+                                    .put("reason",e.getMessage())
+                                    .put("data-1","some data")
+                                    .build();
         }
-        return stepManager.next(PreAuthExecutor.class, OrderStatus.INITIALIZED_ORDER);
     }
 
     @Override
@@ -43,27 +57,86 @@ public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggreg
 }
 ----
 
-<1> *@SagaExecutor*: annotate your query executor with `@org.stacksaga.annotation.SagaExecutor` annotation.
+<1> *@SagaExecutor*: Annotate the executor with `@org.stacksaga.annotation.SagaExecutor` annotation.
 The annotation provides the spring bean capabilities and also another metadata for the StackSaga framework.
++
+executeFor:: The name of the target service that the executor goes to access.
+value:: The bean name of the executor.
+The executor is identified with this value by StackSaga engine.
+After configuring the bean name, it cannot be changed at all.
+If you want to the class package, it does not matter without changing the configured name.
+xref:architecture:aggregator_versioning.adoc#executor_changing[See more.]
 
-<2> *executeFor*: The name of the service that particular executor is going to be connected. it can be a service name of another service. if the service is spring boot service, make sure to keep the application name as its. because it will be helpful for the retry process.
+<2> *CommandExecutor<T>* IF the executor is command one, The executor should be implemented by `org.stacksaga.executor.CommandExecutor<T>`. `T` should be the target Aggregator class for the domain.
 
-<3> *liveCheck*: When the retry process is executed, liveCheck is considered by the engine. if the target service is a spring boot service or registered service with the service registry, the availability is checked before executing the retry by the StackSaga engine.
+<3> Override the `doProcess()`  method and put your execution code block that should be executed when the executor is executed by the StackSaga engine.
 
-<4> *value*: The bean name of the executor.
-The executor is identified with this value by StackSaga engine. after configuring the bean name, it cannot be changed at all. if you want to the class package, it does not matter without changing the configured name.
+<4> *currentAggregator*: This is the aggregator object that is initialized and passed when a request is sent to the SEC.
+If the current is the first executor, the aggregator state will be identical to the object initially provided to the SEC.
+The aggregator state can be modified within any executor, and the updated data will be accessible across all executors.
+For example, if the aggregator is initialized with a `userId`, the same `userId` will be accessed in the first executor.
+Additionally, modifications can be made to the aggregator as needed.
+For instance, if the `paymentId` of the aggregator object is updated within the current executor, this updated value will be accessible in the subsequent executor.
 
-<5> *CommandExecutor<T>* IF the executor is command one, The executor should be implemented by `org.stacksaga.executor.CommandExecutor<T>`. `T` should be the target Aggregator class for the domain.
+<5> *stepManager*: This object provides the methods for giving the navigation to the engine regarding the next step.
+The next step can be another executor (either a command or a query) or a process completion.
++
+If we want to execute another executor after the current executor, we can use the `stepManager.next()` method or if we want to finish the LRT, we can use `stepManager.complete()` method.
+For instance, after making the preAuth process if it returns `OK` response, we can go to the next executor by using the `stepManager.next()` method like below.
++
+[source,java]
+----
+if (response.STATUS == 200) {
+   return stepManager.next(StockUpdateExecutor.class, () -> "MADE_PRE_AUTH");
+}
+----
++
+Or on the other hand, if we are in the last executor, we can use the `stepManager.complete()` method like below.
++
+[source,java]
+----
+return stepManager.complete(OrderStatus.MADE_PAYMENT);
+----
 
-<6> Override the `doProcess()`  method and put your execution code block that should be executed when the executor is executed by the StackSaga engine.
-<7> *ProcessStack* Object provides all the executed execution until the process so far.
-It will help for gen an idea about the execution history.
-And also you can get the decision of the execution base on the execution history.
+<6> *idempotencyKey*: This is the key that is provided by the SEC regarding the *specific transaction* and *specific executor* to have safe retrying with idempotency. read more about xref:architecture:idempotency.adoc[idempotency]
 
-<8> *PlaceOrderAggregator*: The current aggregator state.
-<9> *ProcessStepManagerUtil<T>*: This object provides the methods for giving the navigation to the engine regarding the next step. it can be another executor (command or query) or a process completion.
+<7> *RetryableExecutorException*: If the executor has a *RetryableExecutorException*, it is allowed to throw it.
+When a RetryableExecutorException exception is thrown, the LRT is stopped temporarily by the SEC.
+See More about xref:framework:retryable_executor_exception.adoc[RetryableExecutorException]
+
+<8> *NonRetryableExecutorException*: If the executor has a *NonRetryableExecutorException*, it is allowed to throw it.
+When a `NonRetryableExecutorException` exception is thrown, the SEC stops the primary execution and starts the compensating process.
+
+
+<9> By accessing necessary data from the current aggregator state, you can call the target endpoint and after that you can update the aggregator state with the received data.
+
+<10> If there is no any error from the target endpoint, you can simply mention the next executor by using the `stepManager.next()`.
+You have to pass the next executor class, and also you have to pass the event-name for the action that has been done.
+
+<11> IF there is an error from the target endpoint, and if it is a *NetworkException* (resource unavailable error,) you can simply catch the exception and build a new xref:framework:retryable_executor_exception.adoc[RetryableExecutorException] and throw it.
+While you are building the `RetryableExecutorException` you can mention the real exception that received.
++
+NOTE: It is necessary to catch the resource unavailable exceptions and throw it by building a new xref:framework:retryable_executor_exception.adoc[RetryableExecutorException].
+Because the SEC does not know what exceptions are presented, the resource is unavailable errors.
+The exceptions that are thrown for the network related failures are different to each other based on the http client.
+Therefore, SEC lets catch the error as you want and throw it by wrapping it in `RetryableExecutorException`.
+
+<12> IF there is an error from the target endpoint, and if it is not a *NetworkException* (resource unavailable error,) you can simply catch the exception and build a new xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException] and throw it.
+Then the SEC will stop the primary execution and start the compensating process.
+While you are building the `NonRetryableExecutorException` you can mention the real exception that received and as well as you can mention any data that you want to access from the error.
+For instance if you want to access the reason of the error when the compensating process, you can mention them when the `NonRetryableExecutorException` is thrown.
++
+NOTE: Catching the `NonRetryableExecutorException` is not required.
+If there is an error while executing the executor, the error is identified as a `NonRetryableExecutorException` by the SEC by default.
+But as a best practice it is recommended to handle the `NonRetryableExecutorException` and `RetryableExecutorException` separately.
+Because if you do not handle the exception separately, all the exceptions are identified as `NonRetryableExecutorException` by the SEC.
+
+
+
+////
 <10> Inside the method scope, you can provide the execution that should be executed when the StackSaga engine executes.
 And finally you can navigate to the next step by using the `ProcessStepManagerUtil` object.
+
 <11> *@RevertBefore*: If the executor has any revert-before-executors, you can mention that executor class with `@RevertBefore` annotation.
 According to the example, the revert before execution will be started from <<revert_before_executor,DispatchRevertNotifierExecutor>>.
 
@@ -71,8 +144,9 @@ According to the example, the revert before execution will be started from <<rev
 According to the example, the revert after execution will be started from <<revert_after_executor,DispatchRevertCompleteLogExecutor>>.
 
 <13> *ProcessStack* The final process stack that was when the final execution was executed.
-<14> *NonRetryableExecutorException* The exception that caused the transition process stopping to forward.
 <15> *PlaceOrderAggregator* The final aggregator state when the NonRetryableExecutorException is thrown.
 <16> *RevertHintStore* If you want to add some data to the backward process, you can use the `RevertHintStore` to put the data.
+////
+
 
 '''
