@@ -131,7 +131,7 @@ NOTE: It is necessary to catch the resource unavailable exceptions and throw it 
 Because the SEC does not know what exceptions are presented, the resource is unavailable errors.
 The exceptions that are thrown for the network related failures are different to each other based on the http client.
 Therefore, SEC lets catch the error as you want and throw it by wrapping it in `RetryableExecutorException`.
-
+[[NonRetryableExecutorException]]
 <12> IF there is an error from the target endpoint, and if it is not a *NetworkException* (resource unavailable error,) you can simply catch the exception and build a new xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException] and throw it.
 Then the SEC will stop the primary execution and start the compensating process.
 While you are building the `NonRetryableExecutorException` you can mention the real exception that received and as well as you can mention any data that you want to access from the error.
@@ -147,15 +147,14 @@ Because if you do not handle the exception separately, all the exceptions are id
 <14> *primaryExecutionException*: `doRevert` method is called only for compensating. that means the one of primary executions was failed.
 the exception that threw when the primary execution was failed is passed here as a parameter by the SEC.
 it can be used to identify what was the exception, and you can access the data from the exception object that you set when the primary execution was failed.
-
+[[finalAggregatorState]]
 <15> *finalAggregatorState:* This contains the final aggregator state when the `NonRetryableExecutorException` is thrown.
 +
 NOTE: If a `NonRetryableExecutorException` is thrown, the changes that made into the aggregator withing the same executor is not applied to the aggregator state.
 Because we only execute an atomic execution withing the executor.
-If that atomic executor is failed, the aggregator state should be changed.
+If that atomic executor is failed, the aggregator state should not be changed.
 The aggregator state should be in the state that passed from the last executor.
-
-
+[[revertHintStore]]
 <16> *revertHintStore:* As we used the custom created aggregator as the payload for carrying the data into primary executions, the *RevertHintStore* is used as the payload for carrying the data into the compensating executions.
 for instance, if you want to add some data after executing one compensation execution, that should be accessed by subsequent compensation executions. you can use the `revertHintStore.put(key, value)` method.
 
