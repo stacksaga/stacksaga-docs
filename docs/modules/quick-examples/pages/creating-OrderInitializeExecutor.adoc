@@ -1,18 +1,16 @@
 [[creating_order_initialize_executor]]
 === Creating OrderInitializeExecutor
 
-You know that the request comes to the `OrderController`
-and the request is transferred to the `UserDetailExecutor` as the first step to collect the user details.
-And next, we are going to initiate the order in the own service (order-service).
-To initiate the order will be creating an executor called `OrderInitializeExecutor`.
+Next executor for initiate the order.
+The atomic execution is done in the same service without calling another utility service.
 
-The OrderInitializeExecutor should be a command-executor because the primary execution (updating order database) makes some changes in the database, and then if a failure occurred at some point after executing the order initialization process, it should be recovered again.
+The `OrderInitializeExecutor` should be a *command-executor*.
+because the primary execution makes some changes in the database (updating order database), and then, if a failure occurs at some point after executing the order initialization process, it should be recovered again.
 
-.https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/executor/OrderInitializeExecutor.java[icon:github[role=black,size=2x] OrderInitializeExecutor.class]
 [source,java]
 ----
 // <1>
-@SagaExecutor(executeFor = "order-service", liveCheck = false, value = "OrderInitializeExecutor")
+@SagaExecutor(executeFor = "order-service", value = "OrderInitializeExecutor")
 @RequiredArgsConstructor
 public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggregator> { // <2>
 
@@ -20,25 +18,25 @@ public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggreg
     private final OrderService orderService;
     private final ObjectMapper objectMapper;
 
-    @Override // <4>
-    public ProcessStepManager<PlaceOrderAggregator> doProcess(PlaceOrderAggregator currentAggregator, ProcessStepManagerUtil<PlaceOrderAggregator> stepManager) throws RetryableExecutorException, NonRetryableExecutorException {
-        try {
-            currentAggregator.getExecutions().add(this.getClass().getSimpleName() + ":" + LocalDateTime.now());
-            // <5>
-            this.orderService.initialize(
-                    OrderEntity
-                            .builder()
+    @Override //<4>
+    @SneakyThrows  //just for ignoring the JsonProcessingException due to accessing the objectMapper
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        currentAggregator.getExecutions().add(this.getClass().getSimpleName() + ":" + LocalDateTime.now());
+            //<5>
+        this.orderService.initialize(
+                    OrderEntity.builder()
                             .orderId(currentAggregator.getAggregatorTransactionId())
-                            .userId(currentAggregator.getUserId())
                             .createAt(LocalDateTime.now())
                             .isCancelled(false)
+                            .userId(currentAggregator.getUserId())
                             .items(objectMapper.writeValueAsString(currentAggregator.getItems()))
                             .build()
-            );
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException(e);
-        }
-        // <6>
+        );
+        //<6>
         return stepManager.next(PreAuthExecutor.class, OrderStatus.INITIALIZED_ORDER);
     }
 
@@ -63,16 +61,17 @@ public class OrderInitializeExecutor implements CommandExecutor<PlaceOrderAggreg
 
 <1> Annotate the `OrderInitializeExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
 +
-Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
-<2> The class has been extended from the `CommandExecutor`.
-+
-Read more about xref:framework:saga_executors.adoc#command_executor[`CommandExecutor`] annotation.
+*executeFor* is the target service's name and *value* is the bean name of the executor.
 
-<3> Autowire the https://github.com/stacksaga/stacksaga-examples/blob/main/stacksaga-demo-for-kubernetes/order-service/src/main/java/org/example/service/internal/OrderService.java[`OrderService`] service to make the execution.
+<2> Implement the `OrderInitializeExecutor` from the `CommandExecutor` by passing the target Aggregator due to initializing the order has a compensation process.
+
+<3> Autowire xref:#creating_order_service_class[OrderService Class] to make the execution.
 (`ObjectMapper` has been Autowired just for getting the JSON string)
 <4> Overridden the `doProcess` and `doRevert` methods.
 
-<5> Initialize the order-details by calling the orderService.
+<5> Initialize the order-details by calling the `initialize()` method.
++
+NOTE: All the exception handling is done in the xref:#creating_order_service_class[OrderService Class].
 
 <6> After Initializing the order successfully, SEC is navigated to the next executor by using `stepManager.next`.
 The next executor is `PreAuthExecutor` and also the current executed is marked as `INITIALIZED_ORDER` in the event-store.
@@ -89,4 +88,68 @@ If we have passed the `hasRevertError` value as `true`, throw an exception to te
 IMPORTANT: This is totally testing purpose only.
 In your real application make sure to do not throw an exception from the doRevert method unless `RetryableExecutorException`.
 
-<10> If the canceling process is successfully executed, return the event name as CANCELED_ORDER.
+<10> If the canceling process is successfully executed, return the event name as *CANCELED_ORDER*.
+
+[[creating_order_service_class]]
+=== Creating OrderService Class
+
+It is time to create the `OrderService` class.
+This is a traditional spring service class.
+The important part is handling the exceptions to identify the retryable and non-retryable exceptions.
+You know already that Identifying the retryable and non-retryable exceptions totally depends on what you are using.
+At this moment, we have to identify the exceptions from the database connection.
+Because we don't make an Http request to another service.
+
+[source,java]
+----
+@Service
+@RequiredArgsConstructor
+@Transactional
+public class OrderService {
+
+    private final OrderRepository orderRepository; //<1>
+
+    public void initialize(OrderEntity orderEntity) throws RetryableExecutorException, NonRetryableExecutorException {
+        try {
+            this.orderRepository.save(orderEntity); //<2>
+        } catch (CannotCreateTransactionException e) { //<3>
+            throw RetryableExecutorException.buildWith(e).build();
+        } catch (Exception e) { //<4>
+            throw NonRetryableExecutorException.buildWith(e).build();
+        }
+    }
+
+    public void cancelOrder(String orderId) throws RetryableExecutorException {
+        try {
+            this.orderRepository
+                    .findById(orderId)
+                    .map(orderEntity -> {
+                        orderEntity.setIsCancelled(true);
+                        return this.orderRepository.save(orderEntity);
+                    })
+                    .orElseThrow(() -> new RuntimeException("Order not found"));//<5>
+        } catch (CannotCreateTransactionException e) {//<6>
+            throw RetryableExecutorException.buildWith(e).build();
+        }
+    }
+}
+----
+
+<1> Inject the `OrderRepository` for accessing the database.
+
+<2> Initialize the order by accessing the `OrderRepository`.
+
+<3> Catch the `CannotCreateTransactionException`.
+In JPA we can filter the connection related issue with `CannotCreateTransactionException`.
+Build the RetryableExecutorException by wrapping the real exception and throwing it.
++
+NOTE: If you are using native JDBC or any other framework, it might be different.
+
+<4> Catch the other exceptions and build the `NonRetryableExecutorException` by wrapping the real exception.
+
+<5> Cancel the order by accessing the `OrderRepository` and throw an error if the order is not found.
+Due to we know exactly the order should be there the exception has been thrown as a RuntimeException.
+
+<6> Filter the resource-unavailable error and build the `RetryableExecutorException` by wrapping the real exception.
+In this method, you cannot have any other exceptions.
+Because compensation only can have the resource-unavailable error.
