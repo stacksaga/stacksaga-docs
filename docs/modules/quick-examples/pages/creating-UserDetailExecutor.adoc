@@ -6,6 +6,8 @@ As per the diagram, you know that executor should be a `Query-Executor`.
 Because the requirement is only fetching the user details.
 Fetching user details doesn't change any data.
 
+TIP: Read more about implementing the `QueryExecutor` in deep xref:framework:saga_executors.adoc#query_executor[here].
+
 [source,java]
 ----
 // <1>
@@ -32,10 +34,9 @@ public class UserDetailExecutor implements QueryExecutor<PlaceOrderAggregator> {
 
 <1> Annotate the `UserDetailExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
 +
-> Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+*executeFor* is the target service's name and *value* is the bean name of the executor.
+
 <2> Implement the `UserDetailExecutor` from the `QueryExecutor` by passing the target Aggregator due to fetching user details has no any compensation.
-+
-> Read more about xref:framework:saga_executors.adoc#query_executor[`QueryExecutor<A>`] interface.
 
 <3> Autowire the xref:#creating_user_service[`UserService`]
 to make the execution by calling the `user-service`.
@@ -45,22 +46,15 @@ to make the execution by calling the `user-service`.
 <5> Adding some metadata to the aggregator to see what executor is executed.
 (Just for see in StackSaga Cloud-Window)
 
-<6> If you throw an exception, that is how the framework knows that the executor has an exception at this moment.
-Based on the exception type that you have thrown, The framework decides that the process should be started the revert process or either process should be stopped temporally.
+<6> By using the UserService's `getUserDetails()` method, fetches the user's data from user `user-service` by passing the `UserId` from the `currentAggregator`.
 +
-IF the exception is a `RetryableExecutorException` the framework stops the process temporally.
-Or if the exception is a `NonRetryableExecutorException` the framework knows that the execution cannot be processed to forward anymore and the revert process should be started.
-Throwing an exception can be implemented in the method as well.
-But in this example, we categorize the exceptions whether the exception is a `RetryableExecutorException` or otherwise a `NonRetryableExecutorException` in the xref:creating_user_service[UserService] (service layer).
-+
-> Read more about xref:framework:retryable_executor_exception.adoc[RetryableExecutorException] and xref:framework:non_retryable_executor_exception.adoc[NonRetryableExecutorException].
+You can catch the exception here when you're calling the target service.
+But as a best practice (according the xref:architecture:Saga-CHES-architecture.adoc[CHES&D] layered architecture), catching and deciding the exception either resource-unavailable exception (retryable exception) or not is done in the xref:creating_user_service[UserService] (service layer).
 
-<7> By using the UserService's `getUserDetails()` method, fetches the user's data from user `user-service`.
-
-<8> After receiving the user's detail the `currentAggregator` is updated with user's details.
+<7> After receiving the user's detail the `currentAggregator` is updated with user's details.
 Therefore, you can access the user's detail within the next executor.
 
-<9> By using the `stepManager`, navigates the execution to the next executor called and the event name marked as `USER_DETAILS_FETCHED` xref:creating-OrderInitializeExecutor.adoc#creating_order_initialize_executor[OrderInitializeExecutor].
+<8> By using the `stepManager`, navigates the execution to the next executor called and the event name marked as `USER_DETAILS_FETCHED` xref:creating-OrderInitializeExecutor.adoc#creating_order_initialize_executor[OrderInitializeExecutor].
 
 [[creating_user_service]]
 === Creating UserService.
@@ -126,8 +120,6 @@ public class UserService {
             throw ex; // <10>
         } catch (IllegalArgumentException illegalArgumentException) { // <11>
             throw RetryableExecutorException.buildWith(illegalArgumentException).build();
-        } catch (RunT) { // <11>
-            throw RetryableExecutorException.buildWith(illegalArgumentException).build();
         }
     }
 }
@@ -158,7 +150,7 @@ Therefore, a `NonRetryableExecutorException` is thrown by wrapping with the real
 If you want to put some data based on the exception, you can use the `put("key","value")` method for that.
 The data can be accessed from any revert-exceptions.
 
-<5> Other 4xx errors are thrown as the `NonRetryableExecutorException` by wrapping the real error.
+<5> Other *4xx* errors are thrown as the `NonRetryableExecutorException` by wrapping the real error.
 
 <6> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*5xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
 Most probably 5xx errors can be retried, but there are some cases it can not.
@@ -176,14 +168,15 @@ Therefore, that error just throws without wrapping with `NonRetryableExecutorExc
 IF you want to wrap, you can do as usual but is not required if you don't consider those errors.
 Because internally the framework wraps the all `RuntimeExceptions` with `NonRetryableExecutorException` by default.
 
-<11> Due to we are using `spring-cloud-load-balancer`, when we make a request via the `RestTemplate` internally load balancer check is there any registered services in the local cache.
+<11> Due to we are using `spring-cloud-load-balancer`, when we make a request via the `RestTemplate` internally load balancer checks that if is there any registered services in the local cache or not.
 Then, if there is no instance in the cache, it throws and exception with `IllegalArgumentException`.
-But in our case, actuality it is also a retryable exception.
+But in our case, actuality it should be considered as a *retryable exception*.
 Because when an instance is registered, that execution can be invoked.
 Therefore, that error is thrown as `RetryableExecutorException`.
 
 [[exception_tip]]
 ====
+
 TIP: The reason for handling the exception is that this is where the http client does the invocation and the special this is most probably the exceptions are different to each other even though the http status code is the same.
 
 Case-1::: IF you change the Rest-Client, (For instance, you move to RestTemplate to Feign-client), all the exceptions are changed.
