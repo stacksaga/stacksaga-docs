@@ -2,59 +2,88 @@
 
 [source,java]
 ----
-//<1>
-@SagaExecutor(
-        executeFor = "delivery-service",//<2>
-        liveCheck = true,//<3>
-        value = "DispatchRevertNotifierExecutor" //<4>
-)
-public class DispatchRevertCompleteLogExecutor implements RevertAfterExecutor<PlaceOrderAggregator, DispatchOrderExecutor> {//<5>
+@SagaExecutor(executeFor = "inventory-service",value = "SampleAfterExeStockUpdate") //<1>
+public class SampleAfterExeStockUpdate implements RevertAfterExecutor<PlaceOrderAggregator, StockUpdateExecutor> { //<2>
 
-    //<6>
+    //<3>
     @Override
-    public RevertAfterStepManager<PlaceOrderAggregator, DispatchOrderExecutor> doProcess(
-            PlaceOrderAggregator aggregator,//<7>
-            ProcessStack previousProcessStack,//<8>
-            NonRetryableExecutorException processException,//<9>
-            RevertHintStore revertHintStore,//<10>
-            RevertAfterStepManagerUtil<PlaceOrderAggregator, DispatchOrderExecutor> revertStepManagerUtil //<11>
-    ) throws RetryableExecutorException { //<12>
-        return revertStepManagerUtil.next(NextAfterExecutor.class); //<13>
-        //or
-        return revertStepManagerUtil.complete(); //<14>
+    public RevertAfterStepManager<PlaceOrderAggregator, StockUpdateExecutor> doProcess(
+            PlaceOrderAggregator finalAggregatorState, //<4>
+            NonRetryableExecutorException processException, //<5>
+            RevertHintStore revertHintStore, //<6>
+            RevertAfterStepManagerUtil<PlaceOrderAggregator, StockUpdateExecutor> stepManager, //<7>
+            String idempotencyKey //<8>
+    ) throws RetryableExecutorException { //<9>
+        try {
+            //<10>
+            //Access the necessary data from the finalAggregatorState,processException and processException objects and call your target service.
+            //Add the data to the revertHintStore If there is any data that should be added to access by the subsequent compensation executions.
+            if (condition) {
+                //<11>
+                return stepManager.next(NextAfterExecutor.class, () -> "UPDATED");
+            } else {
+                //<12>
+                return stepManager.complete(() -> "UPDATED");
+            }
+        } catch (ResourceUnavailableException e) { //<13>
+            throw RetryableExecutorException.buildWith(e).build();
+        }
     }
 }
+
 ----
 
-<1> *@SagaExecutor*: annotate your query executor with `@org.stacksaga.annotation.SagaExecutor` annotation.
+
+<1> *@SagaExecutor*: annotate your *revert-before* executor class with `@org.stacksaga.annotation.SagaExecutor` annotation.
 The annotation provides the spring bean capabilities and also another metadata for the StackSaga framework.
++
+executeFor::
+The name of the target service that the executor goes to access.
 
-<2> *executeFor*: The name of the service that particular executor is going to be connected. it can be a service name of another service. if the service is spring boot service, make sure to keep the application name as its. because it will be helpful for the retry process.
+value::
+The bean name of the executor.
+The executor is identified with this value by StackSaga engine.
+After configuring the bean name, it cannot be changed at all.
+If you want to the class package, it does not matter without changing the configured name.
+See more.
 
-<3> *liveCheck*: When the retry process is executed, liveCheck is considered by the engine. if the target service is a spring boot service or registered service with the service registry, the availability is checked before executing the retry by the StackSaga engine.
+<2> *RevertAfterExecutor<A, E>*: Your Executor should be implemented from the `RevertAfterExecutor<A,E>`.
+Generic <A>:: The aggregator class of the executor.
+Generic <E>:: Which is the target xref:framework:saga_executors.adoc#command_executor[command-executor] of this *revert-after-executor*.
 
-<4> *value*: The bean name of the executor.
-The executor is identified with this value by StackSaga engine. after configuring the bean name, it cannot be changed at all. if you want to the class package, it does not matter without changing the configured name.
-
-<5> *RevertAfterExecutor<A, E>*: The Revert After Executor should be implemented from the `RevertAfterExecutor<A,E>`.
-Generic *A* is the aggregator.
-Generic *E* is the <<command_executor,command-executor>> of the given aggregator as the Generic *A*.
-
-<6> Override the `doProcess()` method that `RevertAfterExecutor` provides.
+<3> Override the `doProcess()` method that `RevertAfterExecutor` provides.
 That is the method is executed by the StackSaga engine.
 
-<7> *PlaceOrderAggregator*: The final aggregator state when the process exception is thrown.
+<4> *finalAggregatorState*: The final aggregator state when the process exception is thrown.
+It is identical to the *finalAggregatorState* that discussed in the xref:saga_executors.adoc#finalAggregatorState[command-executor's `revert()`] method.
 
-<8> *ProcessStack*: The final process stack when the process exception is thrown.
+<5> *NonRetryableExecutorException*: The exception that was thrown by the last executor.
+It is identical to the *NonRetryableExecutorException* that discussed in the xref:saga_executors.adoc#NonRetryableExecutorException[command-executor's `revert()`] method.
 
-<9> *NonRetryableExecutorException*:The process-exception that was thrown by the last executor.
+<6> *revertHintStore:* This is the payload for using carrying the data into the subsequent compensation executions.
+It is identical to the *revertHintStore* that discussed in the xref:saga_executors.adoc#revertHintStore[command-executor's `revert()`] method.
 
-<10> *RevertHintStore* If you want to add some data to the backward process, you can use the `RevertHintStore` to put the data as container.
+<7> *stepManager* is used to navigate the compensation executions. if there is another *revert-after-executor*, after the current *revert-after-executor* for the same *command-executor*, you can use `stepManager.next()` to navigate to the next *revert-after-executor*.
+or otherwise, if there is no any revert-after executor for the same *command-executor*, you can use `stepManager.complete()` to command to the SEC that revert-after executions are done for the mentioned *command-executor*. and go ahead,
 
-<11> **RevertAfterStepManagerUtil<A, E>**: This object provides the methods for giving the navigation to the engine regarding the next step. it can be another revert-after-executor or a revert-after completion.
+<8> *idempotencyKey:* The idempotency key for the *revert-after-executor* that assigned by the SEC.
 
-<12> *RetryableExecutorException*: If the revert after execution is failed due to a retryable exception, you can provide that by warping with `RetryableExecutorException`.
+<9> *RetryableExecutorException:*
+If the `doRevert` method has a *RetryableExecutorException* (resource unavailable error,) it is allowed to throw it.
++
+WARNING: any compensation execution can have only *resource-unavailable* errors as per the saga design pattern.
+you have to carefully handle the execution without any error except the resource-unavailable errors.
+if there is unhandled error while executing the `doRevert` method, the entire execution is terminated.
+and then you have to manually handle the terminated transactions.
 
-<13> *next()*: You can provide (only if you have) the next revert-after-executor with `revertStepManagerUtil.next()`.
+<10> In the method body, you can call your target-service to execute the atomic compensation-execution.
+Yon can access any data from the *finalAggregatorState* , *processException* or *processException* objects.
+And also if you want to put some data for accessing the subsequent compensation execution, you can use the *revertHintStore.put()* method.
 
-<14> *complete()*: If you don't have any revert-after-executor to be executed as next regarding the command-executor, you can return `revertStepManagerUtil.complete()`.
+<11> Based on your condition, if there is another *revert-before-executor*, you can command to the SEC to the next *revert-after-executor* by using `stepManager.next()` method.
+
+<12> Based on your condition, if there is no more *revert-after-executors* for the mentioned *command-executor*, you can return `stepManager.complete()` method.
+(See xref:architecture:executor_architecture.adoc#sub-executors[how the executors are executed] when one primary atomic execution has multiple compensation.)
+
+
+<13> You can catch the resource-unavailable errors in the `doRevert` method and throw it by wrapping with a `RetryableExecutorException` to stop the execution temporarily.
