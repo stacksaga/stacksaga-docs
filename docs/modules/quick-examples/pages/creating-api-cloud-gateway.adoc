@@ -1,22 +1,19 @@
 [[creating_api_cloud_gateway]]
 == Creating API-Cloud-Gateway
 
-Now we are going to create the api-cloud-gateway.
+Here we are going to create the *api-cloud-gateway*.
 
 *Road Map*
 
 image:admin:stacksaga-example-stacksaga-spring-cloud-api-gateway-demo-hight-level-2.drawio.svg[]
 
-Same as before, visit to the https://start.spring.io/[spring initializr] and create a new project with the following dependencies.
+Visit the https://start.spring.io/[spring initializr] and create a new project with the following dependencies.
 
 * spring-boot-starter-webflux
 * spring-cloud-starter-gateway
 * spring-cloud-starter-netflix-eureka-client
 
-IMPORTANT: You don't want to worry about StackSaga things because StackSaga doesn't involve with the API-Gateway.
-But to avoid the cross-origin restrictions, you have to xref://[allow the cross-requests] for the Admin-Dashboard URL(s).
-
-The pom.xml file will be like below.
+The `pom.xml` file of the project will be like below.
 
 [source,xml]
 .pom.xml
@@ -28,7 +25,7 @@ The pom.xml file will be like below.
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>2.7.0</version>
+        <version>3.3.1</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com.example</groupId>
@@ -37,10 +34,13 @@ The pom.xml file will be like below.
     <name>api-gateway</name>
     <description>api-gateway</description>
     <properties>
-        <maven.compiler.source>8</maven.compiler.source>
-        <maven.compiler.target>8</maven.compiler.target>
+        <java.version>17</java.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <maven.compiler.release>17</maven.compiler.release>
+        <spring-cloud.version>2023.0.3</spring-cloud.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <spring-cloud.version>2021.0.3</spring-cloud.version>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     </properties>
     <dependencies>
         <dependency>
@@ -123,11 +123,10 @@ Next, let's update the configuration file.
 eureka:
   client:
     serviceUrl:
-      defaultZone: http://localhost:8085/eureka/ # <1>
+      defaultZone: http://localhost:8085/eureka/ #<1>
   instance:
     hostname: localhost
-    # <2>
-    instance-id: ${spring.application.name}:${random.uuid}
+    instance-id: ${spring.application.name}:${random.uuid} #<2>
 server:
   port: 8080
 spring:
@@ -140,7 +139,7 @@ spring:
         cors-configurations:
           '[/*/stacksaga/**]':
             allowedOrigins:
-              - "http://localhost:4444"
+              - "https://live.stacksaga.org"
             allowedMethods: "*"
             allowedHeaders: "*"
       default-filters:
@@ -173,10 +172,12 @@ info:
 <1> Provide the eureka service registry URL.
 <2> Due to the api gateway also a one eureka clients, you have to mention how it would be the instance id when the api gateway is registered with eureka service.
 
-<3> To avoid the cross-origin restrictions, you can permit the Admin-Dashboard URL.
-If you have a list of Admin-Dashboard URLs, you provide all.
-It permits all the requests for this pattern.
-/*/stacksaga/**
+<3> Due to we wish to see the tracing details via the StackSaga Cloud-Window via the API-Gateway, we have to allow the *cross-origin* from the API-Gateway globally.
+
+[/*/stacksaga/**]:: Url pattern to permit the request.
+allowedOrigins:: The allowed origin (`https://live.stacksaga.org`) that StackSaga Cloud-Window is running.
+allowedMethods:: Allow all methods.
+allowedHeaders:: Allow all headers.
 
 <4> To avoid duplicate response headers exceptions, you can add these filters. (https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-mvc/filters/deduperesponseheader.html[Read spring doc])
 
