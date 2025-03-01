@@ -1,7 +1,8 @@
 === Creating StockUpdateExecutor (Command-Executor)
 
-`StockUpdateExecutor` is responsible for updating (reduce) the stock by connecting with the utility stock-service.
-After reducing the stock to place the order, an error occurred that reduced stock should be restored because the order will be canceled.
+`StockUpdateExecutor` is responsible for updating (deducting) the stock by connecting with the utility *inventory-service*.
+After deducting the stock to place the order, if an error occurs that deducted stock should be restored.
+Because the order will be canceled.
 That means that the execution has Compensating.
 Therefore, the executor should be a `Command-Executor`
 
@@ -16,10 +17,11 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
 
     @Override
     public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            PlaceOrderAggregator currentAggregator, // <3>
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
-    )
-    throws RetryableExecutorException, NonRetryableExecutorException {
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        //<3>
         currentAggregator.getExecutions().add(this.getClass().getSimpleName()+":"+ LocalDateTime.now());
         // <4>
         this.stockService.updateStock(
@@ -43,12 +45,13 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
     }
 
     @Override
-    public String doRevert(
+    public SagaExecutionEventName doRevert(
             NonRetryableExecutorException processException,
             PlaceOrderAggregator finalAggregatorState,
-            RevertHintStore revertHintStore
-    ) throws RetryableExecutorException { // <6>
-        // <7>
+            RevertHintStore revertHintStore,
+            String idempotencyKey
+    ) throws RetryableExecutorException {
+        // <6>
         this.stockService.restoreStock(
                 RestoreStockDto.RequestBody
                         .builder()
@@ -58,12 +61,12 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
                         )
                         .build()
         );
-        // <8>
+        // <7>
         revertHintStore.put(
                 String.valueOf(System.currentTimeMillis()),
                 this.getClass().getSimpleName() + ":doRevert"
         );
-        // <9>
+        // <8>
         return OrderStatus.RESTORED_STOCK;
     }
 }
@@ -73,34 +76,30 @@ public class StockUpdateExecutor implements CommandExecutor<PlaceOrderAggregator
 
 <1> Annotate the `StockUpdateExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
 +
-> Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+executeFor:: executeFor is the target service’s name.
+value::
+value is the bean name of the executor.
 
 <2> Implement the `StockUpdateExecutor` from the `CommandExecutor` by passing the target Aggregator.
-+
-Read more about xref:framework:saga_executors.adoc#command_executor[`CommandExecutor<A>`] interface.
 
-<3> you will have the `currentAggregator` object through the method parameter. due to this executor is the 4th executor, the `currentAggregator` object has been updated by the `OrderController`(initialization), `UserDetailExecutor`, `OrderInitializeExecutor`,and `PreAuthExecutor`.
+<3> Adding the current executor to the Executions list to keep track via the StackSaga Cloud-Window.
+(This part is only for logging purposes to understand).
 
 <4> updating the stock by invoking the StockService's `updateStock()` method. the `orderId` and `items` are passed accessing from the `currentAggregator`.
 
 <5> Navigates the execution by using `stepManager` to the next executor called `MakePaymentExecutor`.
 And also passed the status as `UPDATED_STOCK`.
 
-
-<6> `RetryableExecutorException` As per the StackSaga design pattern the revert process cannot have any `NonRetryableExecutorException` error.
-It only can have `RetryableExecutorException`.
-
-<7> Calling the StockService's `restoreStock()` method to restoring the items that has been reduced in the `doProcess()` method.
+<6> Calling the StockService's `restoreStock()` method to restoring the items that has been reduced in the `doProcess()` method.
 To restore the Stock, we have to pass a reason.
 Due to we have put a reason all the possible times when an `NonRetryableExecutorException` is occurred in `doProcess` executions.
 If the value doesn't exist in the exception object we have passed just empty `String` there.
 
-<8> Update the hint-store object by adding current millisecond and the revert method name with the executor name while the revert process.  +
-In your real application, xref://[the hint-store] can be used for adding some data regarding the revert process. It can be accessed from the next revert process.
+<7> Update the hint-store object by adding current millisecond and the revert method name with the executor name while the revert process.  +
+In your real application, xref://[the hint-store] can be used for adding some data regarding the revert process.
+It can be accessed from the next revert process.
 
-<9> Returns the status as `RESTORED_STOCK` finally.
-
-*Related classes*
+<8> Returns the status as `RESTORED_STOCK` finally.
 
 === Creating StockService
 
@@ -174,14 +173,14 @@ This service is also pretty much the same as the service that has been created s
 <1> Call the endpoint to update the stock.
 
 <2> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*5xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
-Most probably 5xx errors can be retried, but there are some cases it can not.
+Most probably 5xx errors can be retried, but there are some cases it cannot.
 
-<3> Cathe the other exceptions (with 4xx errors as well).
+<3> Catch the other exceptions (with 4xx errors as well).
 
 <4> Call the endpoint to restore the updated stock.
 
 <5> Catch the https://en.wikipedia.org/wiki/List_of_HTTP_status_codes[*5xx*] HTTP errors to determine if the exception is a `NonRetryableExecutorException` or `RetryableExecutorException`.
 Most probably 5xx errors can be retried, but there are some cases it can not.
 
-<6> Cathe the other exceptions (with 4xx errors as well).
+<6> Catch the other exceptions (with 4xx errors as well).
 

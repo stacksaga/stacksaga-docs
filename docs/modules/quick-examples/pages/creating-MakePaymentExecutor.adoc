@@ -1,8 +1,9 @@
 === Creating MakePaymentExecutor (Command-Executor)
 
-`MakePaymentExecutor` is the final executor as per the diagram. this executor interacts with the utility `payment-service`.
-in the `PreAuthExecutor` also we accessed the utility `payment-service` for making the pre-auth.
-his executor is responsible for making the real payment for that `pre-auth`.
+`MakePaymentExecutor` is the final executor as per the usecase.
+This executor interacts with the utility `payment-service`.
+In the `PreAuthExecutor` also access the utility `payment-service` for making the pre-auth.
+The executor is responsible for making the real payment.
 
 [source,java]
 ----
@@ -12,14 +13,11 @@ his executor is responsible for making the real payment for that `pre-auth`.
 public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator> { // <2>
 
     private final PaymentService paymentService; // <3>
-
     @Override
-    public ProcessStepManager<PlaceOrderAggregator> doProcess(
-                PlaceOrderAggregator currentAggregator,
-                ProcessStepManagerUtil<PlaceOrderAggregator> stepManager
-    ) throws RetryableExecutorException, NonRetryableExecutorException {
-        currentAggregator.getExecutions().add(this.getClass().getSimpleName()+":"+ LocalDateTime.now());
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(PlaceOrderAggregator currentAggregator, ProcessStepManagerUtil<PlaceOrderAggregator> stepManager, String idempotencyKey) throws RetryableExecutorException, NonRetryableExecutorException {
         // <4>
+        currentAggregator.getExecutions().add(this.getClass().getSimpleName() + ":" + LocalDateTime.now());
+        // <5>
         String paymentId = this.paymentService.makePayment(
                 MakePaymentDto
                         .RequestBody
@@ -29,15 +27,14 @@ public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator
                         .userId(currentAggregator.getUserId())
                         .build()
         );
-        // <5>
-        currentAggregator.setPaymentId(paymentId);
         // <6>
-        return stepManager.complete(OrderStatus.MADE_PAYMENT);
+        currentAggregator.setPaymentId(paymentId);
+        return stepManager.complete(OrderStatus.MADE_PAYMENT);// <7>
     }
 
     @Override
     public String doRevert(NonRetryableExecutorException processException, PlaceOrderAggregator finalAggregatorState, RevertHintStore revertHintStore) throws RetryableExecutorException {
-        throw new UnsupportedOperationException(); // <7>
+        throw new UnsupportedOperationException(); // <8>
     }
 }
 ----
@@ -45,16 +42,18 @@ public class MakePaymentExecutor implements CommandExecutor<PlaceOrderAggregator
 *Highlights*
 
 <1> Annotate the `MakePaymentExecutor` class as a `SagaExecutor` by using `@SagaExecutor` annotation.
-+
-> Read more about xref:framework:saga_executors.adoc#saga_executors[`@SagaExecutor`] annotation.
+executeFor:: executeFor is the target service’s name.
 
+value:: value is the bean name of the executor.
 <2> Implement the `MakePaymentExecutor` from the `CommandExecutor` by passing the target Aggregator.
-+
-Read more about xref:framework:saga_executors.adoc#command_executor[`CommandExecutor<A>`] interface.
 
 <3> Autowire the `PaymentService`.
 The old payment service is used this as well.
 (The new methods will be updated below.)
++
+TIP: The relationship between the executor and service should not be one-to-one.
+A service can be used for many executors.
+In this example, the PaymentService class is used for PreAuthExecutor both executors.
 
 <4> Calling the PaymentService's `makePayment()` method for making the payment.
 To make the payment, we have to pass the following data.
@@ -69,7 +68,7 @@ To make the payment, we have to pass the following data.
 <6> Due to this step is the finale execution, mentions the *compiled* signal to the SEC by using `stepManager.complete` method with the status as `MADE_PAYMENT`.
 By mentioning *compiled* signal, the SEC stop the execution and mark the transaction has been successfully completed.
 
-<7> All other command-executors had a Compensating but in this executor have no any execution for Compensating.
+<7> All other command-executors had a Compensating but in this executor have no any execution for Compensating at this moment.
 The reason is that this is the final execution of this entire process and there is no any next executor can be failed.
 You know that all the revert executions are called as the descending order from where the `NonRetryableExecutorException` is thrown.
 Even this execution is failed for some reason, no need to do a Compensating because that execution already failed.
@@ -78,10 +77,6 @@ If this execution failed for some reason, all other executed (successfully execu
 IMPORTANT: If you add another execution after making the Payment, you must implement the `doRevert()` method.
 Because that new execution is failed for some reason, the payment should be refunded.
 Because the payment is already done.
-
-> Refer the xref://[reference documentation] to see how the executions are invoked.
-
-*Related Classes*
 
 === Updating the PaymentService.
 
@@ -121,7 +116,6 @@ To make the payment, we have to create a new method in the existing `PaymentServ
         }
     }
 ----
+
 That method is also pretty much the same as the service methods we have been implementing so far.
 Just call the target utility service and handle the exception.
-
-*Related Classes' links*
