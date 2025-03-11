@@ -2,7 +2,7 @@
 = Transaction Retrying.
 
 In general, In microservices architecture, retry is a mechanism used to handle transaction failures by automatically reattempting an operation that has failed.
-Transient failures are short-lived issues that are expected to resolve themselves after a short delay, such as network timeouts, temporary xref:replay-transaction.adoc#resource-unavailable[resource unavailability], or overloaded systems.
+Transient failures are short-lived issues that are expected to resolve themselves after a short delay, such as network timeouts, temporary xref:#resource-unavailable[resource unavailability], or overloaded systems.
 
 [[resource-unavailable]]
 ====
@@ -54,24 +54,24 @@ If the executor throws and `RetryableExecutorException` the saga engine keep the
 == StackSaga Agent
 
 Stacksaga agent is the application that invokes for retrying the transactions.
-You already know that if the transaction is failed with a network exception (*Resource Unavailable*) the transaction can be replayed.
+You already know that if the transaction is failed with a network exception (*Resource-Unavailable*) the transaction can be replayed.
 That retrying part is done by the Stacksaga agent service.
 
 === Retrying Transactions with StackSaga Agent
 
 You know that the transactions are executed by the StackSaga framework.
-If the transaction is not able to process due to some *Resource Unavailable* exception, the transaction is kept in the event-store for retrying.
-for instance, while make-order process an exception is occurred in the MakePaymentExecutor due to the payment-services are not available for some reason.
-then order-service saves the transaction with the help of StackSaga framework in the event-store for retrying.
-With the given configurations the agent application trigger the schedulers for gathering the transaction that should be retried.
-The transactions that are eligible for retrying are caught by the agent and the agent distributes the transactions for the available instances for retrying.
+If the transaction is not able to process due to some *Resource-Unavailable* exception, the transaction is kept in the event-store for retrying.
+For instance, while make-order process an exception is occurred in the MakePaymentExecutor due to the payment-services are not available for some reason.
+Then order-service saves the transaction with the help of StackSaga framework in the event-store for retrying.
+With the given configurations, the agent application triggers the schedulers for gathering the transaction that should be retried.
+The transactions that are eligible for retrying are caught by the agent, and the agent distributes the transactions for the available instances for retrying.
 
 ====
 [[why-instance-does-not-involve-directly-for-retrying]]
-IMPORTANT: Sometimes you might think that why can't be re-invoked the transactions by the own instance without an agent? +
-The short answer is it can't be done due the instances are xref:replay-transaction.adoc#ephemeral[Ephemeral] in nature in the microservice architecture. +
+IMPORTANT: Sometimes you might think that why cannot be re-invoked the transactions by the own instance without an agent? +
+The short answer is it cannot be done due the instances are xref:#ephemeral[Ephemeral] in nature in the microservice architecture. +
 For instance, just imagine there are 10 instances running on, and there are 100 transactions have been saved temporarily by them due to some network issues.
-After a while, the scheduler is triggered for replying the transactions on each instance.
+After a while, the scheduler is triggered for replying transactions on each instance.
 At that moment it can have different instances count due to scaling up or scaling down based on the load.
 Just imagine there was an instance called "a" that made some retryable transactions before triggering the scheduler, and that instance might not be running when the scheduler is triggered for retrying.
 Then the transactions that made by the instance called "a" cannot be run ever.
@@ -79,8 +79,10 @@ Then the transactions that made by the instance called "a" cannot be run ever.
 Then some transactions can be missing.
 This is one of the major reasons that replaying cannot involve all available instances at the same time.
 
-In the below diagram you can see there are 7 transactions that should be exposed for retrying that have been run by 3 instances.
-but the problem is when the scheduler is triggered for retrying in each instance, only 2 instances are being running called *instance:3491465* and *instance:3491425*. the *instance:3400001* was destroyed. then that transaction can not be exposed for retrying.
+In the below diagram, you can see there are 7 transactions that should be exposed for retrying that have been run by 3 instances.
+But the problem is when the scheduler is triggered for retrying in each instance, only 2 instances are being running called *instance:3491465* and *instance:3491425*.
+The *instance:3400001* was destroyed.
+Then that transaction cannot be exposed for retrying.
 
 image:stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt="why instance does not involve directly for retrying in StackSaga"]
 ====
@@ -89,8 +91,9 @@ Here you can see how the StackSaga Agent involves and distributes the transactio
 
 image:stacksaga-diagram-how-stacksaga-agent-distribute-transactions.drawio.svg[alt="how stacksaga agent distribute transactions"]
 
-Here you can see it does not matter which instance initiated the transaction. all the transaction that should be retried are scanned by the agent and those are distributed with the available services.
-The communication happens via the In-built Http endpoints that has been provided by `stacksaga-spring-boot-starter`.
+Here you can see it does not matter which instance initiated the transaction.
+All the transactions that should be retried are scanned by the agent, and those are distributed with the available services.
+The communication happens via the In-built Http endpoints that have been provided by `stacksaga-spring-boot-starter`.
 
 [[ephemeral]]
 ====
@@ -101,17 +104,19 @@ In the context of microservices, ephemeral refers to the principle that a micros
 
 == Cluster grouping of StackSaga agent
 
-You can isolate (group) the StackSaga agent applications in different isolation levels.
-the reason for to Isolate the agent applications is that to share the load between the available clusters without any collision when the data is accessed by the agent.
-Cluster is the logical entity that share the token range.
-if the cluster has only one node the entire range is acquired by the single node. or if the cluster has multiple nodes, the token range is divided withing the available multiple nodes.
+Cluster grouping of StackSaga agent refers to grouping the agent applications in the geographical
 
-You already know that there are two parts mainly service-agent does in retrying.
+Cluster grouping StackSaga agent refers to organizing and managing the StackSaga agent instances across different geographic regions (in multi-regions) to improve availability, performance, fault tolerance, and compliance.
+In simple, If your orchestrator service is deployed in different geographic regions, Cluster grouping should be considered to how the transactions are saved in the databases and how the transactions are filtered from the databases for retrying and how they are retrying how many nodes should be involved.
 
-* Fetching transactions from the event-store for retrying.
-* Sharing the data to the available utility services.
+As we learned above, `service-agent` involves for two main duties in retrying.
 
-IMPORTANT: Cluster grouping only considers accessing the data from the event-store for managing. *it is not about sharing the data withing the available utility services by the agent.*
+* Fetching (filtering) transactions from the `event-store` for retrying.
+* Sharing filtered transactions withing the available instances.
+
+When the application is getting bigger, One stacksaga-agent application cannot handle all the transactions.
+And then the number of agent-application instances should be increased.
+In stacksaga, the agent-applications can be scaled horizontally.
 
 . xref:#Regional-Clustering[Regional Clustering]
 .. Single Node Cluster
@@ -183,10 +188,6 @@ You know that if we are in the cloud environment, we have to make our deployment
 Then we mainly deal with *regions* and *zones*.
 In the stacksaga ecosystem, it is very important to identify the distributed deployments geographically to enhance the performance and balance the load between the target nodes.
 
-[[zonal-standalone-mode]]
-=== Zonal Isolation In Standalone Mode
-
-image:stacksaga-diagram-eureka-service-registry-zonal-architecture-standalone-mode.drawio.svg[alt="stacksaga diagram eureka service registry zonal architecture standalone mode"]
 
 [[cluster-mode]]
 === Cluster Mode
