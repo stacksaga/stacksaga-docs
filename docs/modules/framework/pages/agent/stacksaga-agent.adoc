@@ -1,1 +1,66 @@
-= stacksaga-agent
+[[stacksaga_agent]]
+== Stacksaga Agent
+
+Stacksaga agent is the application that invokes for retrying the transactions.
+You already know that if the transaction is failed with a network exception (*Resource-Unavailable*) the transaction can be replayed.
+That retrying part is done by the Stacksaga agent service.
+
+== Why Agent-service?
+
+Sometimes you might think that why cannot be re-invoked the transactions by the own instance without an agent? +
+The short answer is it cannot be done due the instances are xref:#ephemeral[Ephemeral] in nature in the microservice architecture. +
+
+For instance, just imagine there are *3* instances running on, and there are *7* transactions have been saved for retrying by them due to some network issues.
+If each instance takes care of the transactions by themselves, After a while, the scheduler is triggered for replying transactions on each instance.
+At that moment it can have different instances count due to scaling up or scaling down based on the traffic at that particular time.
+Just imagine an instance that has made some transactions is not running on when the scheduler is triggered for retrying called `order-service-3400001`.
+At this moment, other instances do not touch to those transactions that made by that instance.
+Therefore, those transactions will not be exposed for retrying ever, like the diagram shows below.
+
+image:framework:agent/stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt="why instance does not involve directly for retrying in StackSaga"]
+
+That is why a separate system should be involved in transaction retrying.
+Next let's see how the StackSaga-Agent manages it.
+
+== Retrying Transactions with StackSaga Agent
+
+You know that the transactions are executed by the orchestrator service with the help of StackSaga framework.
+If the transaction is not able to process due to some *Resource-Unavailable* exception, the transaction is kept in the `event-store` for retrying.
+For instance, while the `make-order` process an exception is occurred in the `MakePaymentExecutor` due to the `payment-services` are not available for some reason.
+Then `order-service` saves the transaction with the help of StackSaga framework in the `event-store` for retrying in a configured interval.
+The duty of the orchestrator service is ended with that temporally.
+
+When the interval is reached, the Stacksaga agent service triggers the schedulers for gathering the transaction that should be retried.
+And after collecting the transactions, the agent distributes the transactions for the available `order-service` (orchestrator services) instances for retrying.
+
+image:framework:agent/stacksaga-diagram-how-stacksaga-agent-distribute-transactions.drawio.svg[alt="how stacksaga agent distribute transactions"]
+
+Here you can see it does not matter which instance initiated the transaction.
+All the transactions that should be retried are scanned by the agent, and those are distributed with the available `order-service` instances.
+
+NOTE: The communication between the `agent-service` and the `order-services` is done via the In-built Http endpoints that are provided by `stacksaga-spring-boot-starter` in the orchestrator service. +
+The load is balanced by the service discovery implementation in the system like `eureka`, `kubernetes service`, etc.
+
+== Deploying Stacksaga Agent
+
+Deploying Stacksaga Agent can be done in two ways as a theory.
+
+1. Single Node Cluster
+2. Multi-Node Cluster
+
+NOTE: Stacksaga Agent application can be scaled up regularly and the application cluster.
+
+=== Stacksaga Agent - Single Node Cluster
+
+image:framework:agent/stacksaga-diagram-eureka-service-registry-regional-architecture-standalone-mode.drawio.svg[alt="stacksaga diagram eureka service registry regional architecture standalone mode"]
+
+=== Stacksaga Agent - Multi-Node Cluster
+
+image:framework:agent/stacksaga-diagram-eureka-service-registry-regional-architecture-cluster-mode.drawio.svg[alt="stacksaga diagram eureka service registry regional architecture cluster mode"]
+
+[[ephemeral]]
+====
+*Ephemeral* behavior of the instances.
+
+In the context of microservices, ephemeral refers to the principle that a microservice can be created, destroyed, and replenished on-demand on a target easily, quickly, and with no side effects.
+====
