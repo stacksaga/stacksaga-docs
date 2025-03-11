@@ -1,0 +1,80 @@
+== Overview
+
+In the StackSaga ecosystem, few components are working together.
+It can be divided as below based on the usage.
+
+* Orchestration service related components
+** stacksaga-spring-boot-starter
+** stacksaga-db-support
+** stacksaga-env-support
+* Agent service related components
+* StackSaga Cloud-Window
+
+Here you can see the relationship between them and how they are used in the StackSaga ecosystem.
+
+image:stacksaga-components.drawio.svg[]
+
+== Orchestration service related components
+
+Stacksaga is configured based on the target service that you want to make the service as the Orchestration service.
+For instance if you want to configure stacksaga into the order service, you have to add the Orchestration service related components into the `order service`.
+
+=== `stacksaga-spring-boot-starter` Dependency
+
+`stacksaga-spring-boot-starter` is the core of the framework. it the `stacksaga-spring-boot-starter` is a java dependency that can be added into your project as a dependency.
+
+[source,xml]
+----
+<dependency>
+  <groupId>org.stacksaga</groupId>
+  <artifactId>stacksaga-spring-boot-starter</artifactId>
+  <version>${org.stacksaga.version}</version>
+</dependency>
+----
+
+=== `stacksaga-db-support` Dependency
+
+StackSaga works with the help of the event-store.
+So it requires a one of database implementations for connecting with the target database.
+The database implementation is based on your target Orchestration service's database.
+For instance, if you want to configure stacksaga into the order service, and the Mysql database is used as the primary database, you have to add the stacksaga mysql implementation called `stacksaga-mysql-support` dependency into the `order service`.
+
+Currently, the following database implementations are available.
+
+* Mysql Database - `stacksaga-mysql-support`
+* Cassandra Database - `stacksaga-cassandra-support`
+* MongoDb Database - `stacksaga-mongodb-support` #Comming soon!#
+
+=== `stacksaga-env-support` Dependency
+
+`stacksaga-env-support` Dependency provides the environment related geographical (region, zone, instance ID, etc.) data to the SEC.
+Based on where your applications are deployed the `stacksaga-env-support` should be changed.
+For instance, if you deploy your `order-service` application in the *eureka* environment(Eureka based service discovery and load balancing), you have to add the `stacksaga-eureka-support` dependency into the `order service`.
+And if you want to migrate your `order-service` application to the *kubernetes* environment, you can change the `stacksaga-env-support` dependency to the `stacksaga-k8s-support` dependency in the `order service`.
+
+Currently, StackSaga supports for the following environments.
+
+* Eureka based environment - `stacksaga-eureka-support`
+* Kubernetes environment - `stacksaga-k8s-support`
+
+=== Agent service related components
+
+To manage the transaction retrying, you have to build the agent application for the target Orchestration service.
+To create an agent-service, you have to choose one of `stacksaga-agent` dependencies based on the target Orchestration service's database.
+For instance, if you have configured StackSaga on the `order-service` with the `stacksaga-mysql-support` database, you have to create a `stacksaga-agent` application for the `order-service` by adding the `stacksaga-mysql-agent` dependency.
+
+NOTE: No need to worry about the environment that your agent-application is deployed.
+Because all the `stacksaga-agent` implementations supports for all the environments.
+You can adjust the agent-application by changing the profile to your target environment.
+For instance, if you want to deploy the agent-application in the *kubernetes* environment, you can mention the profile as `k8s` in the property file in your application.
+
+The following stacksaga-agent dependencies are available for the specific databases.
+
+* Mysql Agent - `stacksaga-mysql-agent`
+* Cassandra Agent - `stacksaga-cassandra-agent`
+* MongoDb Agent - `stacksaga-mongodb-agent` #Comming soon!#
+
+=== StackSaga Cloud-Window
+
+Stacksaga Cloud-Window is the platform that you can see the transaction tracing details of the transaction that you made in graphically.
+there is nothing to be implemented regarding this component. you can visit https://live.stacksaga.org[live.stacksaga.org] and use it.
