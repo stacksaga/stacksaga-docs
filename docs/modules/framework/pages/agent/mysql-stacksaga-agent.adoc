@@ -104,3 +104,107 @@ Finally, all the agent applications will fetch the transactions that should be r
 
 [[k8s-profile]]
 == `k8s` Profile
+
+When Stacksaga agent is deployed in the kubernetes environment, the deployment architecture is a bit different from the eureka environment.
+In the kubernetes environment, the nodes are deployed as https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/[StatefulSet].
+The reason for using *StatefulSet* is that the token range of the node is calculated by itself based on the position (index of the node) and the total number of nodes.
+All nodes continuously monitor changes of respective StatefulSet's changes in real-time.
+If one instance goes down or added, all the nodes will be notified the update in real-time and then the token range will be updated accordingly by themselves.
+
+=== Deploy `stacksaga-agent-mysql` in kubernetes environment.
+
+First you have to create a user account due to `stacksaga-agent-mysql` access the kubernetes API in `k8s` profile.
+And should create and bind the role with the created service account as follows.
+
+.ServiceAccount Manifest
+[source,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stacksaga-agent-mysql-service-account #the name of the service account.
+  namespace: default #the namespace the application is deployed.
+----
+
+.Role Manifest
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: default
+  name: stacksaga-agent-mysql-access
+rules:
+  # Grant read access to pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Grant access to watch StatefulSets
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["watch", "get", "list"]
+
+----
+
+.RoleBinding Manifest
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stacksaga-agent-mysql-access-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: stacksaga-agent-mysql-service-account
+    namespace: default
+roleRef:
+  kind: Role
+  name: stacksaga-agent-mysql-access
+  apiGroup: rbac.authorization.k8s.io
+----
+
+Create the service-agent `StatefulSet` to deploy the agent-service.
+
+.RoleBinding Manifest
+[source,yaml]
+----
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: your-app
+spec:
+  serviceName: "your-app"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: your-app
+  template:
+    metadata:
+      labels:
+        app: your-app
+    spec:
+      serviceAccountName: stacksaga-agent-mysql-service-account #assign the service-account
+      containers:
+        - name: your-app-container
+          image: your-app-image:latest
+          ports:
+            - containerPort: 8080
+----
+
+.Headless Service Manifest
+[source,yaml]
+----
+apiVersion: v1
+kind: Service
+metadata:
+  name: your-app
+spec:
+  clusterIP: None
+  selector:
+    app: your-app
+  ports:
+    - port: 8080
+      name: http
+----
