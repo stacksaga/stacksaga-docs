@@ -1,1 +1,106 @@
-= mysql-stacksaga-agent
+= `mysql-stacksaga-agent`
+
+`mysql-stacksaga-agent` is one of the xref:agent/stacksaga-agent.adoc[Stacksaga Agent] implementations to support Mysql based Orchestrator services for retrying the transactions.
+`mysql-stacksaga-agent` is a *ready to use* dependency.
+you can create your own spring boot project and add the `mysql-stacksaga-agent` as a dependency and run your application with few changes.
+
+.Adding `stacksaga-agent-mysql-starter` as a dependency
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-agent-mysql-starter</artifactId>
+    <version>${org.stacksaga.version}</version>
+</dependency>
+----
+
+After adding the dependency, in the main class of the application, replace `StackSagaAgentRunner` class with `SpringApplication`.
+
+.Replacing Runner
+[source,java]
+----
+public static void main(String[] args) {
+    //replace StackSagaAgentRunner with SpringApplication
+    StackSagaAgentRunner.run(QuickStartApplication.class, args);
+}
+----
+
+And then update the xref:stacksaga_mysql_agent_configuration_properties.adoc[configuration properties] of the application as you want.
+
+== Profiles
+
+Based on your environment, you can choose one of the profiles in `stacksaga-agent-mysql-starter`.
+There are two profiles as follows:
+
+. xref:eureka-profile[`eureka`] - Eureka based environment
+. xref:k8s-profile[`k8s`] - Kubernetes based environment
+
+[[eureka-profile]]
+== `eureka` Profile
+
+If your application is deployed in the Eureka environment, you can use the *eureka* profile when the agent application is deployed.
+Under the `eureka` profile, the agent nodes can be scaled horizontally as per requirement.
+The `stacksaga-agent-mysql-starter` can acts as the leader and also as the follower.
+If there are multiple agent nodes in the region, one node should be deployed as a leader and other nodes should be deployed as the followers.
+The leader node is responsible for xref:how-leader-acts-for-range-update[updating the token range] based on the running nodes count.
+
+[[how-the-agent-application-configured-as-master-and-slave]]
+=== Agent-service as Leader and Follower
+
+A mentioned above after adding the `stacksaga-agent-mysql-starter` as a dependency, the application should be configured as a leader and als as a follower.
+Let's see how the configuration looks like for both.
+
+* *Leader Instance configuration:*
++
+[source,properties]
+----
+stacksaga.cloud.agent.eureka.instance-type=MASTER #<1>
+eureka.instance.instance-id=order-service-agent-us-east-master #<2>
+----
++
+<1> Set the `instance-type` as `MASTER` to run the node as the leader.
+<2> Set a Eureka instance ID as a fixed (Static ID) one.
++
+IMPORTANT: It is recommended to use this format for the leader instance ID. +
+Format: `*${service-name}-agent-${region}-master*`  +
+Using the service name in the master instance ID helps to avoid the collision if you are using same event-store for multiple services.
+Because the slaves identify the master instance in the database by the master instance ID. and adding the region to the master instance ID guarantees the region-based uniqueness.
++
+* *Follower Instance configuration:*
++
+[source,properties]
+----
+stacksaga.cloud.agent.eureka.instance-type=SLAVE <1>
+stacksaga.cloud.agent.eureka.master-id=order-service-agent-us-east-master <2>
+eureka.instance.instance-id=${spring.application.name}:${random.uuid} <3>
+----
++
+<1> Set the `instance-type` as the `SLAVE`.
+<2> Set the leader's Static ID.this value should be the same exactly with the leader's id that we configured in the leader node in the same region.
+<3> Set the `instance-id` as a random ID.
+
+[[token_range_allocation_in_the_region]]
+=== Token range allocation in the region
+
+All agent applications are registered with the eureka server in eureka environment.
+So the master service will have all other agent instances' details through the eureka server.
+The master server periodically checks the changes of the instance based on the local eureka service registry cache and updates the database with the relevant token range for each instance.
+The position of each instance is sored based on the instance started time.
+For instance, if there are five StackSaga-agent instances in the cluster, the token range is divided with the help of Murmur3 Partition algorithm as follows:
+
+image:framework:agent/mysql/stacksaga-diagram-how-token-range-is-shared-with-agents-in-eureka-mysql.drawio.svg[alt="How token range is shared with the available agents in Eureka"]
+
+Steps:
+
+<1> Master fetch the cache from the eureka server.
+(It can be a single eureka server or peers)
+<2> Calculate the range for each instance periodically based on their timetamps and updates the ranges into the database.
+Even the scheduler gets triggered time to time, The database update is done only if the instance state is changed compared to the previous state.
++
+For instance, if there is no instance change on the next schedule, the database is not updated. or some instances may have changed, so the range is re-arranged and updated in the database by the master agent instance.
+<3> All agent instances fetch their token range from the database periodically based on the given configurations.
+
+Finally, all the agent applications will fetch the transactions that should be retried based on the token range from the event-store.
+
+[[k8s-profile]]
+== `k8s` Profile
