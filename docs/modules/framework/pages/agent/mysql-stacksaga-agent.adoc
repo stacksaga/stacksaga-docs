@@ -27,6 +27,45 @@ public static void main(String[] args) {
 
 And then update the xref:stacksaga_mysql_agent_configuration_properties.adoc[configuration properties] of the application as you want.
 
+== Transaction retrying with `mysql-stacksaga-agent`
+
+As mentioned above, the agent acquires a token range for retrying from the entire transaction set in the event store.
+A scheduler is triggered with the configured time, and the retrying process is started by retreating the transactions from the event store.
+Retrieving the transactions from the event store is processed batch-wise.
+For instance, if you have configured batch size as 100 and if there are 1000 transactions to be retried in the event store, the loop is run 10 times sequentially like fetches 10 transactions by updating their retry-retention time and shares that 10 transactions to the available services to process.
+We discussed the process of how one thread is involved in the process.
+But the reality is that multiple threads do the same task in parallel in the application.
+There is a configured thread pool called StackSagaRetryExecutorPool.
+For instance, if the thread pool’s thread size is 3 as per the diagram, the token range that has been assigned to the respective node is divided into sub-ranges again.
+The sub-ranges are assigned for each thread.
+Then they do the same task individually based on their respective token range.
+After fetching the data from the event store by each thread, the transactions are transferred to another thread pool called StackSagaPublisherExecutorPool.
+It is responsible for collecting the transactions that each thread collects from the event store.
+
+Let's have a look at the process step by step.
+
+image::agent/mysql/stacksaga-diagram-stacksaga-service-agent-mysql-how-retry-is-done.svg[]
+
+*The steps are as follows:*
+
+. The scheduler is triggered
+. Once the scheduler is triggered, the retrying process is started.
+At this moment, the node knows about their respective token range.
+And it has been divided again into sub-rangers identical to the configured pool size.
+As per diagram, the pool size is 3. Just imagine only one instance is running on the given region.
+Then this node[] acquires the entire token range-9,223,372,036,854,775,808 to 9,223,372,036,854,775,807.
+
+NOTE: If you deploy 2 nodes in the region, the broken rage is divided into two like +
+Node 1: Range [-9,223,372,036,854,775,808 to 0] +
+Node 2: Range [1 to 9,223,372,036,854,775,807].
+
+Then the toke range is divided into the thread pool count.
+As per the diagram, it's 3.
+
+Each thread knows about their token range and they start to get transactions that should be retired batch wise as a loop until the retryable transactions becomes zero.
+The fetched transactions batch
+
+[alt="stacksaga diagram stacksaga service agent mysql how retry is done"]
 == Profiles
 
 Based on your environment, you can choose one of the profiles in `stacksaga-agent-mysql-starter`.
