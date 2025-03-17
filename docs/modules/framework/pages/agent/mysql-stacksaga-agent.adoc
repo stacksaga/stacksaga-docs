@@ -53,17 +53,33 @@ image::agent/mysql/stacksaga-diagram-stacksaga-service-agent-mysql-how-retry-is-
 At this moment, the node knows about their respective token range.
 And it has been divided again into sub-rangers identical to the configured pool size.
 As per diagram, the pool size is 3. Just imagine only one instance is running on the given region.
-Then this node[] acquires the entire token range-9,223,372,036,854,775,808 to 9,223,372,036,854,775,807.
+Then this node acquires the entire token range -9,223,372,036,854,775,808 to 9,223,372,036,854,775,807. And again, the range is divided into 3 sub-ranges due to the pool size is 3 like below.
 
-NOTE: If you deploy 2 nodes in the region, the broken rage is divided into two like +
-Node 1: Range [-9,223,372,036,854,775,808 to 0] +
-Node 2: Range [1 to 9,223,372,036,854,775,807].
-
-Then the toke range is divided into the thread pool count.
-As per the diagram, it's 3.
-
-Each thread knows about their token range and they start to get transactions that should be retired batch wise as a loop until the retryable transactions becomes zero.
-The fetched transactions batch
+* *Thread-1*: `-9,223,372,036,854,775,808` To `-3,074,457,345,618,258,603`
++
+Thread-1 is responsible for fetching the transactions from the event store between the above range.
+* *Thread-2*: `-3,074,457,345,618,258,602` To `3,074,457,345,618,258,602`
++
+Thread-2 is responsible for fetching the transactions from the event store between the above range.
+* *Thread-3*: `3,074,457,345,618,258,603` To `9,223,372,036,854,775,807`
++
+Thread-3 is responsible for fetching the transactions from the event store between the above range.
++
+NOTE: If you deploy 2 agent nodes in the region, the token rage is divided into two like and 3 sub ranges for each like below
++
+[cols="1,1,2,2",options="header"]
+|===
+| Node   | Thread Name  | Start Token                   | End Token
+| Node 1 | Thread-1 | -9,223,372,036,854,775,808  | -6,148,914,691,236,517,206
+| Node 1 | Thread-2 | -6,148,914,691,236,517,205  | -3,074,457,345,618,258,603
+| Node 1 | Thread-3 | -3,074,457,345,618,258,602  | 0
+| Node 2 | Thread-1 | 1                            | 3,074,457,345,618,258,603
+| Node 2 | Thread-2 | 3,074,457,345,618,258,604   | 6,148,914,691,236,517,206
+| Node 2 | Thread-3 | 6,148,914,691,236,517,207   | 9,223,372,036,854,775,807
+|===
++
+. Each thread adds all the fetching transactions to the *StackSagaPublisherExecutorPool*'s queue.
+. *StackSagaPublisherExecutorPool*'s threads will send the transactions to the available services to process them. and finally, each orchestrator service will receive the transactions and execute them.
 
 [alt="stacksaga diagram stacksaga service agent mysql how retry is done"]
 == Profiles
@@ -81,7 +97,7 @@ If your application is deployed in the Eureka environment, you can use the *eure
 Under the `eureka` profile, the agent nodes can be scaled horizontally as per requirement.
 The `stacksaga-agent-mysql-starter` can acts as the leader and also as the follower.
 If there are multiple agent nodes in the region, one node should be deployed as a leader and other nodes should be deployed as the followers.
-The leader node is responsible for xref:how-leader-acts-for-range-update[updating the token range] based on the running nodes count.
+The leader node is responsible for xref:token_range_allocation_in_the_region[updating the token range] based on the running nodes count.
 
 [[how-the-agent-application-configured-as-master-and-slave]]
 === Agent-service as Leader and Follower
@@ -131,15 +147,9 @@ image:framework:agent/mysql/stacksaga-diagram-how-token-range-is-shared-with-age
 
 Steps:
 
-<1> Master fetch the cache from the eureka server.
+<1> Leader node uses the eureka client's cache to get the list of all instances in the region.
 (It can be a single eureka server or peers)
-<2> Calculate the range for each instance periodically based on their timetamps and updates the ranges into the database.
-Even the scheduler gets triggered time to time, The database update is done only if the instance state is changed compared to the previous state.
-+
-For instance, if there is no instance change on the next schedule, the database is not updated. or some instances may have changed, so the range is re-arranged and updated in the database by the master agent instance.
-<3> All agent instances fetch their token range from the database periodically based on the given configurations.
-
-Finally, all the agent applications will fetch the transactions that should be retried based on the token range from the event-store.
+<2> Leader node calculates the range for each instance periodically based on their timetamps and updates the ranges is sent to each nodes.
 
 [[k8s-profile]]
 == `k8s` Profile
