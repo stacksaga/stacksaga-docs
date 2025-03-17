@@ -1,1 +1,126 @@
 = stacksaga-cassandra-support
+
+`stacksaga-cassandra-support` is one of Stacksaga db support(event store support) implementations as per the architectural diagram.
+
+image::agent/stacksaga-diagram-stacksaga-components-database-support.svg[]
+
+It is used for the orchestrator service along with the starter dependency if the orchestrator service uses the Cassandra database as their primary database.
+This library provides all the facilities for accessing the Cassandra database for the Stacksaga engine.
+
+Here is the way that you can add the library into your existing orchestrator application as a dependency.
+
+.Adding `stacksaga-cassandra-support` as a dependency
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-cassandra-support</artifactId>
+    <version>${org.stacksaga.version}</version>
+</dependency>
+----
+
+== How the transaction data is sorted
+
+As mentioned above, the primary responsibility of the Cassandra database support implementation is providing the facilities for saving the transaction data on the event store.
+Saving the transaction data approach is quite different from the SQL support implementations due to the database's nature like data modeling, Denormalized Schema, clustering, partitioning, etc.
+
+// The main purpose of using the Cassandra database is to handle high throughput.
+
+All the transactions are saved in 4 tables in the Cassandra database.
+
+. `es_transaction` table
+. `es_transaction_tryout` table.
+. `es_transaction_retention` table.
+. `es_transaction_retry_bucket_$+{bucket_number}+` table.
+
+
+=== es_transaction table
+
+`es_transaction` is the main table that transaction's meta-data is saved in event store based on the *transaction-Id* as the *Partition-Key*.
+All the transactions are saved in this table as *https://cassandra.apache.org/doc/stable/cassandra/data_modeling/data_modeling_refining.html[Single-Row Partition]*.
+Single-Row Partition approach refers to handling millions of transactions without making Database-Hotspot in your Cassandra database's nodes.
+Because the transactions are shared withing the all available nodes efficiently like below.
+
+image:framework:agent/cassandra/stacksaga-diagram-cassandra-managing-throughput.drawio.svg[alt="StackSaga cassandra managing throughput"]
+
+IMPORTANT: Even the Single-Row Partition helps to overcome the database hotspot problem, The data cannot be fetched from the database without knowing the exact transaction key.
+It makes a trouble for fetching the data that should be retried from all the transactions from the entire table.
+It is discussed in the xref:framework:agent/cassandra-agent.adoc[`cassandra-stacksaga-agent`] section.
+
+=== es_transaction_tryout table
+
+*es_transaction_tryout* is the table that transaction's tryout-data is saved in based on the *transaction-Id* as the *Partition-Key*.
+transaction tryouts are saved under the *transaction-Id* with *Multi-Row Partition* approach.
+due to the tryout data is saved based on the *transaction-Id*, tryout data is also saved in the same node that the transaction has been saved.
+it helps to optimize the network latency, and all the data(`es_transaction` and `es_transaction_tryout`) goes to the same node.
+
+image:framework:agent/cassandra/stacksaga-diagram-cassandra-es-transaction-tryout-table.svg[alt="StackSaga cassandra managing throughput"]
+
+As you can see in the above diagram, the tryout data is saved in the same node that the transaction has been saved.
+If the `tx-8dKz7LpJ2Q` transaction metadata is saved in the `Node-1` node, the `tx-8dKz7LpJ2Q` transaction tryout data is also saved in the `Node-1` node.
+
+== es_transaction_retention table.
+
+== es_transaction_retention table.
+
+es_transaction_retention table is responsible for keeping the transaction's' data until the transaction is completed successfully.
+It helps to track the missing transactions. even if it is a very rare case, the transaction can be missed for some reason like computers are not shut down gracefully.
+we talked above already that we cannot identify the transaction based on the status like in SQL databases due to the structure of the transaction data is saved.
+this table keeps the transaction data until the transaction is completed. and if some transactions were missed for some reason, those transactions can be identified.
+
+There are two tables are called `es_transaction_retention_odd` and `es_transaction_retention_even`. the names are based on when the tables are scanned for identifying the missing transactions.
+if the transaction is initiated in odd date, the transaction saves in the `es_transaction_retention_even` table.
+and if the transactions are initiated in even date, the transaction saves in the `es_transaction_retention_odd` table.
+the reason is that after initiating the transaction, it should be kept some period for ending the transaction.
+this is called as the retention time. in stacksaga cassandra implementation, the retention time can be minimum 24 hours to maximum 48 hours based on the transaction initializing time.
+
+== es_transaction_retry_bucket table
+
+the *es_transaction_retry_bucket* tables are created based on the given configuration for `stacksaga.cloud.agent.retry-fixed-delay`.
+the default fixed-delay value is 2 minutes.
+that means the retry scheduler is triggered every 2 minutes, so withing one hour the retry scheduler is triggered 30 times.
+then 30 tables are created when the application is started if the tables are not existed like, +
+
+* *es_transaction_retry_bucket_0*
+* *es_transaction_retry_bucket_2*
+* *es_transaction_retry_bucket_4*
+* *es_transaction_retry_bucket_6*
+* *es_transaction_retry_bucket_8*
+* *es_transaction_retry_bucket_10*
+* *es_transaction_retry_bucket_12*
+* *es_transaction_retry_bucket_14*
+* *es_transaction_retry_bucket_16*
+* ....
+* ....
+* *es_transaction_retry_bucket_54*
+* *es_transaction_retry_bucket_56*
+* *es_transaction_retry_bucket_58*
+
+For instance, if you customize the `stacksaga.cloud.agent.retry-fixed-delay` value as 10, the table count will be 6 (60/10).
+
+Let's see how the table is selected when the transaction is saved in one of es_transaction_retry_bucket tables.
+
+When a transaction is initiated by the stacksaga-framework, the transaction is saved on es_transaction and es_transaction_tryout tables.
+after that, the transaction should be saved in one of the es_transaction_retry_bucket tables.
+just imagine if the transaction is initiated at `2022-01-01 00:00:00.000` the transaction is saved on the farthest es_transaction_retry_bucket table from that time.
+according to this transaction, the table will be *es_transaction_retry_bucket_60*.
+
+IMPORTANT: The reason for selecting the farthest table is that still the framework has not identified the transaction has a *retryable-error* even the transaction is saved a table that can be exposed for retrying.
+and the reason for adding every transaction to one of the es_transaction_retry_bucket tables is that the transaction cannot be caught based on the STATUS of the transaction due to StackSaga doesn't save the transaction based on the Transaction status.
+Saving the transaction based on the status can be increased the network latency, StackSaga is responsible for saving the metadata in maximum performance to reduce the overhead of using a third-party framework for managing a transaction.
+and also, Saving the transaction based on the status can be caused to have a hotspot issue if the system is a large one. +
+For instance, if one million concurrent transactions come to the system and those transactions are failed due to a utility service's failure, the framework has to add a metadata of each transaction to a table.
+the problem is that due to the time exact same (The token that Cassandra generates will be the same) for all transactions that one million transactions goes to the same node.
+then it can lead to a hotspot issue.
+
+if the transaction is processed successfully without any retryable error, the record will be deleted from the table at the end of the transaction.
+but if there is an
+
+es_transaction_retry_bucket_* table is used for identifying the retryable transactions.
+This table is used in StackSaga in a quite different approach from the regular approach that a table used.
+This table is used as a data bucket. that means the data that is stored in this table is deleted after using.
+
+es_transaction_retry_bucket is a not a single table. it's actually the prefix of the table name.
+
+you know that already prefixed tables are used for identifying the retryable transactions.
+so when a transaction is initiated, it is saved in the es_transaction_retry_bucket table apart from the es_transaction and es_transaction_tryout table.
