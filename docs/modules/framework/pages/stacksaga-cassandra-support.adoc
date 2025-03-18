@@ -30,8 +30,14 @@ All the transactions are saved in 4 tables in the Cassandra database.
 
 . `es_transaction` table
 . `es_transaction_tryout` table.
-. `es_transaction_retention` table.
-. `es_transaction_retry_bucket_$+{bucket_number}+` table.
+. `transaction_recovery_retention` tables.
+.. `es_{region_name}_transaction_recovery_retention_1` table.
+.. `es_{region_name}_transaction_recovery_retention_2` table.
+.. `es_{region_name}_transaction_recovery_retention_3` table.
+. `es_transaction_retry_retention` tables.
+.. `es_{region_name}_transaction_retry_retention_1` table.
+.. `es_{region_name}_transaction_retry_retention_2` table.
+.. `es_{region_name}_transaction_retry_retention_3` table.
 
 
 === es_transaction table
@@ -61,18 +67,139 @@ If the `tx-8dKz7LpJ2Q` transaction metadata is saved in the `Node-1` node, the `
 
 == es_transaction_retention table.
 
-== es_transaction_retention table.
+== transaction_recovery_retention tables.
 
-es_transaction_retention table is responsible for keeping the transaction's' data until the transaction is completed successfully.
-It helps to track the missing transactions. even if it is a very rare case, the transaction can be missed for some reason like computers are not shut down gracefully.
-we talked above already that we cannot identify the transaction based on the status like in SQL databases due to the structure of the transaction data is saved.
-this table keeps the transaction data until the transaction is completed. and if some transactions were missed for some reason, those transactions can be identified.
+// As mentioned above, the transaction cannot be identified based on the status like in relational database databases due to the structure of the transaction data is saved.
+// Because Cassandra distributes data across multiple nodes based on the partition key.
+// So after adding the transactions into the transaction table, it cannot be filtered as a bulk.
+// Therefore, there should have a mechanism to identify the missing transactions in another way.
 
-There are two tables are called `es_transaction_retention_odd` and `es_transaction_retention_even`. the names are based on when the tables are scanned for identifying the missing transactions.
-if the transaction is initiated in odd date, the transaction saves in the `es_transaction_retention_even` table.
-and if the transactions are initiated in even date, the transaction saves in the `es_transaction_retention_odd` table.
-the reason is that after initiating the transaction, it should be kept some period for ending the transaction.
-this is called as the retention time. in stacksaga cassandra implementation, the retention time can be minimum 24 hours to maximum 48 hours based on the transaction initializing time.
+Unlike relational databases, transactions in Cassandra cannot be identified based on a field like status due to the way data is distributed across multiple nodes using a partition key.
+This distribution prevents bulk filtering of transactions directly from the transaction table.
+
+===  Why Bulk Filtering is Not Possible?
+
+Partition-Based Distribution:: Cassandra shards data across multiple nodes, making global queries on large datasets inefficient.
+No Centralized Indexing for Status-Based Queries:: Since transactions are stored based on partition keys, retrieving missing transactions requires querying multiple partitions, which is not feasible for large-scale systems.
+
+=== Alternative Mechanism to Identify Missing Transactions.
+
+Since transactions cannot be filtered in bulk due to Cassandra’s partition-based distribution, an alternative mechanism is required to track missing transactions effectively.
+
+. Use separate recovery tables
+* Instead of relying on status-based filtering, transactions that require tracking should be stored in separate recovery tables.
+* These tables can act as a centralized reference for identifying transactions that may not have completed.
+
+. Time-Based Retention Mechanism
+
+* Each transaction is retained for a specific time window after being added to the transaction table.
+* If a transaction fails to complete within this configured time frame, it is considered missing, and it will be exposed for re-invoking.
+. Agent-Based Recovery Mechanism
+
+* Deploy an agent service that collects pending transactions from the `transaction_recovery_retention` table.
+* The agent then forwards the missing transactions to the orchestrator service for re-invoke.
+
+
+////
+Storing the transaction data temporarily in the `transaction_recovery_retention` tables is the way to identify the missing transactions.
+
+When the transaction is initialized, the transaction data is saved in one of the `transaction_recovery_retention` tables temporarily.
+And then the transaction data remains until the transaction is successfully completed(primary-execution is successful or compensating is successful).
+When the transaction is successfully completed, the transaction data is removed from the `transaction_recovery_retention` table.
+
+How can the transactions be missed?
+
+just imagine that while the transaction is being processed, the running node goes down instantly due to a power outage or hardware failure.
+Then the transactions that were running or the transactions were in the queue for running were vanished, and it cannot be identified anymore if we had not saved the running transactions in the `transaction_recovery_retention` table.
+
+How the missing transactions are identified with `transaction_recovery_retention` tables?
+////
+
+As described earlier, when a transaction is initialized, its data is stored in one of the `transaction_recovery_retention` tables.
+If the transaction completes successfully, its data is removed from the table upon process completion.
+However, if a transaction does not reach completion, its data remains in the `transaction_recovery_retention` table, making it a potential candidate for recovery.
+
+Scenario: Identifying Missing Transactions::
+Consider a scenario where 1,000 transactions are executed within a specified time period across multiple nodes.
+Ideally, all transactions that complete their journey are removed from the `transaction_recovery_retention` table.
+However, if even one transaction fails to complete, it will persist in the table.
+Then the transaction is exposed to the agent application after the configured time period, and then the agent application will collect the missing transactions from the respective `transaction_recovery_retention` table and shares them withing the available orchestrator service to re-invoke.
+This could happen due to various reasons such as system failures, network issues, or unexpected interruptions.
+
+=== `transaction_recovery_retention` table selection formula.
+
+As mentioned above, there are 3 `transaction_recovery_retention` tables for adding the transactions temporarily.
+In cassandra implementation, the *Transaction recovery retention time* is not a fixed one like in other database implementations.
+The *Transaction recovery retention time* is oscillated between a range.
+
+image::agent/cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-recovery.svg[]
+
+Just imagine if you configure the *Transaction recovery retention time* to be 8 hours.
+The *Transaction recovery retention time* will be withing the range of 4 hours to 12 hours.
+
+*How does that happen?*
+
+If the *Transaction recovery retention time* has been mentioned as 8 hours(480 minutes), 3 scheduled can be triggered withing a day for collecting and re-invoke the missing transactions like the diagram shows.
+
+. 1st schedule at: 00:00
+. 2nd schedule at: 08:00
+. 3rd schedule at: 16:00
+
+To determine whether a transaction has sufficient time to complete its journey, the system uses the middle time of the configured duration as the boundary point.
+This boundary helps classify transactions into different recovery schedules.
+
+*Transaction Placement Logic*
+
+. Transactions Behind the Boundary (Back of the Boundary)
+
+* These transactions have already passed the boundary point.
+* They are scheduled for the next upcoming recovery schedule.
+. Transactions Ahead of the Boundary
+* These transactions were initialized after the boundary point.
+* They are scheduled for the recovery schedule after the next upcoming schedule to allow more time for completion.
+
+The middle time is considered as the boundary point for determining that the transaction has sufficient time to complete their Journey.
+The transactions that are at the back of the boundary go to the next upcoming schedule.
+And the transactions that are ahead of the boundary go to the schedule after the next upcoming schedule.
+
+[cols="^1,^1,^1,^1,^1",options="header"]
+|===
+| Transaction | Initialization Time | Time Until End (16:00)  | Position Relative to Boundary | Recovery Schedule
+| T4         | 11:30               | 4 hours 30 minutes                | Back of the boundary         | Next upcoming schedule
+| T5         | 12:30               | 3 hours 30 minutes                 | Ahead of the boundary        | Schedule after the next
+| T6         | 15:59               | 1 minute                   | Ahead of the boundary        | Schedule after the next
+|===
+
+
+
+
+
+// IMPORTANT: *Handling False Positives in Transaction Recovery & the Role of Idempotency* +
+// Even if the transactions that are in the `transaction_recovery_retention` table are considered as missing, Sometimes it may not be so.
+// For instance, just imagine that transition is still in the queue waiting for execution due to the respective orchestrator service is too busy.
+// In such a case, the system assumes that the transaction was missing and the transaction is invoked.
+// Then the transaction(entirely or some atomic executions) can be executed multiple times.
+// This is where the idempotency comes in.
+// If you have followed the idempotency in your atomic executions of the transaction, it will not be a problem.
+
+
+
+=== Handling False Positives in Transaction Recovery & the Role of Idempotency
+
+While transactions that remain in the `transaction_recovery_retention` table are generally considered missing, this is not always the case.
+
+Scenario: Transactions Delayed but Not Missing::
+Consider a situation where a transaction is still in the queue, waiting for execution because the **respective orchestrator service is too busy**.
+In this case:
+
+1. The system mistakenly **assumes the transaction is missing** since it has not been removed from the `transaction_recovery_retention` table within the expected time frame.
+2. As a result, the system **triggers a recovery process**, re-invoking the transaction.
+3. This can lead to the transaction(or certain *atomic executions*) **executed multiple times**, causing unintended duplicate operations.
+
+IMPORTANT: This is one of possible ways the transactions can be executed multiple times.
+To prevent these kinds of unintended duplicate executions, **xref:architecture:idempotency.adoc[idempotency]** should be implemented at the atomic execution level of the transaction.
+
+////
 
 == es_transaction_retry_bucket table
 
@@ -92,7 +219,7 @@ then 30 tables are created when the application is started if the tables are not
 * *es_transaction_retry_bucket_16*
 * ....
 * ....
-* *es_transaction_retry_bucket_54*
+* *1_54*
 * *es_transaction_retry_bucket_56*
 * *es_transaction_retry_bucket_58*
 
@@ -124,3 +251,6 @@ es_transaction_retry_bucket is a not a single table. it's actually the prefix of
 
 you know that already prefixed tables are used for identifying the retryable transactions.
 so when a transaction is initiated, it is saved in the es_transaction_retry_bucket table apart from the es_transaction and es_transaction_tryout table.
+
+////
+
