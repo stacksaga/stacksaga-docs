@@ -65,12 +65,14 @@ image:framework:agent/cassandra/stacksaga-diagram-cassandra-es-transaction-tryou
 As you can see in the above diagram, the tryout data is saved in the same node that the transaction has been saved.
 If the `tx-8dKz7LpJ2Q` transaction metadata is saved in the `Node-1` node, the `tx-8dKz7LpJ2Q` transaction tryout data is also saved in the `Node-1` node.
 
+[[transaction_recovery_retention]]
 === transaction_recovery_retention tables.
 
 Unlike relational databases, transactions in Cassandra cannot be identified based on a field like status due to the way data is distributed across multiple nodes using a partition key.
 This distribution prevents bulk filtering of transactions directly from the transaction table.
 
-====  Why Bulk Filtering is Not Possible?
+[[bulk-filtering-not-possible]]
+====  Why Bulk Filtering is Not Possible In Cassandra?
 
 * *Partition-Based Distribution* +
 Cassandra shards data across multiple nodes, making global queries on large datasets inefficient.
@@ -160,26 +162,6 @@ The system can scale to handle multiple regions independently without affecting 
 
 ====
 
-////
-NOTE: *#Why 3 tables?#*
-The reason is that one table is allocated for each scheduled time.
-For instance, if the recovery retention time is 400 minutes, the schedule time will be *00:00*, *06:00* and *16:00*. the 3 tables are allocated for each of these times like: +
-*1.* 00:00 - `transaction_recovery_retention_1` +
-*2.* 06:00 - `transaction_recovery_retention_2` +
-*3.* 16:00 - `transaction_recovery_retention_3` +
-And also the tables are created for each region. because the *service-agent* accesses only the data in their respective region only. for instance, if one database is used in 2 different regions like `us-east-1` and `us-west-1`, the table count will be 6 like below: +
-`us_east_1_transaction_recovery_retention_1` +
-`us_east_1_transaction_recovery_retention_2` +
-`us_east_1_transaction_recovery_retention_3` +
-`us_west_1_transaction_recovery_retention_1` +
-`us_west_1_transaction_recovery_retention_2` +
-`us_west_1_transaction_recovery_retention_3` +
-////
-
-
-
-
-
 ====  Identifying Missing Transactions::
 
 Consider a scenario where 1,000 transactions are executed within a specified time period across multiple nodes.
@@ -201,7 +183,7 @@ The *Transaction recovery retention time* will be withing the range of 4 hours t
 
 *How does that happen?*
 
-If the *Transaction recovery retention time* has been mentioned as 8 hours(480 minutes), 3 scheduled can be triggered withing a day for collecting and re-invoke the missing transactions like the diagram shows.
+If the *Transaction recovery retention time* has been mentioned as 8 hours(480 minutes), 3 schedulers can be triggered in the round robbin manner for collecting and re-invoke the missing transactions like the diagram shows.
 
 . 1st schedule at: 00:00
 . 2nd schedule at: 08:00
@@ -226,25 +208,11 @@ And the transactions that are ahead of the boundary go to the schedule after the
 
 [cols="^1,^1,^1,^1,^1",options="header"]
 |===
-| Transaction | Initialization Time | Time Until End (16:00)  | Position Relative to Boundary | Recovery Schedule
+| Transaction | Initialization Time | Duration  | Position Relative to Boundary | Recovery Schedule
 | T4         | 11:30               | 4 hours 30 minutes                | Back of the boundary         | Next upcoming schedule
 | T5         | 12:30               | 3 hours 30 minutes                 | Ahead of the boundary        | Schedule after the next
 | T6         | 15:59               | 1 minute                   | Ahead of the boundary        | Schedule after the next
 |===
-
-
-
-
-
-// IMPORTANT: *Handling False Positives in Transaction Recovery & the Role of Idempotency* +
-// Even if the transactions that are in the `transaction_recovery_retention` table are considered as missing, Sometimes it may not be so.
-// For instance, just imagine that transition is still in the queue waiting for execution due to the respective orchestrator service is too busy.
-// In such a case, the system assumes that the transaction was missing and the transaction is invoked.
-// Then the transaction(entirely or some atomic executions) can be executed multiple times.
-// This is where the idempotency comes in.
-// If you have followed the idempotency in your atomic executions of the transaction, it will not be a problem.
-
-
 
 ==== Handling False Positives in Transaction Recovery & the Role of Idempotency
 
@@ -261,58 +229,84 @@ In this case:
 IMPORTANT: This is one of possible ways the transactions can be executed multiple times.
 To prevent these kinds of unintended duplicate executions, **xref:architecture:idempotency.adoc[idempotency]** should be implemented at the atomic execution level of the transaction.
 
+=== transaction_retry_retention tables.
+
+In StackSaga, asynchronous xref:architecture:transaction-retrying.adoc[transaction retrying] is an essential feature that ensures transactions are retried when they fail due to resource unavailability.
+When a transaction's execution is failed with a Resource Unavailability problem, the transaction is retried asynchronous by the *service-agent* by collecting them from the event-store.
+Unlike SQL databases, Cassandra does not support centralized indexing for bulk filtering.
+This makes it impossible to scan transactions by their states.
+More details on this limitation can be found xref:bulk-filtering-not-possible[here].
+
+To overcome this,
+*transaction retrying* follows the same *table-switching mechanism* that used for xref:transaction_recovery_retention[transaction recovery].
+
+When the transaction is stopped due to resource unavailability, it is stored in one of the `transaction_retry_retention` tables.
+It will be exposed for the upcoming retry schedule by the service-agent.
+
+TIP: The only difference of way of scheduling and exposing transactions to the agent between *transaction recovery retention* and
+*transaction retry retention* is that the delay time less the recovery retention time.
+
+==== `transaction_retry_retention` table selection formula.
+
+image::agent/cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-retry.svg[]
+
+Just imagine if you configure the *Transaction retry retention time* to be 2 minutes.
+The *Transaction retry retention time* will be withing the range of 1 minute to 3 minutes.
+
+*How does that happen?*
+
+If the *Transaction retry retention time* has been mentioned as 2 minutes, 3 schedulers can be triggered 30 times in the round robbin manner withing a day for collecting and re-invoke the temporally stopped transactions like the diagram shows.
+
+. 1st schedule at: 00:00 (`transaction_retry_retention_1`)
+. 2nd schedule at: 00:02 (`transaction_retry_retention_2`)
+. 3rd schedule at: 00:04 (`transaction_retry_retention_3`)
+. 4th schedule at: 00:06 (`transaction_retry_retention_1`)
+. 5th schedule at: 00:08 (`transaction_retry_retention_2`)
+. and so on...
+
+To determine whether a transaction has sufficient time to be stayed without being executed, the system uses the middle time of the configured duration as the boundary point.
+This boundary helps classify transactions into different retry schedules.
+
+*Transaction Placement Logic*
+
+. Transactions Behind the Boundary (Back of the Boundary)
+* These transactions have already passed the boundary point.
+* They are scheduled for the next upcoming recovery schedule.
+. Transactions Ahead of the Boundary
+* These transactions were initialized after the boundary point.
+* They are scheduled for the recovery schedule after the next upcoming schedule to allow more time for completion.
+
+The middle time is considered as the boundary point for determining that the transaction has sufficient time to be stayed without being executed.
+The transactions that are at the back of the boundary go to the next upcoming schedule.
+And the transactions that are ahead of the boundary go to the schedule after the next upcoming schedule.
+
+[cols="^1,^1,^1,^1,^1",options="header"]
+|===
+| Transaction | Stopped Time | Duration                 | Position Relative to  Boundary | Recovery Schedule
+| T4         | 00:02:        | 1 minute and 10 seconds  | Back of the boundary         | Next upcoming schedule
+| T5         | 00:03:08      | 52 seconds               | Ahead of the boundary        | Schedule after the next
+| T6         | 00:03:58      | 2 seconds                | Ahead of the boundary        | Schedule after the next
+|===
+
 ////
+== Round Robin Table Rotation
 
-== es_transaction_retry_bucket table
+Round Robin Table Rotation is the way that used for keeping the pre-scheduled data in different target tables.
+Unlike relational databases, Cassandra does not allow querying transactions freely based on arbitrary conditions.
+Instead, data must be structured in a way that allows efficient retrieval.
 
-the *es_transaction_retry_bucket* tables are created based on the given configuration for `stacksaga.cloud.agent.retry-fixed-delay`.
-the default fixed-delay value is 2 minutes.
-that means the retry scheduler is triggered every 2 minutes, so withing one hour the retry scheduler is triggered 30 times.
-then 30 tables are created when the application is started if the tables are not existed like, +
+For instance, if we want to get the 100 transactions that should be retried.
+It is not allowed in Cassandra we cannot filter data by their status (with Single-Row Partition).
+In this way, if we know that a transaction should be exposed for a specific time, we can store that transaction in the table that has been created for that respective time.
 
-* *es_transaction_retry_bucket_0*
-* *es_transaction_retry_bucket_2*
-* *es_transaction_retry_bucket_4*
-* *es_transaction_retry_bucket_6*
-* *es_transaction_retry_bucket_8*
-* *es_transaction_retry_bucket_10*
-* *es_transaction_retry_bucket_12*
-* *es_transaction_retry_bucket_14*
-* *es_transaction_retry_bucket_16*
-* ....
-* ....
-* *1_54*
-* *es_transaction_retry_bucket_56*
-* *es_transaction_retry_bucket_58*
+Even though it is a solution As a theory, creating and deleting dynamic tables in the cassandra database are expensive operations.
+That is the reason for using 3 tables by rotating in a round-robin manner.
 
-For instance, if you customize the `stacksaga.cloud.agent.retry-fixed-delay` value as 10, the table count will be 6 (60/10).
-
-Let's see how the table is selected when the transaction is saved in one of es_transaction_retry_bucket tables.
-
-When a transaction is initiated by the stacksaga-framework, the transaction is saved on es_transaction and es_transaction_tryout tables.
-after that, the transaction should be saved in one of the es_transaction_retry_bucket tables.
-just imagine if the transaction is initiated at `2022-01-01 00:00:00.000` the transaction is saved on the farthest es_transaction_retry_bucket table from that time.
-according to this transaction, the table will be *es_transaction_retry_bucket_60*.
-
-IMPORTANT: The reason for selecting the farthest table is that still the framework has not identified the transaction has a *retryable-error* even the transaction is saved a table that can be exposed for retrying.
-and the reason for adding every transaction to one of the es_transaction_retry_bucket tables is that the transaction cannot be caught based on the STATUS of the transaction due to StackSaga doesn't save the transaction based on the Transaction status.
-Saving the transaction based on the status can be increased the network latency, StackSaga is responsible for saving the metadata in maximum performance to reduce the overhead of using a third-party framework for managing a transaction.
-and also, Saving the transaction based on the status can be caused to have a hotspot issue if the system is a large one. +
-For instance, if one million concurrent transactions come to the system and those transactions are failed due to a utility service's failure, the framework has to add a metadata of each transaction to a table.
-the problem is that due to the time exact same (The token that Cassandra generates will be the same) for all transactions that one million transactions goes to the same node.
-then it can lead to a hotspot issue.
-
-if the transaction is processed successfully without any retryable error, the record will be deleted from the table at the end of the transaction.
-but if there is an
-
-es_transaction_retry_bucket_* table is used for identifying the retryable transactions.
-This table is used in StackSaga in a quite different approach from the regular approach that a table used.
-This table is used as a data bucket. that means the data that is stored in this table is deleted after using.
-
-es_transaction_retry_bucket is a not a single table. it's actually the prefix of the table name.
-
-you know that already prefixed tables are used for identifying the retryable transactions.
-so when a transaction is initiated, it is saved in the es_transaction_retry_bucket table apart from the es_transaction and es_transaction_tryout table.
-
-////
+For instance, we have a schedule that gets triggered every 5 minutes.
+And a transaction is failed due to network issues, and that transaction should be rescheduled for retrying.
+Then which table should the transaction be saved?
+As per the diagram, we are in point 1, and a schedule has been allocated already for this time period.
+Therefore, we cannot add this transaction into that table.
+Because sometimes that schedule may have completed at this moment or if the scheduler is being run, this transaction can be exposed immediately for retrying.
+Therefore, the parallel scheduler is not the one all the time.////
 
