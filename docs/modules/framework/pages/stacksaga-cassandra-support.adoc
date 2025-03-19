@@ -65,19 +65,19 @@ image:framework:agent/cassandra/stacksaga-diagram-cassandra-es-transaction-tryou
 As you can see in the above diagram, the tryout data is saved in the same node that the transaction has been saved.
 If the `tx-8dKz7LpJ2Q` transaction metadata is saved in the `Node-1` node, the `tx-8dKz7LpJ2Q` transaction tryout data is also saved in the `Node-1` node.
 
-== transaction_recovery_retention tables.
+=== transaction_recovery_retention tables.
 
 Unlike relational databases, transactions in Cassandra cannot be identified based on a field like status due to the way data is distributed across multiple nodes using a partition key.
 This distribution prevents bulk filtering of transactions directly from the transaction table.
 
-===  Why Bulk Filtering is Not Possible?
+====  Why Bulk Filtering is Not Possible?
 
 * *Partition-Based Distribution* +
 Cassandra shards data across multiple nodes, making global queries on large datasets inefficient.
 * *No Centralized Indexing for Status-Based Queries* +
 Since transactions are stored based on partition keys, retrieving missing transactions requires querying multiple partitions, which is not feasible for large-scale systems.
 
-=== Alternative Mechanism to Identify Missing Transactions.
+==== Alternative Mechanism to Identify Missing Transactions.
 
 Since transactions cannot be filtered in bulk due to Cassandra’s partition-based distribution, an alternative mechanism is required to track missing transactions effectively.
 
@@ -180,7 +180,7 @@ And also the tables are created for each region. because the *service-agent* acc
 
 
 
-===  Identifying Missing Transactions::
+====  Identifying Missing Transactions::
 
 Consider a scenario where 1,000 transactions are executed within a specified time period across multiple nodes.
 Ideally, all transactions that complete their journey are removed from the `transaction_recovery_retention` table.
@@ -188,7 +188,7 @@ However, if even one transaction fails to complete, it will persist in the table
 Then the transaction is exposed to the agent application after the configured time period, and then the agent application will collect the missing transactions from the respective `transaction_recovery_retention` table and shares them withing the available orchestrator service to re-invoke.
 This could happen due to various reasons such as system failures, network issues, or unexpected interruptions.
 
-=== `transaction_recovery_retention` table selection formula.
+==== `transaction_recovery_retention` table selection formula.
 
 As mentioned above, there are 3 `transaction_recovery_retention` tables for adding the transactions temporarily.
 In cassandra implementation, the *Transaction recovery retention time* is not a fixed one like in other database implementations.
@@ -246,7 +246,7 @@ And the transactions that are ahead of the boundary go to the schedule after the
 
 
 
-=== Handling False Positives in Transaction Recovery & the Role of Idempotency
+==== Handling False Positives in Transaction Recovery & the Role of Idempotency
 
 While transactions that remain in the `transaction_recovery_retention` table are generally considered missing, this is not always the case.
 
