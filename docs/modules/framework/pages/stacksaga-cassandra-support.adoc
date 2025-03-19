@@ -65,22 +65,17 @@ image:framework:agent/cassandra/stacksaga-diagram-cassandra-es-transaction-tryou
 As you can see in the above diagram, the tryout data is saved in the same node that the transaction has been saved.
 If the `tx-8dKz7LpJ2Q` transaction metadata is saved in the `Node-1` node, the `tx-8dKz7LpJ2Q` transaction tryout data is also saved in the `Node-1` node.
 
-== es_transaction_retention table.
-
 == transaction_recovery_retention tables.
-
-// As mentioned above, the transaction cannot be identified based on the status like in relational database databases due to the structure of the transaction data is saved.
-// Because Cassandra distributes data across multiple nodes based on the partition key.
-// So after adding the transactions into the transaction table, it cannot be filtered as a bulk.
-// Therefore, there should have a mechanism to identify the missing transactions in another way.
 
 Unlike relational databases, transactions in Cassandra cannot be identified based on a field like status due to the way data is distributed across multiple nodes using a partition key.
 This distribution prevents bulk filtering of transactions directly from the transaction table.
 
 ===  Why Bulk Filtering is Not Possible?
 
-Partition-Based Distribution:: Cassandra shards data across multiple nodes, making global queries on large datasets inefficient.
-No Centralized Indexing for Status-Based Queries:: Since transactions are stored based on partition keys, retrieving missing transactions requires querying multiple partitions, which is not feasible for large-scale systems.
+* *Partition-Based Distribution* +
+Cassandra shards data across multiple nodes, making global queries on large datasets inefficient.
+* *No Centralized Indexing for Status-Based Queries* +
+Since transactions are stored based on partition keys, retrieving missing transactions requires querying multiple partitions, which is not feasible for large-scale systems.
 
 === Alternative Mechanism to Identify Missing Transactions.
 
@@ -97,7 +92,7 @@ Since transactions cannot be filtered in bulk due to Cassandra’s partition-bas
 . Agent-Based Recovery Mechanism
 
 * Deploy an agent service that collects pending transactions from the `transaction_recovery_retention` table.
-* The agent then forwards the missing transactions to the orchestrator service for re-invoke.
+* The agent then shares the missing transactions to the orchestrator service for re-invoke.
 
 
 ////
@@ -119,7 +114,74 @@ As described earlier, when a transaction is initialized, its data is stored in o
 If the transaction completes successfully, its data is removed from the table upon process completion.
 However, if a transaction does not reach completion, its data remains in the `transaction_recovery_retention` table, making it a potential candidate for recovery.
 
-Scenario: Identifying Missing Transactions::
+====
+
+*Why Are There Three `transaction_recovery_retention` Tables?*
+
+The reason for using **three tables** is to allocate one table for **each scheduled recovery time**.
+This ensures that transactions are efficiently managed and recovered based on a predefined schedule.
+
+**Scheduled Time and Table Allocation** +
+
+If the **recovery retention time** is **480 minutes**, the system schedules recovery at:
+1. **00:00** → `transaction_recovery_retention_1`
+2. **08:00** → `transaction_recovery_retention_2`
+3. **16:00** → `transaction_recovery_retention_3`
+
+Each table stores transactions that fall within its respective time frame.
+Due to Cassandra has no feature for scanning data in a specific time frame, This approach helps to collect the transactions efficiently.
+
+**Why Are Tables Created Per Region?** +
+
+In a **multi-region deployment**, each service-agent operates within a specific region and should only access data within its assigned region.
+
+For example, if a database is used in **two different regions** (`us-east-1` and `us-west-1`), the number of tables **doubles**, resulting in **six tables**:
+
+*Tables for `us-east-1` Region*
+
+* `us_east_1_transaction_recovery_retention_1` (00:00)
+* `us_east_1_transaction_recovery_retention_2` (08:00)
+* `us_east_1_transaction_recovery_retention_3` (16:00)
+
+**Tables for `us-west-1` Region** +
+
+* `us_west_1_transaction_recovery_retention_1` (00:00)
+* `us_west_1_transaction_recovery_retention_2` (08:00)
+* `us_west_1_transaction_recovery_retention_3` (16:00)
+
+**Key Benefits of This Approach** +
+
+* **Efficient Recovery Processing** +
+Instead of scanning a massive dataset, transactions are categorized based on scheduled recovery times.
+* **Regional Isolation for Faster Access** +
+Service-agents in a specific region only access data within their region, reducing unnecessary cross-region queries.
+* **Scalability** +
+The system can scale to handle multiple regions independently without affecting transaction recovery in other locations.
+
+====
+
+////
+NOTE: *#Why 3 tables?#*
+The reason is that one table is allocated for each scheduled time.
+For instance, if the recovery retention time is 400 minutes, the schedule time will be *00:00*, *06:00* and *16:00*. the 3 tables are allocated for each of these times like: +
+*1.* 00:00 - `transaction_recovery_retention_1` +
+*2.* 06:00 - `transaction_recovery_retention_2` +
+*3.* 16:00 - `transaction_recovery_retention_3` +
+And also the tables are created for each region. because the *service-agent* accesses only the data in their respective region only. for instance, if one database is used in 2 different regions like `us-east-1` and `us-west-1`, the table count will be 6 like below: +
+`us_east_1_transaction_recovery_retention_1` +
+`us_east_1_transaction_recovery_retention_2` +
+`us_east_1_transaction_recovery_retention_3` +
+`us_west_1_transaction_recovery_retention_1` +
+`us_west_1_transaction_recovery_retention_2` +
+`us_west_1_transaction_recovery_retention_3` +
+////
+
+
+
+
+
+===  Identifying Missing Transactions::
+
 Consider a scenario where 1,000 transactions are executed within a specified time period across multiple nodes.
 Ideally, all transactions that complete their journey are removed from the `transaction_recovery_retention` table.
 However, if even one transaction fails to complete, it will persist in the table.
