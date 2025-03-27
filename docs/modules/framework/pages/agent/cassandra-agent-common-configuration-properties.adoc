@@ -1,0 +1,46 @@
+|`spring.profiles.active` | `-`  | `String` | There are two profiles available as `eureka` and `k8s`.
+You can choose one of them based on the deployment environment.
+|`spring.application.name` | `-`  | `String` | The name of the agent application.
+It is recommended to use this format: `${target-service-name}-agent`.
+For instance if deploying s agent service for `order-service` the agent service name will be `order-service-agent`.
+|`server.port` | `8080`  | `int` | The port of the agent service.
+4+|
+*NOTE:* Due to StackSaga Cassandra-Agent internally uses spring primary-datasource, It can be configured in the https://docs.spring.io/spring-boot/appendix/application-properties/index.html#appendix.application-properties.data[same way] that spring boot provides. +
+The prefix is `spring.cassandra` +
+Example: `spring.cassandra.keyspace-name=order_service_event_store`. +
+To configure the cassandra database, it is recommended to configure by providing a `.conf` file like below. + `spring.cassandra.config=classpath:stacksaga-cassandra.conf`
+|`stacksaga.agent.cassandra.target-service` | - | `String` | The host name of the target *orchestrator service*.
+|`stacksaga.agent.cassandra.service-host` | - | `String` | The host name that target service can be reached. (It can be a host in the PVC or another external one)
+|`stacksaga.agent.target-service` | - | `String` | The name of the target service.
+(The transactions are fetched based on this name from the event-store) |`stacksaga.agent.act-master-as-slave` | `true`  | `boolean` | Whether the master service acts as the slave or not.
+If the cluster is small, you can run one instance and run as the master and as well as the slave.
+
+4+|
+*Communication Thread-Pool*: It is responsible for communicating with other services for sharing the transactions to the target orchestrator services.
+
+|`stacksaga.agent.cassandra.thread-pool.communication.core-size` | `available processors * 5`  | `int` | core number of threads in the communication pool.
+|`stacksaga.agent.cassandra.thread-pool.communication.max-size` | `available processors * 50`  | `int` | maximum number of threads in the communication pool.
+|`stacksaga.agent.cassandra.thread-pool.communication.allow-core-thread-timeout` | `true`  | `Boolean` | Whether core threads are allowed to time out. This enables dynamic growing and shrinking of the communication pool.
+|`stacksaga.agent.cassandra.thread-pool.communication.queue-capacity` | `Integer.MAX_VALUE`  | `int` | Queue capacity. An unbounded capacity does not increase the pool and therefore ignores the "max-size" property.
+|`stacksaga.agent.cassandra.thread-pool.communication.keep-alive` | `60 seconds`  | `Duration` | Time limit for which threads may remain idle before being terminated.
+
+4+|
+*Recovery Thread-Pool*: It is responsible for processing the transactions that should be recovered.
+
+|`stacksaga.agent.cassandra.thread-pool.recovery.size` | `available processors * 5`  | `int` | core number of threads in the communication pool.
+|`stacksaga.agent.cassandra.thread-pool.recovery.allow-core-thread-timeout` | `true`  | `Boolean` | Whether core threads are allowed to time out. This enables dynamic growing and shrinking of the communication pool.
+|`stacksaga.agent.cassandra.thread-pool.recovery.queue-capacity` | `Integer.MAX_VALUE`  | `int` | Queue capacity. An unbounded capacity does not increase the pool and therefore ignores the "max-size" property.
+|`stacksaga.agent.cassandra.thread-pool.recovery.keep-alive` | `60 seconds`  | `Duration` | Time limit for which threads may remain idle before being terminated.
+
+
+4+|
+*Retry Thread-Pool*: It is responsible for processing the transactions that should be recovered.
+
+|`stacksaga.agent.cassandra.thread-pool.retry.size` | `available processors * 5`  | `int` | core number of threads in the communication pool.
+|`stacksaga.agent.cassandra.thread-pool.retry.allow-core-thread-timeout` | `true`  | `Boolean` | Whether core threads are allowed to time out. This enables dynamic growing and shrinking of the communication pool.
+|`stacksaga.agent.cassandra.thread-pool.retry.queue-capacity` | `Integer.MAX_VALUE`  | `int` | Queue capacity. An unbounded capacity does not increase the pool and therefore ignores the "max-size" property.
+|`stacksaga.agent.cassandra.thread-pool.retry.keep-alive` | `60 seconds`  | `Duration` | Time limit for which threads may remain idle before being terminated.
+
+
+
+
