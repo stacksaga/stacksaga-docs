@@ -18,6 +18,188 @@ you can create your own spring boot project and add the `stacksaga-agent-cassand
 
 After adding the dependency, update the xref:stacksaga_cassandra_agent_configuration_properties.adoc[configuration properties] of the application as needed.
 
+
+== Profiles
+
+Based on your environment, you can choose one of the profiles in `stacksaga-agent-cassandra-starter`.
+There are two profiles as follows:
+
+. xref:eureka-profile[`eureka`] - Eureka based environment
+. xref:k8s-profile[`k8s`] - Kubernetes based environment
+
+[[eureka-profile]]
+=== `eureka` Profile
+
+If your application is deployed in the Eureka environment, you can use the *eureka* profile when the agent application is deployed.
+Under the `eureka` profile, the agent nodes can be scaled horizontally as per requirement.
+The `stacksaga-agent-cassandra-starter` can acts as the leader and also as the follower.
+If there are multiple agent nodes in the region, one node should be deployed as a leader and other nodes should be deployed as the followers.
+The leader node is responsible for xref:token_range_allocation[updating the token range] based on the running nodes count.
+
+[[how-the-agent-application-configured-as-master-and-slave]]
+==== Agent-service as Leader and Follower
+
+A mentioned above after adding the `stacksaga-agent-cassandra-starter` as a dependency, the application should be configured as a leader and als as a follower.
+Let's see how the configuration looks like for both.
+
+* *Leader Instance configuration:*
++
+[source,properties]
+----
+stacksaga.cloud.agent.eureka.instance-type=MASTER #<1>
+eureka.instance.instance-id=order-service-agent-us-east-master #<2>
+----
++
+<1> Set the `instance-type` as `MASTER` to run the node as the leader.
+<2> Set a Eureka instance ID as a fixed (Static ID) one.
++
+IMPORTANT: It is recommended to use this format for the leader instance ID. +
+Format: `*${service-name}-agent-${region}-master*`  +
+Using the service name in the master instance ID helps to avoid the collision if you are using same event-store for multiple services.
+Because the slaves identify the master instance in the database by the master instance ID. and adding the region to the master instance ID guarantees the region-based uniqueness.
++
+* *Follower Instance configuration:*
++
+[source,properties]
+----
+stacksaga.cloud.agent.eureka.instance-type=SLAVE <1>
+stacksaga.cloud.agent.eureka.master-id=order-service-agent-us-east-master <2>
+eureka.instance.instance-id=${spring.application.name}:${random.uuid} <3>
+----
++
+<1> Set the `instance-type` as the `SLAVE`.
+<2> Set the leader's Static ID.this value should be the same exactly with the leader's id that we configured in the leader node in the same region.
+<3> Set the `instance-id` as a random ID.
+
+[[token_range_allocation]]
+==== Token range allocation for nodes
+
+All agent applications are registered with the eureka server in eureka environment.
+So the master service will have all other agent instances' details through the eureka server.
+The master server periodically checks the changes of the instance based on the local eureka service registry cache and updates the database with the relevant token range for each instance.
+The position of each instance is sored based on the instance started time.
+For instance, if there are five StackSaga-agent instances in the cluster, the token range is divided with the help of Murmur3 Partition algorithm as follows:
+
+image:framework:agent/mysql/stacksaga-diagram-how-token-range-is-shared-with-agents-in-eureka-mysql.drawio.svg[alt="How token range is shared with the available agents in Eureka"]
+
+Steps:
+
+<1> Leader node uses the eureka client's cache to get the list of all instances in the region.
+(It can be a single eureka server or peers)
+<2> Leader node calculates the range for each instance periodically based on their timetamps and updates the ranges is sent to each nodes.
+
+[[k8s-profile]]
+=== `k8s` Profile
+
+When Stacksaga agent is deployed in the kubernetes environment, the deployment architecture is a bit different from the eureka environment.
+In the kubernetes environment, the nodes are deployed as https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/[StatefulSet].
+The reason for using *StatefulSet* is that the token range of the node is calculated by itself based on the position (index of the node) and the total number of nodes.
+All nodes continuously monitor changes of respective StatefulSet's changes in real-time.
+If one instance goes down or added, all the nodes will be notified the update in real-time and then the token range will be updated accordingly by themselves.
+
+==== Deploy `stacksaga-agent-cassandra` in kubernetes environment.
+
+First you have to create a user account due to `stacksaga-agent-cassandra` access the kubernetes API in `k8s` profile.
+And should create and bind the role with the created service account as follows.
+
+.ServiceAccount Manifest
+[source,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stacksaga-agent-cassandra-service-account #the name of the service account.
+  namespace: default #the namespace the application is deployed.
+----
+
+.ClusterRole Manifest
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  namespace: default
+  name: stacksaga-agent-cassandra-access
+rules:
+  # Grant read access to pods
+  - apiGroups: [ "" ]
+    resources: [ "pods" ]
+    verbs: [ "get", "list", "watch" ]
+  # Grant access to watch StatefulSets
+  - apiGroups: [ "apps" ]
+    resources: [ "statefulsets" ]
+    verbs: [ "watch", "get", "list" ]
+  # Grant access to nodes
+  - apiGroups: [ "" ]
+    resources: [ "nodes" ]
+    verbs: [ "get", "list" ]
+----
+
+.ClusterRoleBinding Manifest
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stacksaga-agent-cassandra-access-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: stacksaga-agent-cassandra-service-account
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: stacksaga-agent-cassandra-access
+  apiGroup: rbac.authorization.k8s.io
+----
+
+Create the service-agent `StatefulSet` to deploy the agent-service.
+
+.RoleBinding Manifest
+[source,yaml]
+----
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: your-app
+spec:
+  serviceName: "your-app"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: your-app
+  template:
+    metadata:
+      labels:
+        app: your-app
+    spec:
+      serviceAccountName: stacksaga-agent-cassandra-service-account #assign the service-account
+      containers:
+        - name: your-app-container
+          image: your-app-image:latest
+          ports:
+            - containerPort: 8080
+----
+
+.Headless Service Manifest
+[source,yaml]
+----
+apiVersion: v1
+kind: Service
+metadata:
+  name: your-app
+spec:
+  clusterIP: None
+  selector:
+    app: your-app
+  ports:
+    - port: 8080
+      name: http
+----
+
+
 == StackSaga Cassandra-Agent Configuration Properties
 
 include::framework:stacksaga_cassandra_agent_configuration_properties.adoc[]
+
