@@ -16,7 +16,7 @@ you can create your own spring boot project and add the `stacksaga-agent-mysql` 
 </dependency>
 ----
 
-After adding the dependency, update the xref:stacksaga_mysql_agent_configuration_properties.adoc[configuration properties] of the application as needed.
+After adding the dependency, update the xref:#configuration-properties[configuration properties] of the application as needed.
 
 == Transaction retrying with `stacksaga-agent-mysql`
 
@@ -103,28 +103,28 @@ Let's see how the configuration looks like for both.
 +
 [source,properties]
 ----
-stacksaga.cloud.agent.eureka.instance-type=MASTER #<1>
-eureka.instance.instance-id=order-service-agent-us-east-master #<2>
+stacksaga.agent.mysql.eureka.instance-type=LEADER #<1>
+eureka.instance.instance-id=order-service-agent-us-east-leader #<2>
 ----
 +
-<1> Set the `instance-type` as `MASTER` to run the node as the leader.
+<1> Set the `instance-type` as `LEADER` to run the node as the leader.
 <2> Set a Eureka instance ID as a fixed (Static ID) one.
 +
 IMPORTANT: It is recommended to use this format for the leader instance ID. +
-Format: `*${service-name}-agent-${region}-master*`  +
-Using the service name in the master instance ID helps to avoid the collision if you are using same event-store for multiple services.
-Because the slaves identify the master instance in the database by the master instance ID. and adding the region to the master instance ID guarantees the region-based uniqueness.
+Format: `*${service-name}-agent-${region}-leader*`  +
+Using the service name in the leader instance ID helps to avoid the collision if you are using same event-store for multiple services.
+Because the followers identify the leader instance in the database by the leader instance ID. and adding the region to the leader instance ID guarantees the region-based uniqueness.
 +
 * *Follower Instance configuration:*
 +
 [source,properties]
 ----
-stacksaga.cloud.agent.eureka.instance-type=SLAVE <1>
-stacksaga.cloud.agent.eureka.master-id=order-service-agent-us-east-master <2>
+stacksaga.agent.mysql.eureka.instance-type=FOLLOWER <1>
+stacksaga.agent.mysql.eureka.follower.leader-id=order-service-agent-us-east-leader <2>
 eureka.instance.instance-id=${spring.application.name}:${random.uuid} <3>
 ----
 +
-<1> Set the `instance-type` as the `SLAVE`.
+<1> Set the `instance-type` as the `FOLLOWER`.
 <2> Set the leader's Static ID.this value should be the same exactly with the leader's id that we configured in the leader node in the same region.
 <3> Set the `instance-id` as a random ID.
 
@@ -132,8 +132,8 @@ eureka.instance.instance-id=${spring.application.name}:${random.uuid} <3>
 ==== Token range allocation for nodes
 
 All agent applications are registered with the eureka server in eureka environment.
-So the master service will have all other agent instances' details through the eureka server.
-The master server periodically checks the changes of the instance based on the local eureka service registry cache and updates the database with the relevant token range for each instance.
+So the leader service will have all other agent instances' details through the eureka server.
+The leader server periodically checks the changes of the instance based on the local eureka service registry cache and updates the database with the relevant token range for each instance.
 The position of each instance is sored based on the instance started time.
 For instance, if there are five StackSaga-agent instances in the cluster, the token range is divided with the help of Murmur3 Partition algorithm as follows:
 
@@ -255,4 +255,5 @@ spec:
       name: http
 ----
 
+[[configuration-properties]]
 include::stacksaga_mysql_agent_configuration_properties.adoc[]
