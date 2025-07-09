@@ -1,0 +1,33 @@
+|`spring.profiles.active` | `-`  | `String` |  There are two profiles available as `eureka` and `k8s`. You can choose one of them based on the deployment environment.
+|`spring.application.name` | `-`  | `String` |  The name of the agent application.
+|`server.port` | `8080`  | `int` |  The port of the agent service.
+4+|
+*NOTE:* Due to StackSaga Mysql-Agent internally uses https://docs.spring.io/spring-boot/appendix/application-properties/index.html#application-properties.data.spring.datasource.url[spring default datasource] and https://docs.spring.io/spring-boot/appendix/application-properties/index.html#application-properties.data.spring.datasource.hikari[HikariCP] for managing the connection pool, It can be configured the datasource properties in the same way that spring boot provides. +
+The prefix is `stacksaga.datasource`.
+|`stacksaga.agent.mysql.target-service` | -  | `String` |  The name of the target service. (The transactions are fetched based on this name from the event-store)
+|`stacksaga.agent.mysql.target-service-host` | -  | `String` |  The host name of the target service that retry tasks should be submitted to.
+|`stacksaga.agent.mysql.act-leader-as-follower` | `true`  | `boolean` |  Whether the leader service acts as the follower or not. If the cluster is small, you can run one instance and run as the leader and as well as the follower.
+
+4+|
+*Communication Thread-Pool*: It is responsible for communicating with other services for sharing the transactions to the target orchestrator services.
+
+|`stacksaga.agent.mysql.thread-pool.communication.core-size` | `available processors * 5`  | `int` | core number of threads in the communication pool.
+|`stacksaga.agent.mysql.thread-pool.communication.max-size` | `available processors * 50`  | `int` | maximum number of threads in the communication pool.
+|`stacksaga.agent.mysql.thread-pool.communication.allow-core-thread-timeout` | `true`  | `Boolean` | Whether core threads are allowed to time out.
+This enables dynamic growing and shrinking of the communication pool.
+|`stacksaga.agent.mysql.thread-pool.communication.queue-capacity` | `Integer.MAX_VALUE`  | `int` | Queue capacity.
+An unbounded capacity does not increase the pool and therefore ignores the "max-size" property.
+|`stacksaga.agent.mysql.thread-pool.communication.keep-alive` | `60 seconds`  | `Duration` | Time limit for which threads may remain idle before being terminated.
+
+
+4+|
+*Retry Thread-Pool*: It is responsible for processing the transactions that should be retried and recovered(The expired transactions).
+
+|`stacksaga.agent.mysql.thread-pool.retry.size` | `available processors * 5`  | `int` | core number of threads in the communication pool.
+|`stacksaga.agent.mysql.thread-pool.retry.allow-core-thread-timeout` | `true`  | `Boolean` | Whether core threads are allowed to time out.
+This enables dynamic growing and shrinking of the communication pool.
+|`stacksaga.agent.mysql.thread-pool.retry.queue-capacity` | `Integer.MAX_VALUE`  | `int` | Queue capacity.
+An unbounded capacity does not increase the pool and therefore ignores the "max-size" property.
+|`stacksaga.agent.mysql.thread-pool.retry.keep-alive` | `60 seconds`  | `Duration` | Time limit for which threads may remain idle before being terminated.
+|`stacksaga.agent.mysql.retry.batch-size` | `1000`  | `int` | how much data should be fetched from the database per time for retrying as a bulk.
+|`stacksaga.agent.mysql.retry.delay-in-minutes` | `2`  | `int` | how often the retry task should be executed.
