@@ -1,0 +1,61 @@
+=== StackSaga Admin Docker Image [[stacksaga_admin_docker_image]]
+
+If docker is running on your computer, you can build a container and run StackSaga server (admin) by using the docker StackSaga server (admin) docker image. +
+
+You can choose the StackSaga server wit specific database that you want. https://hub.docker.com/u/stacksaga[See all images on docker hub.]
+
+For instance, if you prefer to use mysql StackSaga server, you can run the code to pull the image.
+
+[source,shell]
+----
+docker pull stacksaga/stacksaga_admin_mysqll:latest
+----
+
+After pulling the image, you can create an image, and then you have to provide the following Environment variables.
+
+[source,shell]
+----
+docker run -d \
+-p 4444:4444 \
+-e DB_URL=jdbc:mysql://localhost:3306/stacksaga_admin_db?createDatabaseIfNotExist=true  \
+-e DB_R2DBC_URL=r2dbc:mysql://localhost:3306/stacksaga_admin_db \
+-e DB_USERNAME=root \
+-e DB_PASSWORD=*** \
+-e DROP_FIRST_DB=your-config \
+-e SECRET=*** \
+-e TOKEN_EXPIRATION_TIME=60000 \
+--name stacksaga-admin-server \
+stacksaga/stacksaga_admin_mysql:1.0.0
+----
+
+[[docker_compose_file]]
+=== Docker Image Compose
+
+OR, if you prefer doing the deal with docker compose, here is the basic code snippet that you want to run your own container.
+
+[source,yaml]
+----
+version: '3'
+services:
+  stacksaga_admin_mysql:
+    container_name: stacksaga_admin_mysql
+    image: "stacksaga/stacksaga_admin_mysql:1.0.0"
+    ports:
+      - "4444:4444"
+    restart: always
+    environment:
+      - DB_URL=jdbc:mysql://host.docker.internal:3306/stacksaga_admin_db?createDatabaseIfNotExist=true
+      - DB_R2DBC_URL=r2dbc:mysql://host.docker.internal:3306/stacksaga_admin_db
+      - DB_USERNAME=root
+      - DB_PASSWORD=mafei
+      - DROP_FIRST_DB=true
+      - SECRET=c403ba24-ea8f-4285-977a-a5b6361b427a
+      - TOKEN_EXPIRATION_TIME=600000
+----
+
+to run the docker-compose file, go the file directory and run this code.
+
+[source,shell]
+----
+docker compose up
+----
