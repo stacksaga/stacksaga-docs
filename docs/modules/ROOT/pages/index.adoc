@@ -1,1 +1,96 @@
-= StackSga Page
+:keywords: stacksaga, stacksaga doc, stacksaga framework, stacksaga introduction, spring boot microservices
+:description: Stacksaga Introduction To Microservice
+
+= Introduction To Microservice.
+
+== Microservice Architecture
+
+Before dive in to the framework, let's have the basic idea of microservice architecture.
+A microservice' architecture consists of a collection of small, autonomous services.
+Each service is self-contained and should implement a single business capability within a bounded context.
+A bounded context is a natural division within a business and provides an explicit boundary within which a domain model exists.
+
+image:stacksaga-diagram-Microservice-architecture-style.drawio.svg[alt="stacksaga diagram  microservice architecture style"]
+
+https://spring.io/microservices[Read more through spring microservices.]
+
+=== Key characteristics of microservices
+
+[arabic]
+. *Modularity*: Each microservice is a self-contained unit that can be developed, deployed, and scaled independently.
+This modularity allows for easier development and maintenance of complex systems.
+. *Scalability*: Since each service is independent, it can be scaled horizontally or vertically based on its specific requirements.
+This allows for better resource utilization and improved performance.
+. *Resilience*: Microservices are designed to be fault-tolerant and resilient.
+If one service fails, it does not necessarily affect the entire application, as other services can continue to function independently.
+. *Flexibility*: Microservices allow for flexibility in technology choices.
+Each service can be developed using the most suitable programming language, framework, or database for its requirements.
+. *Decentralized Data Management*: Instead of a single centralized database, each microservice can have its own database or data store.
+This allows for better isolation of data and reduces the risk of data corruption or loss.
+. *Continuous Deployment*: Microservices enable continuous deployment and delivery practices, as each service can be deployed independently without affecting others.
+This allows for faster release cycles and quicker time-to-market.
+
+== Database Per Service Pattern
+
+One of the benefits of microservice architecture is that it lets us choose the technology stack per service.
+For instance, we can decide to use a relational database for service A and NoSQL database for service B. This model lets the services manage domain data independently on a data store that best suites its data types and schema.
+Further, it also lets the service scale its datastore on-demand and insulates it from the failures of other services.
+However, at times a transaction can span across multiple services, and ensuring data consistency across the service database is a challenge.
+
+image:stacksaga-diagram-Microservice-architecture-style-database-per-service.drawio.svg[alt="stacksaga diagram  microservice architecture style database per service"]
+
+== Migration to microservices architecture
+
+image:stacksaga-diagram-monolithic-architecture-vs-microservices-architecture.drawio.svg[alt="stacksaga diagram monolithic architecture vs microservices architecture"]
+
+The above diagram shows how to migrate the stem from monolithic architecture to microservices' architecture.
+
+== Distributed Transaction
+
+In the microservice architecture, a distributed transaction refers to a transaction that spans multiple microservices.
+Traditional monolithic applications often use a single database and ACID (Atomicity, Consistency, Isolation, Durability) transactions to ensure data integrity within a single transaction.
+However, in the microservice environment, each microservice typically has its own database or data store, and transactions may need to span multiple services.
+
+As an example, Just imagine that there is an e-commerce application that makes online orders, and it has been implemented with microservice architecture.
+In general, the following microservices can be involved to make the entire order placing request.
+
+* order-service
+** initialize the order.
+** update the order status
+* payment-service
+** make pre-auth
+** make real payment
+* Stock-service
+** update the inventory, and so on.
+
+Even though the entire transaction is pace-order, that transaction has many sub atomic-transactions.
+Those transactions have been distributed along with many microservices.
+Each service performs a single local transaction to implement the individual functionalities.
+
+image:stacksaga-diagram-distributed-transaction.drawio.svg[alt="distributed transaction"]
+
+To make a successful transaction, all 4 atomic-transactions (three microservices) must be completed.
+If any of the microservices fails to complete one of the local transactions, all the completed atomic transactions until where the failure happened should be rolled back to ensure data integrity.
+
+As per the example, if the *make-payment* atomic transaction (transaction-4) is failed, all other successfully executed transactions should be rolled back to ensure data integrity.
+
+== Challenges of Distributed Transaction
+
+Distributed transactions in a microservice architecture pose two key challenges.
+The first one is maintaining ACID.
+
+* *Atomicity across services* (maintaining ACID)
++
+To ensure the correctness of a transaction, it must be an atomic, consistent, isolated, and durable (ACID).
+The atomicity ensures that all or none of the steps of a transaction should complete.
+Consistency takes data from one valid state to another valid state.
+Isolation guarantees that concurrent transactions should produce the same result that sequentially transactions would have produced.
+Lastly, durability means that committed transactions remain committed irrespective of any type of system failure.
+In a distributed transaction scenario, as the transaction spans several services, it always remains a key concern to ensure ACID.
+
+* *Managing the transaction isolation level.*
++
+It specifies the amount of data that is visible in a transaction when the other services access the same data simultaneously.
+In other words, if one object in one of the microservices is persisted in the database while another request reads the data, should the service return the old or new data?
+
+In the next section, let's see what are the solutions that can be used to overcome this challenge.
