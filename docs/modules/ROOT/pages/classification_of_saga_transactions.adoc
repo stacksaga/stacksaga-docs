@@ -1,0 +1,66 @@
+[[classification_of_saga_transactions]]
+== Classification of SAGA transactions
+
+According to the behaviors of the transaction, we can mainly identify 3 transaction types that can be happened when we use saga.
+
+* *Fully success transactions*
+* *Compensating/Revert success transactions*
+* *Compensating/Revert failed transactions*
+
+
+[[fully_success_transaction]]
+=== icon:circle[role=green,1x] Fully Success Transactions (Primary Execution Success Transactions)
+
+image:stacksaga-diagram-fully-successfull-transaction.drawio.svg[alt="stacksaga diagram fully successfull transaction"]
+
+As we discussed earlier, we had used a number of microservices for executing one single execution.
+Here we have 4 atomic executions (atomic transactions) with 3 microservices.
+The entire transaction (Business transaction) will be completed after successfully executing the 4th atomic execution called *MAKE_PAYMENT*.
+All the primary atomic transactions are done successfully as we accepted it is called as *fully-success-transaction*.
+
+Here is the summarized diagram for fully success transaction.
+
+[ MS = Microservice ]
+image:fully-success-transaction-summary.svg[alt="Fully Success Transaction Summary",height=300]
+
+[[revert_success_transaction]]
+=== icon:circle[role=yellow,1x] Compensating Success Transaction
+
+image:stacksaga-diagram-revert-successfull-transaction.drawio.svg[alt="stacksaga diagram revert successfull transaction"]
+
+At this time, An exception has occurred when make payment execution is executed.
+Then the primary executions process is stopped due to the error, and the compensating process is started to undo the successfully executed executions so far.
+And finally, the compensating process is also completed.
+Even though this is a failed transaction from the business perspective, this is one of the successful transaction types from the Saga perspective.
+Because we have managed to successfully restore the data eventually.
+
+Here is the summarized diagram for compensating successful transaction.
+
+[ MS = Microservice ]
+image:revert-success-transaction-summary.svg[alt="Revert Success Transaction Summary",height=300]
+
+'''
+
+[[revert_failed_transaction]]
+=== icon:circle[role=red,1x] Compensating Failed Transaction
+
+image:stacksaga-diagram-revert-failed-transaction.drawio.svg[alt="stacksaga diagram revert failed transaction"]
+
+At this time, a primary execution exception is occurred when make-payment execution.
+Then the compensating processing is stared one by one as the sequence order to undo the changes that have been made by the primary executions.
+While then, unfortunately, an error occurred in the process of *RELEASE_PRE-AUTH*.
+
+NOTE: Even we discuss this kind of situation As a theory, you should be able to manage not to happen this kind of situation as a developer.
+In brief, the compensating transactions cannot be failed (if there is a Resource Unavailability problem, the compensating transactions can be retried until the execution is successful.
+Except that the compensating transactions cannot be failed.
+
+TIP: Don't worry about handling those complex situations.
+Stacksaga provides the way that you can manage them easily.
+
+Here is the summarized diagram for compensating failed transaction.
+
+[ MS = Microservice ]
+image:revert-failed-transaction-summary.svg[alt="Revert Failed Transaction Summary",height=300]
+
+
+
