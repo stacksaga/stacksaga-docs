@@ -1,0 +1,71 @@
+= Custom Aggregator Mapper [[aggregator_mapper_implementation]]
+
+You can decide your custom configurations of the objectMapper for your target <<creating_aggregator_class,Aggregator>>.
+By default, the system will use an https://fasterxml.github.io/jackson-databind/javadoc/2.7/com/fasterxml/jackson/databind/ObjectMapper.html[`ObjectMapper`]
+that the framework provides for the aggregator serialization and deserialization.
+But if you want to customize the objectMapper for your target aggregator, you can create and provide a custom objectMapper object for the target aggregator by using `SagaAggregatorMapperProvider` implementation.
+Then The framework will use the custom Aggregator Mapper that you provided to the target aggregator.
+
+NOTE: The class should be a Spring bean (Annotate with `+@Component+`).
+
+Here you can see a custom implementation of the `AggregatorMapper`.
+
+[source,java]
+----
+@Component //<1>
+public class PlaceOrderAggregatorJsonMapper implements SagaAggregatorMapperProvider  {//<2>
+
+    private final ObjectMapper objectMapper;
+
+    public PlaceOrderAggregatorJsonMapper() {
+        this.objectMapper = new ObjectMapper(); //<3>
+        //your custom object mapper configurations
+        ...
+    }
+
+    //<4>
+    @Override
+    public SagaAggregatorMapper getSagaAggregatorMapper() {
+        return SagaAggregatorMapper.Builder.build(
+                this.objectMapper
+        );//<5>
+    }
+}
+----
+
+<1> *@Component*: Mark your custom object mapper implementation as a Spring bean.
+<2> *SagaAggregatorMapperProvider*: Implement by the `SagaAggregatorMapperProvider` interface.
+<3> Initialize and set your custom configurations for the `objectMapper` object that you provide for the target aggregator.
+<4> Override the method for providing the `SagaAggregatorMapper` object.
+<5> *SagaAggregatorMapper.Builder*: The builder class provides the methods for building `SagaAggregatorMapper` object.
+you can build `SagaAggregatorMapper` object by adding your custom configured objectMapper object and return it back.
+
+NOTE: The `SagaAggregatorMapper.Builder` class can have several build methods with several mapper types other than the `ObjectMapper`.
+Currently, StackSaga framework only supports `ObjectMapper`.
+
+You can provide your custom object `SagaAggregatorMapperProvider` class to the target Aggregator like below.
+
+[source,java]
+----
+@SagaAggregator(
+        version = @SagaAggregatorVersion(major = 1, minor = 0, patch = 1),
+        idPrefix = "po",
+        name = "PlaceOrderAggregator",
+        sagaSerializable = PlaceOrderAggregatorSample.class,
+        mapper = PlaceOrderAggregatorJsonMapper.class //<1>
+)
+@Getter
+@Setter
+public class PlaceOrderAggregator extends Aggregator {
+
+    public PlaceOrderAggregator() {
+        super(PlaceOrderAggregator.class);
+    }
+    ...
+}
+
+----
+
+<1> *mapper*: provide your custom aggregator mapper provider class.
+
+''''
