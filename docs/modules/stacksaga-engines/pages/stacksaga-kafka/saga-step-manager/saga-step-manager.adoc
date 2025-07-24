@@ -1,1 +1,40 @@
 = SagaStepManager
+
+[source,java]
+----
+
+@SagaStepExecutor(rootTopic = "PlaceOrderStepManager", value = "PlaceOrderStepManager", partitions = {0})
+public class PlaceOrderStepManager implements SagaEventManager<PlaceOrderAggregator, PlaceOrderTopic> {
+    @Override
+    public SagaPrimaryEventAction<PlaceOrderTopic> onNext(PlaceOrderTopic recentTopic, PlaceOrderAggregator aggregator) {
+        return switch (recentTopic) {
+            case DO_USER_VALIDATE -> {
+                yield SagaPrimaryEventAction.next(PlaceOrderTopic.DO_UPDATE_STOCK);
+            }
+            case DO_UPDATE_STOCK -> {
+                yield SagaPrimaryEventAction.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
+            }
+            case DO_MAKE_DELIVERY -> {
+                yield SagaPrimaryEventAction.done();
+            }
+            default -> SagaPrimaryEventAction.error(new IllegalStateException("Unexpected value: " + recentTopic));
+        };
+    }
+
+    @Override
+    public SagaRevertEventAction<PlaceOrderTopic> onNextRever(PlaceOrderTopic lastEvent, PlaceOrderAggregator aggregator, NonRetryableExecutorException exception, RevertHintStore revertHintStore) {
+        return switch (lastEvent) {
+            case UNDO_UPDATE_STOCK -> {
+                yield SagaRevertEventAction.next(PlaceOrderTopic.UNDO_MAKE_PAYMENT_SUB_BEFORE_1);
+            }
+            case UNDO_MAKE_PAYMENT_SUB_BEFORE_1 -> {
+                yield SagaRevertEventAction.next(PlaceOrderTopic.UNDO_MAKE_PAYMENT_SUB_BEFORE_2);
+            }
+            case UNDO_MAKE_PAYMENT -> {
+                yield SagaRevertEventAction.next(PlaceOrderTopic.UNDO_MAKE_PAYMENT_SUB_AFTER_1);
+            }
+            default -> SagaRevertEventAction.autopilot();
+        };
+    }
+}
+----

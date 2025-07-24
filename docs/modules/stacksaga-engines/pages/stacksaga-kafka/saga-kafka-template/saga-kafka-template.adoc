@@ -1,1 +1,30 @@
 = SagaKafkaTemplate
+
+[source,java]
+----
+@RestController
+@RequestMapping("/order")
+@AllArgsConstructor
+public class PlaceOrderSagaController {
+
+    private final SagaKafkaTemplate<PlaceOrderAggregator, PlaceOrderTopic> placeOrderSagaKafkaTemplate;
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public Map<String, String> placeOrder() {
+
+        PlaceOrderAggregator aggregator = new PlaceOrderAggregator();
+        aggregator.setUsername("mafei");
+        aggregator.setTotal(200.00);
+        String orderId = this.placeOrderSagaKafkaTemplate.start(
+                aggregator,
+                PlaceOrderStepManager.class,
+                PlaceOrderTopic.DO_USER_VALIDATE
+        );
+        return Collections.singletonMap(
+                "order_id",
+                orderId//OR aggregator.getAggregatorTransactionId()
+        );
+    }
+}
+----

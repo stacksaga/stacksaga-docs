@@ -1,1 +1,55 @@
-= SagaReactiveKafkaTemplate
+= ReactiveSagaKafkaTemplate
+
+[source,java]
+----
+@RestController
+@RequestMapping("/order")
+@AllArgsConstructor
+public class PlaceOrderSagaController {
+
+    private final ReactiveSagaKafkaTemplate<PlaceOrderAggregator, PlaceOrderTopic> placeOrderReactiveSagaKafkaTemplate;
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public Mono<String> placeOrder() {
+
+        PlaceOrderAggregator aggregator = new PlaceOrderAggregator();
+        aggregator.setUsername("mafei");
+        aggregator.setTotal(200.00);
+
+        return this.placeOrderReactiveSagaKafkaTemplate.start(
+                aggregator,
+                PlaceOrderStepManager.class,
+                PlaceOrderTopic.DO_USER_VALIDATE
+        );
+    }
+
+}
+----
+
+[source,java]
+----
+@RestController
+@RequestMapping("/order")
+@AllArgsConstructor
+public class PlaceOrderSagaController {
+
+    private final ReactiveSagaKafkaTemplate<PlaceOrderAggregator, PlaceOrderTopic> placeOrderReactiveSagaKafkaTemplate;
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public CompletableFuture<String> placeOrder() {
+
+        PlaceOrderAggregator aggregator = new PlaceOrderAggregator();
+        aggregator.setUsername("mafei");
+        aggregator.setTotal(200.00);
+
+        return this.placeOrderReactiveSagaKafkaTemplate.start(
+                aggregator,
+                PlaceOrderStepManager.class,
+                PlaceOrderTopic.DO_DO_SOME1
+        ).toFuture();
+    }
+
+}
+----
