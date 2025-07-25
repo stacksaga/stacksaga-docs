@@ -1,0 +1,61 @@
+= SagaEventNavigator
+
+*SagaEventNavigator* is where you can navigate your long-running transaction based on the previous execution state.
+simply, it is triggered each and every time after an execution is done. then you can provide the next topic should be triggered conditionally by using the current status of your LRT.
+
+* Create your custom `EventNavigator` class and implement it from `SagaEventNavigator<A,T>` interface.
+** `Generic A`: What is the target xref:stacksaga-engines:stacksaga-kafka/aggregator/create-aggregator.adoc[Custom Aggregator] class for the respective navigator.
+** `Generic T`: What is the target xref:stacksaga-engines:stacksaga-kafka/saga-topic/saga-topic.adoc[Custom SagaTopic] is used as the topic.
+
+[source,java]
+----
+//<1>
+@SagaStepExecutor(
+        //<2>
+        rootTopic = "PlaceOrderEventNavigator",
+        //<3>
+        value = "PlaceOrderEventNavigator",
+        //<4>
+        partitions = {0}
+)
+public class PlaceOrderEventNavigator implements SagaEventNavigator<PlaceOrderAggregator, PlaceOrderTopic> { //<5>
+
+    //<6>
+    @Override
+    public SagaPrimaryEventAction<PlaceOrderTopic> onNext(
+            //<7>
+            PlaceOrderTopic recentTopic,
+            //<8>
+            PlaceOrderAggregator aggregator
+    ) {
+        return switch (recentTopic) {
+            case DO_USER_VALIDATE -> SagaPrimaryEventAction.next(PlaceOrderTopic.DO_UPDATE_STOCK);
+            case DO_UPDATE_STOCK -> SagaPrimaryEventAction.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
+            case DO_MAKE_DELIVERY -> SagaPrimaryEventAction.done();
+            default -> SagaPrimaryEventAction.error(new IllegalStateException("Unexpected value: " + recentTopic));
+        };
+    }
+
+    //<9>
+    @Override
+    public SagaRevertEventAction<PlaceOrderTopic> onNextRevert(
+            //<10>
+            PlaceOrderTopic lastRevertedEvent,
+            //<11>
+            PlaceOrderAggregator aggregator,
+            //<12>
+            NonRetryableExecutorException exception,
+            //<13>
+            RevertHintStore revertHintStore
+    ) {
+        return switch (lastEvent) {
+            case UNDO_UPDATE_STOCK -> SagaRevertEventAction.next(PlaceOrderTopic.UNDO_MAKE_PAYMENT_SUB_BEFORE_1);
+            case UNDO_MAKE_PAYMENT_SUB_BEFORE_1 -> SagaRevertEventAction.next(PlaceOrderTopic.UNDO_MAKE_PAYMENT_SUB_BEFORE_2);
+            case UNDO_MAKE_PAYMENT -> SagaRevertEventAction.next(PlaceOrderTopic.UNDO_MAKE_PAYMENT_SUB_AFTER_1);
+            default -> SagaRevertEventAction.autopilot();
+        };
+    }
+}
+----
+
+<1> Annotate the class with `@SagaStepExecutor`. it enables to acts as
