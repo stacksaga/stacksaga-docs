@@ -1,10 +1,28 @@
+[#_sagatopic]
 = SagaTopic
+
+`SagaTopic` is where all topics and their metadata is defined in the orchestration service which are involved to overcome the long-running transaction. for instance if you have an `PlaceOrderAggregator`, In parallel with that you have to create a custom `SagaTopic` called `PlaceOrderTopic` for storing all the topics that used while entire place-order long-running transaction. that defined `PlaceOrderTopic` is used in the xref:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[] for navigating the transaction's spans.
+
+The topic names should be identical to the xref:stacksaga-engines:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-endpoints.adoc[Stacksaga kafka endpoints] that are define in the target-services by using `stacksaga-kafka-client`.
+
+as per the classification, you can define 5 topic types(`SagaTopicType`).
+
+- `COMMAND_DO_ACTION`: The topics that are triggered for make some changes in the target database's state. it should have a compensation to undo the changes that has been done in case of feature failure.
+- `QUERY_DO_ACTION`: The topics that are triggered for retreating the data without any state change of the target service.
+- `COMMAND_UNDO_ACTION`: The compensation action of the `COMMAND_DO_ACTION`. it is the main default compensation.
+- `COMMAND_UNDO_BEFORE_ACTION`: In addition to the default compensation(`COMMAND_UNDO_ACTION`), if there should have some additional more actions should be done before the default compensation of the `COMMAND_DO_ACTION`, you can create the `COMMAND_UNDO_BEFORE_ACTION`s.
+- `COMMAND_UNDO_AFTER_ACTION`: In addition to the default compensation(`COMMAND_UNDO_ACTION`), if there should have some additional more actions should be done after the default compensation of the `COMMAND_DO_ACTION`, you can create the `COMMAND_UNDO_AFTER_ACTION`s.
+
+
+*The below diagram shows how the `SagaTopic` interacts with other components of the stacksaga-kafka flow.*
+
+image::stacksaga-engines:stacksaga-kafka/saga-topic/stacksaga-kafka-engine-components-custom-saga-topic.svg[]
 
 [source,java]
 ----
 //<1>
 public enum PlaceOrderTopic implements SagaTopic<PlaceOrderTopic> { //<2>
-    //<3>
+
     DO_USER_VALIDATE(1, "user-service", SagaTopicType.QUERY_DO_ACTION),
     DO_MAKE_PAYMENT(1, "order-service", SagaTopicType.COMMAND_DO_ACTION),
     UNDO_MAKE_PAYMENT(2, "order-service", SagaTopicType.COMMAND_UNDO_ACTION, DO_MAKE_PAYMENT),
@@ -16,55 +34,91 @@ public enum PlaceOrderTopic implements SagaTopic<PlaceOrderTopic> { //<2>
     DO_MAKE_DELIVERY(5, "delivery-service", SagaTopicType.COMMAND_DO_ACTION),
     UNDO_MAKE_DELIVERY(6, "delivery-service", SagaTopicType.COMMAND_UNDO_ACTION, DO_MAKE_DELIVERY),
     ;
-    //<4>
+    //<3>
     private final String targetServiceName;
-    //<5>
+    //<3>
     private final SagaTopicType sagaEventType;
-    //<6>
+    //<3>
     private final PlaceOrderTopic parent;
-    //<7>
+    //<3>
     private final float topicKey;
 
-    //<8>
-    PlaceOrderTopic(float topicKey, String targetServiceName, SagaTopicType sagaEventType, PlaceOrderTopic parent) {
-        this.targetServiceName = targetServiceName;
-        this.sagaEventType = sagaEventType;
-        //<9>
-        this.parent = parent;
-        this.topicKey = topicKey;
-    }
-
-    //<10>
+    //<4>
+    //for initializing primary-execution topics
     PlaceOrderTopic(float topicKey, String targetServiceName, SagaTopicType sagaEventType) {
         this.targetServiceName = targetServiceName;
         this.sagaEventType = sagaEventType;
-        //<11>
-        this.parent = null;
+        this.parent = null; //parent is assigned as null due to the primary-execution topic has no any parent
         this.topicKey = topicKey;
     }
 
-    //<12>
+    //<4>
+    //for initializing revert-execution topics
+    PlaceOrderTopic(float topicKey, String targetServiceName, SagaTopicType sagaEventType, PlaceOrderTopic parent) {
+        this.targetServiceName = targetServiceName;
+        this.sagaEventType = sagaEventType;
+        this.parent = parent; //due to revert-execution topics are initialized with this constructor, the parent is assigned.
+        this.topicKey = topicKey;
+    }
+    //<2>
     @Override
     public String targetService() {
+        //<5>
         return this.targetServiceName;
     }
 
-    //<13>
+    //<2>
     @Override
     public SagaTopicType topicType() {
+        //<5>
         return this.sagaEventType;
     }
 
-    //<14>
+    //<2>
     @Override
     public PlaceOrderTopic parent() {
+        //<5>
         return this.parent;
     }
 
-    //<15>
+    //<2>
     @Override
     public float topicKey() {
+        //<5>
         return this.topicKey;
     }
 }
 ----
+
+<1> create a custom `enum` with desired name for SagaTopic.
+<2> implements the enm from `SagaTopic` interface passing the same enum as the generic type parameter and `@Override` the required methods like `targetService()`, `topicType()`, `parent()`, `topicKey()`.
+<3> create the following fields as `final`.
++
+* `String targetServiceName`: the respective topic targets which service.
+* `SagaTopicType sagaEventType`: topic's type.
+* `PlaceOrderTopic parent`: The parent of the respective topic. (only if the topic is a revert-execution topic.)
+* `float topicKey`: the constant number for identifying the event. (it cannot be changed ever after configuring because it is used for serializing and deserializing the event.)
++
+TIP: As a best practice, it is recommended to define the `QUERY_DO_ACTION`, `COMMAND_DO_ACTION` and `COMMAND_UNDO_ACTION` topics in `Integer` numbers and `COMMAND_UNDO_BEFORE_ACTION` in  `minus float` and `COMMAND_UNDO_AFTER_ACTION` in `plus float` numbers. it helps you to keep the link between the parent and sub topics clearly. +
+for example, if the `COMMAND_UNDO_ACTION`'s key is `2`, and if it has  `COMMAND_UNDO_BEFORE_ACTION` topics it can be `-2.1f`,`-2.2f`,`-2.3f` etc. and if it has `COMMAND_UNDO_AFTER_ACTION` topics it can be `2.1f`,`2.2f`,`2.3f` etc.
+
+<4> create two different constructors with the following parameters.
++
+* `Constructor-1`: it has 3 parameters, and it is created for initialized the *primary-execution topics*(`QUERY_DO_ACTION`,`COMMAND_DO_ACTION`).
+** `topicKey`
+** `targetServiceName`
+** `sagaEventType`
++
+*Parent is set as `null` due to primary-execution topics has no parent.*
+
+* `Constructor-2`: it has 4 parameters, and it is created for initialized the *revert-execution topics*(`COMMAND_UNDO_ACTION`,`COMMAND_UNDO_BEFORE_ACTION`,`COMMAND_UNDO_AFTER_ACTION`).
+** `topicKey`
+** `targetServiceName`
+** `sagaEventType`
+** *`parent`* +
+parent must be set due to *revert-execution topics* should parent.
++
+IMPORTANT: *The parents should be set as follows for each revert-execution topics*. +
+- If the topic is *`COMMAND_UNDO_ACTION`* the parent should be a *`COMMAND_DO_ACTION`* +
+- If the topic is *`COMMAND_UNDO_BEFORE_ACTION`* OR *`COMMAND_UNDO_AFTER_ACTION`* the parent should be a *`COMMAND_UNDO_ACTION`*
+<5> Returns the respective initialized data in the respective methods. those are accessed by the framework.
