@@ -1,1 +1,47 @@
-= Stacksaga Kafka Endpoints
+[[stacksaga-kafka-endpoints]]
+== Stacksaga Kafka Endpoints
+
+Stacksaga Kafka Endpoints stands for creating topics accordingly Stacksaga engine's form. the endpoint As per the architecture it can be created 3 types of endpoints as fallows,
+
+. *xref:#query-endpoints[]*
+. *xref:#command-endpoints[]*
+. *xref:#revert-endpoints[]*
+
+
+image::stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-engine-stacksaga-kafka-endpoints.svg[]
+
+[[query-endpoints]]
+=== Query Endpoints
+
+If an execution(atomic execution) doesn't make any state change due to executing that execution those kinds of executions are executed in *Query Endpoints*. due to it doesn't make any changes in the database state, it has no any compensation action to undo. +
+these are the topics that define in the in xref:stacksaga-kafka/saga-topic/saga-topic.adoc[] with type of `SagaTopicType.QUERY_DO_ACTION`
+
+- Each Query Endpoint creates one topic in kafka.
+** `DO_VALIDATE_USER` (primary execution topic)
+** the topic name should be started with `DO_`
+
+image:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-engine-query-endpoint.svg[]
+
+[[command-endpoints]]
+=== Command Endpoints
+
+if an execution(atomic execution) make some state change in the database of the respective service those kinds of executions are executed in *Command Endpoints*. due to the fact that it make some state changes in the database of the respective service, in case of failure, the changes should be restored by invoking compensation reaction.
+these are the topics that define in the in xref:stacksaga-kafka/saga-topic/saga-topic.adoc[] with type of `SagaTopicType.QUERY_DO_ACTION`
+
+- Each Command Endpoint creates two topics in kafka for the primary execution and the compensation execution.
+** `DO_MAKE_PAYMENT` (primary execution topic)
+*** the topic name should be started with `DO_`
+** `UNDO_MAKE_PAYMENT` (compensating execution topic)
+*** the topic name should be started with `UNDO_`
+
+image:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-engine-command-endpoint.svg[]
+
+[[revert-endpoints]]
+=== Revert Endpoints
+
+in Command Endpoints,there is a compensation execution for revering. in case if you want to add more execution before or after when the compensation execution is done, you can create *Revert Endpoints* to execute those kind of executions.
+
+- Each Revert Endpoint creates one topic in kafka.
+** `REVERT_MAKE_PAYMENT_LOG` (sub compensating execution topic)
+
+image:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-engine-revert-endpoints.svg[]
