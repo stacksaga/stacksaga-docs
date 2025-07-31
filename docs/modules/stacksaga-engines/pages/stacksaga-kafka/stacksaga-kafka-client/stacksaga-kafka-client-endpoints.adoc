@@ -72,3 +72,127 @@ for instance, if we set the `eventName` as `MAKE_PAYMENT` for our xref:command-e
 It is an inherited and optimized version of Spring’s `@KafkaListener`, tailored specifically to suit StackSaga’s requirements. +
 most of the parameters can be configured as usual from `@KafkaListener`.
 but some of requires have been configured internally by the framework like `containerFactory` , `groupId` etc.
+
+IMPORTANT: `Concurrency` and `TopicPartitions` related configurations can be done as you prefer in the same way as in the `@KafkaListener`.
+
+== Retrying In Kafka Client
+
+In Stacksaga Kafka system immediate retrying is done from the target service side. that means the orchestra engine doesn't involve for immediate retrying.
+Stacksaga Kafka Client provides supports two ways to manage immediate retrying as follows.
+
+* xref:#Keep-ordering-mode[]
+* xref:#parallel-mode[]
+
+[[Keep-ordering-mode]]
+== Keep‑Ordering Mode (Synchronous)
+
+- *Description:*
+** Messages from a partition are processed one by one in the order Kafka delivers them.
+** The consumer thread processes the record and only after successful completion acknowledges the offset.
+
+- *Characteristics:*
+** ✅ Strict ordering is guaranteed per partition.
+
+** ✅ Failures can trigger retry or pause/resume logic without skipping messages.
+
+** ❌ If processing is slow, the partition is blocked — no further messages will be processed from that partition until the current one completes.
+
+- *Typical Flow:* +
++
+----
+poll -> process (same thread) -> ack -> next record
+----
+
+- *Retrying:* +
+Retrying can be done in two ways in *Keep‑Ordering Mode* as follows, *
+
+* xref:#Keep-Ordering_In-memory-retries[]
+* xref:#Keep-Ordering_Topic-based[]
+
+=== Retrying In Keep‑Ordering Mode (Synchronous)
+
+[[Keep-Ordering_In-memory-retries]]
+==== In‑memory retries
+
+In‑memory retries is a retry strategy in Spring Kafka where failed message processing is automatically re-attempted using an exponential backoff delay between each retry with help of `DefaultErrorHandler` and  `ExponentialBackOffWithMaxRetries`. +
+When the listener throws an exception, the consumer seeks back to the same offset and re-fetches the record from Kafka.
+The same consumer thread retries the processing after a backoff interval that grows exponentially (e.g., 1s → 2s → 4s → 8s) until either: +
+✅ The message is successfully processed, or +
+❌ The maximum retry attempts are reached, at which point the message is ignored without delegated to a Dead Letter Topic (DLT).
+This approach ensures message ordering is preserved per partition, prevents tight retry loops, and provides a progressive delay mechanism to avoid overwhelming downstream systems while still guaranteeing that transient failures are handled gracefully. +
+
+IMPORTANT: In Stacksaga, delegating messages to a Dead Letter Topic (DLT) is not recommended.
+The framework already provides built‑in support for handling failed transactions by automatically rescheduling them for asynchronous retrying.
+This eliminates the need for immediate‑retry failures to be stored in Kafka again, avoiding unnecessary storage overhead and simplifying recovery logic.
+
+* *✅ Pros*
+** Simple to set up (just configure DefaultErrorHandler)
+** Doesn’t require extra Kafka topics
+** Good for quick, transient errors (e.g. database hiccup)
+
+* *❌ Cons*
+** Blocks the partition until retries are done. xref:#partition_level_blocking_during_retries[see more...]
+** If the consumer restarts midway, you “lose” the retry delay and it starts over
+** All retrying is synchronous → one thread is tied up
+
+[[partition_level_blocking_during_retries]]
+*_Partition-Level Blocking During Retries_*
+
+When a message fails and the `DefaultErrorHandler` with `ExponentialBackOffWithMaxRetries` is applied, the consumer seeks back to the same offset and retries the message on the same thread. +
+Because Kafka enforces strict ordering within a partition, no subsequent messages from that partition will be processed until the failing message is either successfully handled or exhausts all retry attempts (after which it may be sent to a Dead Letter Topic or discarded). +
+This behavior ensures ordering guarantees are never violated, but it also means that messages queued behind the failing record on that partition will wait. +
+Messages on other partitions are not affected — if the listener container is configured with multiple concurrent consumer threads, those other partitions continue processing normally while retries occur on the blocked partition.
+
+[[Keep-Ordering_Topic-based]]
+==== Topic‑based/Non-Blocking retries
+
+Topic‑based/Non-Blocking retries can be implemented with *`@SagaRetryableEndpoint`* annotation.
+it is an inherited version of https://docs.spring.io/spring-kafka/reference/retrytopic/retry-config.html#using-the-retryabletopic-annotation[`@RetryableTopic`]'s, tailored specifically to suit StackSaga’s requirements.
+
+- *How it works?*
+
+* When a listener fails:
+
+** The failed record is published to a new Kafka topic (e.g., orders-saga-retry-1)
+** That retry topic has its own backoff delay (controlled by consumer pause or delayed scheduling)
+** After the delay, the record is consumed from the retry topic and processed again
+** If it fails again, it may move to another retry topic (e.g., orders-saga-retry-2)
+* After final retry(exhausted) → send the repose to the root-topic(orchestrator service's main topic of the aggregator)
+
+- *Key behavior*
+* Retries happen asynchronously via Kafka infrastructure.
+* The main partition is not blocked — new messages keep flowing.
+* You get better durability: retries survive restarts, because retry messages live in Kafka topics.
+
+* *✅ Pros*
+** Doesn’t block the original topic partition
+** Survives application restarts (retries live in Kafka)
+** Ideal for longer backoff or when you don’t want to tie up threads
+
+* *❌ Cons*
+** More complex — Spring Kafka creates extra retry topics
+** More Kafka storage overhead (messages copied to retry topics)
+** Slightly higher latency (messages hop between topics)
+
+[[parallel-mode]]
+== Async/Parallel Mode (Order‑Free)
+
+- *Description:*
+* Messages are acknowledged immediately in the consumer thread.
+* Processing is handed off to a separate thread pool or @Async method for parallel execution.
+
+- *Characteristics:*
+
+* ✅ Very fast – consumer thread keeps polling new records without waiting.
+
+* ✅ Parallel processing – multiple messages can be processed at the same time.
+
+* ❌ No ordering guarantee – messages may finish out of order.
+
+* ❌ If async processing fails, Kafka won’t retry because the offset has already been committed (requires a custom retry/error handler).
+
+- *Typical Flow:* +
++
+----
+poll ->  hand off to thread pool -> ack -> consumer continues polling
+----
