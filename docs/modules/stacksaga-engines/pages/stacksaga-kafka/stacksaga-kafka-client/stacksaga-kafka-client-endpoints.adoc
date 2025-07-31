@@ -96,8 +96,9 @@ As you can see in the method signature, you can throw `RetryableException` or `N
 +
 IMPORTANT: Classification the exception is the most important part in stacksaga. the unhandled `RuntimeException`(s) are considered as `NonRetryableException` exceptions. then the engine stops executing and sent a message to the orchestrator-service as there is a primary execution exception. and then it will start compensation process.
 <6> If you want to execute something when the execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
-<7> xref:#retryable_endpoint_annotation[@SagaRetryableEndpoint] annotation has been used for enabling xref:Keep-Ordering_Topic-based[] mode.
+<7> ##xref:#retryable_endpoint_annotation[@SagaRetryableEndpoint] annotation has been used for enabling xref:Keep-Ordering_Topic-based[] mode.
 it avoids xref:Keep-Ordering_In-memory-retries[] and helps to keep consumer thread non-blocking in retrying. xref:#retryable_endpoint_annotation[read more...]
+##
 
 ==== Query Endpoints -- Async/Parallel Mode with RetryTemplate in-memory retries
 
@@ -105,24 +106,24 @@ This example shows that how a custom Query-Endpoint is implemented in xref:paral
 
 [source,java]
 ----
-@Endpoint(eventName = "USER_VALIDATE")
-public class UserValidateEndpoint extends QueryEndpoint {
+@Endpoint(eventName = "USER_VALIDATE")//<1>
+public class UserValidateEndpoint extends QueryEndpoint { //<2>
     @Override
-    @SagaEndpointListener(value = "DO_USER_VALIDATE")
+    @SagaEndpointListener(value = "DO_USER_VALIDATE") //<3>
     public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) {
-        this.doProcessAsync(consumerRecord);
+        this.doProcessAsync(consumerRecord); //<4>
     }
 
-    @Override
+    @Override //<5>
     protected void doProcessAsyncInAction(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
         try {
-            //implement your execution //<4>
+            //implement your execution //<6>
         } catch (Exception e) {
-            //throws RetryableException Or NonRetryableException based on the exception; //<5>
+            //throws RetryableException Or NonRetryableException based on the exception; //<7>
         }
     }
 
-    @Override
+    @Override //<8>
     public void onDoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) {
         //do something when Query execution retrying exhausted.
     }
@@ -133,20 +134,27 @@ public class UserValidateEndpoint extends QueryEndpoint {
 <2> Extend your custom `QueryEndpoint` class from `QueryEndpoint` abstract class.
 then you have to override a *required abstract method* called `doProcess(consumerRecord)`.
 <3> Annotate the `doProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
-<4> Implement your real execution here (ex: database accessing etc.).
-<5> Catch the exception carefully. the error that you throws will determine whether if the execution should be retried or stop processing. +
+<4> Call the `doProcessAsync(consumerRecord)` method by passing the received `consumerRecord`.
+it will handed off the execution to a separate thread pool and internally configure the retry capabilities, and also it sends the response back to the orchestrator-service after executing(success or failed).
+it executes the `doProcessAsyncInAction()` to invoke your real code.
+
+<5> override the `doProcessAsyncInAction()` method due to that method is invoked by the `doProcessAsync()` internally to run your exact business logic.
+this is where you should write your exact business logic. +
++
+NOTE: The method is called in different thread from xref:#[thread pool].
+
+<6> Implement your real execution here (ex: database accessing etc.).
+<7> Catch the exception carefully. the error that you throws will determine whether if the execution should be retried or stop processing. +
 As you can see in the method signature, you can throw `RetryableException` or `NonRetryableException` based on the exception you have. +
 +
 IMPORTANT: Classification the exception is the most important part in stacksaga. the unhandled `RuntimeException`(s) are considered as `NonRetryableException` exceptions. then the engine stops executing and sent a message to the orchestrator-service as there is a primary execution exception. and then it will start compensation process.
-<6> If you want to execute something when the execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
-<7> xref:#retryable_endpoint_annotation[@SagaRetryableEndpoint] annotation has been used for enabling xref:Keep-Ordering_Topic-based[] mode.
-it avoids xref:Keep-Ordering_In-memory-retries[] and helps to keep consumer thread non-blocking in retrying. xref:#retryable_endpoint_annotation[read more...]
+<8> If you want to execute something when the execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
 [[command-endpoints]]
 === Command Endpoints
 
 if an execution(atomic execution) make some state change in the database of the respective service those kinds of executions are executed in *Command Endpoints*. due to the fact that it make some state changes in the database of the respective service, in case of failure, the changes should be restored by invoking compensation reaction.
-these are the topics that define in the in xref:stacksaga-kafka/saga-topic/saga-topic.adoc[] with type of `SagaTopicType.QUERY_DO_ACTION`
+these are the topics that define in the in xref:stacksaga-kafka/saga-topic/saga-topic.adoc[] with type of `SagaTopicType.COMMAND_DO_ACTION`
 
 - Each Command Endpoint creates two topics in kafka for the primary execution and the compensation execution.
 ** `DO_MAKE_PAYMENT` (primary execution topic)
