@@ -11,7 +11,7 @@ Stacksaga Kafka Endpoints stands for creating topics accordingly Stacksaga engin
 // image::stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-engine-stacksaga-kafka-endpoints.svg[]
 
 [[query-endpoints]]
-=== Query Endpoints
+=== Query Endpoint
 
 If an execution(atomic execution) doesn't make any state change due to executing that execution those kinds of executions are executed in *Query Endpoints*. due to it doesn't make any changes in the database state, it has no any compensation action to undo. +
 these are the topics that define in the in xref:stacksaga-kafka/saga-topic/saga-topic.adoc[] with type of `SagaTopicType.QUERY_DO_ACTION`
@@ -159,7 +159,7 @@ IMPORTANT: Classification the exception is the most important part in stacksaga.
 <8> If you want to execute something when the execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
 [[command-endpoints]]
-=== Command Endpoints
+=== Command Endpoint
 
 if an execution(atomic execution) make some state change in the database of the respective service those kinds of executions are executed in *Command Endpoints*. due to the fact that it make some state changes in the database of the respective service, in case of failure, the changes should be restored by invoking compensation reaction.
 these are the topics that define in the in xref:stacksaga-kafka/saga-topic/saga-topic.adoc[] with type of `SagaTopicType.COMMAND_DO_ACTION`
@@ -466,7 +466,7 @@ public class MakePaymentEndpoint extends CommandEndpoint {
 ----
 
 [[revert-endpoints]]
-=== Revert Endpoints
+=== Revert Endpoint
 
 in Command Endpoints,there is a compensation execution for revering. in case if you want to add more execution before or after when the compensation execution is done, you can create *Revert Endpoints* to execute those kind of executions.
 
@@ -785,6 +785,150 @@ IMPORTANT: As mentioned xref:#dtl_not_recommended[above], retry-exhausted messag
 poll ->  hand off to thread pool -> ack -> consumer continues polling
 ----
 
+[[configuring-ThreadPoolTaskExecutor]]
+=== Configure `ThreadPoolTaskExecutor` in Parallel Mode
+
+As mentioned above in xref:parallel-mode[], spring `ThreadPoolTaskExecutor` is used for retrying pool.
+so you provide or customize the `ThreadPoolTaskExecutor` for each `endpoint` as follows,
+
+* use default `stacksagaKafkaAsyncTaskExecutor` or update it via the xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-configuration-properties.adoc[configuration properties]
+* provide `ThreadPoolTaskExecutor` xref:#custom-ThreadPoolTaskExecutor[via the `endpoint` class] for each, separately.
+
+[[custom-ThreadPoolTaskExecutor]]
+==== provide `ThreadPoolTaskExecutor` via the `endpoint` class (Bean)
+
+If you want to provide separate ThreadPoolTaskExecutor for the endpoint instead of using default one, you can configure the pool by overriding the `customize+actionName+ThreadPoolTaskExecutor` method.
+
+* xref:query-endpoints[] or xref:revert-endpoints[]
+- `customizeDoProcessThreadPoolTaskExecutor()` --  customize `doProcess` topic's pool.
+* xref:command-endpoints[]
+- `customizeDoProcessThreadPoolTaskExecutor()` --  customize `doProcess` topic's pool.
+- `customizeUndoProcessThreadPoolTaskExecutor()` --  customize `undoProcess` topic's pool.
+
+IMPORTANT: All above `customize**` methods are called when only the bean is initialized(one time call method).
+
+See th example below,
+
+[source,java]
+----
+@Endpoint(eventName = "MAKE_PAYMENT")
+public class MakePaymentEndpoint extends CommandEndpoint {
+
+    @Override
+    @SagaEndpointListener("DO_MAKE_PAYMENT")
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
+        this.doProcessAsync(consumerRecord);
+    }
+
+    @Override
+    protected void doProcessAsyncInAction(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
+        //TODO: implement the business logic
+    }
+
+    @Override
+    protected ThreadPoolTaskExecutor customizeDoProcessThreadPoolTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5);           // number of core threads (always alive)
+        executor.setMaxPoolSize(10);           // max threads when queue is full
+        executor.setQueueCapacity(50);         // tasks that can wait before new thread is created
+        executor.setKeepAliveSeconds(60);      // idle thread timeout (for threads above core)
+        executor.setThreadNamePrefix("custom-do-pool-"); // helps debugging
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy()); //<1>
+        // if queue is full, runs task in the caller thread instead of discarding
+        executor.initialize();  // MUST call to apply settings
+        return executor;
+    }
+
+
+    @Override
+    @SagaEndpointListener("UNDO_MAKE_PAYMENT")
+    public void undoProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
+        this.undoProcessAsync(consumerRecord);
+    }
+
+    @Override
+    protected void undoProcessAsyncInAction(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
+        //TODO: implement the business logic
+    }
+
+    @Override
+    protected ThreadPoolTaskExecutor customizeUndoProcessThreadPoolTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5);           // number of core threads (always alive)
+        executor.setMaxPoolSize(10);           // max threads when queue is full
+        executor.setQueueCapacity(50);         // tasks that can wait before new thread is created
+        executor.setKeepAliveSeconds(60);      // idle thread timeout (for threads above core)
+        executor.setThreadNamePrefix("custom-undo-pool-"); // helps debugging
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy()); //<1>
+        // if queue is full, runs task in the caller thread instead of discarding
+        executor.initialize();  // MUST call to apply settings
+        return executor;
+    }
+}
+----
+
+[[backpressure_real_impl]]
+<1> You can manage the Backpressure naturally by setting `CallerRunsPolicy` to the pool. or of it is different, you can manage the Backpressure using `pause()` / `resume()` polling. read more xref:backpressure[]
+
+[[backpressure]]
+=== Managing Backpressure in Parallel Mode
+
+*_What is Backpressure?_*
+
+Backpressure is the mechanism that prevents a fast producer (Kafka) from overwhelming a slower consumer (our application).
+In streaming and messaging systems, producers can deliver messages at very high rates, but consumers often process them at varying speeds due to CPU, memory, or downstream system constraints. +
+
+*Without backpressure, the system risks:*
+
+* Queue overload – unbounded growth of messages waiting to be processed.
+
+* Out-of-memory errors – if queues or caches keep accumulating messages.
+
+* System instability – spikes of load leading to crashes or degraded performance.
+
+*Why Backpressure Matters in Kafka Consumers*
+
+Kafka is designed for high throughput and can deliver thousands of messages per second.
+But in real-world applications:
+
+* Processing involves I/O calls (DB writes, API calls).
+
+* Consumers often run on thread pools with finite capacity.
+
+* Workloads may have traffic spikes (e.g., flash sales, seasonal demand).
+
+👉 If we just let Kafka keep polling endlessly, the consumer’s thread pool queue fills up, memory usage increases, and tasks start failing.
+
+Managing Backpressure in `Parallel Mode` is crucial. because consumer thread(s) are not blocked by default due to the executions are hand off to a custom thread-pool.
+it can be done in two ways,
+
+* *Natural Backs-off* +
+By configuring the executor pool with CallerRunsPolicy.
+it slows down the consumer naturally by forcing the caller thread to run tasks, which indirectly throttles Kafka polling. +
++
+IMPORTANT: This is the default Backpressure managing mechanism if you are using default pool called `stacksagaKafkaAsyncTaskExecutor`.
+or even you customize the pool you can by setting the `rejectedExecutionHandler` as `CallerRunsPolicy`. +
+Checkout xref:#backpressure_real_impl[here].
+
+* *`pause()` / `resume()`* +
+Temporarily stop polling messages from Kafka when the system is under pressure, and resume when it’s ready to handle more.
+If your custom ThreadPoolTaskExecutor does not use CallerRunsPolicy as its RejectedExecutionHandler, tasks will be rejected once the pool is full.
+To prevent task loss and system overload, the framework internally pauses message polling from the respective topic when the executor queue reaches its capacity.
+Polling is resumed only when the queue has dropped to a safe threshold — by default, when the `QueueSize` falls below 50% of the configured `QueueCapacity`.
++
+If you want to customize the threshold, you can override the relevant *isReadyToResume* method(`isUndoProcessReadyToResume()`,`isDoProcessReadyToResume()`) and provide the resume should be started or not by returning the `boolen` value.
+You can use the following necessary utility methods that the endpoint provides to accumulate(by using the pool's matrix) whether it should be resumed or not.
+
+* `getConfiguredDoProcessThreadPoolTaskExecutor()` or `getConfiguredUndoProcessThreadPoolTaskExecutor()` to get the configured thread pool details. (default one or customized one).
+
+or if you use own way to `resume` the polling like `Scheduling`, you can use the inbuilt methods mentioned below,
+
+* `resumeDoProcessContainer()` --  Can be used for `resume` message polling from the `doProcess` topic.
+* `resumeUndoProcessContainer()` -- Can be used for `resume` message polling from the `undoProcess` topic.
+* `isDoProcessPauseRequested()` -- Can be used for check polling pause requested or not from the `doProcess` topic.
+* `isUndoProcessPauseRequested()` -- Can be used for check polling pause requested or not from the `undoProcess` topic.
+* `pauseDoProcessContainer()` -- Can be used for `paused` message polling from the `doProcess` topic.
+* `pauseUndoProcessContainer()` -- Can be used for `paused` message polling from the `undoProcess` topic.
 
 [[configuring-retry-template]]
 === Configuring `RetryTemplate` in Parallel Mode
@@ -795,7 +939,7 @@ As mentioned above in xref:parallel-mode[], spring `RetryTemplate` is used for r
 * provide `RetryTemplate` xref:#custom-RetryTemplate[via the `endpoint` class] for each, separately.
 
 [[custom-RetryTemplate]]
-==== provide `RetryTemplate` via the `endpoint` class
+==== provide `RetryTemplate` via the `endpoint` class (Bean)
 
 you can override the `getRetryTemplate()` method from any of endpoints(xref:query-endpoints[],xref:command-endpoints[] or xref:query-endpoints[]) and provide your custom `RetryTemplate`. then it will be used for retrying your `undoProcessAsyncInAction()` or `processAsyncInAction()` method(s) like below.
 
@@ -815,7 +959,7 @@ public class UserValidateEndpoint extends QueryEndpoint {
     }
 
     @Override
-    protected RetryTemplate getRetryTemplate() {
+    protected RetryTemplate customizeDoProcessRetryTemplate() {
         RetryTemplate retryTemplate = new RetryTemplate();
         // ✅ Retry Policy (e.g., retry max 3 times for any Exception)
         SimpleRetryPolicy retryPolicy = new SimpleRetryPolicy(3);
