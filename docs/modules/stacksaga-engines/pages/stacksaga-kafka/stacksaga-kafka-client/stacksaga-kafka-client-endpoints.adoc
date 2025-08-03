@@ -26,6 +26,12 @@ As per the above diagram,
 
 * the orchestrator service(order-service) trigger an event via the xref:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[] the topic of `DO_VALIDATE_USER`(the event is triggered by the SEC behind the sense accordingly your navigation in the xref:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[]).
 
+
+. xref:#query-endpoints-keep-ordering-in-memory-retries[]
+. xref:#query-endpoints-keep-ordering-non-blocking-retries[]
+. xref:#query-endpoints-parallel-mode-in-memory-retries[]
+
+[[query-endpoints-keep-ordering-in-memory-retries]]
 ==== Query Endpoints -- Keep‑Ordering Mode with In‑memory retries
 
 This example shows that how a custom Query-Endpoint is implemented in xref:Keep-ordering-mode[] and the retrying is done in xref:Keep-Ordering_In-memory-retries[] mode.
@@ -61,6 +67,7 @@ As you can see in the method signature, you can throw `RetryableException` or `N
 IMPORTANT: Classification the exception is the most important part in stacksaga. the unhandled `RuntimeException`s are considered as `NonRetryableException` exceptions. then the engine stops executing and sent a message to the orchestrator-service as there is a primary execution exception. and then it will start compensation process.
 <6> If you want to execute something when the execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
+[[query-endpoints-keep-ordering-non-blocking-retries]]
 ==== Query Endpoints -- Keep‑Ordering Mode with Topic‑based/Non-Blocking retries
 
 This example shows that how a custom Query-Endpoint is implemented in xref:Keep-ordering-mode[] and the retrying is done in xref:Keep-Ordering_Topic-based[] mode.
@@ -100,6 +107,7 @@ IMPORTANT: Classification the exception is the most important part in stacksaga.
 it avoids xref:Keep-Ordering_In-memory-retries[] and helps to keep consumer thread non-blocking in retrying. xref:#retryable_endpoint_annotation[read more...]
 ##
 
+[[query-endpoints-parallel-mode-in-memory-retries]]
 ==== Query Endpoints -- Async/Parallel Mode with RetryTemplate in-memory retries
 
 This example shows that how a custom Query-Endpoint is implemented in xref:parallel-mode[] and the retrying is done in xref:parallel-mode[RetryTemplate in-memory retries] mode.
@@ -164,6 +172,12 @@ these are the topics that define in the in xref:stacksaga-kafka/saga-topic/saga-
 
 image:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-engine-command-endpoint.svg[]
 
+. xref:#command-endpoints-keep-ordering-in-memory-retries[]
+. xref:#command-endpoints-keep-ordering-non-blocking-retries[]
+. xref:#command-endpoints-parallel-mode-in-memory-retries[]
+
+
+[[command-endpoints-keep-ordering-in-memory-retries]]
 ==== Command-Endpoints -- Keep‑Ordering Mode with In‑memory retries
 
 This example shows that how a custom Command-Endpoint is implemented in xref:Keep-ordering-mode[] and the retrying is done in xref:Keep-Ordering_In-memory-retries[] mode.
@@ -178,13 +192,15 @@ public class MakePaymentEndpoint extends CommandEndpoint { //<2>
     public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
 
         try {
-            final ObjectNode aggregatorForUpdate = consumerRecord.value().getAggregatorForUpdate(); //accessing the current aggregator state //<4>
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<4>
+            log.debug("idempotencyKey for UPDATE_STOCK_LOG: {}", idempotencyKey);
+            final ObjectNode aggregatorForUpdate = consumerRecord.value().getAggregatorForUpdate(); //accessing the current aggregator state //<5>
             double amount = aggregatorForUpdate.get("amount").asDouble();
             if (amount == 0) {
-                throw NonRetryableException.buildWith(new IllegalStateException("amount must be greater than 0")); //<5>
+                throw NonRetryableException.buildWith(new IllegalStateException("amount must be greater than 0")); //<6>
             }
-            aggregatorForUpdate.put("payment_status", "SUCCESS"); //updating the aggregator state //<6>
-        } catch (Exception e) { //<7>
+            aggregatorForUpdate.put("payment_status", "SUCCESS"); //updating the aggregator state //<7>
+        } catch (Exception e) { //<8>
             if (retryable) {
                 throw RetryableException.buildWith(e);
             } else {
@@ -193,31 +209,32 @@ public class MakePaymentEndpoint extends CommandEndpoint { //<2>
         }
     }
 
-    @Override //<8>
+    @Override //<9>
     protected void onDoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) {
         //do something when primary Command execution retrying exhausted.
     }
 
 
     @Override
-    @SagaEndpointListener("UNDO_MAKE_PAYMENT") //<9>
+    @SagaEndpointListener("UNDO_MAKE_PAYMENT") //<10>
     public void undoProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
         try {
-            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state //<10>
-
+            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state //<11>
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<12>
+            log.debug("idempotencyKey for UNDO_MAKE_PAYMENT: {}", idempotencyKey);
             final double amount = aggregator.get("amount").asDouble();
-            final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception //<11>
+            final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception //<13>
             log.debug("amount is going to be deducted from the account {} due to {}", amount, primaryExecutionException.getRealExceptionMessage());
 
             consumerRecord.value().getHintStore().ifPresent(historyStore -> {
-                historyStore.put("payment_status_revert", "SUCCESS"); //updating the historyStore //<12>
+                historyStore.put("payment_status_revert", "SUCCESS"); //updating the historyStore //<14>
             });
         } catch (Exception e) {
-            throw RetryableException.buildWith(e); //<13>
+            throw RetryableException.buildWith(e); //<15>
         }
     }
 
-    @Override //<14>
+    @Override //<16>
     protected void onUndoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) {
         //do something when undo(revert/compensation) execution retrying exhausted.
     }
@@ -231,32 +248,37 @@ then you have to override two *required abstract methods* called `doProcess(cons
 
 <3> Annotate the `doProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
 
-<4> Accessing the current aggregator state. you can get the current aggregator state from the `SagaPayload` object and also update the aggregator state upon the business logic.
+<4> Accessing the IdempotencyKey for the respective event. the key is set by stacksaga engine from the orchestrator service. read more about maintaining the xref:ROOT:idempotency.adoc[idempotency].
 
-<5> You can throw a `NonRetryableException` if you want to stop the transaction going forward. orchestrator service will be received an error response, and it will start compensation process.
+<5> Accessing the current aggregator state. you can get the current aggregator state from the `SagaPayload` object and also update the aggregator state upon the business logic.
 
-<6> updating the aggregator state
+<6> You can throw a `NonRetryableException` if you want to stop the transaction going forward. orchestrator service will be received an error response, and it will start compensation process.
 
-<7> Catch the exception carefully. the error that you throws will determine whether if the execution should be retried or stop processing. +
+<7> updating the aggregator state
+
+<8> Catch the exception carefully. the error that you throws will determine whether if the execution should be retried or stop processing. +
 As you can see in the method signature, you can throw `RetryableException` or `NonRetryableException` based on the exception you have. +
 +
 IMPORTANT: Classification the exception is the most important part in stacksaga. the unhandled `RuntimeException`(s) are considered as `NonRetryableException` exceptions. then the engine stops executing and sent a message to the orchestrator-service as there is a primary execution exception. and then it will start compensation process.
 
-<8> If you want to execute something when the primary-execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
+<9> If you want to execute something when the primary-execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
-<9> Annotate the `undoProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
+<10> Annotate the `undoProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
 
-<10> Accessing the last aggregator state(the state that was before primary-exception occurred) to retrieve the aggregator data.
+<11> Accessing the last aggregator state(the state that was before primary-exception occurred) to retrieve the aggregator data.
 
-<11> Accessing the primary execution exception.
+<12> Accessing the IdempotencyKey for the respective event. the key is set by stacksaga engine from the orchestrator service. read more about maintaining the xref:ROOT:idempotency.adoc[idempotency].
 
-<12> Updating the HistoryStore for setting the data on compensation process.
+<13> Accessing the primary execution exception.
 
-<13> throws and exception. in the compensation process, it can not have any `NonRetryableException` or `RuntimeException` due to compensation. it can have only `RetryableException`.
+<14> Updating the HistoryStore for setting the data on compensation process.
+
+<15> throws an exception. in the compensation process, it can not have any `NonRetryableException` or `RuntimeException` due to compensation. it can have only `RetryableException`.
 if an exception is thrown except `RetryableException` the transaction will be terminated by stopping compensation process.
 
-<14> If you want to execute something when the revert-execution is failed even after retrying(retrying-exhausted) you can override and use the `onUndoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
+<16> If you want to execute something when the revert-execution is failed even after retrying(retrying-exhausted) you can override and use the `onUndoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
+[[command-endpoints-keep-ordering-non-blocking-retries]]
 ==== Command-Endpoints -- Keep‑Ordering Mode with Topic‑based/Non-Blocking retries
 
 This example shows that how a custom Command-Endpoint is implemented in xref:Keep-ordering-mode[] and the retrying is done in xref:Keep-Ordering_Topic-based[] mode.
@@ -272,13 +294,16 @@ public class MakePaymentEndpoint extends CommandEndpoint { //<2>
     public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
 
         try {
-            final ObjectNode aggregatorForUpdate = consumerRecord.value().getAggregatorForUpdate(); //accessing the current aggregator state //<4>
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<4>
+            log.debug("idempotencyKey for DO_MAKE_PAYMENT: {}", idempotencyKey);
+
+            final ObjectNode aggregatorForUpdate = consumerRecord.value().getAggregatorForUpdate(); //accessing the current aggregator state //<5>
             double amount = aggregatorForUpdate.get("amount").asDouble();
             if (amount == 0) {
-                throw NonRetryableException.buildWith(new IllegalStateException("amount must be greater than 0")); //<5>
+                throw NonRetryableException.buildWith(new IllegalStateException("amount must be greater than 0")); //<6>
             }
-            aggregatorForUpdate.put("payment_status", "SUCCESS"); //updating the aggregator state //<6>
-        } catch (Exception e) { //<7>
+            aggregatorForUpdate.put("payment_status", "SUCCESS"); //updating the aggregator state //<7>
+        } catch (Exception e) { //<8>
             if (retryable) {
                 throw RetryableException.buildWith(e);
             } else {
@@ -287,32 +312,35 @@ public class MakePaymentEndpoint extends CommandEndpoint { //<2>
         }
     }
 
-    @Override //<8>
+    @Override //<9>
     protected void onDoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) {
         //do something when primary Command execution retrying exhausted.
     }
 
 
     @Override
-    @SagaEndpointListener("UNDO_MAKE_PAYMENT") //<9>
-    @SagaRetryableEndpoint(attempts = "3", backoff = @Backoff(delay = 5000, multiplier = 0.5))//<15>
+    @SagaEndpointListener("UNDO_MAKE_PAYMENT") //<10>
+    @SagaRetryableEndpoint(attempts = "3", backoff = @Backoff(delay = 5000, multiplier = 0.5))//<17>
     public void undoProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
         try {
-            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state //<10>
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<11>
+            log.debug("idempotencyKey for UNDO_MAKE_PAYMENT: {}", idempotencyKey);
+
+            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state //<12>
 
             final double amount = aggregator.get("amount").asDouble();
-            final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception //<11>
+            final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception //<13>
             log.debug("amount is going to be deducted from the account {} due to {}", amount, primaryExecutionException.getRealExceptionMessage());
 
             consumerRecord.value().getHintStore().ifPresent(historyStore -> {
-                historyStore.put("payment_status_revert", "SUCCESS"); //updating the historyStore //<12>
+                historyStore.put("payment_status_revert", "SUCCESS"); //updating the historyStore //<14>
             });
         } catch (Exception e) {
-            throw RetryableException.buildWith(e); //<13>
+            throw RetryableException.buildWith(e); //<15>
         }
     }
 
-    @Override //<14>
+    @Override //<16>
     protected void onUndoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) {
         //do something when undo(revert/compensation) execution retrying exhausted.
     }
@@ -326,36 +354,41 @@ then you have to override two *required abstract methods* called `doProcess(cons
 
 <3> Annotate the `doProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
 
-<4> Accessing the current aggregator state. you can get the current aggregator state from the `SagaPayload` object and also update the aggregator state upon the business logic.
+<4> Accessing the IdempotencyKey for the respective event. the key is set by stacksaga engine from the orchestrator service. read more about maintaining the xref:ROOT:idempotency.adoc[idempotency].
 
-<5> You can throw a `NonRetryableException` if you want to stop the transaction going forward. orchestrator service will be received an error response, and it will start compensation process.
+<5> Accessing the current aggregator state. you can get the current aggregator state from the `SagaPayload` object and also update the aggregator state upon the business logic.
 
-<6> updating the aggregator state
+<6> You can throw a `NonRetryableException` if you want to stop the transaction going forward. orchestrator service will be received an error response, and it will start compensation process.
 
-<7> Catch the exception carefully. the error that you throws will determine whether if the execution should be retried or stop processing. +
+<7> updating the aggregator state
+
+<8> Catch the exception carefully. the error that you throws will determine whether if the execution should be retried or stop processing. +
 As you can see in the method signature, you can throw `RetryableException` or `NonRetryableException` based on the exception you have. +
 +
 IMPORTANT: Classification the exception is the most important part in stacksaga. the unhandled `RuntimeException`(s) are considered as `NonRetryableException` exceptions. then the engine stops executing and sent a message to the orchestrator-service as there is a primary execution exception. and then it will start compensation process.
 
-<8> If you want to execute something when the primary-execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
+<9> If you want to execute something when the primary-execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
-<9> Annotate the `undoProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
+<10> Annotate the `undoProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
 
-<10> Accessing the last aggregator state(the state that was before primary-exception occurred) to retrieve the aggregator data.
+<11> Accessing the IdempotencyKey for the respective event. the key is set by stacksaga engine from the orchestrator service. read more about maintaining the xref:ROOT:idempotency.adoc[idempotency].
 
-<11> Accessing the primary execution exception.
+<12> Accessing the last aggregator state(the state that was before primary-exception occurred) to retrieve the aggregator data.
 
-<12> Updating the HistoryStore for setting the data on compensation process.
+<13> Accessing the primary execution exception.
 
-<13> throws and exception. in the compensation process, it can not have any `NonRetryableException` or `RuntimeException` due to compensation. it can have only `RetryableException`.
+<14> Updating the HistoryStore for setting the data on compensation process.
+
+<15> throws an exception. in the compensation process, it can not have any `NonRetryableException` or `RuntimeException` due to compensation. it can have only `RetryableException`.
 if an exception is thrown except `RetryableException` the transaction will be terminated by stopping compensation process.
 
-<14> If you want to execute something when the revert-execution is failed even after retrying(retrying-exhausted) you can override and use the `onUndoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
+<16> If you want to execute something when the revert-execution is failed even after retrying(retrying-exhausted) you can override and use the `onUndoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
-<15> ##xref:#retryable_endpoint_annotation[@SagaRetryableEndpoint] annotation has been used on `doProcess()` method and `undoProcess()` for enabling xref:Keep-Ordering_Topic-based[] mode.
+<17> ##xref:#retryable_endpoint_annotation[@SagaRetryableEndpoint] annotation has been used on `doProcess()` method and `undoProcess()` for enabling xref:Keep-Ordering_Topic-based[] mode.
 it avoids xref:Keep-Ordering_In-memory-retries[] and helps to keep consumer thread non-blocking in retrying. xref:#retryable_endpoint_annotation[read more...]
 ##
 
+[[command-endpoints-parallel-mode-in-memory-retries]]
 ==== Command-Endpoints -- Async/Parallel Mode with RetryTemplate in-memory retries
 
 This example shows that how a custom Command-Endpoint is implemented in xref:parallel-mode[] and the retrying is done in xref:parallel-mode[RetryTemplate in-memory retries] mode.
@@ -376,7 +409,9 @@ public class MakePaymentEndpoint extends CommandEndpoint {
     @Override
     protected void doProcessAsyncInAction(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
         try {
-            //TODO: implement the business logic
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<4>
+            log.debug("idempotencyKey for DO_MAKE_PAYMENT: {}", idempotencyKey);
+
             final ObjectNode aggregatorForUpdate = consumerRecord.value().getAggregatorForUpdate(); //accessing the current aggregator state
             double amount = aggregatorForUpdate.get("amount").asDouble();
             if (amount == 0) {
@@ -406,8 +441,10 @@ public class MakePaymentEndpoint extends CommandEndpoint {
     @Override
     protected void undoProcessAsyncInAction(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
         try {
-            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<4>
+            log.debug("idempotencyKey for DO_MAKE_PAYMENT: {}", idempotencyKey);
 
+            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state
             final double amount = aggregator.get("amount").asDouble();
             final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception
             log.debug("amount is going to be deducted from the account {} due to {}", amount, primaryExecutionException.getRealExceptionMessage());
@@ -437,6 +474,163 @@ in Command Endpoints,there is a compensation execution for revering. in case if 
 ** `REVERT_MAKE_PAYMENT_LOG` (sub compensating execution topic)
 
 image:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-engine-revert-endpoints.svg[]
+
+
+. xref:#revert-endpoints-keep-ordering-in-memory-retries[]
+. xref:#revert-endpoints-keep-ordering-non-blocking-retries[]
+. xref:#revert-endpoints-parallel-mode-in-memory-retries[]
+
+
+[[revert-endpoints-keep-ordering-in-memory-retries]]
+==== Revert-Endpoints -- Keep‑Ordering Mode with In‑memory retries
+
+This example shows that how a custom Revert-Endpoint is implemented in xref:Keep-ordering-mode[] and the retrying is done in xref:Keep-Ordering_In-memory-retries[] mode.
+
+[source,java]
+----
+@Endpoint(eventName = "UPDATE_STOCK_LOG") //<1>
+public class UpdateStockLogEndpoint extends RevertEndpoint { //<2>
+
+    @Override
+    @SagaEndpointListener("UPDATE_STOCK_LOG") //<3>
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
+        try {
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<4>
+            log.debug("idempotencyKey for UPDATE_STOCK_LOG: {}", idempotencyKey);
+
+            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state for reading //<5>
+            final double amount = aggregator.get("amount").asDouble();
+            final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception //<6>
+            log.debug("amount has been deducted from the account {} due to {}", amount, primaryExecutionException.getRealExceptionMessage());
+
+            consumerRecord.value().getHintStore().ifPresent(historyStore -> {
+                historyStore.put("update_stock_log_status", "SUCCESS"); //updating the historyStore //<7>
+            });
+        } catch (Exception e) {
+            throw RetryableException.buildWith(e); //<8>
+        }
+    }
+
+    @Override
+    protected void onDoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) { //<9>
+        //do something when extra-revert execution retrying exhausted.
+    }
+}
+----
+
+<1> Annotate your custom `RevertEndpoint` class with xref:#Endpoint-annotation[`@Endpoint`] and set the eventName.
+
+<2> Extend your custom RevertEndpoint class from RevertEndpoint abstract class. then you have to override a required abstract method called doProcess(consumerRecord).
+
+<3> Annotate the `doProcess(consumerRecord)` with xref:#SagaEndpointListener-annotation[@SagaEndpointListener] annotation to make the method as a `kafka consumer` and provide the topic name as per the stacksaga xref:#topic-name-specifications[].
+
+<4> Accessing the IdempotencyKey for the respective event. the key is set by stacksaga engine from the orchestrator service. read more about maintaining the xref:ROOT:idempotency.adoc[idempotency].
+<5> Accessing the current aggregator state. you can get the current aggregator state from the `SagaPayload` object and also update the aggregator state upon the business logic.
+<6> Accessing the primary execution exception.
+
+<7> Updating the HistoryStore for setting the data on compensation process.
+<8> Throws an exception. in the compensation process, it can not have any `NonRetryableException` or `RuntimeException` due to compensation. it can have only `RetryableException`. if an exception is thrown except `RetryableException` the transaction will be terminated by stopping compensation process.
+
+<9> If you want to execute something when the execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
+
+[[revert-endpoints-keep-ordering-non-blocking-retries]]
+
+==== Revert-Endpoints -- Keep‑Ordering Mode with Topic‑based/Non-Blocking retries
+
+This example shows that how a custom Revert-Endpoint is implemented in xref:Keep-ordering-mode[] and the retrying is done in xref:Keep-Ordering_Topic-based[] mode.
+
+[source,java]
+----
+@Endpoint(eventName = "UPDATE_STOCK_LOG")
+public class UpdateStockLogEndpoint extends RevertEndpoint {
+
+    @Override
+    @SagaEndpointListener("UPDATE_STOCK_LOG")
+    @SagaRetryableEndpoint(attempts = "3", backoff = @Backoff(delay = 5000, multiplier = 0.5)) //<1>
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
+        try {
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event
+            log.debug("idempotencyKey for UPDATE_STOCK_LOG: {}", idempotencyKey);
+
+            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state for reading
+            final double amount = aggregator.get("amount").asDouble();
+            final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception
+            log.debug("amount has been deducted from the account {} due to {}", amount, primaryExecutionException.getRealExceptionMessage());
+
+            consumerRecord.value().getHintStore().ifPresent(historyStore -> {
+                historyStore.put("update_stock_log_status", "SUCCESS"); //updating the historyStore
+            });
+        } catch (Exception e) {
+            throw RetryableException.buildWith(e);
+        }
+    }
+
+    @Override
+    protected void onDoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) {
+        //do something when extra-revert execution retrying exhausted.
+    }
+}
+----
+
+Almost pretty much same as xref:#revert-endpoints-keep-ordering-in-memory-retries[]. additionally,
+
+<1> ##xref:#retryable_endpoint_annotation[@SagaRetryableEndpoint] annotation has been used on `doProcess()` method for enabling xref:Keep-Ordering_Topic-based[] mode.
+it avoids xref:Keep-Ordering_In-memory-retries[] and helps to keep consumer thread non-blocking in retrying. xref:#retryable_endpoint_annotation[read more...]
+##
+
+[[revert-endpoints-parallel-mode-in-memory-retries]]
+==== Revert-Endpoints -- Async/Parallel Mode with RetryTemplate in-memory retries
+
+This example shows that how a custom Revert-Endpoint is implemented in xref:parallel-mode[] and the retrying is done in xref:parallel-mode[RetryTemplate in-memory retries] mode.
+
+[source,java]
+----
+@Endpoint(eventName = "UPDATE_STOCK_LOG")
+public class UpdateStockLogEndpoint extends RevertEndpoint {
+
+    @Override
+    @SagaEndpointListener("UPDATE_STOCK_LOG")
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
+        this.doProcessAsync(consumerRecord);
+    }
+
+    @Override
+    protected void doProcessAsyncInAction(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException {
+        try {
+            String idempotencyKey = consumerRecord.value().getIdempotencyKey(); //accessing the IdempotencyKey for the respective event //<4>
+            log.debug("idempotencyKey for UPDATE_STOCK_LOG: {}", idempotencyKey);
+
+            final JsonNode aggregator = consumerRecord.value().getAggregator();//accessing the last aggregator state for reading
+            final double amount = aggregator.get("amount").asDouble();
+            final PrimaryExecutionException primaryExecutionException = consumerRecord.value().getPrimaryExecutionException().orElseThrow(); //accessing the primary execution exception
+            log.debug("amount has been deducted from the account {} due to {}", amount, primaryExecutionException.getRealExceptionMessage());
+
+            consumerRecord.value().getHintStore().ifPresent(historyStore -> {
+                historyStore.put("update_stock_log_status", "SUCCESS"); //updating the historyStore
+            });
+        } catch (Exception e) {
+            throw RetryableException.buildWith(e);
+        }
+    }
+
+    @Override
+    protected void onDoProcessExhausted(ConsumerRecord<String, SagaPayload> consumerRecord) {
+        //do something when Query execution retrying exhausted.
+    }
+}
+----
+
+Almost pretty much same as xref:#revert-endpoints-keep-ordering-in-memory-retries[].
+But,
+
+The business logic part has been moved to the overridden method called `doProcessAsyncInAction()` instead of `doProcess()` method. and `this.doProcessAsync(consumerRecord)` method has been called in the `doProcess()` method. the execution flow as fallows.
+
+
+----
+  | [consumer-thread] |    | [consumer-thread] |    |   [saga-async- thread]    |
+>>|                   | -> |                   | -> |                           |
+  |   doProcess()     |    | doProcessAsync()  |    | doProcessAsyncInAction()  |
+----
 
 [[Endpoint-annotation]]
 == @Endpoint Annotation
