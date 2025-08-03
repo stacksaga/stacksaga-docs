@@ -534,7 +534,6 @@ public class UpdateStockLogEndpoint extends RevertEndpoint { //<2>
 <9> If you want to execute something when the execution is failed even after retrying(retrying-exhausted) you can override and use the `onDoProcessExhausted(consumerRecord)`  method to overcome that as a hock.
 
 [[revert-endpoints-keep-ordering-non-blocking-retries]]
-
 ==== Revert-Endpoints -- Keep‑Ordering Mode with Topic‑based/Non-Blocking retries
 
 This example shows that how a custom Revert-Endpoint is implemented in xref:Keep-ordering-mode[] and the retrying is done in xref:Keep-Ordering_Topic-based[] mode.
@@ -572,7 +571,7 @@ public class UpdateStockLogEndpoint extends RevertEndpoint {
 }
 ----
 
-Almost pretty much same as xref:#revert-endpoints-keep-ordering-in-memory-retries[]. additionally,
+The implementation is pretty much the same as xref:#revert-endpoints-keep-ordering-in-memory-retries[]. additionally,
 
 <1> ##xref:#retryable_endpoint_annotation[@SagaRetryableEndpoint] annotation has been used on `doProcess()` method for enabling xref:Keep-Ordering_Topic-based[] mode.
 it avoids xref:Keep-Ordering_In-memory-retries[] and helps to keep consumer thread non-blocking in retrying. xref:#retryable_endpoint_annotation[read more...]
@@ -620,11 +619,10 @@ public class UpdateStockLogEndpoint extends RevertEndpoint {
 }
 ----
 
-Almost pretty much same as xref:#revert-endpoints-keep-ordering-in-memory-retries[].
+The implementation is pretty much the same as xref:#revert-endpoints-keep-ordering-in-memory-retries[].
 But,
 
 The business logic part has been moved to the overridden method called `doProcessAsyncInAction()` instead of `doProcess()` method. and `this.doProcessAsync(consumerRecord)` method has been called in the `doProcess()` method. the execution flow as fallows.
-
 
 ----
   | [consumer-thread] |    | [consumer-thread] |    |   [saga-async- thread]    |
@@ -768,7 +766,8 @@ IMPORTANT: As mentioned xref:#dtl_not_recommended[above], retry-exhausted messag
 
 - *Description:*
 * Messages are acknowledged immediately in the consumer thread.
-* Processing is handed off to a separate xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-configuration-properties.adoc[`ThreadPoolTaskExecutor`] for parallel execution and xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-configuration-properties.adoc[`RetryTemplate`] is used for in-memory retrying internally.
+* Processing is handed off to a separate xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-configuration-properties.adoc[`ThreadPoolTaskExecutor`] for parallel execution and spring `RetryTemplate` is used for in-memory retrying internally. +
+(read more xref:#configuring-retry-template[])
 
 - *Characteristics:*
 
@@ -786,5 +785,48 @@ IMPORTANT: As mentioned xref:#dtl_not_recommended[above], retry-exhausted messag
 poll ->  hand off to thread pool -> ack -> consumer continues polling
 ----
 
-In Stacksaga Kafka system immediate retrying is done from the target service side. that means the orchestra engine doesn't involve for immediate retrying.
-Stacksaga Kafka Client provides supports two ways to manage immediate retrying as follows.
+
+[[configuring-retry-template]]
+=== Configuring `RetryTemplate` in Parallel Mode
+
+As mentioned above in xref:parallel-mode[], spring `RetryTemplate` is used for retrying. so you provide or customize the `RetryTemplate` for each `endpoint` as follows,
+
+* use default `sagaAsyncRetryTemplate` or update it via the xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-configuration-properties.adoc[configuration properties]
+* provide `RetryTemplate` xref:#custom-RetryTemplate[via the `endpoint` class] for each, separately.
+
+[[custom-RetryTemplate]]
+==== provide `RetryTemplate` via the `endpoint` class
+
+you can override the `getRetryTemplate()` method from any of endpoints(xref:query-endpoints[],xref:command-endpoints[] or xref:query-endpoints[]) and provide your custom `RetryTemplate`. then it will be used for retrying your `undoProcessAsyncInAction()` or `processAsyncInAction()` method(s) like below.
+
+[source,java]
+----
+@Endpoint(eventName = "USER_VALIDATE")
+public class UserValidateEndpoint extends QueryEndpoint {
+    @Override
+    @SagaEndpointListener(value = "DO_USER_VALIDATE")
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
+        this.doProcessAsync(consumerRecord);
+    }
+
+    @Override
+    protected void doProcessAsyncInAction(ConsumerRecord<String, SagaPayload> consumerRecord) throws RetryableException, NonRetryableException {
+        //...
+    }
+
+    @Override
+    protected RetryTemplate getRetryTemplate() {
+        RetryTemplate retryTemplate = new RetryTemplate();
+        // ✅ Retry Policy (e.g., retry max 3 times for any Exception)
+        SimpleRetryPolicy retryPolicy = new SimpleRetryPolicy(3);
+        retryTemplate.setRetryPolicy(retryPolicy);
+
+        // ✅ Backoff Policy (e.g., wait 2 seconds between retries)
+        FixedBackOffPolicy backOffPolicy = new FixedBackOffPolicy();
+        backOffPolicy.setBackOffPeriod(2000);
+        retryTemplate.setBackOffPolicy(backOffPolicy);
+        return retryTemplate;
+    }
+}
+----
+
