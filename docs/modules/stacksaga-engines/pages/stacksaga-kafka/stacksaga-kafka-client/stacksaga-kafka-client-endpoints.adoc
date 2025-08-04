@@ -916,7 +916,8 @@ If your custom ThreadPoolTaskExecutor does not use CallerRunsPolicy as its Rejec
 To prevent task loss and system overload, the framework internally pauses message polling from the respective topic when the executor queue reaches its capacity.
 Polling is resumed only when the queue has dropped to a safe threshold — by default, when the `QueueSize` falls below 50% of the configured `QueueCapacity`.
 +
-If you want to customize the threshold, you can override the relevant *isReadyToResume* method(`isUndoProcessReadyToResume()`,`isDoProcessReadyToResume()`) and provide the resume should be started or not by returning the `boolen` value.
+If you want to customize the threshold or whatever logic, you can override the relevant *isReadyToResume* method(`isUndoProcessReadyToResume()`,`isDoProcessReadyToResume()`) and provide the resume should be started or not by returning the `boolen` value.
+it is called after each and every record execution if the container is `paused` status until `resume`.
 You can use the following necessary utility methods that the endpoint provides to accumulate(by using the pool's matrix) whether it should be resumed or not.
 +
 * `getConfiguredDoProcessThreadPoolTaskExecutor()` or `getConfiguredUndoProcessThreadPoolTaskExecutor()` to get the configured thread pool details. (default one or customized one).
@@ -941,7 +942,18 @@ As mentioned above in xref:parallel-mode[], spring `RetryTemplate` is used for r
 [[custom-RetryTemplate]]
 ==== provide `RetryTemplate` via the `endpoint` class (Bean)
 
-you can override the `getRetryTemplate()` method from any of endpoints(xref:query-endpoints[],xref:command-endpoints[] or xref:query-endpoints[]) and provide your custom `RetryTemplate`. then it will be used for retrying your `undoProcessAsyncInAction()` or `processAsyncInAction()` method(s) like below.
+If you are using `Parallel Mode`, a `RetryTemplate` is used internally for handling retrying. by default, it uses `sagaAsyncRetryTemplate` which provide by stacksaga.
+otherwise, you can change the xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-configuration-properties.adoc[configuration properties] of the default, or you can provide separate `RetryTemplate` for each endpoint by overriding the following methods.
+
+* xref:query-endpoints[] or xref:revert-endpoints[]
+- `customizeDoProcessRetryTemplate()` --  customize `doProcess` topic's pool.
+* xref:command-endpoints[]
+- `customizeDoProcessRetryTemplate()` --  customize `doProcess` topic's pool.
+- `customizeUndoProcessThreadPoolTaskExecutor()` --  customize `undoProcess` topic's pool.
+
+IMPORTANT: All above `customize**` methods are called when only the bean is initialized(one time call method).
+
+See the example below,
 
 [source,java]
 ----
