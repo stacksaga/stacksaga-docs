@@ -82,7 +82,7 @@ The Stacksaga-Kafka Framework consists of several key components that work toget
 
 The usage of each component as follows,
 
-image::stacksaga-engines:stacksaga-kafka/stacksaga-kafka-engine-stacksaga-kafka-components.svg[Stacksaga-Kafka components Architecture,width=800]
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stacksaga-kafka-components.svg[Stacksaga-Kafka components Architecture,width=800]
 
 As mentioned above, the Stacksaga-Kafka Framework consists can be divided into three main parts, +
 the main service get as the orchestrator service, you have to add the `stacksaga-kafka-starter` dependency to your Spring Boot application to make it the orchestrator service. +
@@ -100,12 +100,12 @@ finally, to enable the asynchronous retry mechanism, you need to deploy the `sta
 
 The following diagram illustrates the high-level architecture of the Stacksaga-Kafka Framework and how its components interact to manage and execute sagas.
 
-image::stacksaga-engines:stacksaga-kafka/stacksaga-kafka-engine-architecture-overview.svg[Stacksaga-Kafka Framework Architecture,width=800]
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-architecture-overview.svg[Stacksaga-Kafka Framework Architecture,width=800]
 
-. As per the above diagram, as the first step, you have to xref:stacksaga-engines:stacksaga-kafka/aggregator/aggregator.adoc[create an aggregator] class. it helps to maintain the state of the saga transaction each time the saga progresses through its steps. it works as the payload of primary executions. that means the aggregator objects is serialized and sent as the message to the target service via Kafka by the framework.
+. As per the above diagram, as the first step, you have to xref:implementations:stacksaga-kafka/aggregator/aggregator.adoc[create an aggregator] class. it helps to maintain the state of the saga transaction each time the saga progresses through its steps. it works as the payload of primary executions. that means the aggregator objects is serialized and sent as the message to the target service via Kafka by the framework.
 . Next, you habe to create an enum for storing the saga steps and the topics of the respective events that should be triggered.
-. Next, you can configure how your flow should be executed based on the aggregator state by implementing the xref:stacksaga-engines:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[Saga Event Navigator] interface.
-. Now you can trigger the SEC by using the xref:stacksaga-engines:stacksaga-kafka/saga-kafka-template/saga-kafka-template.adoc[SagaKafkaTemplate] or xref:stacksaga-engines:stacksaga-kafka/saga-kafka-template/saga-reactive-kafka-template.adoc[ReactiveSagaKafkaTemplate]. it provides methods to start a new saga transaction and also to send events to the SEC for progressing the saga.
+. Next, you can configure how your flow should be executed based on the aggregator state by implementing the xref:implementations:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[Saga Event Navigator] interface.
+. Now you can trigger the SEC by using the xref:implementations:stacksaga-kafka/saga-kafka-template/saga-kafka-template.adoc[SagaKafkaTemplate] or xref:implementations:stacksaga-kafka/saga-kafka-template/saga-reactive-kafka-template.adoc[ReactiveSagaKafkaTemplate]. it provides methods to start a new saga transaction and also to send events to the SEC for progressing the saga.
 . Once the transaction is initiated, the SEC takes over and manages the saga's lifecycle. it coordinates between different microservices by sending messages to the appropriate Kafka topics based on the configured saga steps one by one. in case of a failure, it triggers the compensating actions in the reverse order of execution.
 . Each target service listens to its designated Kafka topic using the `stacksaga-kafka-client`. upon receiving a message, the target service processes the request, performs the necessary business logic, and sends a response back to the SEC via the aggregator root topic that created by the framework.
 . Throughout the process, the SEC maintains the state of the transaction and persists events to the configured event store for future-retrying and traceability.
