@@ -1,12 +1,24 @@
 = `stacksaga-mysql-support`
 
+== Overview
+
 `stacksaga-mysql-support` is the mysql implementation of the xref:stacksaga-database-support:overview/database-support-overview.adoc[].
 it provides all the necessary facilities for accessing the mysql database for the Stacksaga engine. and also it provides the endpoints for accessing the event-store to see the tracing details from the xref:stacksaga-admin:stacksaga-cloud-window.adoc[].
 
 NOTE: read xref:stacksaga-database-support:overview/database-support-overview.adoc[] to have a better understanding of the database support modules like the responsibilities, architecture etc.
 
-It is used for the orchestrator service along with the starter dependency if the orchestrator service uses the Mysql database as their primary database.
-This library provides all the facilities for accessing the mysql database for the Stacksaga engine.
+== Adding mysql support to your orchestrator application
+
+adding mysql support to your orchestrator application consists of 3 simple steps.
+
+xref:#adding-mysql-support[Step-1]:: Add `stacksaga-mysql-support` as a dependency to your orchestrator application.
+xref:#executing-schema-creation-script[Step-2]:: Execute the shema creation script that is provided by the `stacksaga-mysql-support` module.
+xref:#configure-mysql-connection-properties[Step-3]:: Configure the mysql connection properties in your application configuration file.
+
+The following sections will explain each step in detail.
+
+[[adding-mysql-support]]
+=== Adding `stacksaga-mysql-support` as a dependency
 
 Here is the way that you can add the library into your existing orchestrator application as a dependency.
 
@@ -17,8 +29,30 @@ Here is the way that you can add the library into your existing orchestrator app
     <groupId>org.stacksaga</groupId>
     <artifactId>stacksaga-mysql-support</artifactId>
     <version>${org.stacksaga.version}</version>
+    <exclusions>
+        <!--<exclusion>
+            <groupId>org.stacksaga.cassandra</groupId>
+            <artifactId>stacksaga-mysql-api-servlet</artifactId>
+        </exclusion>-->
+        <exclusion>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-mysql-api-webflux</artifactId>
+        </exclusion>
+    </exclusions>
 </dependency>
 ----
+
+IMPORTANT: Make sure to exclude the `stacksaga-mysql-api-servlet` or `stacksaga-mysql-api-webflux` module based on your orchestrator application type (spring mvc or spring webflux).
+because, stacksaga-database-support modules provide built-in API for both spring mvc and spring webflux applications. for example if you are using spring mvc, then you should exclude the `stacksaga-mysql-api-webflux` module. or if you are using spring webflux, then you should exclude the `stacksaga-mysql-api-servlet` module. in this example we are excluding the `stacksaga-mysql-api-webflux` module because we are assuming that the orchestrator application is a spring mvc application.
+
+[[executing-schema-creation-script]]
+=== Executing the schema creation script
+
+Execute the following script in your mysql database to create the necessary tables and indexes that are required by the Stacksaga engine to save the transaction data.
+
+Get the script from the following location on https://github.com/stacksaga/scripts/blob/main/database-support/stacksaga-mysql-support/schema.sql[GitHub].
+
+IMPORTANT: Make sure to verify that the script is the latest version.
 
 == How the transaction data is sorted
 
@@ -29,5 +63,7 @@ All the transaction’s metadata is saved in the `es_transaction` table, and the
 The transaction is saved with the unique transaction id and as well as it is saved with a token that has been generated with murmur3 algorithm.
 The reason is that the token is used by the xref:agent/mysql-stacksaga-agent.adoc[agent application] to find their respective transactions within their xref:agent/mysql-stacksaga-agent.adoc#token_range_allocation[token range].
 
-[[configuration-properties]]
-include::framework:db-support/mysql-support-configuration-properties.adoc[]
+[[configure-mysql-connection-properties]]
+=== Configure the mysql connection properties
+
+include::stacksaga-database-support:mysql-database-support/mysql-support-configuration-properties.adoc[]
