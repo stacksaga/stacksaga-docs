@@ -9,11 +9,9 @@ That retrying part is manage by the Stacksaga agent service.
 
 == The role of Stacksaga Agent
 
-Why it is needed a separate agent-service rather than the real service instance?,
-why it cannot be re-invoked the transactions *asynchronously* by the own instance without an agent? +
+Why it is needed a separate agent-service rather than the real service instance?, why it cannot be re-invoked the transactions *asynchronously* by the own instance without an agent? +
 The short answer is: it cannot be done due the instances are xref:#ephemeral[Ephemeral] in nature in the microservice architecture. +
-Even though the immediate retrying can be done by the own instance in microservice architecture,
-the asynchronous retrying cannot be done by the own instances due to the instances are *short-lived(instances are not meant to be persistent)*.
+Even though the immediate retrying can be done by the own instance in microservice architecture, the asynchronous retrying cannot be done by the own instances due to the instances are *short-lived(instances are not meant to be persistent)*.
 
 *For instance,* just imagine there are *3* instances are running on, and there are *7* transactions have been saved for retrying by them due to some network issues.
 If each instance takes care of the transactions by themselves, After a while, the scheduler is triggered for replaying transactions on each instance.
@@ -50,7 +48,7 @@ image:ROOT:stacksaga-diagram-how-stacksaga-agent-distribute-transactions.drawio.
 Here you can see it does not matter which instance initiated the transaction.
 All the transactions that should be retried are scanned by the agent, and those are distributed with the available `order-service` instances.
 
-NOTE: The communication between the `agent-service` and the `order-services` is done via the In-built Http endpoints that are provided by `stacksaga-spring-boot-starter` in the orchestrator service. +
+NOTE: The communication between the `agent-service` and the `order-services` is done via the In-built Http endpoints that are provided by framework in the orchestrator service. +
 The load is balanced by the service discovery implementation in the system like `eureka`, `kubernetes service`, etc.
 
 == How does agent filter the transactions from event-store?
@@ -138,7 +136,6 @@ image::ROOT:stacksaga-diagram-stacksaga-service-agent-consistent-hash-ring.svg[a
 . After adding the transactions to the queue the transactions are send the to the available services to process them.
 
 .Description
-
 At this moment, the node knows about their respective token range.
 And it has been divided again into sub-rangers identical to the configured pool size.
 As per diagram, the pool size is 3. Just imagine only one instance is running on the given region.
@@ -190,7 +187,7 @@ TIP: If only one instance is running in the region, that node acquires the entir
 <1> Fetch the transactions from the event-store for the respective region.
 Due to only one node is running in the region, it can be running on one of the available zones in the region, and the entire token range is acquired by that node.
 
-<2> Send the collected transactions withing the available instances.
+<2> Send the collected transactions within the available instances.
 It does not matter which zone the service agent is running in.
 It shares all the collected transactions for the available instances in the region.
 
@@ -204,8 +201,10 @@ image:ROOT:stacksaga-diagram-stacksaga-service-agent-multi-node-in-multi-region.
 <1> Fetch the transactions from the event-store for the respective region and the respective token range.
 The service agent nodes can have in any zone in the region with any amount, and they have their own token range.
 
-<2> Send the collected transactions withing the available instances in the region.
-It shares all the collected transactions withing the available instances in the region.
-Not only withing the zone that service agent running on because service agents are for the entire region.
+<2> Send the collected transactions within the available instances in the region.
+It shares all the collected transactions within the available instances in the region.
+Not only within the zone that service agent running on because service agents are for the entire region.
 
 <3> Receive the transactions by each orchestrator service and execute them by connecting with the event-store.
+
+*_To explore the specific configurations for each implementation, please refer to the corresponding implementation guides._*
