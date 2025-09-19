@@ -54,7 +54,50 @@ Get the script from the following location on https://github.com/stacksaga/scrip
 
 IMPORTANT: Make sure to verify that the script is the latest version.
 
-[[configure-mysql-connection-properties]]
-=== Configure the mysql connection properties
+[[configurations]]
+== Configurations
 
-include::stacksaga-database-support:mysql-database-support/mysql-support-configuration-properties.adoc[]
+By default `stacksaga-mysql-support` uses spring reactive `R2DBC` connection to connect to the mysql database.
+because even if your orchestrator application is a spring mvc application, the Stacksaga engine internally uses reactive programming model to achieve better performance and scalability.
+therefore if default `R2DBC` connection factory is not used in your application, you can configure the connection factory for the Stacksaga engine by providing the necessary properties in your application configuration file.
+or, otherwise, you can provide a custom `io.r2dbc.spi.ConnectionFactory` can provide it as a bean of `org.stacksaga.mysql.reactive.provider.ConnectionFactoryProvider` like below.
+
+make sure to update the `stacksaga.mysql.use-default-r2dbc-connection=false` property in your application configuration file to mention not use the default `r2dbc` connection factory by the stacksaga.
+
+[source,java]
+----
+@Configuration
+public class CustomConfig {
+    @Bean
+    public ConnectionFactoryProvider customConnectionFactory() {
+        ConnectionFactoryOptions options = ConnectionFactoryOptions.parse("r2dbc:postgresql://localhost:5432/mydb")
+                .mutate()
+                .option(ConnectionFactoryOptions.USER, "dbuser")
+                .option(ConnectionFactoryOptions.PASSWORD, "dbpassword")
+                .build();
+        ConnectionPoolConfiguration configuration = ConnectionPoolConfiguration.builder(ConnectionFactories.get(options))
+                .initialSize(5)
+                .maxSize(20)
+                .maxIdleTime(java.time.Duration.ofMinutes(30))
+                .build();
+        return () -> new ConnectionPool(configuration);
+    }
+}
+----
+
+this approach keep your default connection factory intact and the Stacksaga engine will use the custom connection factory that you have provided.
+
+== Configuration Properties
+
+[cols="~,~,~,70h"]
+|===
+|Property Name|Default Value|Type|Description
+
+4+| you can use the default spring `r2dbc` mysql connection properties that starts with `spring.r2dbc` prefix to configure the mysql connection for the stacksaga engine. otherwise, you can provide a custom one as mention xref:#configurations[here].
+
+|`stacksaga.mysql.transaction.retry.crashed-restore-retention-period-seconds` | `300` (five-minutes)  | long | if the transaction has not been updated after configured duration, it is considered as the transaction was dismissed due to crash, or it may in a queue in rare case. even if the transaction is in a queue, the transaction is restored for retrying by considering it has crashed.
+the value should be provided in seconds.
+
+|`stacksaga.mysql.transaction.retry.retention-period-seconds` | `60` (one-minute) | long | How long the transaction should be kept waiting to next expose the transaction for retrying. This ensures that avoiding the transaction retrying frequently withing a short period of time. the transaction is frozen for some period of time, even the transaction is failed again after retrying recently.
+|===
+
