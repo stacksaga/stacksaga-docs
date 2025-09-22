@@ -55,3 +55,17 @@ It will be the transaction id for the entire transaction.
 '''
 
 TIP: Even though `SagaTemplate<A>` can be autowired anywhere in the application, As the best practice it is recommended to use `SagaTemplate<A>` inside of an `EventHandler` class according to the StackSaga design pattern called <<test,CHES>>.
+
+== Customizing the SagaTemplate's Execution Scheduler
+
+Even `SagaTemplate` seems like blocking one, it internally operates in reactive, non-blocking manner.
+So transaction processing is offloaded to a dedicated reactive scheduler to be executed asynchronously, By default https://projectreactor.io/docs/core/release/api/reactor/core/scheduler/Schedulers.html#boundedElastic--[boundedElastic] is used, If customization is required, you can override the default scheduler by providing a custom `Scheduler` bean named `beanNonReactiveTxExecutorScheduler` (use the static identifier `Stacksaga.BEAN_NON_REACTIVE_TX_EXECUTOR_SCHEDULER`).
+
+[source,java]
+----
+@Bean(Stacksaga.BEAN_NON_REACTIVE_TX_EXECUTOR_SCHEDULER)
+//@Bean("beanNonReactiveTxExecutorScheduler")
+public Scheduler scheduler() {
+    return Schedulers.newBoundedElastic(10, 100, "non-reactive-tx-executor-pool");
+}
+----

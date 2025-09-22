@@ -1,32 +1,57 @@
-= Aggregator KeyGen
+= Aggregator KeyGen Custom Implementation [[aggregator_key_gen_custom_implementation]]
 
 == Overview
 
-You already know that every transaction should have a unique id.
-to provide your own custom keygen for the aggregator, you have to provide an implementation of `AggregatorKeyGenerator` interface.
-`AggregatorKeyGenerator` does provide a method called `generateKey`. and also it provides you helpful metadata for creating your unique id like *serviceName*,*serviceVersion*,*instanceId*,*region*,*zone* and *sagaAggregator*.
-providing a custom keygen is not necessary all the time because StackSaga provides an implementation for the KeyGen by default (`DefaultKeyGen.class`).
-even though it is not necessary, implementing a custom id generator helps some cases.
-for instance, it can be helped for proper indexing and as well as the database partition in the datacenter.
+AggregatorKeyGenerator is an interface that allows you to define a custom strategy for generating unique identifiers for saga transactions.
+the interface provides two methods for generating keys:
 
-The default implementation creates the unique id in this format.
+- `generateTransactionKey` - generates a unique identifier for a new saga transaction.
+- `generateIdempotencyKey` - generates an idempotency key for each span of the transaction.
 
-*#the_initial_letters_of_service_name-currentTimeMillis-randomNanoId#*.
+== Generating Unique Identifiers for Saga Transactions
 
-let's assume that the service name is *order-service* then here you can see some of the transaction ids that created by using default keygen.
+Every saga transaction requires a globally unique identifier To supply a custom key generator for an Aggregator.
+implement the `AggregatorKeyGenerator` interface.
+Its `generateKey` method provides rich context you can leverage to construct a deterministic or randomized identifier: `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`,`executionMode`, and the `sagaAggregator` metadata.
 
-* *OS-1713809175237-021575259417101*
-* *OS-1713809468378-117401549843120*
-* *OS-1713809493499-012220401009440*
+Providing a custom KeyGen is optional.
+StackSaga ships with a production-ready default (`DefaultKeyGen.class`).
+A custom generator can still be valuable to:
 
-NOTE: https://github.com/aventrix/jnanoid[jnanoid] is used for creating the randomNanoId.
+- align identifiers with your sharding/partitioning strategy,
+- improve index locality or read/write patterns,
+- embed minimal routing or observability hints,
+- satisfy organization-specific compliance or traceability rules.
 
-== Custom Implementation of `AggregatorKeyGenerator`
+The default generator produces time-ordered, high-entropy identifiers using this shape:
 
-as mentioned above if you want to implement your custom own keygen for generating the aggregator id, you can implement as below.
+* `<serviceInitials>-<epochMillis>-<nanoId>`
+
+For example, with a service named `order-service`, default IDs might look like:
+
+* `OS-1713809175237-021575259417101`
+* `OS-1713809468378-117401549843120`
+* `OS-1713809493499-012220401009440`
+
+NOTE: https://github.com/aventrix/jnanoid[jnanoid] is used to generate the random NanoID segment, providing excellent entropy and collision resistance.
+
+== Generating Idempotency Keys for Saga Spans
+
+Each span of a saga transaction, (i.e., each executor invocation) requires an idempotency key to ensure safe retries.
+The `generateIdempotencyKey` method provides context including `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`, `currentExecutor`, `transactionId`, `executionMode`, and a `hashGenerator` utility.
+
+IMPORTANT: it is highly recommended to use the provided `hashGenerator` to produce a fixed-length hash of a composite string that includes the `transactionId`, `currentExecutor`, and `executionMode`.
+This approach ensures idempotency keys are compact, consistent in length, and collision-resistant.
+
+== Custom implementation of `AggregatorKeyGenerator`
+
+The implementation is as follows.
+
+NOTE: Due to the fact that the `AggregatorKeyGenerator`'s all methods are `default` methods, no need to implement all methods. you can implement only the required methods as needed.
 
 [source,java]
 ----
+
 @Component
 public class PlaceOrderAggregatorKeyGenerator implements AggregatorKeyGenerator {
 
@@ -38,12 +63,33 @@ public class PlaceOrderAggregatorKeyGenerator implements AggregatorKeyGenerator 
         }
         return String.format("%s-%s-%s", serviceName , regionKey , UUID.randomUUID());
     }
+
+    @Override
+    public String generateIdempotencyKey(String serviceName,
+                                         String serviceVersion,
+                                         String instanceId,
+                                         String region,
+                                         String zone,
+                                         String currentExecutor,
+                                         SagaAggregator sagaAggregator,
+                                         String transactionId,
+                                         ExecutionMode executionMode,
+                                         HashGenerator hashGenerator)
+    {
+        final String string = new StringJoiner(":")
+                .add(transactionId)
+                .add(currentExecutor)
+                .add(executionMode.name().toLowerCase())
+                .toString();
+        return hashGenerator.generateHash(string, HashGenerator.ALGType.MD5);
+    }
 }
 ----
 
-WARNING: Make sure to mark the implementation class as `@Component`.
+WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
+The framework may invoke it concurrently.
 
-After implementing it should be provided as keyGen of the aggregator inside the `@SagaAggregator` annotation as below.
+After implementing, wire it into the Aggregator via the `keyGen` attribute on `@SagaAggregator`:
 
 [source,java]
 ----
@@ -54,12 +100,14 @@ After implementing it should be provided as keyGen of the aggregator inside the 
         keyGen = PlaceOrderAggregatorKeyGenerator.class
 )
 public class PlaceOrderAggregator extends Aggregator  {
+    // ...existing code...
+}
 ----
 
 After configuring the custom keygen to the aggregator that will be invoked by framework when start the transaction.
 and then the generated ID will be stored to the `Aggregator#aggregatorTransactionId`. and then it can be accessed by calling the get method from your aggregator class due to that your aggregator class has been extended by the `Aggregator`.
 
-Accessing the generated ID;
+Accessing the generated identifier:
 
 [source,java]
 ----
@@ -75,30 +123,30 @@ public class PlaceOrderController {
     @PostMapping
     public Object placeOrder() {
         PlaceOrderAggregator placeOrderAggregator = new PlaceOrderAggregator();
-        //initialize your aggregator data
+        // initialize aggregator payload
         placeOrderAggregator.setUserName("mafei");
-        ...
-        ...
-        //calling the getAggregatorTransactionId() method but still the id is null.
+        // ...existing code...
+
+        // Before process(): the ID is not yet assigned.
         String aggregatorTransactionIdBefore = placeOrderAggregator.getAggregatorTransactionId();
         System.out.println("aggregatorTransactionIdBefore = " + aggregatorTransactionIdBefore);
 
-        //calling the process() method and then the aggregatorTransactionId will be added internally by the framework.
+        // process(): framework assigns aggregatorTransactionId and persists it in the Aggregator state.
         placeOrderAggregatorSagaTemplate.process(
                 placeOrderAggregator,
                 InitializeOrderExecutor.class
         );
-        //after calling the process() method, the aggregatorTransactionId is no longer null.
+
+        // After process(): the ID is available.
         String aggregatorTransactionIdAfter = placeOrderAggregator.getAggregatorTransactionId();
         System.out.println("aggregatorTransactionIdAfter = " + aggregatorTransactionIdAfter);
 
         return Collections.singletonMap("aggregator_id", aggregatorTransactionIdAfter);
     }
 }
-
 ----
 
-The output wil be like below.
+Sample output:
 
 [source,bash]
 ----
