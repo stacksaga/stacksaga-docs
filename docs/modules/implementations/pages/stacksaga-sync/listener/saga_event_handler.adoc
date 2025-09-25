@@ -1,111 +1,81 @@
 = Saga Execution Event Listener  [[saga_event_handler]]
 
-`ExecutionEventListener<A>` is the place where you're notified about each and every action during the process by the SEC.
+`ExecutionEventListener<A>` is where it is notified about each and every action during the transaction lifecycle.
 As an example, After handing over the transaction to the StackSaga engine by mentioning the starting executor, the engine will invoke your executors one by one.
 During the process, the engine does provide some events regarding the execution to notify.
-To get notified for each action, you can create a separate ExecutionEventListener implementations for xref:create-aggregator.adoc[Aggregators].
-One aggregator can have many ExecutionEventListener implementations as needed.
-Specially the ExecutionEventListener is provided for cross-cutting concerns.
-therefore the implementations of the `ExecutionEventListener<A>` can be used in two ways.
+To get notified for each action, you can create a separate *ExecutionEventListener* implementation for xref:implementations:stacksaga-kafka/aggregator/create-aggregator.adoc[Aggregators].
+One aggregator can have many *ExecutionEventListener* implementations as needed.
+Specially the *ExecutionEventListener* is provided for cross-cutting concerns.
 
-* Synchronous way
-- if the events also should be run in sequence order with the same thread, the Synchronous way can be implemented.
-to overcome the Synchronous feature the implementation should be annotated by `*@SagaExecutionEventListener*`.
-* Asynchronous way
-- if the events should not be bothered to the man executions and if not required sequence order between real executions and events, the Asynchronous way can be implemented. and also the events are triggered in separate threads.
-to overcome the Asynchronous feature the implementation should be annotated by `@*SagaAsyncExecutionEventListener*`.
+IMPORTANT: It is important not to make any changes to the aggregator and other parameters that are passed to the listener methods. it can be very harmful to the transaction execution. just use the parameters to read.
 
-NOTE: `ExecutionEventListener` comes with a generic parameter. the `<A>` is represented the target Aggregator. when the ExecutionEventListener implementation is created, the target aggregator should be mentioned. and also #the same aggregator is shared with the implementations, and it is not allowed to make any changes on the aggregator in the listeners according the StackSaga architecture.# you can only read the data from the aggregator.
-
-//todo: add in image diagram about aggregator sharing across the threads
-
-WARNING: Make sure to not use spring `@Async` annotation with each method inside the listener or the entire class.
-Because StackSaga does create a separate thread pool for executing the event methods and also, you can customize it as per the requirements.
+NOTE: `ExecutionEventListener` comes with a generic parameter. the `<A>` is represented the target Aggregator. when the ExecutionEventListener implementation is created, the target aggregator should be mentioned.
 
 `ExecutionEventListener<A>` provides the following events to be notified.
 
 [[onEachPrimaryExecutionPerformed]]
 . `*onEachPrimaryExecutionPerformed*`
-- This method will be invoked after executing each sub process successfully.
-— Just think about our example.
-After payment process success, the order status should be updated as payment successful and also after successfully dispatched the order, the order status should be updated as order dispatched.
-And just think, you want to update your customer by sending an email after the payment process and after dispatching the process.
-Handler is the place that you can invoke your processes.
-[[onEachRevertPerformed]]
-. `*onEachRevertPerformed*`
-- This is the opposite of the onEachProcess.
-That works after every successful process.
-If the whole transaction has to be reverted at some point, the Compensating process starts from that point.
-Then the revert method of each executed executor starts to be executed as the Compensatings.
-If you want to get notified after each Compensating, onEachRevert method will be invoked by the framework with all the data that you want. +
-According to the example, if the payment process is failed, you have to update the order status as payment failed.
-This kind of execution can be proceeded in this method.
-. `*onTransactionCompleted*`
-- There are two meanings of transaction-complete.
-One is that the transaction was processed without any process exception.
-When considering the example the create-order success, user checking is successful, make payment is success, increase point is success, and finally dispatching the order is also success.
-The 2nd success is, a process exception was happened and after that all the relevant Compensating has been processed successfully.
-(That means a revert error hasn't been occurred while the Compensating process) otherwise we can say the Compensating has been processed smoothly without any exceptions.
+- This method is invoked after executing each primary execution successfully. if there is any error, it is not called. if there is a `RetryableExecutorException` the transaction is scheduled for retrying and then if the next time it is successful, this method is called. if there is a `NonRetryableExecutorException` the transaction is scheduled for Compensating and this method is not called.
+
 [[onPrimaryExecutionException]]
 . `*onPrimaryExecutionException*`
-- This is not relevant to the sub process.
-That means the process exception can be happened only one time in the entire process.
-When considering the example, you are going to dispatch the order, and it is failed because of non-retryable exception.
-(Just think the order is not existing in the database) then the Compensating process will be started.
-This is the turning point to Compensating start.
-At that time, this method will be invoked by the framework with the data that you want.
+- This method is invoked when there is a `NonRetryableExecutorException` during the primary execution. that means that due to the primary execution is failed with a `NonRetryableExecutorException`, this method is invoked. it is the point before starting the Compensating process.
+
+[[onEachRevertPerformed]]
+. `*onEachRevertPerformed*`
+- This is the opposite of the xref:#onEachPrimaryExecutionPerformed[`onEachPrimaryExecutionPerformed`].
+- This method is invoked after executing each revert execution successfully.
+if there is a `RetryableExecutorException` the transaction is scheduled for retrying and then if the next time it is successful, this method is called.
++
+IMPORTANT: As per the architecture, there can't be any unhandled-exception(RuntimeException) during the revert process. because the compensating can only have `RetryableExecutorException`. if an unhandled-exception(RuntimeException) is thrown during the revert process, the framework will terminate the transaction. there is no more chance to revert the transaction.
+
+[[onTransactionCompleted]]
+. `*onTransactionCompleted*`
+- This method is invoked when the transaction is completed.
+- The transaction can be completed in 2 ways. the transaction can be completed successfully by processing all the primary executions successfully or the transaction can be completed after processing all the compensating executions successfully.
+
+[[onTransactionTerminated]]
 . `*onTransactionTerminated*`
-- According to the flow, any revert process can't have non-retryable exception.
-That is the rule.
-But sometimes the programmer may haven't been handled that.
-Then the revert process also can't be processed anymore.
-Then the framework marks that transaction as a garbage transaction and terminates the process.
-This is a very rare case.
-But it can be happened.
+- as discussed above, the transaction can be terminated when there is an unhandled-exception(RuntimeException) during the revert process.
+- This method is invoked when the transaction is terminated.
 
-TIP: In `ExecutionEventListener`, all the abstract methods are default.
-Therefore, you don't want to override all the methods, and you can only override the methods that you want as per the requirement.
-And also you can create multiple listeners for the target Aggregator.
-
+TIP: In `ExecutionEventListener` interface, all the abstract methods are default.
+Therefore, it is not required to override all the methods, you can override the methods that you need.
 Here you can see an example how you can create a listener of `ExecutionEventListener`.
 
 [source,java]
 ----
-@SagaExecutionEventListener
 public class PlaceOrderEventListener implements ExecutionEventListener<PlaceOrderAggregator> {
     @Override
     public void onEachProcessExecutionPerformed(String executedExecutor, PlaceOrderAggregator currentAggregator) {
-        // TODO: implement
+        //TODO: implement your logic here
     }
 
     @Override
-    public void onEachRevertPerformed(String revertedExecutor, PlaceOrderAggregator finalAggregatorState, NonRetryableExecutorException nonRetryableExecutorException,
-                                      RevertHintStore revertHintStore) {
-        // TODO: implement
+    public void onProcessException(PlaceOrderAggregator finalAggregatorState, NonRetryableExecutorException exception, String executedExecutor) {
+        //TODO: implement your logic here
+    }
+
+
+    @Override
+    public void onEachRevertPerformed(String revertedExecutor, PlaceOrderAggregator finalAggregatorState,
+                                      NonRetryableExecutorException nonRetryableExecutorException,
+                                      RevertHintStore revertHintStore
+    ) {
+        //TODO: implement your logic here
+
     }
 
     @Override
-    public void onTransactionCompleted(TransactionCompletedDetail<PlaceOrderAggregator> transactionCompletedDetail,
-                                       CompleteStatus completeStatus) {
-        // TODO: implement
+    public void onTransactionCompleted(TransactionCompletedDetail<PlaceOrderAggregator> transactionCompletedDetail) {
+        //TODO: implement your logic here
     }
 
     @Override
     public void onTransactionTerminated(TransactionTerminationDetail<PlaceOrderAggregator> transactionTerminationDetail) {
-        // TODO: implement
-    }
-
-    @Override
-    public void onProcessException(PlaceOrderAggregator finalAggregatorState,
-                                   NonRetryableExecutorException exception,
-                                   String executedExecutor) {
-        // TODO: implement
+        //TODO: implement your logic here
     }
 }
 ----
 
 
-// todo: link the  custom there pool related ti this topic and mention it here
-
-NOTE: Other than this main listener regarding the aggregator there is another listener called `UncommittedDataListener`. the listener acts for notify you about the falling of sending uncommitted data into the admin-server. the `UncommittedDataListener` listener can be implemented for entire application.
-xref:uncommitted_data_listener.adoc[read more...]
