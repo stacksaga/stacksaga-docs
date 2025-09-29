@@ -54,10 +54,23 @@ Get the script from the following location on https://github.com/stacksaga/scrip
 
 IMPORTANT: Make sure to verify that the script is the latest version.
 
-[[configurations]]
-== Configurations
 
-=== Configuring mysql connection
+== Secondary Internal Service for Transaction Retry
+
+Within the module that `stacksaga-mysql-api-servlet` or `stacksaga-mysql-api-webflux`, it provides a secondary HTTP port dedicated to internal communication for transaction retries.
+This port runs in the same application context as the main service but uses a separate connector, ensuring that retry requests from agent services are isolated from external traffic.
+
+The endpoints on this secondary port are automatically created by the framework and are exclusively called by agent services to process retry transactions.
+This design ensures that internal retry operations do not interfere with the main application traffic.
+
+The basic configurations can be changed as you prefer via the properties file.
+refer to the xref:#stacksaga-retry-server-configurations[configuration properties] table for more details.
+
+Further customizations like changing the protocol (http/https), SSL configurations etc., developers can provide a customized https://docs.spring.io/spring-boot/how-to/webserver.html#howto.webserver.configure[WebServerFactoryCustomizer<?>] via the through an implementation of `WebServerFactoryCustomizerSupplier` interface as a bean.
+it will override the default customizer that is provided by the framework.
+
+
+== Configuring mysql connection
 
 By default `stacksaga-mysql-support` uses spring reactive `R2DBC` connection to connect to the mysql database.
 because even if your orchestrator application is a spring mvc application, the Stacksaga engine internally uses reactive programming model to achieve better performance and scalability.
@@ -89,19 +102,6 @@ public class CustomConfig {
 
 this approach keeps your default connection factory intact, and the Stacksaga engine will use the custom connection factory that you have provided.
 
-=== Secondary Internal Service for Transaction Retry
-
-Within the module that `stacksaga-mysql-api-servlet` or `stacksaga-mysql-api-webflux`, it provides a secondary HTTP port dedicated to internal communication for transaction retries.
-This port runs in the same application context as the main service but uses a separate connector, ensuring that retry requests from agent services are isolated from external traffic.
-
-The endpoints on this secondary port are automatically created by the framework and are exclusively called by agent services to process retry transactions.
-This design ensures that internal retry operations do not interfere with the main application traffic.
-
-The basic configurations can be changed as you prefer via the properties file.
-refer to the xref:#stacksaga-retry-server-configurations[configuration properties] table for more details.
-
-Further customizations like changing the protocol (http/https), SSL configurations etc., developers can provide a customized https://docs.spring.io/spring-boot/how-to/webserver.html#howto.webserver.configure[WebServerFactoryCustomizer<?>] via the through an implementation of `WebServerFactoryCustomizerSupplier` interface as a bean.
-it will override the default customizer that is provided by the framework.
 
 [[configuration-properties]]
 == Configuration Properties
