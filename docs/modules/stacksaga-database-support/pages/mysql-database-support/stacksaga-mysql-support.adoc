@@ -1,9 +1,13 @@
-= `stacksaga-mysql-support`
+= Stacksaga Mysql Reactive Support
 
 == Overview
 
-`stacksaga-mysql-support` is the mysql implementation of the xref:stacksaga-database-support:overview/database-support-overview.adoc[].
+`stacksaga-mysql-reactive-support` is the *mysql reactive(non-blocking)* implementation of the xref:stacksaga-database-support:overview/database-support-overview.adoc[].
 it provides all the necessary facilities for accessing the mysql database for the Stacksaga engine. and also it provides the endpoints for accessing the event-store to see the tracing details from the xref:trace-window:stacksaga-trace-window.adoc[].
+
+Here you can see where the `stacksaga-mysql-reactive-support` fits into the overall Stacksaga architecture.
+
+image::cassandra/stacksaga-diagram-stacksaga-components-database-support-cassandra.svg[alt="stacksaga components overview with mysql database support", title="Stacksaga components overview with mysql database support"]
 
 NOTE: read xref:stacksaga-database-support:overview/database-support-overview.adoc[] to have a better understanding of the database support modules like the responsibilities, architecture etc.
 
@@ -11,23 +15,23 @@ NOTE: read xref:stacksaga-database-support:overview/database-support-overview.ad
 
 adding mysql support to your orchestrator application consists of 3 simple steps.
 
-xref:#adding-mysql-support[Step-1]:: Add `stacksaga-mysql-support` as a dependency to your orchestrator application.
-xref:#executing-schema-creation-script[Step-2]:: Execute the shema creation script that is provided by the `stacksaga-mysql-support` module.
-xref:#configurations[Step-3]:: Configure the mysql connection configurations.
+xref:#adding-mysql-support[Step-1]:: Add `stacksaga-mysql-reactive-support` as a dependency to your orchestrator application.
+xref:#executing-schema-creation-script[Step-2]:: Execute the shema creation script that is provided by the `stacksaga-mysql-reactive-support` module.
+xref:#connection-configuration[Step-3]:: Configure the mysql connection configurations.
 
 The following sections will explain each step in detail.
 
 [[adding-mysql-support]]
-=== Adding `stacksaga-mysql-support` as a dependency
+=== Adding `stacksaga-mysql-reactive-support` as a dependency
 
 Here is the way that you can add the library into your existing orchestrator application as a dependency.
 
-.Adding `stacksaga-mysql-support` as a dependency
+.Adding `stacksaga-mysql-reactive-support` as a dependency
 [source,xml]
 ----
 <dependency>
     <groupId>org.stacksaga</groupId>
-    <artifactId>stacksaga-mysql-support</artifactId>
+    <artifactId>stacksaga-mysql-reactive-support</artifactId>
     <version>${org.stacksaga.version}</version>
     <exclusions>
         <!--<exclusion>
@@ -69,10 +73,10 @@ refer to the xref:#stacksaga-retry-server-configurations[configuration propertie
 Further customizations like changing the protocol (http/https), SSL configurations etc., developers can provide a customized https://docs.spring.io/spring-boot/how-to/webserver.html#howto.webserver.configure[WebServerFactoryCustomizer<?>] through an implementation of `WebServerFactoryCustomizerSupplier` interface as a bean.
 it will override the default customizer that is provided by the framework.
 
-
+[[connection-configuration]]
 == Configuring mysql connection
 
-By default `stacksaga-mysql-support` uses spring reactive `R2DBC` connection to connect to the mysql database.
+By default `stacksaga-mysql-reactive-support` uses spring reactive `R2DBC` connection to connect to the mysql database.
 because even if your orchestrator application is a spring mvc application, the Stacksaga engine internally uses reactive programming model to achieve better performance and scalability.
 therefore if default `R2DBC` connection factory is not used in your application, you can configure the connection factory for the Stacksaga engine by providing the necessary properties in your application configuration file.
 or, otherwise, you can provide a custom `io.r2dbc.spi.ConnectionFactory` can provide it as a bean of `org.stacksaga.mysql.reactive.provider.ConnectionFactoryProvider` like below.
@@ -110,12 +114,12 @@ this approach keeps your default connection factory intact, and the Stacksaga en
 |===
 |Property Name|Default Value|Type|Description
 
-4+| you can use the default spring `r2dbc` mysql connection properties that starts with `spring.r2dbc` prefix to configure the mysql connection for the stacksaga engine. otherwise, you can provide a custom one as mentioned xref:#configurations[here].
+4+| you can use the default spring `r2dbc` mysql connection properties that starts with `spring.r2dbc` prefix to configure the mysql connection for the stacksaga engine. otherwise, you can provide a custom one as mentioned xref:#connection-configuration[here].
 
-|`stacksaga.mysql.transaction.retry.crashed-restore-retention-period-seconds` | `300` (five-minutes)  | long | if the transaction has not been updated after configured duration, it is considered as the transaction was dismissed due to crash, or it may in a queue in rare case. even if the transaction is in a queue, the transaction is restored for retrying by considering it has crashed.
+|`stacksaga.mysql.transaction.retry.crashed-restore-retention-period-seconds` | `300` (five-minutes)  | long | if the transaction has not been updated after configured duration, it is considered as the transaction was dismissed due to crash, or it may be in a queue in rare case. even if the transaction is in a queue, the transaction is restored for retrying by considering it has crashed.
 the value should be provided in seconds.
 
-|`stacksaga.mysql.transaction.retry.retention-period-seconds` | `60` (one-minute) | long | How long the transaction should be kept waiting to next expose the transaction for retrying. This ensures that avoiding the transaction retrying frequently withing a short period of time. the transaction is frozen for some period of time, even the transaction is failed again after retrying recently.
+|`stacksaga.mysql.transaction.retry.retention-period-seconds` | `60` (one-minute) | long | How long the transaction should be kept waiting to next expose the transaction for retrying. This ensures that avoiding the transaction retrying frequently withing a short period of time. the transaction is frozen for some period of time, even the transaction failed again after retrying recently.
 
 [[stacksaga-retry-server-configurations]]
 
