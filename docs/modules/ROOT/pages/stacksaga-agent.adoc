@@ -1,0 +1,214 @@
+:description: Detailed guide on how Stacksaga Agent handles asynchronous transaction retries, consistent hashing, and deployment in microservices.
+:keywords: stacksaga agent, transaction retry, microservices, event-store, consistent hashing, deployment
+
+
+[[stacksaga_agent]]
+= Stacksaga Agent
+
+== Overview
+
+Stacksaga agent is the application that invokes for retrying (asynchronous-retrying) the transactions from the event-store.
+You already know that if the transaction is failed with a network exception (*Resource-Unavailable*), the transaction can be replayed.
+That retrying part is manage by the Stacksaga agent service.
+
+== The role of Stacksaga Agent
+
+Why it is needed a separate agent-service rather than the real service instance?, why it cannot be re-invoked the transactions *asynchronously* by the own instance without an agent? +
+The short answer is: it cannot be done due the instances are xref:#ephemeral[Ephemeral] in nature in the microservice architecture. +
+Even though the immediate retrying can be done by the own instance in microservice architecture, the asynchronous retrying cannot be done by the own instances due to the instances are *short-lived(instances are not meant to be persistent)*.
+
+*For instance,* just imagine there are *3* instances are running on, and there are *7* transactions have been saved for retrying by them due to some network issues.
+If each instance takes care of the transactions by themselves, After a while, the scheduler is triggered for replaying transactions on each instance.
+At that moment it can have different instances count due to scaling up or scaling down based on the traffic at that particular time due to the scaling up and down.
+Just imagine an instance that has made some transactions is not running on when the scheduler is triggered for retrying called `order-service-3400001`.
+At that moment, other instances do not touch to those transactions that made by that respective instance.
+hence, those transactions will not be exposed for retrying ever, like the diagram shows below.
+
+image:ROOT:stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt="why instance does not involve directly for retrying in StackSaga"]
+
+[[ephemeral]]
+====
+*Ephemeral* behavior of the instances in microservices architecture
+
+In the context of microservices, ephemeral refers to the principle that a microservice can be created, destroyed, and replenished on-demand on a target easily, quickly, and with no side effects.
+====
+
+That is why a separate system should be involved in transaction retrying.
+Next let's see how the StackSaga-Agent manages it.
+
+== Retrying Transactions with StackSaga Agent
+
+You know that the transactions are executed by the orchestrator service with the help of StackSaga framework.
+If the transaction is not able to process due to some *Resource-Unavailable* exception, the transaction is kept in the `event-store` for retrying.
+For instance, while the `make-order` process an exception is occurred in the `MakePaymentExecutor` due to the `payment-services` are not available for some reason.
+Then `order-service` saves the transaction with the help of StackSaga framework in the `event-store` for retrying in a configured interval.
+The duty of the orchestrator service is ended with that temporally.
+
+When the configured interval is reached, the Stacksaga agent service triggers the schedulers for gathering the transactions that should be retried.
+And after collecting the transactions from the event-store, the agent distributes the transactions for the available `order-service` (orchestrator services) instances for retrying.
+
+image:ROOT:stacksaga-diagram-how-stacksaga-agent-distribute-transactions.drawio.svg[alt="how stacksaga agent distribute transactions"]
+
+Here you can see it does not matter which instance initiated the transaction.
+All the transactions that should be retried are scanned by the agent, and those are distributed with the available `order-service` instances.
+
+NOTE: The communication between the `agent-service` and the `order-services` is done via the In-built Http endpoints that are provided by framework in the orchestrator service. +
+The load is balanced by the service discovery implementation in the system like `eureka`, `kubernetes service`, etc.
+
+== How does agent filter the transactions from event-store?
+
+To retry the transactions, the agent should filter the transactions from the event-store.
+When the transaction is filtered from the transactions, the agent node considers 2 factors mainly.
+
+. *Transaction Region* (The region that the transaction was initialized). +
+The region of the transaction that was initialized is the main factor that considers whether the transaction should be retried by that particular agent.
+For instance, if the system is deployed in multi-region, one region should have at least one agent node to get done the transaction retrying.
+
+. *Transaction Token* (The token that is generated by hashing the transaction ID).
+The token is the second factor that considers whether the transaction should be retried by that particular agent node.
+Stacksaga uses consistent hashing to distribute the transactions with the available agent nodes in particular region.
+hence, each agent node is responsible for a distinct token range.
+
+As a summary, the agent node filters the transactions from the event-store by considering the *region* and the *token range* that is responsible for that particular agent node.
+
+[[consistent_hashing_in_stacksaga_agent]]
+== Usage of Consistent Hashing to distribute transactions efficiently.
+
+Consistent hashing is a distributed systems technique that efficiently maps data (in this case, transaction tokens) to nodes (agent instances) with minimal disruption when nodes are added or removed.
+This approach ensures balanced load distribution and high availability.
+
+Stacksaga uses Consistent Hashing in two levels.
+
+* *Cluster Level*: The consistent hashing ring divides the entire key space across multiple nodes (instances).
+* *Node Level*: Each node further divides its assigned range into sub-ranges for multi-threaded processing(parallel processing) within that node.
+
+=== Cluster Level: Consistent Hashing
+
+.StackSaga Agent uses consistent hashing to:
+- Assign each transaction a unique token (using Murmur3 hashing on the transaction ID).
+- Divide the entire token space (`-2^63` to `+2^63-1`) among all active agent nodes in a region.
+- Ensure each agent node is responsible for a distinct, non-overlapping token range.
+- Minimize reallocation of transactions when agent nodes scale up or down.
+
+image:ROOT:stacksaga-diagram-transaction-range-in-cluster-mode.svg[alt="Consistent Hashing Token Ranges"]
+
+For example, with four agent nodes:
+
+|===
+|Node (Agent Instance) |Token Range
+
+|order-service-agent-0
+|`-9223372036854775808` TO `-4611686018427387905`
+
+|order-service-agent-1
+|`-4611686018427387904` TO `-1`
+
+|order-service-agent-2
+|`0` TO `4611686018427387903`
+
+|order-service-agent-3
+|`4611686018427387904` TO `9223372036854775807`
+|===
+
+This mechanism prevents transaction collisions and ensures that each transaction is retried by exactly one agent node, maintaining data consistency and reliability.
+
+=== Node Level: Consistent Hashing
+
+As mentioned above, the agent acquires a token range for retrying from the entire transaction set in the event store.
+A scheduler is triggered with the configured time, and the retrying process is started by retreating the transactions from the event store.
+Retrieving the transactions from the event store is processed batch-wise.
+For instance, if you have configured batch size as 100 and if there are 1000 transactions to be retried in the event store, the loop is run 10 times sequentially like fetches 10 transactions by updating their retry-retention time and shares that 10 transactions to the available services to process.
+We discussed the process of how one thread is involved in the process.
+But the reality is that multiple threads do the same task in parallel in the application.
+There is a configured thread pool called StackSagaRetryExecutorPool.
+For instance, if the thread pool’s thread size is 3 as per the diagram, the token range that has been assigned to the respective node is divided into sub-ranges again.
+The sub-ranges are assigned for each thread.
+Then they do the same task individually based on their respective token range.
+After fetching the data from the event store by each thread, the transactions are transferred to another thread pool called StackSagaPublisherExecutorPool.
+It is responsible for collecting the transactions that each thread collects from the event store.
+
+Let's have a look at the process step by step.
+
+image::ROOT:stacksaga-diagram-stacksaga-service-agent-consistent-hash-ring.svg[alt="stacksaga diagram stacksaga service agent consistent hash ring"]
+
+*The steps are as follows:*
+
+. The scheduler is triggered
+. Once the scheduler is triggered, the retrying process is started.
+. Configured thread pool will start executing in parallel.
+(Each thread in the pool acquires the token range that is assigned to the respective node.)
+. After adding the transactions to the queue the transactions are send the to the available services to process them.
+
+.Description
+At this moment, the node knows about their respective token range.
+And it has been divided again into sub-rangers identical to the configured pool size.
+As per diagram, the pool size is 3. Just imagine only one instance is running on the given region.
+Then this node acquires the entire token range -9,223,372,036,854,775,808 to 9,223,372,036,854,775,807. And again, the range is divided into 3 sub-ranges due to the pool size is 3 like below.
+
+* *Thread-1*: `-9,223,372,036,854,775,808` To `-3,074,457,345,618,258,603`
++
+Thread-1 is responsible for fetching the transactions from the event store between the above range.
+* *Thread-2*: `-3,074,457,345,618,258,602` To `3,074,457,345,618,258,602`
++
+Thread-2 is responsible for fetching the transactions from the event store between the above range.
+* *Thread-3*: `3,074,457,345,618,258,603` To `9,223,372,036,854,775,807`
++
+Thread-3 is responsible for fetching the transactions from the event store between the above range.
++
+NOTE: If you deploy 2 agent nodes in the region, the token rage is divided into two like and 3 sub ranges for each like below
++
+[cols="1,1,2,2",options="header"]
+|===
+| Node   | Thread Name  | Start Token                   | End Token
+| Node 1 | Thread-1 | -9,223,372,036,854,775,808  | -6,148,914,691,236,517,206
+| Node 1 | Thread-2 | -6,148,914,691,236,517,205  | -3,074,457,345,618,258,603
+| Node 1 | Thread-3 | -3,074,457,345,618,258,602  | 0
+| Node 2 | Thread-1 | 1                            | 3,074,457,345,618,258,603
+| Node 2 | Thread-2 | 3,074,457,345,618,258,604   | 6,148,914,691,236,517,206
+| Node 2 | Thread-3 | 6,148,914,691,236,517,207   | 9,223,372,036,854,775,807
+|===
++
+. Each thread adds all the fetching transactions to the *StackSagaPublisherExecutorPool*'s queue.
+. *StackSagaPublisherExecutorPool*'s threads will send the transactions to the available services to process them. and finally, each orchestrator service will receive the transactions and execute them.
+
+== Deployment strategies of Stacksaga Agent
+
+As per the architecture, the agent nodes can be deployed in two modes as shown below.
+
+* xref:#single_multi_node_in_region[Single node per region]
+* xref:#multi_node_in_region[Multi node per region]
+
+IMPORTANT: Due to the fact that the agent nodes are required only for retrying the transactions in your system, at least one agent node should be running in each region where the orchestrator services are running. +
+and as well as be aware of the xref:ROOT:proportional-analysis-of-long-running-transactions-in-saga.adoc[] to decide how many agent nodes should be running in your system.
+
+[[single_multi_node_in_region]]
+=== Single node per one region
+
+image:ROOT:stacksaga-diagram-stacksaga-service-agent-single-node-in-multi-region.drawio.svg[alt="stacksaga diagram stacksaga service agent single node in multi region"]
+
+TIP: If only one instance is running in the region, that node acquires the entire token range (*-9223372036854775808* to *9223372036854775807*). +
+
+<1> Fetch the transactions from the event-store for the respective region.
+Due to only one node is running in the region, it can be running on one of the available zones in the region, and the entire token range is acquired by that node.
+
+<2> Send the collected transactions within the available instances.
+It does not matter which zone the service agent is running in.
+It shares all the collected transactions for the available instances in the region.
+
+<3> Receive the transactions by each orchestrator service and execute them by connecting with the event-store.
+
+[[multi_node_in_region]]
+=== Multi node per one region
+
+image:ROOT:stacksaga-diagram-stacksaga-service-agent-multi-node-in-multi-region.drawio.svg[alt="stacksaga diagram stacksaga service agent multi node in multi region"]
+
+<1> Fetch the transactions from the event-store for the respective region and the respective token range.
+The service agent nodes can have in any zone in the region with any amount, and they have their own token range.
+
+<2> Send the collected transactions within the available instances in the region.
+It shares all the collected transactions within the available instances in the region.
+Not only within the zone that service agent running on because service agents are for the entire region.
+
+<3> Receive the transactions by each orchestrator service and execute them by connecting with the event-store.
+
+*_To explore the specific configurations for each implementation, please refer to the corresponding implementation guides._*

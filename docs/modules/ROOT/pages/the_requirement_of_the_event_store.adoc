@@ -1,0 +1,21 @@
+== The requirement of the event-store [[the_requirement_of_the_event_store]]
+
+StackSaga framework provides the SEC capabilities.
+Then the framework has to store each execution data (aggregator state and the transaction information like that each sub transaction was failed or success, etc.) The interesting part is how the framework saves each state of the whole transaction process.
+As the initial step, the transaction is saved in the event store with initial data that you provided with the relevant aggregator.
+After the saving the INIT step, the first executor is invoked and after invoking the executor, the framework saves the new updated aggregator state in the event store.
+Likewise, after all and every steps the updated aggregator state and the execution state are saved in the event-store.
+
+== What are the reasons for saving the states in the event-store?
+
+* *To retry purpose.*
++
+Any kind of execution can retry if the execution is failed due to a xref:retryable_executor_exception.adoc[RetryableExecutorException] like network issues.
+Because if an execution is failed due to a network error, it is not fair that it is treated as an exception in the microservice architecture.
+Because one transaction consists of multiple individual transactions and at any time, there is a possibility to one service may have gone down.
+Therefore, retrying the execution is one of the main features that StackSaga provides. to provide a safe retry, each state of the transaction should be stored in persistent storage.
+
+* *For analyzing and monitoring purpose.*
++
+StackSaga offers a dashboard called xref:trace-window:stacksaga-trace-window.adoc[Stacksaga Trace-Window], which allows you to monitor transaction tracing details and review any errors related to transactions.
+The displayed data is retrieved from the event store, where transaction records are persisted.

@@ -1,0 +1,184 @@
+= Overview
+
+Before dive in to the executor component, you should have an awareness about the atomic operations (atomic transaction/atomic execution).
+
+== What's an atomic transaction (atomic operation)?
+
+An atomic transaction refers to a set of operations that must either all succeed or all fail as a single unit.
+In microservices, that kind of single unit is called as an atomic execution.
+
+For instance, in the placing-order example, there were 5 atomic operations.
+Those 5 atomic executions can consist of many sets of operations at service level.
+
+image:executor/stacksaga-diagram-atomic-transaction.drawio.svg[]
+
+== Saga Executors
+
+The executor is the where that your atomic transaction should be implemented.
+You know that the entire transaction consists of multiple steps (multiple atomic transactions) in the saga design pattern.
+To execute each atomic transaction, you have to communicate with other microservices or third party APIs.
+In Stacksaga, there's a specific location that should implement that communicating process.
+It is called as Executor.
+
+For instance, let's have a look at the placing-order example.
+There were 5 sub executions for completing the entire transaction.
+To execute those 5 executions, we have to implement 5 executors in Stacksaga.
+
+When it's considered the atomic executions, it can be divided into two types based on the atomic transaction has a compensating execution or not.
+If the execution is a read only operation, it doesn't impact on the database state.
+That means there's nothing to undo.
+
+For instance, in our placing order example, there was an atomic execution for fetching the user's details by calling the user service.
+Due to the fetching the user's details from the service, the impact on the user-service's database is zero.
+We just fetched the data.
+
+In general, an atomic execution can have two executions called *primary-execution* and *compensating-execution*.
+
+. *Primary Execution / Main Execution*
+- Primary Execution refers to the main operations that are part of a long-running transaction.
+Each primary execution is a step in the overall business process and performs a specific action that moves the process towards its completion.
+These operations are typically idempotent and isolated, meaning that they can be executed independently of each other without causing side effects.
++
+For example, In your place order example you had multiple individual transactions to overcome the entire transaction like fetching user's details, initialize the order, making the pre-auth, updating the stock, and make the real payment.
+
+- Those sets of primary executions are moved towards. [icon:arrow-circle-right[1x,role=green]].
+
+. *Compensating Execution / Revert Execution*
+- Compensating Execution refers to the operations that are performed to undo the effects of a previously completed primary execution if a subsequent step fails.
+Each primary execution has a corresponding compensating execution designed to reverse its effect.
+This ensures that the system can revert to a consistent state even if part of the transaction fails.
+
+- Those sets of compensating executions are moved backward. [icon:arrow-circle-left[1x,role=green]].
+
+== Executor types
+
+Based on the above classification, the saga executors are two types in StackSaga.
+
+* Command executors
++
+If some atomic execution has both primary execution and compensating, those kinds of atomic transactions should be implemented inside the command executor. +
+In *Command executor* has two methods for making the primary execution and making the compensating execution.
+(See the command executor xref:framework:command_executor.adoc[implementation] or xref:framework:command_executor.adoc[read more])
++
+*Examples Executions for command-executor*:
++
+** initialize order
+** make pre-auth
+** update stock
+** make real payment
+
+
+* Query executors
++
+If the atomic execution has only the primary execution, those kinds of executions should be implemented inside the Query executor.
++
+In *Query Executor* has only one method for making the primary execution.
+(See the query executor xref:framework:query_executor.adoc[implementation] or xref:framework:query_executor.adoc[read more])
++
+*Example Executions for query-executor*:
++
+** collecting user delivery details
+
+The below diagram shows the Executors types and what are the methods they have.
+
+image:executor/stack-saga-e-store-example-executor-types-in-stacksaga.drawio.svg[alt="Stacksaga Executors",height=300]
+
+== Guidelines for creating executors.
+
+The execution that is implemented in the saga executor should be an atomic transaction.
+That means you cannot implement multiple transactions in the same executor.
+The reason for one executor can have only one atomic transaction is that the executor is the wrapper component that is used for retrying by the saga orchestration engine.
+Then, if you have added many atomic transactions inside the executor saga, the SEC doesn't know that what was exactly failed previously.
+Because, for instance, if the executor had 3 atomic transactions, the first two executions might have been executed successfully.
+But due to the failure of the 3rd one, the executor is retried.
+The worst thing that can happen is that both 1st and 2nd atomic transactions are executed again and again until the 3rd execution is executed successfully if the 3rd execution is failed due to a resource-unavailable issue (Retractable issue).
+
+This can lead to data redundancy and potential problems with data integrity and consistency.
+And the other thing is that if it's wanted to execute the compensating transaction, the SEC has no awareness about what specific atomic transaction should be undone.
+Because the SEC considered an executor as a single atomic operation.
+
+
+// todo :add more
+
+== Executions Classifying Tips
+
+When you are creating the executors, you have to decide that whether the executor is a *command-executor* or *query-executor*.
+To determine that the following chart will be helpful (from the database prospective).
+
+The summary of the chart is that if the atomic execution is a *read-only* one, it should be implemented in a *query-executor*, and if the atomic operation does some state change on any database, that atomic operation should be implemented in a *command-executor*.
+
+|===
+|Operation |Has a Revert | Executor Type
+
+|*C* - Create
+|*YES*
+|Command-Executor
+
+
+|*R* - Read
+|*NO*
+|Query-Executor
+
+|*U* - Update
+|*YES*
+|Command-Executor
+
+|*D* - delete
+|*YES*
+|Command-Executor
+|===
+
+For instance, let's classify the executions that we have in our placing-order example.
+
+|===
+|Execution |Executor Type | Reason
+
+|Collecting user's delivery details
+|Query-Executor
+|Fetching data doesn't make an impact on the user-service's database.
+
+|Initialzie the order
+|Command-Executor
+|The order should be canceled if any upcoming atomic transaction is failed after initializing the order.
+
+|Making Pre-Auth
+|Command-Executor
+|The Pre-Auth should be canceled if any upcoming atomic transaction is failed after making the Pre-Auth.
+
+|Updating The Stock
+|Command-Executor
+|The Stock should be restored if any upcoming atomic transaction is failed after reducing the stock.
+
+|Making Real Payment
+|Command-Executor
+|The Payment should be refunded if any upcoming atomic transaction is failed after making the payment.
+
+|===
+
+NOTE: In the placing-order example, there is no any atomic operation after making the payment.
+But as the theory, making payment execution should be executed withing a command-executor.
+because, for instance, if a new another atomic process is added in the future after making the payment, you must implement the compensating execution for making the payment.
+
+[[sub-executors]]
+include::sub-executors.adoc[]
+
+
+== Combine multiple atomic executions
+
+TIP: There are two possibilities to implement multiple atomic operations in the saga executor.
+You know already there are two types of atomic executions in Stacksaga called command executions and query executions.
+The query executions can sometimes be used together in the same executor based on the use case. +
+
+Using multiple read-only atomic operations inside the same executor can reduce the event sourcing overhead.
+Because you know that after each executor, the new state of the aggregator is stored as a new event in the database by the Saga engine.
+For instance, if you implement 3 read-only atomic transactions in the same executor, you can reduce the event sourcing overhead by 2.
+Because if we added those 3 executions to the 3 executors, 3 times the event store is updated after each execution. +
+
+*First way*:
+
+image:executor/stacksaga-diagram-combine-multiple-executor-option-1.drawio.svg[]
+
+*Second way*:
+
+image:executor/stacksaga-diagram-combine-multiple-executor-option-2.drawio.svg[]
+

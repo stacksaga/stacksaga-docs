@@ -1,0 +1,101 @@
+= Aggregator Serialization
+
+== Creating SagaSerializable Class for Aggregator [[saga_serializable]]
+
+Providing sample objects for the framework is very important to capture the feature failures that can be occurred due to the version updates of the Aggregator.
+You can have a better understanding of version updates through the following topics.
+
+. xref:architecture:version_casting_architecture.adoc[Aggregator's Event Casting]
+
+Let's look at the implementation of `SagaSerializable` here:
+
+The `SagaSerializable` class provides you a method called `<T> getSamples()` to provide the sample array of objects of your real Aggregator. for each aggregator class that you made should have a separate implementation of `SagaSerializable` for validating the sample object before the application is started. that process ensures that your aggregator object will not face a serialization error while the transactions are being processed in the production.
+
+you can see a sample SagaSerializable `(PlaceOrderAggregatorSample.class)` implementation of the PlaceOrderAggregator.
+
+[source,java,highlight=1;3-7;!5]
+----
+public class PlaceOrderAggregatorSample extends SagaSerializable<PlaceOrderAggregator> { //<1>
+    public PlaceOrderAggregatorSample() {
+        //sample-1
+        PlaceOrderAggregator aggregator1 = new PlaceOrderAggregator();
+        aggregator1.setOrderId(UUID.randomUUID().toString());
+
+        this.put("1", aggregator1);//<2>
+
+        //sample-2
+        PlaceOrderAggregator aggregator2 = new PlaceOrderAggregator();
+        aggregator2.setOrderId(UUID.randomUUID().toString());
+        aggregator2.setUsername("mafei");
+
+        this.put("2", aggregator2);//<2>
+
+        //sample-3
+        PlaceOrderAggregator aggregator3 = new PlaceOrderAggregator();
+        aggregator3.getItemDetails().add(
+                PlaceOrderAggregator.ItemDetail
+                        .builder()
+                        .itemName("Item-01")
+                        .price(10.50)
+                        .qty(2)
+                        .build()
+        );
+
+        this.put("3", aggregator3); //<2>
+    }
+}
+----
+
+<1> Implement your custom `PlaceOrderAggregatorSample` from the `SagaSerializable<T>`.
+The generic type should be the aggregator that you wish to check the sample object.
+According to the example, the Type is `PlaceOrderAggregator`.
+Then you will have a method for providing the sample objects for that given type.
+
+<2> Put your initialized sample objects for the validation process by using `put(key,vlaue)` method.
+The key should be unique for each.
+And also you have to provide at least one sample object.
+
+WARNING: Make sure to keep the default constructor for each SagaSerializable implementation.
+
+== Aggregator Serialization And Deserialization [[aggregator_serialization_and_deserialization]]
+
+By default, StackSaga uses `Jackson ObjectMapper` for aggregator serialization and deserialization.
+Therefore, It is possible to do default casting subject to ObjectMapper in StackSaga.
+To do that you are able to use all the https://javadoc.io/doc/com.fasterxml.jackson.core/jackson-annotations/latest/index.html[jackson-annotations] that are provided by the `Jackson ObjectMapper Library`.
+
+NOTE: It is recommended to use `@JsonProperty` annotation with a *fixed-name* for all the properties in your aggregator class.
+It helps to keep the JSON properties safe from the Java codes in the event-store. +
+The suggestion does not mean to keep the properties in *SNAKE_CASE* at all.
+Therefore, it is not recommended to use *SNAKE_CASE* configuration for all the properties in your aggregator class.
+Because it will be changed correspondingly to the property name every time you change the property name in the Java code.
+
+[source,java]
+----
+@SagaAggregator(
+        version = @SagaAggregatorVersion(major = 1, minor = 0, patch = 1),
+        idPrefix = "po",
+        name = "PlaceOrderAggregator",
+        sagaSerializable = PlaceOrderAggregatorSample.class,
+        mapper = PlaceOrderAggregatorJsonMapper.class
+)
+@Getter
+@Setter
+public class PlaceOrderAggregator extends Aggregator {
+
+    public PlaceOrderAggregator() {
+        super(PlaceOrderAggregator.class);
+    }
+
+    @JsonProperty("order_id")
+    private String orderId;
+    @JsonProperty("username")
+    private String username;
+    @JsonProperty("total")
+    private Double total;
+    @JsonProperty("is_active")
+    private int isActive;
+    @JsonProperty("item_details")
+    private List<ItemDetail> itemDetails = new ArrayList<>();
+    ...
+}
+----

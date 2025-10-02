@@ -1,0 +1,245 @@
+= StackSaga in Kubernetes
+
+== Overview
+
+If your system is deployed in Kubernetes, the following changes should be made to the adaptation.
+
+. xref:orchestrator-service-changes[Orchestrator service related changes]
+. xref:agent-service-changes[Agent service related changes]
+
+[[orchestrator-service-changes]]
+== Orchestrator Service Changes
+
+Based on the running environment, it can be chosen one of environment support dependencies.
+Due to we are now in eureka environment, the `stacksaga-connect-k8s-support` dependency should be added to the `pom.xml` of the orchestrator service.
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-connect-k8s-support</artifactId>
+    <version>${stacksaga-version}</version>
+</dependency>
+----
+
+After adding the dependency, you have to provide a service account with roles to access the kubernetes API.
+because `stacksaga-connect-k8s-support` dependency access the kubernetes endpoint internally to get some meta-data like the service name, pod ID, etc.
+
+[[service_account]]
+=== ServiceAccount Manifest
+
+Create the https://kubernetes.io/docs/concepts/security/service-accounts/[service account] for the orchestrator service.
+
+[source,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-order-service-service-account #the name of the service account.
+  namespace: default #the namespace the application is deployed.
+----
+
+[[role]]
+=== Role Manifest
+
+Create a https://kubernetes.io/docs/reference/access-authn-authz/rbac/[role] for granting access to the pods and nodes.
+
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: demo-order-service-role
+  namespace: default
+rules:
+  - apiGroups: [ "" ]
+    resources: [ "pods","nodes" ]
+    verbs: [ "get" ]
+----
+
+=== RoleBinding Manifest
+
+https://kubernetes.io/docs/reference/access-authn-authz/rbac/#kubectl-create-rolebinding[Bind the role] with the service account.
+
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-order-service-service-account-role
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: demo-order-service-service-account
+    namespace: default
+roleRef:
+  kind: RoleBinding
+  name: demo-order-service-role
+  apiGroup: rbac.authorization.k8s.io
+----
+
+=== Deployment Manifest
+
+After binding the role with the service-account, configure the service-account with the deployment.
+
+[source,yaml]
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-application
+spec:
+  selector:
+    matchLabels:
+      app: sample-application
+  template:
+    metadata:
+      labels:
+        app: sample-application
+    spec:
+      serviceAccountName: demo-order-service-service-account #mention the service account name here
+      automountServiceAccountToken: true
+      containers:
+        - name: order-service
+          image: mafeidev/sample-service:1.0.0
+      #.... rest of properties
+----
+
+See the application configuration properties regarding the `stacksaga-connect-k8s-support` xref:#[here].
+
+=== SagaInstanceInfo feature with the help of kubernetes API
+
+====
+TIP:  After adding `stack-saga-k8s-discovery` you can use it to access the *pod metadata*  and as well as the *node metadata* that kubernetes provides.
+
+[source,java]
+----
+
+import io.kubernetes.client.openapi.models.V1Node;
+import io.kubernetes.client.openapi.models.V1Pod;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+import org.stacksaga.common.communication.SagaInstanceInfo;
+import org.stacksaga.common.communication.ServiceInstanceInfo;
+import org.stacksaga.kubernetes.KubernetesSagaInstanceInfo;
+
+@Component
+@RequiredArgsConstructor
+public class InstanceDetailService {
+
+    private final ServiceInstanceInfo serviceInstanceInfo; //<1>
+
+    public void showInstanceInfo() {
+        final SagaInstanceInfo sagaInstanceInfo = serviceInstanceInfo.getSagaInstanceInfo();
+        if (sagaInstanceInfo instanceof KubernetesSagaInstanceInfo) { //<2>
+            final KubernetesSagaInstanceInfo kubernetesSagaInstanceInfo = (KubernetesSagaInstanceInfo) sagaInstanceInfo; //<3>
+            V1Pod v1Pod = kubernetesSagaInstanceInfo.getV1Pod(); //<4>
+            System.out.println("v1Pod = " + v1Pod);
+            V1Node v1Node = kubernetesSagaInstanceInfo.getV1Node(); //<5>
+            System.out.println("v1Node = " + v1Node);
+        }
+    }
+}
+----
+
+<1> Autowire the `ServiceInstanceInfo` bean.
+<2> Call the `getSagaInstanceInfo()` method to get the assistance details and check that object is an instance of `KubernetesSagaInstanceInfo`. due to the adding the `stack-saga-k8s-discovery` dependency you will have a `KubernetesSagaInstanceInfo`.
+<3> cast the object in to `KubernetesSagaInstanceInfo` object.
+<4> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Pod.md[V1Pod] object.
+<5> Access the https://github.com/kubernetes-client/java/blob/master/kubernetes/docs/V1Node.md[V1Node] object.
+====
+
+WARNING: While you are accessing the tracing details via the xref:trace-window:stacksaga-trace-window.adoc[] you might be faced an issue called mixed-content error. refer the solution
+xref:trace-window:stacksaga-trace-window.adoc#mixed_content_error[here].
+
+[[agent-service-changes]]
+== Agent service
+
+NOTE: If you have already created the xref:quick-examples:quick-start.adoc#retrying_with_stacksaga_agent[agent-service with eureka profile], just change the profile to `k8s` in the `application.yml` file and remove other configuration properties related to eureka. see the changes xref:update_existing_eureka_profile[here]
+
+If you are creating the agent-service from the beginning, first, create the agent-service with one of the xref:#[stacksaga-agent implementations] and then chose the profile as `k8s`.
+
+After that, grant accessing the API for the agent application with a service account and the role.
+
+NOTE: If you prefer to configure the same service-account with the role, you can use the xref:service_account[same service-account] that has been created for the orchestrator service.
+Or otherwise, you can create a separate one with the same xref:role[access control].
+
+After binding the role with the service-account, configure the service-account with the deployment.
+
+[source,yaml]
+----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-order-service-agent
+spec:
+  selector:
+    matchLabels:
+      app: demo-order-service-agent
+  template:
+    metadata:
+      labels:
+        app: demo-order-service-agent
+    spec:
+      serviceAccountName: demo-order-service-service-account #mention the service account name here
+      automountServiceAccountToken: true
+      containers:
+        - name: order-service
+          image: mafeidev/sample-service:1.0.0
+      #.... rest of properties
+----
+
+'''
+
+[[update_existing_eureka_profile]]
+====
+
+Migration from Eureka profile to Kubernetes profile
+
+[source,yaml]
+----
+
+server:
+  port: 5566
+spring:
+  profiles:
+    active: k8s #<1>
+  application:
+    name: order-service-agent-eureka
+  datasource:
+    username: root
+    password: mafei
+    url: jdbc:mysql://mysql_host:3306/order-service-db
+    driver-class-name: com.mysql.cj.jdbc.Driver
+stacksaga:
+  agent:
+    retry-batch-size: 10000
+    target-service: order-service
+    target-service-host: order-service
+    act-master-as-slave: true
+    retry-pool:
+      pool-size: 10
+#<2>
+
+#    eureka:
+#      instance-type: master
+#      token-range-update-delay: 10000
+#      token-range-update-initial-delay: 10000
+#      token-range-valid-duration: 150000
+#eureka:
+#  client:
+#    service-url:
+#      defaultZone: http://localhost:8077/eureka/
+#  instance:
+#    metadata-map:
+#      stacksagaRegion: myRegion
+#      stacksagaZone: myZone
+
+----
+
+'''
+
+
+<1> Changed the profile to `k8s`.
+<2> Removed all the eureka related properties.
+====

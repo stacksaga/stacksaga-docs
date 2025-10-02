@@ -1,0 +1,59 @@
+Stacksaga Cassandra agent does support both eureka based and kubernetes based environments.
+There is a list of xref:common_configuration_properties[common configuration properties] for both and as well as there are some configuration properties specific to xref:specific_to_eureka[eureka] and xref:specific_to_kubernetes[kubernetes].
+
+[[common_configuration_properties]]
+=== Common Configuration Properties
+
+[.scrollable-div]
+--
+[cols="1,1,1,<1"]
+[.properties-table]
+
+|===
+|Property Name|Default Value|Type|Description
+include::stacksaga-agent:cassandra-agent/cassandra-agent-common-configuration-properties.adoc[]
+|===
+
+--
+
+[[specific_to_eureka]]
+=== Eureka profile Based Configuration Properties
+
+If you are in the Eureka environment, then you have to configure the following configuration properties.
+
+[.scrollable-div]
+--
+
+[cols="1,1,1,<1"]
+[.properties-table]
+|===
+|Property Name|Default Value|Type|Description
+|`stacksaga.agent.cassandra.eureka.instance-type`|-|`InstanceType`[Enum]|What is the type of this agent? Whether this agent is *leader* or *follower*. As per the architecture, one `leader` instance per region should be deployed.
+4+| If the instance is deployed as leader, the following configuration properties should be provided.
+|`eureka.instance.instance-id`|-|| If the instance is a leader one, the instance-id should be a static value. The recommended pattern is `{service-name}-agent-{region-name}-leader`.
+|`stacksaga.agent.cassandra.eureka.leader.communication-pool.core-size`|`AvailableProcessors()`|int| what is the core size of the thread-pool for communicating with other followers.
+|`stacksaga.agent.cassandra.eureka.leader.communication-pool.max-size`|`AvailableProcessors()`|int| what is the maximum size of the thread-pool for communicating with other followers.
+|`stacksaga.agent.cassandra.eureka.leader.communication-pool.keep-alive`|`AvailableProcessors()`|long| Time limit for which threads may remain idle before being terminated.
+|`stacksaga.agent.cassandra.eureka.leader.token-range-update-interval`|`10 * 60 * 1000`(10 minutes)|long| how long time the token range should be updated based on the available instance data by the leader. the default value is 10 minutes.
+|`stacksaga.agent.cassandra.eureka.leader.token-range-valid-duration`|`10 * 60 * 1000`(10 minutes)|long| How long time the token range should be remains valid. This valid time is sent to the follower instance along with the token range, and their executions will be based on this time. The default value is `tokenRangeUpdateInterval + 5 minutes = 15 minutes`. The extra 5 minutes are added to avoid a network delay that may occur. The tokenRangeValidDuration should be greater than tokenRangeUpdateInterval all the time.
+4+| If the instance is deployed as follower, the following configuration properties should be provided.
+
+|`stacksaga.agent.cassandra.eureka.follower.leader-id`|-|| If the instance is a slave instance, it should be provided the master's *stick-id* to identify their leader.
+
+|===
+--
+
+[[specific_to_kubernetes]]
+=== Kubernetes profile's Configuration Properties
+
+[.scrollable-div]
+--
+[cols="1,1,1,<1"]
+[.properties-table]
+|===
+|Property Name|Default Value|Type|Description
+|`stacksaga.agent.cassandra.k8s.namespace`|`default`|`String`| the namespace that the application is deployed in the kubernetes cluster.
+|`stacksaga.agent.cassandra.k8s.zone-topology-name`|`topology.kubernetes.io/zone`|`String`| the topology name of the zone in the kubernetes cluster.
+|`stacksaga.agent.cassandra.k8s.region-topology-name`|`topology.kubernetes.io/region`|`String`| the topology name of the region in the kubernetes cluster.
+|===
+--

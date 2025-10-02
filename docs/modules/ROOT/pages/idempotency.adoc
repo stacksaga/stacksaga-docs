@@ -1,0 +1,137 @@
+= Maintaining Idempotency
+
+== What is the idempotence?
+
+////
+Idempotence in the distributed system refers to the ability of a system to handle duplicate requests or retries without altering the system's state beyond the first application of the request.
+In other words, it allows sending the same request multiple times, and it will only affect the system once.
+Even if the same request is accidentally repeated due to network issues or retries, the result will be the same as if the request was made just one time.
+////
+
+Idempotency in microservices architecture means that making *multiple identical requests* to a service will have the *same effect* as making a single request.
+This ensures that operations are *safe to retry* without causing unintended side effects, which is especially important in distributed systems where failures and retries are common.
+
+== Why is Idempotence Important in Microservices?
+
+In microservices architecture, services are often distributed and communicate over unreliable networks.
+As a result:
+
+* *Failures and Retries:* When a request fails due to network issues or system crashes, the client may retry the request.
+Without idempotence, multiple retries could lead to inconsistent data or unexpected behavior.
+* *Asynchronous Messaging:* When using message queues, brokers may send the same message multiple times if acknowledgment is not received, or due to delivery guarantees such as "at-least-once."
+* *Concurrency:* Multiple instances of a service might attempt to process the same request or data at the same time, and idempotence ensures that this doesn't lead to incorrect results.
+For example, imagine a microservice responsible for billing.
+If a charge is applied twice due to a retry, the customer could be billed multiple times without idempotence in place.
+
+== Examples of Idempotent and Non-Idempotent Operations
+
+=== Idempotent Requests:
+
+* GET /orders/123 → Fetching an order multiple times does not change the system state.
+
+* PUT /orders/123 → Updating an order with the same data multiple times results in the same final state.
+
+* DELETE /orders/123 → Deleting an order multiple times has the same effect as deleting it once.
+
+=== Non-Idempotent Requests:
+
+* POST /orders → Creating a new order each time a request is sent leads to multiple orders being created.
+
+== Implementing Idempotency
+
+Use Idempotency Keys: Clients send a unique request ID (X-Idempotency-Key) to prevent duplicate processing.
+
+Check Before Processing: Maintain a record of processed requests to ensure duplicate ones are ignored.
+
+Design APIs Correctly: Prefer PUT over POST where applicable.
+
+Use Database Constraints: Enforce unique constraints to prevent duplicate entries.
+
+== Why Idempotency is Important with Retries?
+
+. Prevents Duplicate Transactions
++
+Suppose a payment service processes a POST /payments request.
+If the client does not receive a response due to a network failure and retries, the same payment might be processed twice, leading to double charges for the customer.
++
+With idempotency, the service can recognize the repeated request and ensure it is processed only once.
+
+. Ensures Data Integrity +
+Without idempotency, retrying a non-idempotent operation (like adding money to a wallet) might result in incorrect balances.
++
+Example:
++
+First request: POST /wallets/123/add?amount=100 → Balance: $100
++
+Retry due to failure: POST /wallets/123/add?amount=100 → Balance: $200 (Incorrect!)
++
+With idempotency, the service checks if the request has already been processed and ensures the balance remains correct.
+
+. Avoids Partial Updates & Inconsistencies
++
+In distributed transactions, a microservice might update multiple databases or services.
+If retries happen without idempotency, it could lead to partially completed operations.
++
+Example:
++
+Step 1: Service A debits an account.
++
+Step 2: Service B fails before updating the order status.
++
+Step 3: The client retries, causing another debit.
++
+Idempotency ensures only one successful debit happens, even with multiple retries.
+
+. Improves System Resilience
++
+Many microservices frameworks (e.g., Spring Retry, Resilience4j, Kubernetes Liveness Probes) automatically retry failed requests.
++
+If a service is not idempotent, automatic retries might overload the system with unintended duplicate requests.
+
+== How to Ensure Idempotency in Retried Requests in General?
+
+. Use an Idempotency Key
++
+The client sends a unique request ID (e.g., X-Idempotency-Key: 12345).
++
+The server checks if the request has already been processed.
++
+If processed, return the stored response instead of executing it again.
+
+. Store Processed Requests
++
+Maintain a record of processed requests in a database or cache to avoid reprocessing.
+
+. Use Database Constraints
++
+Enforce unique constraints in the database (e.g., unique order ID for payments).
+
+. Prefer PUT over POST
++
+PUT /orders/123 ensures the same order update happens only once, even if retried.
+
+== How Idempotency is used in the Stacksaga framework?
+
+In StackSaga, service communication requests are processed within the executors.
+The SEC assigns a unique identifier key to each atomic transaction, and you can access it inside each executor.
+For example, if you have a long-running transaction like placing an order and if it consists of five atomic transactions, it has to create five executors for handling the invocations.
+Within each executor, the SEC provides an idempotency key and, that Idempotency key can be used for passing over the requests instead of maintaining idempotency keys manually.
+See the implementation here.
+
+NOTE: The Idempotency key is generated by combining the transaction-ID (Aggregator Transaction ID) and the executor's name by default.
+Even though the executor is executed many times for retrying, the Idempotency key of that particular executor will be the same all the time.
+
+
+
+
+// todo: write about the Dual-Write problem in orchestration
+
+[[dual_write_problem]]
+== Dual-Write Problem in Orchestration
+
+In distributed systems, the dual-write problem occurs when two related operations need to be performed on different systems or databases, and one of the operations succeeds while the other fails.
+This can lead to data inconsistencies and integrity issues.
+
+
+
+
