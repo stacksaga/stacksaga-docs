@@ -84,18 +84,15 @@ Saving the transaction data approach is quite different from the SQL support imp
 // The main purpose of using the Cassandra database is to handle high throughput.
 
 All the transactions are saved in 4 tables in the Cassandra database.
-
-. `es_transaction` table
-. `es_transaction_tryout` table.
+. `es_transaction` table . `es_transaction_tryout` table.
 . `transaction_recovery_retention` tables.
-.. `es_{region_name}_transaction_recovery_retention_1` table.
-.. `es_{region_name}_transaction_recovery_retention_2` table.
-.. `es_{region_name}_transaction_recovery_retention_3` table.
+.. `es_{service_name}_{region_name}_transaction_recovery_retention_1` table.
+.. `es_{service_name}_{region_name}_transaction_recovery_retention_2` table.
+.. `es_{service_name}_{region_name}_transaction_recovery_retention_3` table.
 . `es_transaction_retry_retention` tables.
-.. `es_{region_name}_transaction_retry_retention_1` table.
-.. `es_{region_name}_transaction_retry_retention_2` table.
-.. `es_{region_name}_transaction_retry_retention_3` table.
-
+.. `es_{service_name}_{region_name}_transaction_retry_retention_1` table.
+.. `es_{service_name}_{region_name}_transaction_retry_retention_2` table.
+.. `es_{service_name}_{region_name}_transaction_retry_retention_3` table.
 
 === es_transaction table
 
@@ -198,15 +195,15 @@ For example, if a database is used in **two different regions** (`us-east-1` and
 
 *Tables for `us-east-1` Region*
 
-* `us_east_1_transaction_recovery_retention_1` (00:00)
-* `us_east_1_transaction_recovery_retention_2` (08:00)
-* `us_east_1_transaction_recovery_retention_3` (16:00)
+* `es_order_service_us_east_1_transaction_recovery_retention_1` (00:00)
+* `es_order_service_us_east_1_transaction_recovery_retention_2` (08:00)
+* `es_order_service_us_east_1_transaction_recovery_retention_3` (16:00)
 
 **Tables for `us-west-1` Region** +
 
-* `us_west_1_transaction_recovery_retention_1` (00:00)
-* `us_west_1_transaction_recovery_retention_2` (08:00)
-* `us_west_1_transaction_recovery_retention_3` (16:00)
+* `es_order_service_us_west_1_transaction_recovery_retention_1` (00:00)
+* `es_order_service_us_west_1_transaction_recovery_retention_2` (08:00)
+* `es_order_service_us_west_1_transaction_recovery_retention_3` (16:00)
 
 **Key Benefits of This Approach** +
 
@@ -314,11 +311,11 @@ The *Transaction retry retention time* will be withing the range of 1 minute to 
 
 If the *Transaction retry retention time* has been mentioned as 2 minutes, 3 schedulers can be triggered 30 times in the round robbin manner withing a day for collecting and re-invoke the temporally stopped transactions like the diagram shows.
 
-. 1st schedule at: 00:00 (`transaction_retry_retention_1`)
-. 2nd schedule at: 00:02 (`transaction_retry_retention_2`)
-. 3rd schedule at: 00:04 (`transaction_retry_retention_3`)
-. 4th schedule at: 00:06 (`transaction_retry_retention_1`)
-. 5th schedule at: 00:08 (`transaction_retry_retention_2`)
+. 1st schedule at: 00:00 (`es_order_service_us_transaction_retry_retention_1`)
+. 2nd schedule at: 00:02 (`es_order_service_us_transaction_retry_retention_2`)
+. 3rd schedule at: 00:04 (`es_order_service_us_transaction_retry_retention_3`)
+. 4th schedule at: 00:06 (`es_order_service_us_transaction_retry_retention_1`)
+. 5th schedule at: 00:08 (`es_order_service_us_transaction_retry_retention_2`)
 . and so on...
 
 To determine whether a transaction has sufficient time to be stayed without being executed, the system uses the middle time of the configured duration as the boundary point.
