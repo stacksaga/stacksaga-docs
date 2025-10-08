@@ -9,7 +9,7 @@
 
 Stacksaga agent is the application that invokes for retrying (asynchronous-retrying) the transactions from the event-store.
 You already know that if the transaction is failed with a network exception (*Resource-Unavailable*), the transaction can be replayed.
-That retrying part is manage by the Stacksaga agent service.
+That retrying part is managed by the Stacksaga agent service.
 
 == The role of Stacksaga Agent
 
@@ -170,6 +170,35 @@ NOTE: If you deploy 2 agent nodes in the region, the token rage is divided into 
 +
 . Each thread adds all the fetching transactions to the *StackSagaPublisherExecutorPool*'s queue.
 . *StackSagaPublisherExecutorPool*'s threads will send the transactions to the available services to process them. and finally, each orchestrator service will receive the transactions and execute them.
+
+== Transaction Retry Summary with Stacksaga Agent
+
+image:ROOT:stacksaga-diagram-agent-retry-summary.svg[alt="stacksaga diagram agent retry summary"]
+
+* The *event-store* is partitioned into *multiple token ranges*.
+** Each token range represents a unique subset of the total event-space.
+** The partitioning is determined by the number of *active agent nodes* in a given region.
+
+* In the illustrated scenario, *three agent nodes* are running in the region.
+** Each agent node is assigned a *distinct and non-overlapping token range*.
+** This ensures data ownership isolation and avoids redundant processing.
+
+* Within each agent node, the assigned token range is *further divided into sub-ranges* to enhance parallelism.
+** The number of sub-ranges depends on the configured *parallelism level*.
+** Example: If the parallelism is set to `3`, the main token range is divided into *three sub-ranges*.
+** Each parallel execution is responsible for one sub-range.
+** Each parallel execution independently fetches events from the event-store based on its sub-range boundaries.
+
+* Every parallel execution fetches a *fixed-size batch of transactions* from the event-store.
+** Example: Each fetch operation retrieves *100 transactions* at a time.
+
+* After fetching, the batch is *split into smaller chunks* based on a *transaction ratio* parameter.
+** Example: With a ratio of `0.5`, a batch of 100 transactions is divided into *two arrays of 50 transactions* each.
+
+* These *transaction chunks* are then dispatched to *orchestrator service instances*.
+** Each orchestrator service receives one or more chunks for processing.
+** The chunk-based distribution ensures balanced workload across orchestrators.
+** This prevents overloading individual orchestrator instances while maintaining high throughput.
 
 == Deployment strategies of Stacksaga Agent
 
