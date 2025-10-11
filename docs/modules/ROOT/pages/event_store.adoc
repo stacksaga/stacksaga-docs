@@ -1,24 +1,27 @@
 = Stacksaga Event Store
 
-Event-store is the location that StackSaga stores the data that is relevant to the transaction execution as well as the storing the metadata of the components that you provided like *aggregator details*, *executor details*, *application version details,* etc. all the data you can see through the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace-Window].
-You can configure the database for the event-store as the pattern of database per service.
+An event store is a log or database designed to store a sequence of state changes (events), rather than just the final state.
+In stacksaga, you are able to use your primary database as the event-store by providing a separate schema, instead of managing a totally separate system or database for the event-store.
+it reduces the operational overhead and complexity of managing multiple databases.
 
-Otherwise, you can provide one event-store for all services.
-But as the best practice, event-store per service is recommended.
-You can define a separate schema for event-store by providing the configurations.
+In stacksaga you can configure the database for the event-store as the pattern of database per service.
 
-. xref:one_event_store_per_service[One Event-Store Per Service.]
-. xref:single_event_store_for_all_services[One Common Event-Store For All Services.]
+image::stacksaga-diagram-event-store-per-service.svg[alt="stacksaga diagram event store per service"]
 
-include::the_requirement_of_the_event_store.adoc[]
+Even though it is possible to have a single event-store for all services, it is not recommended in production environments due to potential performance bottlenecks and single points of failure and the microservice architecture principles.
 
+== What are the reasons for saving the states in the event-store?
 
+* *Reliable Retries*
++
+When an execution fails due to a `RetryableExecutorException` (such as network issues), StackSaga enables safe retries.
+In microservice architectures, failures like network errors should not be treated as final exceptions, since transactions often span multiple services, and any service may become temporarily unavailable.
+By persisting each transaction state in the event store, StackSaga ensures that failed executions can be retried reliably, reducing the risk of data loss or inconsistency.
 
-[[one_event_store_per_service]]
-include::one_event_store_per_service.adoc[]
+* *Analysis and Monitoring*
++
+StackSaga provides a dashboard—xref:trace-window:stacksaga-trace-window.adoc[Stacksaga Trace-Window]—for monitoring transaction traces and reviewing errors.
+All displayed data is sourced from the event store, where transaction records are securely persisted for analysis and troubleshooting.
 
-
-[[single_event_store_for_all_services]]
-include::single_event_store_for_all_services.adoc[]
-
-
+NOTE: The event-store is accessed by both xref:stacksaga-database-support:overview/database-support-overview.adoc[] and as well as the
+xref:stacksaga-agent.adoc[Stacksaga Agent Modules]. refer to their respective sections for more details with the causes.
