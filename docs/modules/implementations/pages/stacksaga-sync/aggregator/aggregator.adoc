@@ -2,46 +2,51 @@
 
 == Overview
 
-The *aggregator* object is the main component that all the data is stored for the entire transaction.
-It acts as the data bucket that you bring the data to each executor by updating time to time.
-As well as bringing the data into the executors, each executor can update the aggregator with new data while the executor's scope.
-Then the next upcoming executors can use that updated data in their executor scope.
+The *aggregator* object serves as the central data container for the entire transaction lifecycle.
+It acts as a shared data bucket, allowing each xref:stacksaga-sync/executor/executor_architecture.adoc[executor] to access and update transaction-related data as the process progresses.
 
-The aggregator data is updated time to time, and that data is stored each and every event happens.
-That means, At the initial the data that you update to aggregator, it is saved as the initial state in the xref:event_store.adoc[event-store].
-And after executing the 1st executor, the aggregator state is updated.
-Again, that state is saved in the event-store with the name of the executor.
-It is called aggregator event sourcing.
+Whenever an executor runs, it can both read from and write to the aggregator.
+This means that data produced or modified by one executor becomes immediately available to subsequent executors, ensuring seamless data flow throughout the transaction.
 
-*There are two major reasons for aggregator event sourcing.*
+The aggregator’s state is updated at each significant event, and every version of this state is persisted.
+Initially, the aggregator is saved as the transaction’s starting state in the event-store.
+After each executor completes, the updated aggregator state's snapshot is again saved, tagged with the executor’s name.
+This approach is known as aggregator event sourcing.
 
-. xref:transaction-retrying.adoc[To Transaction Retry] (Replay the executors).
-- You know that all the atomic executions are retryable in case of resource-unavailable situations (If the execution is failed due to connection issue while the communication).
-Then the xref:SEC.adoc[SEC] has to replay the execution again with the same data (Same aggregator state) after a while (based on the configured xref://[configurations]).
+*Aggregator event sourcing provides two main benefits:*
 
-. To View transaction trace via dashboard.
-- Due to the aggregator event sourcing, you can debug all the changes that have been made by each executor via the admin dashboard like what is the aggregator state that was when the particular executor is started and how the aggregator state looks like after executing that particular executor.
+. Transaction Retry (Executor Replay)
+- If an atomic execution fails due to a transient issue (such as a temporary resource unavailability), the system can retry the operation.
+when the retry is done, the transaction should be started where the transaction was stopped previously. to start the transaction from the same point, it has to be restored the same data that was used when the transaction was stopped.
 
-According to the Place-order example, the entire process has a set of sub atomic-transactions like:
+. Transaction Traceability via Dashboard
+- By storing every change to the aggregator, the system enables detailed debugging and auditing.
+Administrators can inspect the aggregator’s state before and after each executor runs, making it easy to trace the transaction’s evolution step by step through the admin dashboard.
 
-. Fetching user's details.
-. Initialize order.
-. Make the Pre-Auth process.
-. Update the stock.
-. Finalize the order by making the real payment.
+== How to use the aggregator
 
-While executing those atomic processes, you have to store some data regarding the transaction.
-For instance, at the initially you can store the order-related data in the aggregator like username of the customer, the total amount, the items that the customer bought, etc.
-After that as the 1st execution, the user's data is fetched from the user-service.
-To fetch the user's more details, we have to use the username that has been stored in the aggregator object.
-And also the user's details are stored in the aggregator object to be used upcoming executions.
-That stored user's data will be used for *Initialize order* and *Pre-Auth process*.
-And after making the *Pre-Auth process*, a reference ID will be returned from the payment-service for make the real payment.
-That reference ID also saved in the aggregator object to.
+According to the xref:foundations:introduction-to-saga-design-pattern.adoc[Place-order example], the entire process has a set of sub executions like:
+
+. Fetching user's details. (query execution)
+. Initialize order. (command execution)
+. Reserve the items. (command execution)
+. Make the Payment (command execution)
+
+While executing those atomic processes, you have to store some data regarding each execution.
+For instance,
+
+* At the initially, order request related data should be stored in the aggregator to be used in upcoming executions such as username, total amount, items that the customer bought, etc.
+* After that, the user's data is fetched from the user-service by using the username that has been stored in the aggregator object. and again, the user's details are stored in the aggregator object to be used in upcoming executions.
+* That stored user's data will be used for *Initialize order*.
+* Next, to reserve the items, the order ID that is generated from the *Initialize order* execution is used.
+* Finally, To make the payment, order ID and the total amount, username that are stored in the aggregator object are used. and also again, the aggregator is updated by storing the reference ID that is returned from the payment-service.
+
+IMPORTANT: In the same way, we have to access that updated data in case of compensating executions. but in the compensating executions, we cannot update the aggregator object. because aggregator is used only for the primary executions in Stacksaga.
+the revert hint-store can be used for compensation executions to store any metadata that is required for the compensating executions.
 
 Here is How the aggregator changes while the transaction on each executor.
 
-image:stacksaga-diagram-aggregator-state.drawio.svg[alt="stacksaga diagram aggregator state"]
+image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="stacksaga diagram aggregator state"]
 
 Another special thing is that the aggregator is used as the key of your entire transaction.
 That means the executors are identified by the aggregator class that you use.
@@ -60,13 +65,10 @@ When you create each executor, you should mention what is the aggregator that yo
 - each and every update is saved in the event-store after executing each executor by serializing as a JSON object.
 - if the transaction is failed as a retryable one, the aggregator object is restored by the orchestration engine when the transaction is trying to invoke.
 
-NOTE: You can store/update the data in the aggregator by using the process execution only (doProcess()).
-If you want to keep some metadata while your revert/Compensating processes, you can use the hint-store that the framework provides.
+== Implementation Related topics
 
-== Implementation Related Links:
-
-* xref:framework:create-aggregator.adoc[Creating Aggregator Class]
-* xref:framework:aggregator_mapper_implementation.adoc[Custom Aggregator Mapper]
-* xref:framework:aggregator_serialization.adoc[Aggregator Serialization And Deserialization]
-* xref:framework:aggregator_key_gen_custom_implementation.adoc[Aggregator KeyGen]
-* xref:framework:aggregator_casting.adoc[Aggregator Event Casting]
+* xref:stacksaga-sync/aggregator/create-aggregator.adoc[Creating Aggregator Class]
+* xref:stacksaga-sync/aggregator/aggregator_mapper_implementation.adoc[Custom Aggregator Mapper]
+* xref:stacksaga-sync/aggregator/saga_serializable.adoc[Aggregator Serialization And Deserialization]
+* xref:stacksaga-sync/aggregator/aggregator_key_gen_custom_implementation.adoc[Aggregator KeyGen]
+* xref:stacksaga-sync/aggregator/aggregator_casting.adoc[Aggregator Event Casting]

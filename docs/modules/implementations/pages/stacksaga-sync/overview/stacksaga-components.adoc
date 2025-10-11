@@ -1,4 +1,3 @@
-:
 In the StackSaga ecosystem, few components are working together.
 It can be divided as below based on the usage.
 
@@ -12,6 +11,16 @@ It can be divided as below based on the usage.
 Here you can see the relationship between them and how they are used in the StackSaga ecosystem.
 
 image:overview/stacksaga-diagram-stacksaga-components.svg[alt="stacksaga components overview",title="Stacksaga components overview",width=800]
+
+*Description*
+
+* xref:stacksaga-spring-boot-starter[stacksaga-spring-boot-starter] provides the core features of the StackSaga framework like managing the saga work flows, transaction coordination, idempotency, event sourcing, and so on.
+* xref:stacksaga-db-support[stacksaga-db-support] provides the event-store supportive implementation for the StackSaga framework and rest APIs for accessing the tracing details from the StackSaga Trace-Window.
+* xref:stacksaga-env-support[stacksaga-env-support] provides the environment related geographical (region, zone, instance ID, etc.) data to the SEC in the cloud environment.
+* xref:agent_service_related_components[Agent service] provides the transaction retrying management for the Orchestration service as a separate application.
+* xref:stacksaga-trace-window[StackSaga Trace-Window] provides the monitoring facilities of the transactions. (no need to implement due to its hosted in the cloud for you)
+
+See the individual sections for more details.
 
 [[orchestration_service_related_components]]
 == Orchestration service related components
@@ -32,6 +41,14 @@ For instance if you want to configure stacksaga into the order service, you have
   <version>${org.stacksaga.version}</version>
 </dependency>
 ----
+
+`stacksaga-spring-boot-starter` works with the following major components.
+
+* SagaTemplates - Entry point to deal with `stacksaga-spring-boot-starter`.
+** xref:stacksaga-sync/saga-templates/saga_template.adoc[]
+** xref:stacksaga-sync/saga-templates/reactive_saga_template.adoc[]
+* xref:stacksaga-sync/aggregator/aggregator.adoc[Aggregator] - To store the necessary data that is required for the transaction.
+* xref:stacksaga-sync/executor/executor_architecture.adoc[Executors] - To create and execute each atomic transactions.
 
 [[stacksaga-db-support]]
 === `stacksaga-db-support` Dependency
@@ -74,8 +91,8 @@ For instance, if you want to deploy the agent-application in the *kubernetes* en
 
 The following stacksaga-agent dependencies are available for the specific databases.
 
-* Mysql Agent - xref:stacksaga-agent:mysql-agent/mysql-stacksaga-agent.adoc[stacksaga-mysql-agent]
-* Cassandra Agent - xref:stacksaga-agent:/cassandra-agent/cassandra-agent.adoc[stacksaga-cassandra-agent]
+* Mysql Agent - xref:stacksaga-sync/stacksaga-agent/mysql-agent/mysql-stacksaga-agent.adoc[stacksaga-mysql-agent]
+* Cassandra Agent - xref:stacksaga-sync/stacksaga-agent/cassandra-agent/cassandra-agent.adoc[stacksaga-cassandra-agent]
 * MongoDb Agent - `stacksaga-mongodb-agent` #Comming soon!#
 
 [[stacksaga-trace-window]]
@@ -83,6 +100,23 @@ The following stacksaga-agent dependencies are available for the specific databa
 
 Stacksaga Trace-Window is the platform that you can see the transaction tracing details of the transaction that you made in graphically.
 there is nothing to be implemented regarding this component. you can visit https://live.stacksaga.org[live.stacksaga.org] and use it.
+
+== Low-Level Digram (LLD)
+
+Here you can see how the StackSaga Execution Coordinator (SEC) fits into the overall Stacksaga architecture.
+
+image::overview/stacksaga-diagram-SEC-in-stacksaga-framework.svg[alt="StackSaga  StackSaga Execution Coordinator (SEC) in Stacksaga framework"]
+
+. The request comes to the orchestration service, and it is handed off to SEC with the SEC to process them asynchronously.
+. SEC will pick up the request and start the execution from the configured starting point.
+. Each step will be executed one by one based on the programmatic navigation by keeping the state in the event-store in case of retrying and tracing.
+with the help of the stacksaga-database-support module and stacksaga-env-support module(to get the instance's metadata(optional)).
+. If there is any primary execution failure, SEC will trigger the compensation executions in reverse order.
+. If there is any failure in the compensation execution due to any resource unavailability, the SEC will keep the transaction in retry mode and retry the transaction based on the configured retry policy.
+. Configured agent-service frequently checks for the transactions that are in retry mode and retry them by calling the orchestration service's built-in retrying endpoint that is provided by the stacksaga-database-support module.
+. Again, the SEC will pick up the request and start the execution from the failed point by restoring the previous state from the event-store.
+. Each update of the transaction is saved in the event-store, and the SEC will publish the events to the configured listeners for each transaction state change.
+. The administrators can see the tracing details of the transaction graphically by accessing the StackSaga Trace-Window via the in-built endpoints that are provided by the stacksaga-database-support module.
 
 ////
 StackSaga consists of four major components in high-level.
