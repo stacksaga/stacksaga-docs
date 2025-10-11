@@ -1,54 +1,48 @@
-= Overview
+= Saga Executors
 
-Before dive in to the executor component, you should have an awareness about the atomic operations (atomic transaction/atomic execution).
+== Overview
 
-== What's an atomic transaction (atomic operation)?
+A Saga Executor in StackSaga is a specialized component responsible for encapsulating and executing a single atomic transaction within a distributed saga workflow.
+It acts as the bridge between your business logic and the saga orchestration engine, ensuring that each step in a long-running transaction is performed reliably and consistently.
+Saga Executors are categorized as either command executors (handling both primary and compensating executions for operations that modify state) or query executors (handling read-only operations).
+By isolating each atomic transaction in its own executor, StackSaga enables precise control, retry, and compensation mechanisms, reducing the risk of data anomalies and ensuring eventual consistency across microservices.
 
-An atomic transaction refers to a set of operations that must either all succeed or all fail as a single unit.
-In microservices, that kind of single unit is called as an atomic execution.
+====
+*Understanding Atomic Operation*
 
-For instance, in the placing-order example, there were 5 atomic operations.
-Those 5 atomic executions can consist of many sets of operations at service level.
+An atomic transaction is a set of operations that must either all succeed or all fail as a single unit.
+Within microservices, such a unit is referred to as an atomic execution.
 
-image:executor/stacksaga-diagram-atomic-transaction.drawio.svg[]
+image:executor/stacksaga-diagram-atomic-transaction.svg[]
 
-== Saga Executors
+For instance, in the placing-order scenario, there are 4 atomic operations.
+Each atomic execution may itself consist of multiple service-level operations.
 
-The executor is the where that your atomic transaction should be implemented.
-You know that the entire transaction consists of multiple steps (multiple atomic transactions) in the saga design pattern.
-To execute each atomic transaction, you have to communicate with other microservices or third party APIs.
-In Stacksaga, there's a specific location that should implement that communicating process.
-It is called as Executor.
 
-For instance, let's have a look at the placing-order example.
-There were 5 sub executions for completing the entire transaction.
-To execute those 5 executions, we have to implement 5 executors in Stacksaga.
+IMPORTANT: *Fetching user details* is quite different from the other atomic executions. because it is a read-only operation that doesn't change any state in the user-service's database.
+So it can be considered as an atomic operation, but it is not a atomic transaction. but others are atomic transactions. because they change the state in their respective service's databases.
 
-When it's considered the atomic executions, it can be divided into two types based on the atomic transaction has a compensating execution or not.
-If the execution is a read only operation, it doesn't impact on the database state.
-That means there's nothing to undo.
+Understanding the atomic execution is crucial for implementing the executors correctly in StackSaga.
+because there is no rollback mechanism after committing each atomic executions onm their service's databases.
 
-For instance, in our placing order example, there was an atomic execution for fetching the user's details by calling the user service.
-Due to the fetching the user's details from the service, the impact on the user-service's database is zero.
-We just fetched the data.
+====
 
-In general, an atomic execution can have two executions called *primary-execution* and *compensating-execution*.
+Typically, an atomic execution consists of two phases: *primary execution* and *compensating execution*.
 
-. *Primary Execution / Main Execution*
-- Primary Execution refers to the main operations that are part of a long-running transaction.
-Each primary execution is a step in the overall business process and performs a specific action that moves the process towards its completion.
-These operations are typically idempotent and isolated, meaning that they can be executed independently of each other without causing side effects.
+. *Primary Execution (Main Execution)*
+- The primary execution represents the core operation within a long-running transaction.
+Each primary execution is a distinct step in the overall business workflow, advancing the process toward completion.
+These operations are generally idempotent and isolated, ensuring they can be executed independently without unintended side effects.
 +
-For example, In your place order example you had multiple individual transactions to overcome the entire transaction like fetching user's details, initialize the order, making the pre-auth, updating the stock, and make the real payment.
+For example, in a place-order workflow, primary executions might include fetching user details, initializing the order, performing pre-authorization, updating stock, and processing the final payment.
 
-- Those sets of primary executions are moved towards. [icon:arrow-circle-right[1x,role=green]].
+- These primary executions move the process forward. [icon:arrow-circle-right[1x,role=green]]
 
-. *Compensating Execution / Revert Execution*
-- Compensating Execution refers to the operations that are performed to undo the effects of a previously completed primary execution if a subsequent step fails.
-Each primary execution has a corresponding compensating execution designed to reverse its effect.
-This ensures that the system can revert to a consistent state even if part of the transaction fails.
+. *Compensating Execution (Revert Execution)*
+- A compensating execution is designed to undo the effects of a previously completed primary execution if a subsequent step fails.
+Each primary execution has a corresponding compensating action to reverse its impact, ensuring the system can return to a consistent state in the event of a failure.
 
-- Those sets of compensating executions are moved backward. [icon:arrow-circle-left[1x,role=green]].
+- Compensating executions move the process backward. [icon:arrow-circle-left[1x,role=green]]
 
 == Executor types
 
@@ -62,10 +56,9 @@ In *Command executor* has two methods for making the primary execution and makin
 +
 *Examples Executions for command-executor*:
 +
-** initialize order
-** make pre-auth
-** update stock
-** make real payment
+** Initialize order
+** Reserve the items
+** Make the payment
 
 
 * Query executors
@@ -77,28 +70,26 @@ In *Query Executor* has only one method for making the primary execution.
 +
 *Example Executions for query-executor*:
 +
-** collecting user delivery details
+** collecting user delivery details +
+because it doesn't make any change to the user-service's database. it's a read-only operation.
+
+
 
 The below diagram shows the Executors types and what are the methods they have.
 
 image:executor/stack-saga-e-store-example-executor-types-in-stacksaga.drawio.svg[alt="Stacksaga Executors",height=300]
 
-== Guidelines for creating executors.
+== Guidelines for Creating Executors
 
-The execution that is implemented in the saga executor should be an atomic transaction.
-That means you cannot implement multiple transactions in the same executor.
-The reason for one executor can have only one atomic transaction is that the executor is the wrapper component that is used for retrying by the saga orchestration engine.
-Then, if you have added many atomic transactions inside the executor saga, the SEC doesn't know that what was exactly failed previously.
-Because, for instance, if the executor had 3 atomic transactions, the first two executions might have been executed successfully.
-But due to the failure of the 3rd one, the executor is retried.
-The worst thing that can happen is that both 1st and 2nd atomic transactions are executed again and again until the 3rd execution is executed successfully if the 3rd execution is failed due to a resource-unavailable issue (Retractable issue).
+Each saga executor should encapsulate a single atomic transaction.
+This means you must not implement multiple atomic transactions within the same executor.
 
-This can lead to data redundancy and potential problems with data integrity and consistency.
-And the other thing is that if it's wanted to execute the compensating transaction, the SEC has no awareness about what specific atomic transaction should be undone.
-Because the SEC considered an executor as a single atomic operation.
+The primary reason for this restriction is that the executor acts as a retryable unit managed by the Saga Orchestration Engine (SEC).
+If an executor contains multiple atomic transactions and a failure occurs, the SEC cannot determine which specific transaction failed.
+For example, if an executor performs three atomic transactions and the third one fails, retrying the executor will re-execute the first and second transactions, potentially leading to duplicate operations if those steps are not idempotent.
 
-
-// todo :add more
+This approach can result in data anomalies such as redundancy, integrity violations, and consistency issues.
+Additionally, if a compensating (rollback) action is required, the SEC lacks the granularity to identify which atomic transaction needs to be reverted, since it treats the executor as a single atomic unit.
 
 == Executions Classifying Tips
 
@@ -161,7 +152,6 @@ because, for instance, if a new another atomic process is added in the future af
 
 [[sub-executors]]
 include::sub-executors.adoc[]
-
 
 == Combine multiple atomic executions
 
