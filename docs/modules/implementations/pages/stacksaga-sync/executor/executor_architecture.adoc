@@ -56,6 +56,9 @@ image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg
 * xref:#command-executors[Command Executors]
 * xref:query-executors[Query Executors]
 * xref:#sub-executors[Sub Executors]
+** xref:#sub-before-executors[Sub Before Executors]
+** xref:#sub-after-executors[Sub After Executors]
+
 
 
 [[command-executors]]
@@ -63,7 +66,6 @@ image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg
 
 If some atomic execution has both primary execution and compensating, those kinds of atomic transactions should be implemented inside the command executor. +
 In *Command executor* has two methods for making the primary execution and making the compensating execution.
-(See the command executor xref:framework:command_executor.adoc[implementation] or xref:framework:command_executor.adoc[read more])
 
 *Examples Executions for command-executor*:
 
@@ -131,7 +133,7 @@ public class InitializeOrderExecutor implements CommandExecutor<PlaceOrderAggreg
                     .buildWith(unavailableException)
                     .build();
         } catch (FeignException.BadRequest badRequestException) {
-            //<9>**
+            //<9>
             revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
         }
     }
@@ -186,7 +188,6 @@ it is optional to use. if there is no need to execute any sub-after-executors, y
 If the atomic execution has only the primary execution, those kinds of executions should be implemented inside the Query executor.
 
 In *Query Executor* has only one method for making the primary execution.
-(See the query executor xref:framework:query_executor.adoc[implementation] or xref:framework:query_executor.adoc[read more])
 
 *Example Executions for query-executor*:
 
@@ -273,11 +274,13 @@ Because those are totally two atomic operations.
 In this kind of situation, you can use a sub executor to overcome the challenge.
 Based on the position that the sub execution should be executed, the sub executors are divided into two types.
 
+[[sub-before-executors]]
 1. sub-before-executors
 - If the sub executor should be run before making the main compensating transaction, it can be used sub before Executors.
 As per the requirement, it can be added any number of sub-before-executors into a command executor.
 You can navigate the SEC to each of them one by one.
 See the code implementation.
+[[sub-after-executors]]
 2. sub-after-executors
 - If the sub executor should be run after making the main compensating transaction, it can be used a sub after Executor.
 As per the requirement, it can be added any number of sub-after-executors into a command executor.
@@ -344,13 +347,61 @@ public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<Plac
 
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `RevertAfterExecutor<A, C>` interface to make it as a sub-after-executor. +
-it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed after its main
-compensating execution as the second generic parameter.
+it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed after its main compensating execution as the second generic parameter.
 <3> The `doProcess` method is overridden to implement the sub-after-execution logic as the #same way as the command executor's doRevert method#.
 <4> if the execution is done successfully, The next sub-after-executor is navigated by using the `stepManager.complete(Supplier<String> eventNameSupplier)` method. +
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-after-executor. +
 If you have more than one sub-after-executor, you can navigate to the next sub-after-executor by using the `stepManager.next(Class<? extends RevertAfterExecutor<A, C>> nextSubAfterExecutorClass, Supplier<String> eventNameSupplier)` method.
 
+=== Summary
+
+*Retryable Executor Exceptions* are allowed for the following executors.
+
+[cols="*,*,*"]
+|===
+|Executor |DoProcess() Method|doRevert() Method
+
+|Query Executor
+|✔
+|✔
+
+|Command Executor
+|✔
+|✔
+
+|Revert Before Executor
+|✔
+|
+
+|Revert After Executor
+|✔
+|
+
+|===
+
+*Non-Retryable Executor Exceptions* are allowed for the following executors.
+
+[cols="*,*,*"]
+|===
+|Executor |DoProcess() Method|doRevert() Method
+
+|Query Executor
+|✔
+|✖
+
+|Command Executor
+|✔
+|✖
+
+|Revert Before Executor
+|✖
+|
+
+|Revert After Executor
+|✖
+|
+
+|===
 
 == Guidelines for Creating Executors
 
