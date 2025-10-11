@@ -182,6 +182,76 @@ it is optional to use. if there is no need to execute any sub-before-executors, 
 <11> The `@RevertAfter` annotation is used to specify #starting sub-after-executor# that should be started after the main compensating execution of this command executor.
 it is optional to use. if there is no need to execute any sub-after-executors, you can avoid that annotation.
 
+==== Code Example of Reactive Command Executor
+
+NOTE: Only highlighted parts are described from the above example.
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "initializeOrderExecutor")
+@AllArgsConstructor
+public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<PlaceOrderAggregator> { //<1>
+
+    @Override //<2>
+    @NonNull
+    public Mono<ProcessStepManager<PlaceOrderAggregator>> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) {
+        //<3>
+        return this.orderService
+                .createOrder(currentAggregator.getUserData(), currentAggregator.getOrderDetails())
+                .map(orderId -> {
+                    currentAggregator.setOrderId(orderId);
+                    return stepManager.next(ReactiveRserveItemsExecutor.class, () -> "ORDER_INITIALIZED");
+                })
+                .onErrorResume(throwable -> {
+                    if (throwable instanceof ResourceUnavailableException) {
+                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                    } else {
+                        return Mono.error(NonRetryableExecutorException.buildWith(throwable)
+                                .put("time", String.valueOf(System.currentTimeMillis()))
+                                .put("reason", "BadRequest")
+                                .build());
+                    }
+                });
+    }
+
+
+    @Override //<4>
+    @NonNull
+    public Mono<SagaExecutionEventName> doRevert(NonRetryableExecutorException processException, PlaceOrderAggregator finalAggregatorState, RevertHintStore revertHintStore, String idempotencyKey) {
+        //<5>
+        return this.orderService
+                .cancelOrder(finalAggregatorState.getOrderId())
+                .thenReturn((SagaExecutionEventName) () -> "ORDER_INITIALIZATION_REVERTED")
+                .onErrorResume(throwable -> {
+                    if (throwable instanceof ResourceUnavailableException) {
+                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                    } else {
+                        revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
+                        SagaExecutionEventName ignored = () -> "ignored";
+                        return Mono.just(ignored);
+                    }
+                });
+    }
+}
+----
+
+<1> The executor implements the `ReactiveCommandExecutor<PlaceOrderAggregator>` interface to make it as a reactive command executor. the generic type should be the aggregator class that you want to use in the executor.
+<2> The `doProcess` method is overridden to implement the primary execution logic in a reactive way.
+<3> The primary execution logic is implemented inside the `doProcess` method by using reactive pipeline.
++
+IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
+it is caused by primary execution exception and stopping the transaction forward and starting the compensating executions in reverse order immediately.
++
+<4> The `doRevert` method is overridden to implement the compensating execution logic in a reactive way.
+<5> The compensating execution logic is implemented inside the `doRevert` method by using reactive pipeline. +
+The same policy of the primary execution is applied here as well. +
+It can not have a non-retryable exception due to compensating execution. if there is any possibility to have a non-retryable exception,
+it should be caught and stored in the `RevertHintStore` and return a dummy event name like above example to avoid the transaction termination.
+
 [[query-executors]]
 === Query executors
 
@@ -250,13 +320,63 @@ There is another method called `stepManager.complete(Supplier<String> eventNameS
 stepManager.complete(() -> "ORDER_INITIALIZED");
 ----
 +
-<6> Catch the resource unavailability that can be retried to notify to the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
+<6> Catch the resource unavailability that can be retried to notify the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
 you can wrap the original exception by using the `RetryableExecutorException.buildWith(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
 if you throw your own exception without wrapping to the `RetryableExecutorException`, the SEC will consider it as a non-retryable exception and it will stop the transaction forward and start the compensating executions in reverse order immediately.
 <7> Catch the non-retryable exceptions to notify to the SEC to stop the transaction forward and start the compensating executions in reverse order immediately. +
 you can wrap the original exception by using the `NonRetryableExecutorException.buildWith(Exception e)` method to create a new instance of `NonRetryableExecutorException` by wrapping the original exception, and also you can add any metadata that you want to store in the event-store regarding the exception by using the `put(String key, Object value)` method. +
 it can be accessed later in the next compensating execution by using the `RevertHintStore` that is passed to the `doRevert` method of the command executor. +
 if you throw your own exception without wrapping to the `NonRetryableExecutorException`, it doesn't matter in this case, because the SEC will consider it as a non-retryable exception internally, and it will stop the transaction forward and start the compensating executions in reverse order immediately.
+
+
+=== Code Example of Reactive Query Executor
+
+[source,java]
+----
+@SagaExecutor(executeFor = "user-service", value = "reactiveChekUserDetailsExecutor")
+@AllArgsConstructor
+public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<PlaceOrderAggregator> { //<1>
+
+    private final UserService userService;
+
+    @Override //<2>
+    public Mono<ProcessStepManager<PlaceOrderAggregator>> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) {
+        //<3>
+        return this
+                .userService
+                .getUserDetails(currentAggregator.getUsername())
+                .map(userData -> {
+                    currentAggregator.setTel(userData.getPhoneNumber());
+                    currentAggregator.setEmail(userData.getEmail());
+                    currentAggregator.setAddress(userData.getEmail());
+                    return stepManager.next(ReactiveInitializeOrderExecutor.class, () -> "FETCHED_USER_DETAILS");
+                })
+                .onErrorResume(throwable -> {
+                    if (throwable instanceof ResourceUnavailableException) {
+                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                    } else {
+                        return Mono.error(NonRetryableExecutorException.buildWith(throwable)
+                                .put("time", String.valueOf(System.currentTimeMillis()))
+                                .put("reason", "BadRequest")
+                                .build());
+                    }
+                });
+    }
+}
+----
+
+<1> The executor implements the `ReactiveQueryExecutor<PlaceOrderAggregator>` interface to make it as a reactive query executor. the generic type should be the aggregator class that you want to use in the executor.
+<2> The `doProcess` method is overridden to implement the primary execution logic in a reactive way.
+<3> The primary execution logic is implemented inside the `doProcess` method by using reactive pipeline.
++IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
+it is caused by primary execution exception and stopping the transaction forward and starting the compensating executions in reverse order immediately.
+
+
+
 
 [[sub-executors]]
 === Sub Executors
