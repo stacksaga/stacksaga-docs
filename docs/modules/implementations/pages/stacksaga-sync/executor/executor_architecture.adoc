@@ -16,7 +16,8 @@ Within microservices, such a unit is referred to as an atomic execution.
 image:executor/stacksaga-diagram-atomic-transaction.svg[]
 
 For instance, in the placing-order scenario, there are 4 atomic operations.
-Each atomic execution may itself consist of multiple service-level operations.
+Each atomic execution can itself consist of multiple service-level operations.
+it is totally acceptable to have multiple service-level operations inside a single atomic execution, as long as they are part of the same logical unit of work.
 
 
 IMPORTANT: *Fetching user details* is quite different from the other atomic executions. because it is a read-only operation that doesn't change any state in the user-service's database.
@@ -46,38 +47,310 @@ Each primary execution has a corresponding compensating action to reverse its im
 
 == Executor types
 
-Based on the above classification, the saga executors are two types in StackSaga.
-
-* Command executors
-+
-If some atomic execution has both primary execution and compensating, those kinds of atomic transactions should be implemented inside the command executor. +
-In *Command executor* has two methods for making the primary execution and making the compensating execution.
-(See the command executor xref:framework:command_executor.adoc[implementation] or xref:framework:command_executor.adoc[read more])
-+
-*Examples Executions for command-executor*:
-+
-** Initialize order
-** Reserve the items
-** Make the payment
-
-
-* Query executors
-+
-If the atomic execution has only the primary execution, those kinds of executions should be implemented inside the Query executor.
-+
-In *Query Executor* has only one method for making the primary execution.
-(See the query executor xref:framework:query_executor.adoc[implementation] or xref:framework:query_executor.adoc[read more])
-+
-*Example Executions for query-executor*:
-+
-** collecting user delivery details +
-because it doesn't make any change to the user-service's database. it's a read-only operation.
-
-
+Based on the above classification, the saga executors are two types mainly. but there is a special type of executor called sub executor in Stacksaga other than the command executor and query executor to handle some extra compensating executions.
 
 The below diagram shows the Executors types and what are the methods they have.
 
-image:executor/stack-saga-e-store-example-executor-types-in-stacksaga.drawio.svg[alt="Stacksaga Executors",height=300]
+image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg[alt=" Stacksaga Executors types",width=100%,opts=interactive,scaledwidth=100%]
+
+* xref:#command-executors[Command Executors]
+* xref:query-executors[Query Executors]
+* xref:#sub-executors[Sub Executors]
+
+
+[[command-executors]]
+=== Command executors
+
+If some atomic execution has both primary execution and compensating, those kinds of atomic transactions should be implemented inside the command executor. +
+In *Command executor* has two methods for making the primary execution and making the compensating execution.
+(See the command executor xref:framework:command_executor.adoc[implementation] or xref:framework:command_executor.adoc[read more])
+
+*Examples Executions for command-executor*:
+
+* Initialize order
+* Reserve the items
+* Make the payment
+
+==== Code Example of Command Executor
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "initializeOrderExecutor") //<1>
+@AllArgsConstructor
+public class InitializeOrderExecutor implements CommandExecutor<PlaceOrderAggregator> { //<2>
+
+    private final OrderService orderService;
+
+    @Override //<3>
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        try {
+            //<4>
+            String orderId = this.orderService.initializeOrder(
+                    currentAggregator.getUsername(),
+                    currentAggregator.getProductItems(),
+                    currentAggregator.getTotalAmount()
+            );
+            currentAggregator.setOrderId(orderId);
+            return stepManager.next(RserveItemsExecutor.class, () -> "ORDER_INITIALIZED");//<5>
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            //<6>
+            throw RetryableExecutorException
+                    .buildWith(unavailableException)
+                    .build();
+        } catch (FeignException.BadRequest badRequestException) {
+            //<7>
+            throw NonRetryableExecutorException
+                    .buildWith(badRequestException)
+                    .put("time", LocalDateTime.now())
+                    .put("reason", "BadRequest")
+                    .build();
+        }
+    }
+
+    @Override
+    @RevertBefore(startFrom = OrderInitializeSubBeforeExecutor.class) //<10>
+    @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<11>
+    public SagaExecutionEventName doRevert(
+            NonRetryableExecutorException processException,
+            PlaceOrderAggregator finalAggregatorState,
+            RevertHintStore revertHintStore,
+            String idempotencyKey
+    ) throws RetryableExecutorException {
+        try {
+            //<8>
+            this.orderService.cancelOrder(finalAggregatorState.getOrderId());
+            return () -> "ORDER_CANCELLED";
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            //<9>
+            throw RetryableExecutorException
+                    .buildWith(unavailableException)
+                    .build();
+        } catch (FeignException.BadRequest badRequestException) {
+            //<9>**
+            revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
+        }
+    }
+}
+----
+
+<1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
+<2> The executor implements the `CommandExecutor` interface to make it as a command executor.
+<3> The `doProcess` method is overridden to implement the primary execution logic. +
+it passes the current state of the aggregator, +
+a utility for managing the process steps, +
+and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
+<4> The primary execution logic is implemented inside the `doProcess` method. here you can update the aggregator as needed and access data from the aggregator. it contains all the changes that were made by the previous executors so far.
+<5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next(Class<? extends SagaExecutor<A>> nextExecutorClass, Supplier<String> eventNameSupplier)` method. +
+it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
+There is another method called `stepManager.complete(Supplier<String> eventNameSupplier)` that can be used to complete the entire transaction successfully after executing the current executor.
++
+[source,java]
+----
+stepManager.complete(() -> "ORDER_INITIALIZED");
+----
++
+<6> Catch the resource unavailability that can be retried to notify to the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
+you can wrap the original exception by using the `RetryableExecutorException.buildWith(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
+if you throw your own exception without wrapping to the `RetryableExecutorException`, the SEC will consider it as a non-retryable exception and it will stop the transaction forward and start the compensating executions in reverse order immediately.
+<7> Catch the non-retryable exceptions to notify to the SEC to stop the transaction forward and start the compensating executions in reverse order immediately. +
+you can wrap the original exception by using the `NonRetryableExecutorException.buildWith(Exception e)` method to create a new instance of `NonRetryableExecutorException` by wrapping the original exception, and also you can add any metadata that you want to store in the event-store regarding the exception by using the `put(String key, Object value)` method. +
+it can be accessed later in the next compensating execution by using the `RevertHintStore` that is passed to the `doRevert` method of the command executor. +
+if you throw your own exception without wrapping to the `NonRetryableExecutorException`, it doesn't matter in this case, because the SEC will consider it as a non-retryable exception internally, and it will stop the transaction forward and start the compensating executions in reverse order immediately.
+
+<8> The `doRevert` method is overridden to implement the compensating execution logic. +
+it passes the exception that caused the compensation, +
+the final state of the aggregator before compensation, +
+the `RevertHintStore` for storing any metadata needed for compensation. +
+and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
+<9> Catch the resource unavailability exception that can be retried to notify to the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
+you can wrap the original exception by using the `RetryableExecutorException.buildWith(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
+if you throw your own exception without wrapping to the `RetryableExecutorException`, the SEC will consider it as a non-retryable exception and terminate the transaction. because `RetryableExecutorException` are not allowed in the compensating execution.
+in case it is thrown an unwrapped runtime exception, the SEC will terminate the transaction immediately. +
+If three is any possibility get a non-retryable exception in the compensating execution and also the compensating execution can be ignored, you can to catch that exception and store the metadata regarding that exception into the `RevertHintStore` by using the `put(String key, Object value)` method like above example.
+it can avoid the transaction termination.
+
+<10> The `@RevertBefore` annotation is used to specify #starting sub-before-executor# that should be started before the main compensating execution of this command executor.
+it is optional to use. if there is no need to execute any sub-before-executors, you can avoid that annotation.
+
+<11> The `@RevertAfter` annotation is used to specify #starting sub-after-executor# that should be started after the main compensating execution of this command executor.
+it is optional to use. if there is no need to execute any sub-after-executors, you can avoid that annotation.
+
+[[query-executors]]
+=== Query executors
+
+If the atomic execution has only the primary execution, those kinds of executions should be implemented inside the Query executor.
+
+In *Query Executor* has only one method for making the primary execution.
+(See the query executor xref:framework:query_executor.adoc[implementation] or xref:framework:query_executor.adoc[read more])
+
+*Example Executions for query-executor*:
+
+* collecting user delivery details +
+because it doesn't make any change to the user-service's database. it's a read-only operation.
+
+==== Code Example of Query Executor
+
+[source,java]
+----
+@SagaExecutor(executeFor = "user-service", value = "chekUserDetailsExecutor") //<1>
+@AllArgsConstructor
+public class ChekUserDetailsExecutor implements QueryExecutor<PlaceOrderAggregator> { //<2>
+
+    private final UserService userService;
+
+    @Override //<3>
+    public ProcessStepManager<PlaceOrderAggregator> doProcess(
+            PlaceOrderAggregator currentAggregator,
+            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        try {
+            //<4>
+            UserDetailDto userDetail = this.userService.getUserDetails(currentAggregator.getUsername());
+            currentAggregator.setUserDetail(userDetail);
+
+            return stepManager.next(InitializeOrderExecutor.class, () -> "FETCHED_USER_DETAILS"); //<5>
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            //<6>
+            throw RetryableExecutorException
+                    .buildWith(unavailableException)
+                    .build();
+        } catch (FeignException.BadRequest badRequestException) {
+            //<7>
+            throw NonRetryableExecutorException
+                    .buildWith(badRequestException)
+                    .put("time", LocalDateTime.now())
+                    .put("reason", "BadRequest")
+                    .build();
+        }
+    }
+}
+----
+
+<1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
+<2> The executor implements the `QueryExecutor` interface to make it as a query executor.
+<3> The `doProcess` method is overridden to implement the primary execution logic. +
+it passes the current state of the aggregator, +
+a utility for managing the process steps, +
+and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
+<4> The primary execution logic is implemented inside the `doProcess` method. here you can update the aggregator as needed and access data from the aggregator. it contains all the changes that were made by the previous executors so far.
+<5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next(Class<? extends SagaExecutor<A>> nextExecutorClass, Supplier<String> eventNameSupplier)` method. +
+it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
+There is another method called `stepManager.complete(Supplier<String> eventNameSupplier)` that can be used to complete the entire transaction successfully after executing the current executor.
++
+[source,java]
+----
+stepManager.complete(() -> "ORDER_INITIALIZED");
+----
++
+<6> Catch the resource unavailability that can be retried to notify to the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
+you can wrap the original exception by using the `RetryableExecutorException.buildWith(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
+if you throw your own exception without wrapping to the `RetryableExecutorException`, the SEC will consider it as a non-retryable exception and it will stop the transaction forward and start the compensating executions in reverse order immediately.
+<7> Catch the non-retryable exceptions to notify to the SEC to stop the transaction forward and start the compensating executions in reverse order immediately. +
+you can wrap the original exception by using the `NonRetryableExecutorException.buildWith(Exception e)` method to create a new instance of `NonRetryableExecutorException` by wrapping the original exception, and also you can add any metadata that you want to store in the event-store regarding the exception by using the `put(String key, Object value)` method. +
+it can be accessed later in the next compensating execution by using the `RevertHintStore` that is passed to the `doRevert` method of the command executor. +
+if you throw your own exception without wrapping to the `NonRetryableExecutorException`, it doesn't matter in this case, because the SEC will consider it as a non-retryable exception internally, and it will stop the transaction forward and start the compensating executions in reverse order immediately.
+
+[[sub-executors]]
+=== Sub Executors
+
+There is a special type of executor called sub executor in Stacksaga other than the query executor and command executor.
+It's used for executing the extra compensating atomic transactions in addition to the main compensating transactions.
+
+You already know that you can only execute one atomic transaction inside the executor.
+The rule is applied for both primary execution and compensating execution.
+Sometimes You might want to execute another extra execution when one of compensating executions is executed.
+
+For instance, just imagine that the system has a requirement that should be updated to another service when that the order is cancelled execution.
+Then, as per the executor's rule, you cannot implement both executions in the doRevert method for canceling the order and notifying that into another server.
+Because those are totally two atomic operations.
+In this kind of situation, you can use a sub executor to overcome the challenge.
+Based on the position that the sub execution should be executed, the sub executors are divided into two types.
+
+1. sub-before-executors
+- If the sub executor should be run before making the main compensating transaction, it can be used sub before Executors.
+As per the requirement, it can be added any number of sub-before-executors into a command executor.
+You can navigate the SEC to each of them one by one.
+See the code implementation.
+2. sub-after-executors
+- If the sub executor should be run after making the main compensating transaction, it can be used a sub after Executor.
+As per the requirement, it can be added any number of sub-after-executors into a command executor.
+You can navigate the SEC to each of them one by one.
+See the code implementation.
+
+If it's needed to have both sub-before-executors and also sub after Executors, it is possible to do.
+If it has been configured both before and after executors, the order of the entire compensating transaction is like below.
+
+At 1st all sub before Executors will be executed that you configured into the command executor and after completing the sub before Executors, next it is executed the default compensating execution (main compensating) of the command executor.
+After completing the main compensating, next it's executed the sub after Executors that you have configured into the command executor.
+The diagram shows the order and relationship between the sub-before-executor, and main-revert-execution and sub-after-executor.
+
+image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.drawio.svg[alt=" Stacksaga Executors",width=100%,opts=interactive,scaledwidth=100%]
+
+==== Code Example of Sub-Before-Executor
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubBeforeExecutor") //<1>
+public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<PlaceOrderAggregator, InitializeOrderExecutor> { //<2>
+
+    @Override //<3>
+    public RevertBeforeStepManager<PlaceOrderAggregator, InitializeOrderExecutor> doProcess(
+            PlaceOrderAggregator finalAggregatorState,
+            NonRetryableExecutorException nonRetryableExecutorException,
+            RevertHintStore revertHintStore,
+            RevertBeforeStepManagerUtil<PlaceOrderAggregator, InitializeOrderExecutor> stepManager,
+            String idempotencyKey)
+    throws RetryableExecutorException {
+        //implement the sub-before-execution logic as the same way as the command executor's doRevert method.
+        return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"); //<4>
+    }
+}
+----
+
+<1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
+<2> The executor implements the `RevertBeforeExecutor<A, C>` interface to make it as a sub-before-executor. +
+it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed before its main compensating execution as the second generic parameter.
+<3> The `doProcess` method is overridden to implement the sub-before-execution logic as the #same way as the command executor's doRevert method#.
+<4> if the execution is done successfully, The next sub-before-executor is navigated to the main(parent) `doRevert` method by using the `stepManager.complete(Supplier<String> eventNameSupplier)` method. +
+it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
+If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next(Class<? extends RevertBeforeExecutor<A, C>> nextSubBeforeExecutorClass, Supplier<String> eventNameSupplier)` method.
+
+==== Code Example of Sub-After-Executor
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubAfterExecutor") //<1>
+public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<PlaceOrderAggregator, InitializeOrderExecutor> { //<2>
+
+    @Override //<3>
+    public RevertAfterStepManager<PlaceOrderAggregator, InitializeOrderExecutor> doProcess(
+            PlaceOrderAggregator finalAggregatorState,
+            NonRetryableExecutorException processException,
+            RevertHintStore revertHintStore,
+            RevertAfterStepManagerUtil<PlaceOrderAggregator, InitializeOrderExecutor> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException {
+        return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_REVERTED"); //<4>
+    }
+}
+----
+
+<1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
+<2> The executor implements the `RevertAfterExecutor<A, C>` interface to make it as a sub-after-executor. +
+it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed after its main
+compensating execution as the second generic parameter.
+<3> The `doProcess` method is overridden to implement the sub-after-execution logic as the #same way as the command executor's doRevert method#.
+<4> if the execution is done successfully, The next sub-after-executor is navigated by using the `stepManager.complete(Supplier<String> eventNameSupplier)` method. +
+it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-after-executor. +
+If you have more than one sub-after-executor, you can navigate to the next sub-after-executor by using the `stepManager.next(Class<? extends RevertAfterExecutor<A, C>> nextSubAfterExecutorClass, Supplier<String> eventNameSupplier)` method.
+
 
 == Guidelines for Creating Executors
 
@@ -128,7 +401,7 @@ For instance, let's classify the executions that we have in our placing-order ex
 |Query-Executor
 |Fetching data doesn't make an impact on the user-service's database.
 
-|Initialzie the order
+|Initialize the order
 |Command-Executor
 |The order should be canceled if any upcoming atomic transaction is failed after initializing the order.
 
@@ -149,9 +422,6 @@ For instance, let's classify the executions that we have in our placing-order ex
 NOTE: In the placing-order example, there is no any atomic operation after making the payment.
 But as the theory, making payment execution should be executed withing a command-executor.
 because, for instance, if a new another atomic process is added in the future after making the payment, you must implement the compensating execution for making the payment.
-
-[[sub-executors]]
-include::sub-executors.adoc[]
 
 == Combine multiple atomic executions
 
