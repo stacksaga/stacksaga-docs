@@ -147,9 +147,9 @@ it passes the current state of the aggregator, +
 a utility for managing the process steps, +
 and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
 <4> The primary execution logic is implemented inside the `doProcess` method. here you can update the aggregator as needed and access data from the aggregator. it contains all the changes that were made by the previous executors so far.
-<5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next(Class<? extends SagaExecutor<A>> nextExecutorClass, Supplier<String> eventNameSupplier)` method. +
+<5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next` method. +
 it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
-There is another method called `stepManager.complete(Supplier<String> eventNameSupplier)` that can be used to complete the entire transaction successfully after executing the current executor.
+There is another method called `stepManager.complete` that can be used to complete the entire transaction successfully after executing the current executor.
 +
 [source,java]
 ----
@@ -310,9 +310,9 @@ it passes the current state of the aggregator, +
 a utility for managing the process steps, +
 and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
 <4> The primary execution logic is implemented inside the `doProcess` method. here you can update the aggregator as needed and access data from the aggregator. it contains all the changes that were made by the previous executors so far.
-<5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next(Class<? extends SagaExecutor<A>> nextExecutorClass, Supplier<String> eventNameSupplier)` method. +
+<5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next` method. +
 it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
-There is another method called `stepManager.complete(Supplier<String> eventNameSupplier)` that can be used to complete the entire transaction successfully after executing the current executor.
+There is another method called `stepManager.complete` that can be used to complete the entire transaction successfully after executing the current executor.
 +
 [source,java]
 ----
@@ -370,7 +370,8 @@ public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<Pl
 <1> The executor implements the `ReactiveQueryExecutor<PlaceOrderAggregator>` interface to make it as a reactive query executor. the generic type should be the aggregator class that you want to use in the executor.
 <2> The `doProcess` method is overridden to implement the primary execution logic in a reactive way.
 <3> The primary execution logic is implemented inside the `doProcess` method by using reactive pipeline.
-+IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
++
+IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
 it is caused by primary execution exception and stopping the transaction forward and starting the compensating executions in reverse order immediately.
 
 [[sub-executors]]
@@ -436,9 +437,9 @@ public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<Pl
 <2> The executor implements the `RevertBeforeExecutor<A, C>` interface to make it as a sub-before-executor. +
 it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed before its main compensating execution as the second generic parameter.
 <3> The `doProcess` method is overridden to implement the sub-before-execution logic as the #same way as the command executor's doRevert method#.
-<4> if the execution is done successfully, The next sub-before-executor is navigated to the main(parent) `doRevert` method by using the `stepManager.complete(Supplier<String> eventNameSupplier)` method. +
+<4> if the execution is done successfully, The next sub-before-executor is navigated to the main(parent) `doRevert` method by using the `stepManager.complete` method. +
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
-If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next(Class<? extends RevertBeforeExecutor<A, C>> nextSubBeforeExecutorClass, Supplier<String> eventNameSupplier)` method.
+If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next` method.
 
 ==== Code Example of Reactive Sub-Before-Executor
 
@@ -484,12 +485,12 @@ Generic `A` is the aggregator class that is used in the entire transaction and g
 <4> The sub-before-execution logic is implemented inside the `doProcess` method by using reactive pipeline.
 +
 IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
-it is caused by non-retryable exception and terminates the transaction immediately. +
+it leads to non-retryable exception with a termination. because it is considered as a non-retryable error. +
 If there is any possibility to have a non-retryable exception, it should be caught and stored in the `RevertHintStore` and return a dummy event name like above example to avoid the transaction termination.
 +
-If the process is done successfully, and there is no more sub-before-executor for the respective command executor, it can be navigated to the main (parent) `doRevert` method by using the `stepManager.complete(SagaExecutionEventName eventName)` method.
+If the process is done successfully, and there is no more sub-before-executor for the respective command executor, it can be navigated to the main (parent) `doRevert` method by using the `stepManager.complete` method.
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
-If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next(Class<? extends RevertAfterExecutor<A, E>> nextRevertAfterExecutor, SagaExecutionEventName eventName)`. +
+If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next`. +
 you can pass another sub-before-executor class that you want to navigate and also the event name that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor.
 
 ==== Code Example of Sub-After-Executor
@@ -516,9 +517,9 @@ public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<Plac
 <2> The executor implements the `RevertAfterExecutor<A, C>` interface to make it as a sub-after-executor. +
 it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed after its main compensating execution as the second generic parameter.
 <3> The `doProcess` method is overridden to implement the sub-after-execution logic as the #same way as the command executor's doRevert method#.
-<4> if the execution is done successfully, The next sub-after-executor is navigated by using the `stepManager.complete(Supplier<String> eventNameSupplier)` method. +
+<4> if the execution is done successfully, The next sub-after-executor is navigated by using the `stepManager.complete` method. +
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-after-executor. +
-If you have more than one sub-after-executor, you can navigate to the next sub-after-executor by using the `stepManager.next(Class<? extends RevertAfterExecutor<A, C>> nextSubAfterExecutorClass, Supplier<String> eventNameSupplier)` method.
+If you have more than one sub-after-executor, you can navigate to the next sub-after-executor by using the `stepManager.next` method.
 
 ==== Code Example of Reactive-Sub-After-Executor
 
@@ -562,12 +563,12 @@ Generic `A` is the aggregator class that is used in the entire transaction and g
 <4> The sub-after-execution logic is implemented inside the `doProcess` method by using reactive pipeline.
 +
 IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
-it is caused by non-retryable exception and terminates the transaction immediately. +
+it leads to non-retryable exception with a termination. because it is considered as a non-retryable error. +
 If there is any possibility to have a non-retryable exception, it should be caught and stored in the `RevertHintStore` and return a dummy event name like above example to avoid the transaction termination.
 +
-If the process is done successfully, and there is no more sub-before-executor for the respective command executor, it can be navigated to the main (parent) `doRevert` method by using the `stepManager.complete(Supplier<String> eventNameSupplier)` method.
+If the process is done successfully, and there is no more sub-before-executor for the respective command executor, it can be navigated to the main (parent) `doRevert` method by using the `stepManager.complete` method.
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
-If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next(Class<? extends RevertAfterExecutor<A, E>> nextRevertAfterExecutor, SagaExecutionEventName eventName)`. +
+If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next`. +
 you can pass another sub-before-executor class that you want to navigate and also the event name that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor.
 
 === Summary
