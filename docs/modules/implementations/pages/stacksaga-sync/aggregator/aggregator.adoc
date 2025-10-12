@@ -65,10 +65,336 @@ When you create each executor, you should mention what is the aggregator that yo
 - each and every update is saved in the event-store after executing each executor by serializing as a JSON object.
 - if the transaction is failed as a retryable one, the aggregator object is restored by the orchestration engine when the transaction is trying to invoke.
 
-== Implementation Related topics
+== Creating Aggregator Class [[creating_aggregator_class]]
 
-* xref:stacksaga-sync/aggregator/create-aggregator.adoc[Creating Aggregator Class]
-* xref:stacksaga-sync/aggregator/aggregator_mapper_implementation.adoc[Custom Aggregator Mapper]
-* xref:stacksaga-sync/aggregator/saga_serializable.adoc[Aggregator Serialization And Deserialization]
-* xref:stacksaga-sync/aggregator/aggregator_key_gen_custom_implementation.adoc[Aggregator KeyGen]
-* xref:stacksaga-sync/aggregator/aggregator_casting.adoc[Aggregator Event Casting]
+Let's see how it is created in StackSaga project.
+
+[source,java]
+----
+@Getter
+@Setter
+//<1>
+@SagaAggregator(
+        version = @SagaAggregatorVersion(
+                major = 1,
+                minor = 0,
+                patch = 0
+        ),
+        name = "placeOrderAggregator"
+)
+public class PlaceOrderAggregator extends Aggregator { //<2>
+    //<4>
+    @JsonProperty("username")
+    private String username;
+    @JsonProperty("order_id")
+    private String orderId;
+    @JsonProperty("user_details")
+    private UserDetails userDetails;
+    @JsonProperty("product_items")
+    private List<ProductItem> productItems;
+
+    protected PlaceOrderAggregator() {
+        //<3>
+        super(PlaceOrderAggregator.class);
+    }
+
+    //<5>
+    @Getter
+    @Setter
+    public static class ProductItem extends MissingPropertyCollector {
+        @JsonProperty("product_id")
+        private String productId;
+        @JsonProperty("quantity")
+        private int quantity;
+        @JsonProperty("price")
+        private double price;
+    }
+
+    @Getter
+    @Setter
+    public static class UserDetails extends MissingPropertyCollector {
+        @JsonProperty("user_id")
+        private String userId;
+        @JsonProperty("name")
+        private String name;
+        @JsonProperty("email")
+        private String email;
+        @JsonProperty("address")
+        private String address;
+        @JsonProperty("phone_number")
+        private String phoneNumber;
+    }
+}
+----
+
+<1> The aggregator class should be annotated with `@org.stacksaga.core.annotation.SagaAggregator`. +
+*name*: The name of the aggregator. this is used for identification of the aggregator by the name. +
+*version*: version will be used for the identification of the aggregator versioning. it is helpful for the *event-upper-casting* and *event-down-casting*. `@org.stacksaga.core.annotation.SagaAggregatorVersion` annotation help you to provide the version of the aggregator. +
+xref:#further_configurations[see further customizations]
+<2> The aggregator class should be extended from the `org.stacksaga.Aggregator` class.
+It provides the shep of aggregator in the framework.
+<3> Create the default constructor of the aggregator class. and inside the constructor, call the super method by passing the same class of the aggregator. +
+Due to framework initiates the object, it's not recommended to have another constructor with parameters and it's pointless +
+<4> The aggregator class can have any number of attributes that you want to store in the aggregator. it is recommended to use `@JsonProperty` annotation for each attribute to avoid any serialization disruptions. +
+here you can see some attributes that are used in the place order example. +
+if the aggregator needs complex objects, you can create inner static classes or separate classes for that purpose. and those classes should be implemented by `org.stacksaga.MissingPropertyCollector`. `MissingPropertyCollector` do a most important job role to collect any missing properties(only there are missing properties by mistaken ) while deserializing the aggregator object from the event-store.
+<5> Sample inner static classes that are used in the aggregator.
+
+WARNING: The name of the aggregator can not be changed after using it in the production environment.
+Because, all the event-store data is mapped with the aggregator name. it won't be an issue for the new transactions.
+But if you change the name of the aggregator, all the previous event-store data will be useless.
+Because the system won't be able to map the previous event-store data with the new name of the aggregator.
+So, it is better to have a proper name for the aggregator before using it in the production environment.
+
+TIP: Due to the fact that the aggregator name is configured by an attribute, you can change the package of the aggregator class anytime.
+
+NOTE: In StackSaga, The aggregator is not a spring bean at all.
+Therefore, it is not necessary to have inside the spring beans' *component scan* area. instead, it can be anywhere in your project, and you can provide the package to the stacksaga framework via `stacksaga.aggregator-scan` property.
+
+[[further_configurations]]
+In addition to that to the following configurations can be done in the `@SagaAggregator` annotation.
+
+== Custom Aggregator Mapper [[aggregator_mapper_implementation]]
+
+By default, stacksaga uses the default `ObjectMapper` that spring boot provides. in case if you want to customize the `ObjectMapper` for your target aggregator, you can create and provide a custom objectMapper object for the target aggregator by using `SagaAggregatorMapperProvider` implementation.
+Then The framework will use the custom Aggregator Mapper that you provided to the target aggregator.
+
+NOTE: The class should be a Spring bean (Annotate with `+@Component+`).
+
+[source,java]
+----
+@Component //<1>
+public class PlaceOrderCustomMapper extends AbstractAggregatorMapperProvider { //<2>
+    @Override //<3>
+    protected ObjectMapper provide() {
+        return new ObjectMapper(); //<4>
+    }
+}
+
+//-------------------------------------------------------------------------------------
+
+@Getter
+@Setter
+@SagaAggregator(
+        version = @SagaAggregatorVersion(
+                major = 1,
+                minor = 0,
+                patch = 0
+        ),
+        name = "placeOrderAggregator",
+        mapper = PlaceOrderCustomMapper.class //<5>
+)
+
+----
+
+<1> *@Component*: Mark your custom object mapper implementation as a Spring bean.
+<2> Extend class by  `AbstractAggregatorMapperProvider` abstract class.
+<3> Override the method for providing the custom `ObjectMapper` object.
+<4> return the customized `ObjectMapper` object.
+<5> *mapper*: provide your custom aggregator mapper provider class in the aggregator class.
+
+[[aggregator_key_gen_custom_implementation]]
+== Custom Aggregator KeyGen
+
+AggregatorKeyGenerator is an interface that allows you to define a custom strategy for generating unique identifiers for saga transactions.
+the interface provides two methods for generating keys:
+
+- `generateTransactionKey` - generates a unique identifier for a new saga transaction.
+- `generateIdempotencyKey` - generates an idempotency key for each span of the transaction.
+
+== Generating Unique Identifiers for Saga Transactions
+
+Every saga transaction requires a globally unique identifier To supply a custom key generator for an Aggregator.
+implement the `AggregatorKeyGenerator` interface.
+Its `generateKey` method provides rich context you can leverage to construct a deterministic or randomized identifier: `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`,`executionMode`, and the `sagaAggregator` metadata.
+
+Providing a custom KeyGen is optional.
+StackSaga ships with a production-ready default (`DefaultKeyGen.class`).
+A custom generator can still be valuable to:
+
+- align identifiers with your sharding/partitioning strategy,
+- improve index locality or read/write patterns,
+- embed minimal routing or observability hints,
+- satisfy organization-specific compliance or traceability rules.
+
+The default generator produces time-ordered, high-entropy identifiers using this shape:
+
+* `<serviceInitials>-<epochMillis>-<nanoId>`
+
+For example, with a service named `order-service`, default IDs might look like:
+
+* `OS-1713809175237-021575259417101`
+* `OS-1713809468378-117401549843120`
+* `OS-1713809493499-012220401009440`
+
+NOTE: https://github.com/aventrix/jnanoid[jnanoid] is used to generate the random NanoID segment, providing excellent entropy and collision resistance.
+
+== Generating Idempotency Keys for Saga Spans
+
+Each span of a saga transaction, (i.e., each executor invocation) requires an idempotency key to ensure safe retries.
+The `generateIdempotencyKey` method provides context including `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`, `currentExecutor`, `transactionId`, `executionMode`, and a `hashGenerator` utility.
+
+IMPORTANT: it is highly recommended to use the provided `hashGenerator` to produce a fixed-length hash of a composite string that includes the `transactionId`, `currentExecutor`, and `executionMode`.
+This approach ensures idempotency keys are compact, consistent in length, and collision-resistant.
+
+== Custom implementation of `AggregatorKeyGenerator`
+
+The implementation is as follows.
+
+NOTE: Due to the fact that the `AggregatorKeyGenerator`'s all methods are `default` methods, no need to implement all methods. you can implement only the required methods as needed.
+
+[source,java]
+----
+
+@Component
+public class PlaceOrderAggregatorKeyGenerator implements AggregatorKeyGenerator {
+
+    @Override
+    public String generateKey(String serviceName, String serviceVersion, String instanceId, String region, String zone, SagaAggregator sagaAggregator) {
+        StringBuilder regionKey = new StringBuilder();
+        for (char c : region.toCharArray()) {
+            regionKey.append((int) c);
+        }
+        return String.format("%s-%s-%s", serviceName , regionKey , UUID.randomUUID());
+    }
+
+    @Override
+    public String generateIdempotencyKey(String serviceName,
+                                         String serviceVersion,
+                                         String instanceId,
+                                         String region,
+                                         String zone,
+                                         String currentExecutor,
+                                         SagaAggregator sagaAggregator,
+                                         String transactionId,
+                                         ExecutionMode executionMode,
+                                         HashGenerator hashGenerator)
+    {
+        final String string = new StringJoiner(":")
+                .add(transactionId)
+                .add(currentExecutor)
+                .add(executionMode.name().toLowerCase())
+                .toString();
+        return hashGenerator.generateHash(string, HashGenerator.ALGType.MD5);
+    }
+}
+----
+
+WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
+The framework may invoke it concurrently.
+
+After implementing, wire it into the Aggregator via the `keyGen` attribute on `@SagaAggregator`:
+
+[source,java]
+----
+@SagaAggregator(
+        version = @SagaAggregatorVersion(major = 1, minor = 0, patch = 1),
+        name = "PlaceOrderAggregator",
+        sagaSerializable = PlaceOrderAggregatorSample.class,
+        keyGen = PlaceOrderAggregatorKeyGenerator.class
+)
+public class PlaceOrderAggregator extends Aggregator  {
+    // ...existing code...
+}
+----
+
+== Keys Generation for Saga Transactions
+
+While your long-running transaction, there are two types of identifiers you need to generate.
+
+. A unique identifier for the entire saga transaction.
+. An idempotency key for each span (executor invocation) within the transaction.
+
+
+=== Default Key Generation Strategy
+
+The default generator produces time-ordered, high-entropy identifiers in the following format:
+
+* `<serviceInitials>-<epochMillis>-<nanoId>`
+
+For example, with a service named `order-service`, default IDs might look like:
+
+* `OS-1713809175237-021575259417101`
+* `OS-1713809468378-117401549843120`
+* `OS-1713809493499-012220401009440`
+
+NOTE: The random NanoID segment is generated using https://github.com/aventrix/jnanoid[jnanoid], ensuring excellent entropy and collision resistance.
+
+== Default Idempotency Keys Generation for Saga Spans
+
+IMPORTANT: If you are not familiar with `Idempotency` strategy, read this the xref:ROOT:idempotency.adoc[] article first.
+
+Each executor invocation (span) within a saga transaction requires an idempotency key to guarantee safe retries.
+The `generateIdempotencyKey` method provides context such as `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`, `currentExecutor`, `transactionId`, `executionMode`, and a `hashGenerator` utility.
+
+Supplying a custom key generator is optional. but it can be beneficial to:
+
+- Align identifiers with your sharding or partitioning strategy
+- Optimize index locality or read/write patterns
+- Embed routing or observability hints
+- Meet organization-specific compliance or traceability requirements
+
+== Custom Key Generation Implementation
+
+In addition to the default key generator, you are able to create your custom key generator by extending the `AbstractAggregatorKeyGenerator` for your target aggregator.
+Then The framework will use the custom key generator that you provided to the target aggregator.
+
+you can customize by overriding the following methods in your implementation.
+
+* `generateTransactionKey`: key for the entire transaction.
+
+** To customize the transaction-id, you can use `generateTransactionKey` method, and it provides you the contextual information, such as `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`,, and also the `sagaAggregator` metadata.
+This allows you to construct deterministic or randomized identifiers tailored to your requirements.
+
+* `generateIdempotencyKey`: idempotency key for each span.
+** To customize the idempotency-key, you can use `generateIdempotencyKey` method, and it provides you the contextual information, such as `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`, `currentExecutor`, `transactionId`, and also the `sagaAggregator` metadata.
+
+IMPORTANT: It is strongly recommended to use the provided `hashGenerator` to produce a fixed-length hash from a composite string (typically including `transactionId`, `currentExecutor`, and `executionMode`).
+This ensures idempotency keys are compact, consistent in length, and collision-resistant.
+
+[source,java]
+----
+@Component //<1>
+public class CustomHashGen extends AbstractAggregatorKeyGenerator { //<2>
+
+    @Override //<3>
+    // this method is called when each transaction is initialized
+    public String generateTransactionKey(String serviceName, String serviceVersion, String instanceId, String region, String zone, SagaAggregator sagaAggregator) {
+        String key = serviceName + "-" + instanceId + "-" + region + "-" + zone + "-" + UUID.randomUUID();
+        return this.hashGenerator().generateHash(key, HashGenerator.ALGType.MD5);
+    }
+
+    @Override //<4>
+    public String generateIdempotencyKey(String serviceName, String serviceVersion, String instanceId, String region, String zone, String currentExecutor, SagaAggregator sagaAggregator, String transactionId, ExecutionMode executionMode) {
+        String key = serviceName + "-" + instanceId + "-" + region + "-" + zone + "-" + currentExecutor + "-" + transactionId + UUID.randomUUID();
+        return this.hashGenerator().generateHash(key, HashGenerator.ALGType.MD5);
+    }
+}
+
+//-----------------------------------------------------------------------
+
+@Getter
+@Setter
+@SagaAggregator(
+        version = @SagaAggregatorVersion(
+                major = 1,
+                minor = 0,
+                patch = 0
+        ),
+        name = "placeOrderAggregator",
+        mapper = PlaceOrderCustomMapper.class,
+        keyGen = CustomHashGen.class //<5>
+)
+public class PlaceOrderAggregator extends Aggregator {
+    //...
+}
+
+----
+
+<1> *@Component*: Mark your custom key generator implementation as a Spring bean.
+<2> Extend the custom class by `AbstractAggregatorKeyGenerator`.
+<3> Override the `generateTransactionKey` method and create your custom key for the transaction. +
+#the method is called when each transaction is initialized.#
+<4> Override the `generateIdempotencyKey` method and create your custom idempotency key for each span. +
+#the method is called when before each executor is invoked.#
+<5> provide your custom class as `keyGen` of the `@SagaAggregator` in your aggregator class.
