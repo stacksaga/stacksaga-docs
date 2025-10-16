@@ -1,11 +1,17 @@
-= SagaTemplate [[saga_template]]
+= SagaTemplates [[saga_template]]
 
-`SagaTemplate` is the class which is responsible for starting the StackSaga engine to invoke your transaction.
-By providing the necessary data, you can say to start the process of the transaction for StackSaga engine.
-`SagaTemplate` is an instance, and it provides one method called `process(...)` for starting the process.
+Saga Template is the bridge between your application and the StackSaga engine.
+It is the entry point for starting a transaction process and hand off the control to the StackSaga engine.
 
-NOTE: `SagaTemplate` Is a spring bean that you can Autowire (Injectable) in Spring environment.
-You can autowire it by using spring @Autowire annotation or by creating the constructor.
+There are two types of SagaTemplates in StackSaga.
+
+* xref:#saga_template_usage[`SagaTemplate<A>`]: It is used for synchronous/blocking transaction processing.
+(For web MVC applications)
+* xref:#reactive_saga_template_usage[`ReactiveSagaTemplate<A>`]: It is used for asynchronous/non-blocking transaction processing.
+(For webflux applications)
+
+[[saga_template_usage]]
+== SagaTemplate<A>
 
 [source,java]
 ----
@@ -52,9 +58,43 @@ The `getAggregatorTransactionId()` method is one of inherited methods from `Aggr
 It will provide you the *unique ID* for each object (each transaction) that you initialize.
 It will be the transaction id for the entire transaction.
 
-'''
+[[reactive_saga_template_usage]]
+== ReactiveSagaTemplate<A>
 
-TIP: Even though `SagaTemplate<A>` can be autowired anywhere in the application, As the best practice it is recommended to use `SagaTemplate<A>` inside of an `EventHandler` class according to the StackSaga design pattern called <<test,CHES>>.
+[source,java]
+----
+@RestController
+@RequestMapping("/order")
+@AllArgsConstructor
+public class PlaceOrderSagaController {
+
+    private final ReactiveSagaTemplate<PlaceOrderAggregator> reactiveSagaTemplate; //<1>
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public Mono<Map<String, String>> placeOrder() {
+        //<2>
+        //<2>
+        PlaceOrderAggregator aggregator = new PlaceOrderAggregator();
+        aggregator.setUsername("mafei");
+        aggregator.setTotal(200.00);
+        //<3>
+        return this.reactiveSagaTemplate
+                .process(placeOrderAggregator, ReactiveCheckUserExecutor.class)
+                .map(transactionId -> Collections.singletonMap("order_id",transactionId));
+    }
+}
+----
+
+<1> Autowire(inject) the `ReactiveSagaTemplate` by providing the target aggregator Class.
+<2> Initialize your aggregator by providing the initial data.
+<3> Use the autowired `ReactiveSagaTemplate` object and call the `process(..)` method.
+As the first argument, you have to provide the initialized target aggregator object.
+As the second argument you have to provide, which is the first executor that should be started the transaction.
+According to the example, The 1st executor is `ReactiveCheckUserExecutor.class`.
+It can be either <<command_executor,Command-Executor>> or <<query_executor,Query-Executor>>.
+The `process(..)` method will return a `Mono<String>` which contains the transaction id.
+You can use that transaction id to return the response.
 
 == Customizing the SagaTemplate's Execution Scheduler
 
