@@ -1,0 +1,708 @@
+=  Transaction Retry Architecture With Retry Coordinator
+:doctype: book
+:toc: left
+:toclevels: 3
+:toc-title: Table of Contents
+:sectnums:
+:sectnumlevels: 3
+:source-highlighter: highlight.js
+:icons: font
+:icon-set: fa
+:revnumber: 1.0.0
+:revdate: {docdate}
+:revremark: Initial Release
+:author: StackSaga Team
+:docinfo: shared
+:experimental:
+:table-stripes: odd
+:stem: latexmath
+
+[.lead]
+This article is the reference guide for the *Transaction Retry Architecture* of the StackSaga framework.
+It is intended for *architects*, *DevOps engineers*, and *developers* who integrate, deploy, or operate StackSaga-based microservices.
+
+== Introduction
+
+In a distributed microservices architecture, transactions often span multiple services and databases, making them susceptible to failures, timeouts, and pauses.
+The StackSaga framework addresses this challenge with a robust *transaction retry subsystem* that ensures reliability and consistency without risking duplicate processing or conflicts.
+This subsystem is designed to detect paused transactions and re-invoke them safely across a cluster of microservice instances, using a combination of token ring partitioning, RSocket communication, and time-windowed publishing.
+This architecture allows StackSaga to maintain high availability and resilience, even in the face of transient failures or network issues, while ensuring that transactions are processed exactly once.
+
+=== Scope of This Document
+
+This document focuses exclusively on the *transaction retry subsystem* — the mechanism by which StackSaga detects paused transactions and re-invokes them safely, without duplication or conflict, across a cluster of microservice instances.
+
+Topics covered:
+
+* Identifying retryable vs non-retryable errors
+* The three-component retry ecosystem: Orchestrator, Agent Slave, and Agent Master
+* Token ring partitioning using Murmur3
+* RSocket communication patterns between components
+* Time-windowed token publishing and conflict avoidance
+* Failure modes, reconnection behaviour, and deployment considerations
+* Multi-region deployments
+* Virtual cluster partitioning for massive-scale systems
+* Database support modules
+
+=== Retryable vs Non-Retryable Errors
+
+Identifying the nature of errors is crucial for effective transaction management.
+
+StackSaga distinguishes two classes of errors:
+
+* *Non-retryable error* — a business logic failure or permanent error condition. these types of errors are not transient and cannot be resolved by retrying. examples include validation failures, authorization errors, or any condition that indicates a fundamental issue with the transaction itself.
+These errors can occur in both the primary flow and the compensation flow.
+In the primary flow, this triggers compensation, and if the error occurs during compensation it produces a failed transaction.
+In either case, the transaction is marked as failed and will not be retried.
+
+
+* *Retryable error* — a transient condition, such as a downstream service being unavailable, a database connection timeout, or a network partition.
+The transaction is paused and will be replayed automatically. retryable errors can occur in both the primary flow and the compensation flow. this is where the retry subsystem comes into play, ensuring that the transaction is retried safely without duplication or conflict to overcome the eventual consistency challenges of distributed systems.
+
+=== Challenge of Transaction Retrying with the same Node
+
+At the first glance, it may seem easy to manage retrying by re-invoking the transaction on the same node that originally processed it.
+However, this approach can lead issues.
+
+the main concern is that the *standard nodes* are *ephemeral* and can become unresponsive or fail by nature, especially in a dynamic microservices environment where instances can be scaled up or down based on traffic demands.
+This can lead to a situation where the #transaction remains paused indefinitely#. for instance, when the time has come to be exposed for retrying the respective transaction, the node that originally processed it might not be available anymore, leading to a situation where the transaction remains paused indefinitely.
+
+For instance, just imagine there are 3 instances are running on, and there are 7 transactions have been saved for retrying by them due to some network issues.
+If each instance takes care of the transactions by themselves, After a while, the scheduler is triggered for replaying transactions on each instance.
+At that moment it can have different instances count due to scaling up or scaling down based on the traffic at that particular time due to the scaling up and down.
+Just imagine an instance that has made some transactions is not running on when the scheduler is triggered for retrying called order-service-3400001. At that moment, other instances do not touch to those transactions that made by that respective instance. hence, those transactions will not be exposed for retrying ever, like the diagram shows below.
+
+image:ROOT:stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt="why instance does not involve directly for retrying in StackSaga"]
+
+As a solution, StackSaga proposes a retry architecture that decouples transaction retrying from the original processing node. it consists of 3 components and let's begin to explore them one by one.
+
+=== Transaction Retry Subsystem
+
+The transaction retry architecture of StackSaga consists of three key components that work together to manage transaction retries across a cluster of microservice instances:
+
+* xref:#retry-coordinator-master[*Retry-Coordinator-Maser*]
+* xref:#retry-coordinator-slave[*Retry-Coordinator-Slave*]
+* xref:#retry-node[*Retry-node*]
+
+==== How the Three Work Together
+
+Before diving into each component, let's have a small preview of how they collaborate to manage transaction retries.
+
+All components are working to safely share the token range of the Murmur3 token ring, which is used to partition the transaction space and ensure that retries are distributed without conflict.
+
+Now that each component is clear on its own, here is the simplest possible summary of how they collaborate:
+
+[cols="1,3",options="header"]
+|===
+| Who | What they contribute
+
+| *Agent Master*
+| Divides the full token ring equally across Slaves every 30 seconds.
+Tells new Orchestrators which Slave to connect to.
+
+| *Agent Slave*
+| Takes its ring slice from the Master and divides it further across its connected Orchestrators.
+Delivers each Orchestrator its personal sub-range every minute.
+
+| *Orchestrator*
+| Holds its sub-range for the current minute.
+Polls the database for paused transactions whose token falls in that sub-range.
+Re-invokes them — without ever conflicting with another instance.
+|===
+
+Each component does its own small job cleanly.
+No component reaches into another's responsibility.
+The result is a retry system that scales horizontally, tolerates partial failures, and guarantees that every paused transaction is eventually retried — exactly once at a time.
+
+[[retry-coordinator-master]]
+==== Retry-Coordinator-Maser
+
+===== What is Retry-Coordinator-Maser?
+
+* The Agent Master is the *single authority* for retry coordination within a microservice domain.
+There is exactly one Master per domain (or per virtual cluster, if you use that feature).
+
+* The Master has no knowledge of your business logic and never touches the transaction database.
+
+* Its entire responsibility is coordination: dividing the token ring, keeping track of which xref:#retry-coordinator-slave[Slaves] are alive, and pointing new Orchestrators in the right direction when they start up.
+
+It is a small, purpose-built service — but it is the cornerstone that makes the rest of the retry system work correctly and conflict-free.
+
+Retry-Coordinator-Maser responsible for managing the global token ring for the microservice domain.
+
+Retry-Coordinator-Maser responsible for managing the global token ring for the microservice domain.
+Partitions the 64-bit Murmur3 token ring equally among registered xref:#retry-coordinator-slave[Retry-Coordinator-Slave nodes].
+Publishes token range updates at the 30th second of every minute.
+Acts as the load balancer directing Orchestrator instances to Slave nodes (Round Robin).
+Built on non-blocking Netty via RSocket — capable of handling thousands of concurrent Slave connections.
+
+===== What Does It Do?
+
+The Master has three distinct responsibilities.
+
+*Responsibility 1 — Maintain the Slave registry.*
+Every Slave that starts up connects to the Master via a persistent RSocket `request-stream` and registers itself.
+The Master keeps a live registry of all connected Slaves.
+When a Slave disconnects (crashes, restarts), the Master notices immediately and updates its registry.
+
+*Responsibility 2 — Publish token ring partitions every 30 seconds.*
+At the 30th second of every minute the Master fires a timer.
+It looks at the current list of registered Slaves, divides the full 64-bit token ring equally among them using the Murmur3 algorithm, and pushes each Slave its assigned range.
+These ranges are tagged as valid for the *next* full minute — giving the entire cluster 30 seconds to receive and prepare the new assignments before they go live.
+This is the heartbeat that keeps the whole retry system ticking.
+
+*Responsibility 3 — Direct new Orchestrators to a Slave.*
+When a new Orchestrator instance starts up, it sends a one-shot `fire-and-forget` message to the Master asking: *"Which Slave should I connect to?"*
+The Master picks a Slave using a Round Robin strategy — spreading Orchestrators evenly across the available Slaves — and responds with the Slave's host and port.
+After this single exchange, the Orchestrator never contacts the Master again.
+All future communication goes through the Slave directly.
+
+===== Why Only One Master per Domain?
+
+A single Master keeps coordination simple and predictable.
+There is one source of truth for the token ring — no need for consensus between multiple Masters, no risk of two Masters publishing conflicting ranges, no split-brain scenarios.
+
+The Master is also built on a *fully non-blocking Netty stack* via RSocket.
+Because it never blocks a thread waiting for I/O, a single Master instance can comfortably handle *thousands of concurrent Slave connections* — far beyond what most deployments will ever need.
+
+For systems that require even stronger fault isolation, StackSaga supports *virtual clusters* — essentially running multiple independent Masters (each with their own Slave group) within the same physical deployment.
+If one Master goes down, only its virtual cluster's retry activity pauses; all other virtual clusters continue normally.
+
+===== What Does It Know About?
+
+The Agent Master knows about:
+
+* The registered Slave nodes and their connection status.
+* How to divide the 64-bit token ring equally using Murmur3 partitioning.
+* Which Slave to assign to each new Orchestrator (Round Robin).
+
+The Agent Master does *not* know about:
+
+* Individual Orchestrator instances after the initial lookup.
+* The transaction database.
+* Your business logic or transaction structure.
+* Other domain Masters — each Master is isolated to its own domain.
+
+
+
+===== Master Node Failure
+
+When the Agent Master fails:
+
+. All registered Slaves lose their connection to the Master.
+. Slaves stop receiving token range updates. Their *last known range remains cached* but expires at the next minute boundary.
+. Orchestrators, which do not communicate directly with the Master during normal operation, continue retrying using their last received sub-range until it expires.
+. New Orchestrator instances starting up will fail to obtain a Slave assignment.
+
+[NOTE]
+====
+Because each microservice domain has its own dedicated Master, a Master failure affects *only that domain's retry subsystem*.
+Other microservice domains continue operating normally.
+Primary transaction execution (new transactions) is unaffected by Master availability.
+
+For systems where even this scoped failure window is unacceptable, see <<Virtual Clusters>> for how to deploy multiple independent master-slave groups within the same domain to achieve fault isolation at the retry layer.
+====
+
+
+[[retry-coordinator-slave]]
+==== Retry-Coordinator-Slave
+
+===== What is the Agent Slave?
+
+The Agent Slave is a *dedicated infrastructure service* — a small, lightweight process that you deploy alongside your microservice.
+It has no awareness of your business logic whatsoever.
+It does not touch the transaction database.
+It does not execute any transactions.
+
+Its entire purpose is to act as a *distribution bridge* between the Agent Master and the Orchestrator instances.
+Think of it as a relay station: it receives a large token range from the Master and breaks it into smaller, non-overlapping sub-ranges, one for each Orchestrator instance it is serving.
+
+===== What Does It Do?
+
+The Agent Slave has a very focused daily routine.
+
+*Step 1 — Register with the Master.*
+When the Slave starts up it opens a persistent connection to the Agent Master using RSocket `request-stream`.
+It says "I am here, I am ready" and then keeps that connection open indefinitely, listening for updates.
+
+*Step 2 — Receive a token range slice.*
+Every 30 seconds the Master publishes updated token range assignments.
+The Slave receives its slice — a contiguous portion of the full 64-bit token ring — and is told which minute that slice is valid for.
+
+*Step 3 — Accept Orchestrator registrations.*
+When an Orchestrator instance starts up, it connects to the Slave and subscribes.
+The Slave records this Orchestrator in its local registry.
+
+*Step 4 — Divide and deliver.*
+With its own slice in hand and a list of connected Orchestrators, the Slave divides the slice equally — one non-overlapping sub-range per Orchestrator — and pushes each sub-range to the respective Orchestrator instance over the persistent stream.
+
+That is it.
+The Slave repeats this cycle every minute, keeping every connected Orchestrator informed of its current retry ownership window.
+
+===== Why Have a Slave Layer at All?
+
+You might wonder: why not have the Master talk directly to every Orchestrator?
+The answer comes down to *stability and scale*.
+
+Your service pods (Orchestrators) come and go frequently — they restart on deployments, scale up under load, scale down at night.
+If the Master had to track every individual pod, it would be overwhelmed with registration and deregistration events and would constantly be recalculating the entire ring.
+
+The Agent Slave acts as a *buffer*.
+The Master only needs to track a small, stable set of Slave nodes.
+All the volatility of your application pods is absorbed within the Slave, which quietly adjusts its sub-range distribution whenever an Orchestrator joins or leaves — without disturbing the Master at all.
+
+===== What Does It Know About?
+
+The Agent Slave knows about:
+
+* The Agent Master it is registered with (configured via `stacksaga.agent.slave.target-master.host` and `stacksaga.agent.slave.target-master.port`).
+* The Orchestrator instances currently connected to it.
+* The token range it has been assigned and how to divide it.
+
+The Agent Slave does *not* know about:
+
+* Your business logic or transaction structure.
+* The transaction database.
+* Other Slave nodes — each Slave works independently.
+
+===== Slave Node Failure
+
+When a Slave node crashes or becomes unreachable:
+
+. All Orchestrators connected to that Slave lose their stream.
+Their sub-ranges become stale and retry polling is paused for those instances.
+. The Master detects the lost connection.
+. The Master applies a *lazy rebalance strategy*:
+* If the lost Slave is **not the last index** in the registry, the Master assumes it will recover shortly (especially true in Kubernetes) and does **not** immediately rebalance.
+* The Master continues sending cached token ranges to the remaining Slaves.
+* The crashed Slave's token range is **frozen** — no Orchestrator covers it during the outage.
+. When the Slave restarts, it reconnects to the Master and is treated as a **new registration** (the Master assigns it a new identity).
+. At the *next 30-second publish cycle*, the Master recalculates and redistributes ranges across all currently registered Slaves, including the restarted one.
+
+[IMPORTANT]
+====
+During a Slave outage, transactions whose tokens fall within the frozen range are *not retried* until the range is covered again.
+These transactions remain safely stored in the database with status `FAILED_WITH_RETRYABLE_ERROR` and are not lost.
+====
+
+===== In One Sentence
+
+____
+The Agent Slave is a lightweight relay service that takes a token ring slice from the Master and distributes non-overlapping sub-slices to each connected Orchestrator instance — keeping retry ownership clearly divided at all times.
+____
+
+[[retry-node]]
+==== Retry-node (Retry support microservice)
+
+As mentioned above, the standard nodes are ephemeral and that are short-lived, temporary, and designed to be created, destroyed, or replaced on-demand. based on the ephemeral term, in Stacksaga architecture, it can be deployed nodes in tow different modes:
+
+* *Standard-Node* +
+The regular orchestrator-service (that has been added stacksaga to enable saga flow ) that processes transactions and handles business logic.
+
+* *Retry-Node* +
+A specialized node that is responsible for managing transaction retries except for processing transactions. it is designed to be more stable and long-lived than standard nodes, ensuring that it can reliably manage retries even in the face of failures or scaling events.
+
+For instance, in a typical deployment, you might have 5 standard nodes that handle transaction processing and 2 retry-nodes that manage retries while handle transaction processing as well. the 5 standard nodes can be scaled up or down based on traffic demands, while the 2 retry-nodes remain stable to ensure that transaction retries are managed effectively. there is no barrier scale up or down the retry-nodes. retry-nodes are designed to be more stable and long-lived than standard nodes. because the retrying is the worst case scenario for the transaction, not the regular flow. read the article of xref:proportional-analysis-of-long-running-transactions-in-saga.adoc[] to understand more about need of retrying and the wight.
+
+===== What Does It Do?
+
+The Orchestrator has two jobs running side by side at all times.
+
+*Job 1 — Execute transactions. (regular job as an orchestrator service )*
+When a new business operation arrives (a customer places an order, for example), the Orchestrator creates a transaction, breaks it into individual steps called *spans*, and executes them one by one — calling downstream services, updating databases, firing events.
+If a span fails with a permanent error, it starts a *compensation* sequence to undo what was already done.
+This is the primary job — the one your business logic cares about.
+
+*Job 2 — Retry paused transactions.*
+Some spans fail not because of a business error, but because a resource was temporarily unavailable — a downstream service was restarting, a database was under heavy load, a network hiccup occurred.
+StackSaga does not discard these transactions.
+Instead, it marks them as paused and saves them safely in the database.
+
+The Orchestrator's second job is to periodically check the database for these paused transactions and try them again.
+But it does not check *all* paused transactions — only the ones it is currently *responsible for*, based on the token sub-range it holds for the current time window.
+This is how StackSaga ensures that multiple running instances of the same service never accidentally retry the same transaction twice.
+
+===== What Does It Know About?
+
+The Orchestrator knows about:
+
+* Its own business logic and transaction spans.
+* The token sub-range it currently holds (delivered by its Agent Slave).
+* The transaction database — it reads and writes transaction records directly.
+
+The Orchestrator does *not* know about:
+
+* Other Orchestrator instances — there is no peer-to-peer communication between service instances.
+* The Agent Master — after the initial startup handshake, the Orchestrator never contacts the Master again unless the given slave connection is lost.
+* How the token ring works internally — it simply receives a range and uses it.
+
+
+===== Retry-node Failure
+
+When an Orchestrator instance fails and restarts:
+
+. It performs a fresh `fire-and-forget` lookup to the Master for an available Slave (potentially receiving a *different Slave* due to Round Robin).
+. It opens a new persistent stream to the newly assigned Slave.
+. It receives the current sub-range at the next 30-second cycle and resumes retrying.
+
+Any transactions that were being actively retried at the moment of failure will be re-attempted in the next window by whichever Orchestrator instance acquires that token range.
+
+
+===== In One Sentence
+
+____
+The Orchestrator is your microservice, augmented by StackSaga to execute distributed transactions and automatically retry the ones that got stuck — without ever conflicting with its sibling instances.
+____
+
+
+=== Registration & Token Distribution Flow
+
+[plantuml, target=registration-sequence, format=svg]
+----
+@startuml registration-sequence
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam sequenceMessageAlign center
+
+skinparam participant {
+  BackgroundColor #EEF4FF
+  BorderColor #4A6FA5
+  FontColor #1A1A2E
+}
+
+skinparam sequence {
+  ArrowColor #4A6FA5
+  LifeLineBorderColor #4A6FA5
+  LifeLineBackgroundColor #EEF4FF
+  NoteBackgroundColor #FFF9E6
+  NoteBorderColor #E0A800
+}
+
+title <b>StackSaga — Registration & Token Distribution Sequence</b>
+
+participant "Order Service\n(Orchestrator)" as orc
+participant "Agent Master\nService" as master
+participant "Agent Slave\n(assigned)" as slave
+participant "Transaction\nStore (DB)" as db
+
+== Slave Registration ==
+slave -> master : RSocket request-stream\nregister(slaveId, host, port)
+master -> slave : ACK — connection established\n(persistent stream open)
+note right of master
+  Master records slave in
+  Slave Registry. Waits for
+  30th-second publish cycle.
+end note
+
+== Orchestrator Registration ==
+orc -> master : RSocket fire-and-forget\nlookupAvailableSlave()
+master -> orc : response: SlaveNodeInfo\n(host, port) — Round Robin selection
+note right of master
+  Master balances orchestrator
+  nodes across available slaves
+  using Round Robin strategy.
+end note
+
+orc -> slave : RSocket request-stream\nsubscribe(orchestratorId)
+slave -> orc : ACK — connection established\n(persistent stream open)
+note right of slave
+  Slave registers orchestrator
+  in its local registry. Awaits
+  token range from master.
+end note
+
+== Token Range Distribution (every 30th second) ==
+master -> master : timer triggers at 30th second\nrecalculate ring partitions
+master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
+slave -> slave : sub-divide received range\namong registered orchestrators
+slave -> orc : push SubTokenRangeUpdate\n(subRangeStart, subRangeEnd, validForMinute=T+1)
+
+note over orc
+  Orchestrator stores the
+  sub-range. Range becomes
+  active at minute T+1.
+end note
+
+== Retry Execution Loop (Minute T+1) ==
+loop polling window active (token range valid)
+  orc -> db : SELECT transactions WHERE\ntoken BETWEEN subRangeStart AND subRangeEnd\nAND cluster = 'us-central-c1'\nAND region  = 'us-central'\nAND status  = 'FAILED_WITH_RETRYABLE_ERROR'
+  db -> orc : list of retryable transactions
+  orc -> orc : re-invoke each transaction's\nnext pending span
+end
+
+@enduml
+----
+
+==== Step-by-Step Description
+
+===== Slave Registration
+
+. On startup, each Agent Slave opens a persistent *RSocket `request-stream`* connection to the Agent Master.
+. The Master records the Slave in its registry.
+. The Slave remains connected and passively waits for token range updates.
+
+===== Orchestrator Registration
+
+. On startup, each Orchestrator sends a *RSocket `fire-and-forget`* message to the Master requesting an available Slave node assignment.
+. The Master applies a **Round Robin** strategy to select a Slave and returns the Slave's connection details (host and port) to the Orchestrator.
++
+NOTE: If the same Orchestrator instance restarts, it will receive a *different* Slave assignment on the next lookup, as the Round Robin pointer advances.
+This ensures balanced distribution of Orchestrators across Slaves over time.
+. The Orchestrator then opens a persistent *RSocket `request-stream`* connection to its assigned Slave and begins listening for sub-range updates.
+
+===== Token Range Distribution
+
+. At the 30th second of every minute the Master fires its publish timer.
+. The Master partitions the full token ring equally among all registered Slaves and sends each Slave its range, tagged with the target minute (`validForMinute = T+1`).
+. Each Slave receives its range, divides it equally among its registered Orchestrators, and pushes sub-range updates downstream.
+. Each Orchestrator stores the received sub-range and activates it at the start of minute `T+1`.
+
+===== Retry Execution Loop
+
+Once the time window is active, each Orchestrator enters its retry polling loop:
+
+. Query the transaction store for records where:
+** `token` is within `[subRangeStart, subRangeEnd]`
+** `cluster` matches the Orchestrator's configured cluster name
+** `region` matches the Orchestrator's configured region
+** `status = FAILED_WITH_RETRYABLE_ERROR`
+. For each matching transaction, re-invoke the next pending span.
+. Repeat until the time window expires (sub-range is superseded by the next update).
+
+==== Communication Patterns
+
+StackSaga uses https://rsocket.io[RSocket] for all inter-component communication.
+RSocket is chosen for its support for persistent, reactive, bidirectional streams backed by a non-blocking Netty transport.
+
+[cols="2,1,2", options="header"]
+|===
+| Connection | Interaction Model | Description
+
+| Slave → Master
+| `Request-Stream`
+| Persistent subscription. Slave registers with Master and keeps the stream open
+to receive token range updates.
+
+| Orchestrator → Master
+| `Request-Response`
+| One-shot lookup. Orchestrator requests an available Slave node assignment from Master on startup.
+
+| Orchestrator → Slave
+| `Request-Stream`
+| Persistent subscription. Orchestrator subscribes to its assigned Slave and keeps
+the stream open to receive sub-range updates.
+|===
+
+== Token Ring Partitioning
+
+=== Overview
+
+StackSaga uses the **Murmur3 consistent hashing algorithm** to assign every transaction to a deterministic position in a 64-bit token ring.
+This token is computed when the transaction is *initialised* and stored alongside the transaction record in the database, together with the *cluster name* and *region* of the originating Orchestrator.
+The retry subsystem uses this stored token, cluster, and region to determine *which orchestrator instance is responsible* for retrying a given transaction at any point in time.
+
+The full token space spans from latexmath:[-2^{63}] to latexmath:[2^{63}-1]:
+
+----
+-9,223,372,036,854,775,808  →  9,223,372,036,854,775,807
+----
+
+=== Master → Slave Partitioning
+
+The Master divides the full token ring into equal segments, one per registered Slave node.
+With three Slave nodes the ring is divided as follows:
+
+[cols="1,2,2", options="header", stripes=odd]
+|===
+| Slave Node | Start Token (Inclusive) | End Token (Inclusive)
+| Slave Node 1 | `-9,223,372,036,854,775,808` | `-3,074,457,345,618,258,603`
+| Slave Node 2 | `-3,074,457,345,618,258,602` | `3,074,457,345,618,258,602`
+| Slave Node 3 | `3,074,457,345,618,258,603` | `9,223,372,036,854,775,807`
+|===
+
+NOTE: The number of partitions and their boundaries are recalculated automatically each time the number of registered Slaves changes (at the next 30-second publish cycle).
+
+=== Slave → Orchestrator Sub-Partitioning
+
+Each Slave further divides its received token range equally among all Orchestrator instances registered with it.
+
+The following example shows how *Slave Node 1* divides its range among two Order Service instances:
+
+[cols="1,2,2", options="header", stripes=odd]
+|===
+| Orchestrator Instance | Start Token (Inclusive) | End Token (Inclusive)
+| Order Service Instance 1 | `-9,223,372,036,854,775,808` | `-6,148,914,691,236,517,206`
+| Order Service Instance 2 | `-6,148,914,691,236,517,205` | `-3,074,457,345,618,258,603`
+|===
+
+All other Slave nodes apply the same logic for their own registered Orchestrator instances.
+
+== Token Time Window & Conflict Avoidance
+
+=== The Publish Cycle
+
+The Agent Master runs a repeating timer that fires at the *30th second of every minute*.
+At each trigger the Master:
+
+. Recalculates the token ring partition based on currently registered Slaves.
+. Publishes the new token range to each Slave.
+. Each Slave recalculates its sub-ranges and pushes updates to its registered Orchestrators.
+
+The published range is labelled as valid for the *next full minute* (minute `T+1`), not the current minute.
+
+=== Why the 30-Second Offset?
+
+Publishing at the 30th second and marking the range as valid for the next minute creates a *30-second preparation window*.
+This window is intentionally allocated to account for worst-case communication delays: Slave distribution, Orchestrator updates, and network latency in large clusters.
+
+By the time minute `T+1` begins, all Orchestrators are guaranteed to have received their new sub-ranges and are ready to start polling.
+
+----
+Timeline example:
+
+  Minute T, second 30 → Master publishes ranges (valid for T+1)
+  Minute T, second 31–59 → Slaves and Orchestrators receive and cache new ranges
+  Minute T+1, second 0  → Orchestrators begin polling with new ranges
+  Minute T+1, second 30 → Master publishes ranges for T+2
+  ...
+----
+
+=== Conflict Avoidance
+
+Because each Orchestrator holds a *non-overlapping sub-range* for a *defined time window*, two Orchestrator instances can never claim responsibility for the same transaction simultaneously.
+This eliminates the need for distributed locking when retrying transactions.
+
+
+== Multi-Region Deployment
+
+For systems deployed across multiple geographic regions, StackSaga uses the `region` property to scope retry ownership. Every component — Master, Slave, and Orchestrator — is stamped with the region it belongs to.
+
+
+=== How Region Scoping Works
+
+When a transaction is created it inherits the region of the Orchestrator that created it.
+That region value is stored in the transaction record in the database.
+
+During the retry polling loop, each Orchestrator adds `region` as a mandatory filter alongside the token range:
+
+[source,sql]
+----
+SELECT *
+FROM   transactions
+WHERE  token   BETWEEN :subRangeStart AND :subRangeEnd
+AND    region  = :region
+AND    cluster = :cluster
+AND    status  = 'FAILED_WITH_RETRYABLE_ERROR';
+----
+
+This guarantees that an Orchestrator in `us-central` never picks up and retries a transaction that was originally created by an Orchestrator in `asia-south` — even if both regions share the same database (e.g., a globally replicated Cassandra cluster).
+
+
+== Virtual Clusters
+
+=== Why Virtual Clusters?
+
+In very large deployments the single-master-per-domain model, while operationally straightforward, presents two concerns as the system grows:
+
+. **Scale** — a single Master must manage all Slave connections for the domain. Although the Master uses a fully non-blocking Netty stack via RSocket and is capable of handling *thousands* of concurrent Slave connections, some extreme-scale deployments may want to distribute this coordination load.
+
+. **Fault isolation** — if the domain's single Master goes down, the entire domain's retry subsystem pauses until it recovers. While the Master is designed to restart quickly under Kubernetes, some systems require that a partial infrastructure failure never affects more than a defined fraction of retry capacity.
+
+Virtual clusters address both concerns by allowing you to divide a single physical deployment into *multiple independent master-slave groups*, each operating as a completely separate retry coordination unit, all within the same region.
+
+=== What is a Virtual Cluster?
+
+A virtual cluster is a named group of Agent Master, Agent Slave, and Orchestrator instances that operate in isolation from other groups.
+The group identity is declared via the `stacksaga.instance.cluster` property.
+
+All three components that share the same cluster name form one logical retry cluster:
+
+* The Master only accepts registrations from Slaves with a matching cluster name.
+* The Slave connects only to the Master of its cluster, declared via `stacksaga.agent.slave.target-master.host` and `stacksaga.agent.slave.target-master.port`.
+* The Orchestrator connects only to the Master of its cluster for the initial Slave lookup, and subsequently to the Slave assigned by that Master.
+* Retry queries are filtered by cluster name in addition to token range and region.
+
+Two virtual clusters running in the same physical Kubernetes cluster are *completely isolated* from each other — they share no state, no connections, and no retry responsibility.
+
+=== Multi-Region Single-Cluster Deployment
+The simplest multi-region setup is one virtual cluster per region.
+This is the baseline configuration for geographic distribution.
+
+=== Multi-Region Multi-Virtual-Cluster Deployment
+
+For the highest levels of scale and fault isolation, each physical region can host *multiple virtual clusters*.
+In this topology, if any single Master fails, only the fraction of transactions belonging to that virtual cluster are affected — the remaining virtual clusters in the same region continue retrying normally.
+
+
+=== Transaction Ownership Across Virtual Clusters
+
+A transaction is permanently bound to the region and cluster of the Orchestrator that created it.
+No other virtual cluster — even within the same region — will ever attempt to retry it.
+
+The retry query always includes both `region` and `cluster` as mandatory filters:
+
+[source,sql]
+----
+SELECT *
+FROM   transactions
+WHERE  token   BETWEEN :subRangeStart AND :subRangeEnd
+AND    region  = 'us-central'        -- physical region
+AND    cluster = 'us-central-c1'     -- virtual cluster
+AND    status  = 'FAILED_WITH_RETRYABLE_ERROR';
+----
+
+This makes the system particularly well-suited to Apache Cassandra deployments where `region` and `cluster` form part of the partition key, enabling the database to route the query directly to the correct nodes with zero full-table scans.
+
+
+
+== Glossary
+
+[cols="1,3", options="header"]
+|===
+| Term | Definition
+
+| *Span*
+| A single, trackable unit of work within a distributed transaction.
+A transaction is composed of one or more sequential spans.
+
+| *Token*
+| A 64-bit integer derived from the Murmur3 hash of a transaction ID.
+Used to deterministically assign the transaction to a retry owner.
+
+| *Token Ring*
+| The full 64-bit integer space divided into contiguous, non-overlapping ranges.
+StackSaga uses the Murmur3Partitioner model, identical in principle to Apache Cassandra's token ring.
+
+| *Token Range*
+| A contiguous subset of the token ring, assigned to a Slave or Orchestrator for a given time window.
+
+| *Time Window*
+| A one-minute interval during which an Orchestrator holds exclusive ownership of a sub-token range.
+
+| *Publish Cycle*
+| The repeating event at the 30th second of every minute in which the Master redistributes token ranges.
+
+| *Compensation*
+| The rollback sequence executed when a non-retryable error occurs in the primary transaction flow.
+
+| *Murmur3Partitioner*
+| A consistent hashing scheme using the MurmurHash3 algorithm to evenly distribute keys across the token ring.
+
+| *Region*
+| A physical deployment boundary (e.g., `us-central`, `asia-south`).
+Declared via `stacksaga.instance.region`. Stored on transactions and used as a mandatory retry query filter.
+
+| *Virtual Cluster*
+| A named logical group of Master, Slave, and Orchestrator instances that operate in complete isolation from other groups.
+Declared via `stacksaga.instance.cluster`. Allows multiple independent retry units within the same physical region.
+
+| *RSocket*
+| A binary application-level protocol supporting multiple interaction models: `request-response`,
+`fire-and-forget`, `request-stream`, and `channel`. StackSaga uses `request-stream` and `fire-and-forget`.
+
+| *Lazy Rebalance*
+| The Master's strategy of deferring token ring recalculation until the next scheduled publish cycle,
+rather than reacting immediately to Slave disconnections.
+|===
