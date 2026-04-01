@@ -1,151 +1,148 @@
-= Proportional Analysis of Failure Modes in Long-Running Transactions Using the Saga Pattern
+= Failure Probability and Retry Necessity in Saga-Based Distributed Transactions
 
 == Overview
 
-Proportional Analysis of Long-Running Transactions in Saga refers to assessing potential failures by comparing different aspects of long-running transactions in a Saga-based system and what are the solutions that StackSaga provides for those potential failures.
-Even in a well-structured microservice architecture using the Saga pattern, failures can still occur.
-While the Saga pattern ensures eventual consistency, it does not eliminate all failures.
-However, at the implementation level, certain rare but critical failures can still be observed, emphasizing the need for robust failure-handling strategies and continuous monitoring.
+This article analyses the failure modes that can affect long-running transactions in a Saga-based microservices architecture, and explains why a robust asynchronous retry subsystem is a non-negotiable part of any production deployment — even when the system appears to be running perfectly.
 
-Due to the system is well-managed and well-configured, most of the transactions are successful in general.
-But there are some rare but critical failures can still be observed like resource-unavailable issues network outages, etc.
-These edge cases, though rare, demand careful consideration during system implementation to ensure overall robustness and resilience.
+The central argument is simple but important:
 
-image:funnel-theory-of-distributed-transactions.svg[alt="funnel theory of distributed transactions",width=800]
+[quote]
+____
+In a well-managed distributed system, the need for transaction retrying is *statistically rare* — but it is also *temporally unpredictable*.
+A retry can become necessary at any moment, triggered by conditions that are invisible until they occur, and the window during which the retry is needed may last anywhere from milliseconds to hours.
+You cannot schedule for it.
+You cannot eliminate it.
+You can only design for it.
+____
 
-The diagram shows that most of the transactions are successful in general due to we are using well-managed distributed systems.
-Even though the following failures can occur rarely in the system.
-It does not say that every time these errors can occur, but there is a possibility.
+This is not a theoretical concern.
+It is a direct consequence of the *Fallacies of Distributed Computing*, the first of which states: *"The network is reliable."*
+It is not.
+Networks drop packets, connections time out, and downstream services become temporarily unreachable — not because of poor engineering, but because distributed systems are inherently composed of components that fail independently and without coordination.
 
-. xref:Successful_transactions[Successful transactions.]
-. xref:primary_execution_failed_transactions[Primary-Execution failed transactions.]
-. xref:compensation_failed_transactions[Compensation Failed Transactions]
-. xref:crashed_transaction[Crashed transactions]
-. xref:missing_transactions[Missing transactions]
+The failure classifications below use standard distributed systems terminology:
 
-[[Successful_transactions]]
-== 1. Successful transactions.
+* *Transient fault* — occurs once and resolves on its own (e.g., a momentary network blip).
+* *Intermittent fault* — recurs unpredictably (e.g., a flapping network interface).
+* *Permanent fault* — persists until actively fixed (e.g., a misconfiguration or a burnt-out component).
 
-////
-These are transactions that complete as intended, achieving the desired outcome without errors.
-In most systems, the majority of transactions fall into this category.
-From the Stacksaga perspective, a transaction is considered successful when all executors complete their tasks without encountering any exceptions or failures.
-////
+Retrying addresses transient and intermittent faults.
+It cannot resolve permanent faults — those require manual intervention.
+The distinction between retryable and non-retryable errors in StackSaga maps directly onto this classification.
 
-Successful transactions represent the majority of the entire transactions due to the fact that we are using healthy and well managed systems.
-According to the saga design pattern, these are the transactions that executed all primary executions successfully.
+== The Funnel Model of Transaction Outcomes
+
+The diagram below illustrates the proportional distribution of transaction outcomes in a well-managed Saga system.
+The funnel shape is intentional: the vast majority of transactions flow straight through to success.
+The failure modes described in this article occupy the narrow lower end — rare, but not impossible, and each one demands a distinct handling strategy.
+
+image:funnel-theory-of-distributed-transactions.svg[alt="Funnel model of distributed transaction outcomes",width=800]
+
+The five outcome categories are:
+
+. xref:#successful_transactions[Successful transactions]
+. xref:#primary_execution_failed_transactions[Primary-execution failed transactions (with successful compensation)]
+. xref:#compensation_failed_transactions[Compensation failed transactions]
+. xref:#crashed_transactions[Crashed transactions]
+. xref:#missing_transactions[Missing transactions]
+
+[NOTE]
+====
+Categories 1 and 2 are outcomes that the Saga pattern explicitly accounts for.
+Categories 3 through 5 are failure modes that the Saga pattern does *not* eliminate — they are edge cases that require additional infrastructure to handle safely.
+StackSaga provides that infrastructure.
+====
+
+[[successful_transactions]]
+== 1. Successful Transactions
+
+Successful transactions represent the dominant outcome in any well-managed system.
+Every primary execution span completes without error, and the transaction reaches its intended final state.
+
+No retry subsystem involvement is required.
+This is the normal path.
 
 [[primary_execution_failed_transactions]]
-== 2. Primary-Execution failed transactions
+== 2. Primary-Execution Failed Transactions
 
-////
+Some transactions encounter a non-retryable (business logic) error during the primary execution flow.
+This is not considered a system failure — it is an expected outcome of the Saga design pattern.
 
-Based on the logical conditions in the code, some transactions may have a primary execution failure.
-(These errors are not considered as errors.
-Because it is used for stopping to forward the transaction and to start the compensation process.) In stacksaga perspective, a non-retryable exception is thrown through one of the executors while the transaction is being executed.
-////
+When a non-retryable error occurs, StackSaga begins the *compensation* sequence, undoing the work completed by earlier spans.
+If compensation succeeds, the transaction reaches a consistent final state.
+The system has maintained eventual consistency, which is exactly what the Saga pattern guarantees.
 
-If one of primary executions fails while going forward and the compensation process is successfully done after the primary execution failure, these transactions are considered as compensation success transactions.
-According to the saga design pattern, successful transactions are not considered as failed transactions.
-Because, the transaction has overcome the eventual consistency.
-
+[NOTE]
 ====
-The above situations are accepted by the saga design pattern.
-But the following failures are not accepted by the saga design pattern.
-But these failures can occur, and we should manage them to avoid inconsistency in the system.
-Even the following unexpected failures are a headache as a developer.
-Do not worry about it, Stacksaga will take care of them with reliable solutions.
+The two categories above are fully handled by the Saga pattern itself.
+The following categories are *not* handled by the pattern and require additional mechanisms.
+Despite being statistically rare, each one can produce permanent inconsistency if left unaddressed.
+StackSaga is designed to address all of them.
 ====
 
 [[compensation_failed_transactions]]
-== 3. Compensation failed transactions.
+== 3. Compensation Failed Transactions
 
-If one of the compensation executions fails (except a resource-unavailable issue,) the entire transaction is stuck.
-So as a developer, you have to guarantee developing the compensation executions without having errors.
+If a compensation span fails with a permanent (non-retryable) error, the transaction is stuck in a partially compensated state.
+The system cannot automatically recover — the compensation logic itself has a bug or an unresolvable condition.
 
-TIP: Stacksaga solution.
-Even if these transactions are frozen due to compensation error without being exposed for scheduling, you are able to restore those transactions by fixing the relevant issue with a manual intervention.
-You can find out the transaction batch wise from the event store via the endpoint that Stacksaga provides.
-After collecting the transactions, it can be restored by calling again the restore endpoint that Stacksaga provides.
-Then those transactions are exposed to the next schedule for re-executing where the transaction was stopped.
+This is a *permanent fault* by definition.
+No amount of retrying will resolve it.
+It requires developer intervention.
 
-[[asynchronous_retry_timeouts]]
-== 4. Asynchronous retry Timeouts
+*How StackSaga helps:*
+Even though these transactions cannot be retried automatically, they are not lost.
+StackSaga exposes them through its event store API, allowing you to retrieve affected transactions in batches, diagnose the root cause, deploy a fix, and manually restore each transaction to the retry queue via the restore endpoint.
+The transaction will then be re-executed from the exact span where it stopped.
 
-While communicating with other services, some services cannot be accessed sometimes due to connection issues.
-As a best practice if you are using a resilience and fault tolerance pattern like a circuit breaker in your application, after a few attempts the transaction is frozen for some period of time and the transaction is scheduled for asynchronous retrying.
-But the case is that if the transaction fails even after a few Asynchronous retrying, the asynchronous retrying period of the transaction is exceeded.
-Then the transaction will not be exposed to re-invoking.
-In simple terms, every transaction has a time period for retrying asynchronously.
-After exceeding that time, the transaction will be frozen.
+[[crashed_transactions]]
+== 4. Crashed Transactions
 
-////
-Asynchronous Retry Timeouts
+In a microservices environment, the JVM process itself can die unexpectedly — due to a hardware fault, an OOM kill, a power outage, or a forced pod eviction.
+When this happens in the middle of a transaction, the Saga Execution Coordinator (SEC) has no opportunity to record the failure.
+The transaction is simply frozen in the database at whatever state it was last persisted to.
 
-When communicating with other services, temporary connection issues may prevent access to certain services.
-As a best practice, if your application utilizes a circuit breaker or synchronous retry mechanism, it will attempt to retry the transaction a few times.
-If these attempts fail, the transaction is temporarily frozen and scheduled for asynchronous retrying.
+This is the most insidious failure mode, because it produces no error signal whatsoever.
+From the outside, the transaction looks like it is still in progress.
 
-If the transaction continues to fail even after multiple asynchronous retry attempts, it eventually exceeds its retry timeout period.
-Once this threshold is reached, the transaction is no longer eligible for further retries and remains in a frozen state.
+Two specific scenarios arise:
 
-In simpler terms, each transaction has a limited time window for asynchronous retries.
-Once this period is exceeded, the transaction is permanently frozen and will not be retried.
-////
+. *Crash during event-store write* — the SEC was in the process of persisting the transaction state when the process died.
+This produces a xref:ROOT:idempotency.adoc#dual_write_problem[Dual-Write problem]: it is ambiguous whether the write committed or not.
+. *Crash during span execution* — the process died while a business span was executing, leaving the downstream service in an unknown state.
 
-TIP: Stacksaga solution.
-Even if these transactions are frozen due to the threshold has been reached, you are able to restore those transactions by fixing the relevant issue with a manual intervention.
-You can find the transactions from the event store batch wise via the endpoint that Stacksaga provides.
-After collecting the transactions, it can be restored by calling again the restore endpoint that Stacksaga provides.
-Then those transactions are exposed to the next schedule for re-executing where the transaction was stopped.
+*How StackSaga helps:*
+StackSaga addresses this using the *Transaction Restore Retention Time* mechanism.
+Every time the SEC successfully updates the transaction state in the event store, it also refreshes a retention timestamp on that record.
+If a transaction's retention timestamp exceeds its configured threshold without any further updates, StackSaga treats the transaction as crashed and automatically re-exposes it for retrying at the next scheduled window.
 
-[[crashed_transaction]]
-== 4. Crashed transaction.
-
-In microservices architecture, one business transaction consists of multiple sub-transactions (atomic-transactions).
-And as well as another extra atomic transaction is made by the SEC behind the scene for storing the state of the transaction in the event store.
-
-So if one atomic transaction is crashed, (the crash can be occurred due to various reasons like Power Outage, hardware failure, etc.) without any update (fallback), the entire transaction is stuck.
-Because the atomic transactions of the business transaction are executed in sequence order in general.
-
-These kinds of failures may occur in mainly two forms.
-
-1. The Application is crashed while processing the atomic execution to the event-store by the SEC.
-It leads to a xref:ROOT:idempotency.adoc#dual_write_problem[Dual-Write problem].
-2. The Application is crashed while processing one of the atomic executions
-
-TIP: Stacksaga solution.
-In the case of a crash of the transactions, the SEC has no idea where the transaction is stuck exactly.
-Because the execution process got killed without announcing anything to the SEC.
-StackSaga is ready for handling these crashes as well.
-Each time the transaction is updated in the event store by the SEC, SEC updates the xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction Restore Retention Time,]
-and in case if the transaction got crashed, the transaction will be caught for retrying after exceeding the *Transaction Restore Retention Time.*
-
-// === Involvement of Stacksaga in crashed transaction.
+See xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction Restore Retention Time] for configuration details.
 
 [[missing_transactions]]
-== 5. Missing transactions
+== 5. Missing Transactions
 
-////
-In the asynchronous retrying process, the transactions are transformed for retrying to the available services (it can be via a queue or http request or any other mechanism).
-While the process of the transaction can be missing without being executed.
-////
+During asynchronous retry processing, a transaction is dispatched for re-execution — via a queue, an HTTP callback, or another async channel.
+But before it can be processed, it disappears: the message is lost, the queue entry is dropped, or the receiving node dies between receiving the message and processing it.
 
-In asynchronous retry processes, transactions are transferred for execution to available services through mechanisms such as queues, HTTP requests, or other communication channels.
-However, during this process, a transaction may be lost or fail to execute due to issues like message loss, queue mismanagement, or communication failures.
-These missing transactions can lead to inconsistencies and require careful monitoring and recovery strategies.
+The result is a transaction that was dispatched but never executed.
+No error is reported.
+No compensation is triggered.
+The transaction simply vanishes from the active processing pipeline.
 
-TIP: Stacksaga solution.
-In this case, the same *Transaction-Restore-Retention-Time* logic is applied as the solution.
-If the transaction has no any sign after sending for retrying, after some configured xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction-Restore-Retention-Time], the transaction is re-exposed for retrying automatically.
+*How StackSaga helps:*
+The same *Transaction Restore Retention Time* logic that protects against crashes also covers this scenario.
+If a dispatched transaction produces no state update within the retention window, StackSaga automatically re-exposes it for retrying.
+The system self-heals without any manual intervention.
 
-////
-== 6. Retry-Timeout transactions
+See xref:replay-transaction.adoc#transaction_restore_retention_time[Transaction Restore Retention Time] for configuration details.
 
-In distributed systems, transactions are retried within a specific time frame.
-If the retry limit is exceeded, the transaction is frozen and will not be retried automatically.
-This can happen due to long service downtimes, network issues, or high system load.
-To resolve these transactions, manual intervention is needed to identify and fix the problem before reactivating the transaction.
-////
+== Why Retry Infrastructure Cannot Be Optional
 
+The failure modes in categories 3 through 5 share a common characteristic: *they cannot be predicted, scheduled, or prevented*.
+A process crash, a lost message, or a temporarily unreachable downstream service can occur at any point in the lifecycle of any transaction, regardless of how carefully the system is engineered.
 
+This is the reason StackSaga treats the retry subsystem as a core architectural component rather than an optional add-on.
+The question in a distributed system is never *whether* a transient failure will occur — it is *when*, and *for how long*.
+
+A system that handles the happy path correctly but has no strategy for these edge cases is not a reliable system.
+It is a system that works until it doesn't, and then produces silent inconsistency.
