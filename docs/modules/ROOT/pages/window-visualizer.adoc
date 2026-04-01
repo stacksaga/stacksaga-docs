@@ -1,1 +1,627 @@
-include::page$window-visualizer.html[]
+++++
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Time Window Manager Visualizer</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f0f2f5;
+            color: #1f2328;
+            padding: 24px;
+            min-height: 100vh;
+        }
+
+        h1 {
+            text-align: center;
+            color: #0969da;
+            font-size: 22px;
+            margin-bottom: 20px;
+            letter-spacing: 1px;
+        }
+
+        .controls {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 10px;
+            padding: 20px;
+            display: flex;
+            gap: 16px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        label {
+            font-size: 11px;
+            color: #57606a;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        input, select {
+            background: #f6f8fa;
+            border: 1px solid #d0d7de;
+            color: #1f2328;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            width: 170px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #0969da;
+            box-shadow: 0 0 0 3px rgba(9,105,218,0.12);
+        }
+
+        button {
+            background: #0969da;
+            color: white;
+            border: none;
+            padding: 9px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        button:hover { background: #0860ca; }
+
+        /* Stats cards */
+        .stats {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 10px;
+            padding: 14px 20px;
+            flex: 1;
+            min-width: 140px;
+            text-align: center;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        }
+
+        .stat-card.highlight {
+            border-color: #bf8700;
+            background: #fff8e1;
+        }
+
+        .stat-card.current {
+            border-color: #cf222e;
+            background: #fff0ee;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #57606a;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* Canvas containers */
+        .chart-section {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        }
+
+        .chart-title {
+            font-size: 13px;
+            color: #57606a;
+            font-weight: 600;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+        }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 12px;
+            color: #57606a;
+        }
+
+        .legend-swatch {
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }
+
+        .decision-box {
+            background: #f6f8fa;
+            border: 1px solid #d0d7de;
+            border-radius: 8px;
+            padding: 14px 18px;
+            font-size: 13px;
+            line-height: 1.7;
+            margin-top: 12px;
+        }
+
+        .decision-box .step { color: #57606a; }
+        .decision-box .val  { color: #1f2328; font-weight: 600; }
+        .decision-box .arrow { color: #0969da; margin: 0 4px; }
+        .decision-box .outcome { color: #bf8700; font-weight: 700; }
+    </style>
+</head>
+<body>
+
+<h1>⏱ Time Window Manager Visualizer</h1>
+
+<!-- Controls -->
+<div class="controls">
+    <div class="control-group">
+        <label>Current Time (HH:MM:SS — 24h)</label>
+        <input type="time" id="inputTime" step="1">
+    </div>
+    <div class="control-group">
+        <label>Window Factor (minutes)</label>
+        <select id="inputWindowFactor">
+            <option value="1">1 min</option>
+            <option value="2">2 min</option>
+            <option value="3">3 min</option>
+            <option value="4">4 min</option>
+            <option value="5">5 min</option>
+            <option value="6">6 min</option>
+            <option value="8">8 min</option>
+            <option value="10">10 min</option>
+            <option value="12">12 min</option>
+            <option value="15">15 min</option>
+            <option value="16">16 min</option>
+            <option value="20">20 min</option>
+            <option value="24">24 min</option>
+            <option value="30" selected>30 min</option>
+            <option value="32">32 min</option>
+            <option value="40">40 min</option>
+            <option value="48">48 min</option>
+            <option value="60">60 min (1 h)</option>
+            <option value="80">80 min</option>
+            <option value="96">96 min</option>
+            <option value="120">120 min (2 h)</option>
+            <option value="160">160 min</option>
+            <option value="240">240 min (4 h)</option>
+            <option value="480">480 min (8 h)</option>
+        </select>
+    </div>
+    <button onclick="run()">▶ Visualize</button>
+</div>
+
+<!-- Stats -->
+<div class="stats" id="statsRow">
+    <div class="stat-card current">
+        <div class="stat-value" id="s-time" style="color:#cf222e">—</div>
+        <div class="stat-label">Input Time</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="s-rest" style="color:#0550ae">—</div>
+        <div class="stat-label">Rest in Window</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="s-rawEff" style="color:#6e40c9">—</div>
+        <div class="stat-label">Effective Win Index</div>
+    </div>
+    <div class="stat-card highlight">
+        <div class="stat-value" id="s-effLabel" style="color:#bf8700">—</div>
+        <div class="stat-label">★ Effective Window Label</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="s-totalWindows" style="color:#0969da">—</div>
+        <div class="stat-label">Windows Within Day</div>
+    </div>
+    <div class="stat-card" style="border-color:#1a7f37; background:#f0fff4;">
+        <div class="stat-value" id="s-exposed" style="color:#1a7f37">—</div>
+        <div class="stat-label">⏳ Exposed Within</div>
+    </div>
+</div>
+
+<!-- Full day timeline -->
+<div class="chart-section">
+    <div class="chart-title">📅 Full Day Timeline &nbsp;<span style="color:#adb5bd; font-weight:400; font-size:11px">(00:00:00 → 24:00:00)</span></div>
+    <canvas id="canvasFull"></canvas>
+    <div class="legend" id="legendFull"></div>
+</div>
+
+<!-- Zoomed view -->
+<div class="chart-section">
+    <div class="chart-title">🔍 Zoomed View &nbsp;<span style="color:#adb5bd; font-weight:400; font-size:11px">(around current time ± context windows)</span></div>
+    <canvas id="canvasZoom"></canvas>
+    <div class="decision-box" id="decisionBox"></div>
+</div>
+
+<script>
+// ─── Algorithm (mirrors Java) ───────────────────────────────────────────────
+function getEffectiveWindow(windowCount, windowFactorMinutes, totalSeconds) {
+    const windowSizeSec = windowFactorMinutes * 60;
+    const realWindowIdx  = Math.floor(totalSeconds / windowSizeSec);
+    const rest           = totalSeconds % windowSizeSec;
+
+    let rawEffective;
+    if (rest > windowSizeSec * 0.5) {
+        rawEffective = realWindowIdx + 2;
+    } else {
+        rawEffective = realWindowIdx + 1;
+    }
+
+    const effectiveLabel   = (rawEffective % windowCount) + 1;
+    const effWindowStart   = rawEffective * windowSizeSec;
+    const exposedWithinSec = effWindowStart - totalSeconds; // gap: now → effective window start
+
+    return { realWindowIdx, rest, rawEffective, effectiveLabel, windowSizeSec, effWindowStart, exposedWithinSec };
+}
+
+function parseTime(str) {
+    const parts = str.split(':').map(Number);
+    return (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
+}
+
+// ─── Color helpers ───────────────────────────────────────────────────────────
+function windowColor(label, windowCount, lightness = 45, alpha = 1) {
+    const hue = ((label - 1) / windowCount) * 300; // spread across 300° to avoid red wrap
+    return `hsla(${hue}, 65%, ${lightness}%, ${alpha})`;
+}
+
+// ─── Draw a timeline segment ─────────────────────────────────────────────────
+function drawTimeline(canvasId, totalSec, result, windowCount, windowFactor,
+                       startSec, endSec, barTop, barH) {
+    const canvas  = document.getElementById(canvasId);
+    const W       = canvas.parentElement.clientWidth - 40;
+    const tickH   = 8;
+    const labelH  = 16;
+    const padding = { top: 40, bottom: tickH + labelH + 60 };
+    canvas.width  = W;
+    canvas.height = barTop + barH + padding.bottom + 2;
+
+    const ctx        = canvas.getContext('2d');
+    const duration   = endSec - startSec;
+    const px         = W / duration;
+    const winSz      = result.windowSizeSec;
+    const totalWins  = Math.ceil(86400 / winSz);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // ── Draw window segments ────────────────────────────────────────────────
+    for (let i = 0; i < totalWins; i++) {
+        const ws = i * winSz;
+        const we = ws + winSz;
+        if (we <= startSec || ws >= endSec) continue;
+
+        const x = (Math.max(ws, startSec) - startSec) * px;
+        const w = (Math.min(we, endSec) - Math.max(ws, startSec)) * px;
+        const label = (i % windowCount) + 1;
+
+        const isEffective = (i === result.rawEffective);
+        const isReal      = (i === result.realWindowIdx);
+
+        // Fill — effective window keeps its natural color, just highlighted with border
+        if (isReal) {
+            ctx.fillStyle = windowColor(label, windowCount, 72, 0.95);
+        } else {
+            ctx.fillStyle = windowColor(label, windowCount, 78, 0.80);
+        }
+        ctx.fillRect(x, barTop, w, barH);
+
+        // Border
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(x, barTop, w, barH);
+
+        // Highlight border for special windows
+        if (isEffective) {
+            // Draw inset margin highlight: thick dark border with inner gap
+            const m = 3; // margin
+            ctx.strokeStyle = '#1f2328';
+            ctx.lineWidth = 2.5;
+            ctx.strokeRect(x + m, barTop + m, w - m * 2, barH - m * 2);
+        } else if (isReal) {
+            ctx.strokeStyle = '#cf222e';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(x + 1, barTop + 1, w - 2, barH - 2);
+        }
+
+        // Window label (if wide enough)
+        if (w > 10) {
+            ctx.save();
+            ctx.fillStyle = 'rgba(0,0,0,0.75)';
+            ctx.font = `${w > 28 ? 'bold ' : ''}${Math.min(12, Math.max(8, w * 0.5))}px Segoe UI`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, x + w / 2, barTop + barH / 2);
+            ctx.restore();
+        }
+    }
+
+    // ── Time-axis ticks ─────────────────────────────────────────────────────
+    const niceIntervals = [30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800];
+    const targetLabels  = Math.floor(W / 70);
+    const tickInterval  = niceIntervals.find(iv => duration / iv <= targetLabels) || 3600;
+
+    const firstTick = Math.ceil(startSec / tickInterval) * tickInterval;
+    ctx.fillStyle   = '#57606a';
+    ctx.font        = '10px Segoe UI';
+    ctx.textAlign   = 'center';
+
+    for (let t = firstTick; t <= endSec; t += tickInterval) {
+        const x = (t - startSec) * px;
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, barTop);
+        ctx.lineTo(x, barTop - 4);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#d0d7de';
+        ctx.beginPath();
+        ctx.moveTo(x, barTop + barH);
+        ctx.lineTo(x, barTop + barH + tickH);
+        ctx.stroke();
+
+        const hh = String(Math.floor(t / 3600)).padStart(2, '0');
+        const mm = String(Math.floor((t % 3600) / 60)).padStart(2, '0');
+        ctx.fillStyle = '#57606a';
+        ctx.fillText(`${hh}:${mm}`, x, barTop + barH + tickH + labelH - 4);
+    }
+
+    // ── Current time marker ──────────────────────────────────────────────────
+    const tx = (totalSec - startSec) * px;
+    if (tx >= 0 && tx <= W) {
+        // Dashed vertical line
+        ctx.strokeStyle = '#f85149';
+        ctx.lineWidth   = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(tx, 0);
+        ctx.lineTo(tx, barTop + barH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Arrow head at top
+        ctx.fillStyle = '#f85149';
+        ctx.beginPath();
+        ctx.moveTo(tx,     4);
+        ctx.lineTo(tx - 6, 0);
+        ctx.lineTo(tx + 6, 0);
+        ctx.closePath();
+        ctx.fill();
+
+        // Time label above arrow
+        const rawVal = document.getElementById('inputTime').value.trim();
+        const dispTime = /^\d{1,2}:\d{2}$/.test(rawVal) ? rawVal + ':00' : rawVal;
+        const lx = Math.min(Math.max(tx + 8, 28), W - 28);
+        ctx.fillStyle   = '#f85149';
+        ctx.font        = 'bold 11px Segoe UI';
+        ctx.textAlign   = 'left';
+        ctx.fillText(dispTime, lx, barTop - 20);
+    }
+
+    // ── Effective window bracket ─────────────────────────────────────────────
+    const effStart = result.rawEffective * winSz;
+    const effEnd   = effStart + winSz;
+    const ex1 = (Math.max(effStart, startSec) - startSec) * px;
+    const ex2 = (Math.min(effEnd,   endSec)   - startSec) * px;
+
+    if (ex2 > 0 && ex1 < W) {
+        const midX = Math.min(Math.max((ex1 + ex2) / 2, 40), W - 40);
+        ctx.fillStyle   = '#1f2328';
+        ctx.font        = 'bold 11px Segoe UI';
+        ctx.textAlign   = 'center';
+        ctx.fillText('★ EFFECTIVE', midX, barTop - 8);
+    }
+
+    // ── "Exposed Within" gap arrow (current time → effective window start) ───
+    const effStartX = (result.effWindowStart - startSec) * px;
+    if (tx >= 0 && tx <= W && effStartX > tx) {
+        const gapY    = barTop + barH + 36; // below the bar
+        const gapMidX = (tx + effStartX) / 2;
+        const gapSec  = result.exposedWithinSec;
+
+        // Horizontal line
+        ctx.strokeStyle = '#1a7f37';
+        ctx.lineWidth   = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(tx,        gapY);
+        ctx.lineTo(effStartX, gapY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Left cap
+        ctx.beginPath();
+        ctx.moveTo(tx, gapY - 5);
+        ctx.lineTo(tx, gapY + 5);
+        ctx.stroke();
+
+        // Right arrow head
+        ctx.fillStyle = '#1a7f37';
+        ctx.beginPath();
+        ctx.moveTo(effStartX,     gapY);
+        ctx.lineTo(effStartX - 7, gapY - 4);
+        ctx.lineTo(effStartX - 7, gapY + 4);
+        ctx.closePath();
+        ctx.fill();
+
+        // Label
+        const mm  = Math.floor(gapSec / 60);
+        const ss  = gapSec % 60;
+        const lbl = mm > 0 ? `${mm}m ${ss}s` : `${ss}s`;
+        ctx.fillStyle   = '#1a7f37';
+        ctx.font        = 'bold 11px Segoe UI';
+        ctx.textAlign   = 'center';
+        const clampedMid = Math.min(Math.max(gapMidX, 30), W - 30);
+        ctx.fillText(`⏳ Exposed within: ${lbl}`, clampedMid, gapY + 18);
+    }
+} // end drawTimeline
+
+// ─── Legend builder ──────────────────────────────────────────────────────────
+function buildLegend(containerId, windowCount) {
+    const el = document.getElementById(containerId);
+    el.innerHTML = '';
+
+    for (let i = 1; i <= windowCount; i++) {
+        const swatch = document.createElement('div');
+        swatch.className = 'legend-swatch';
+        swatch.style.background = windowColor(i, windowCount, 45, 1);
+
+        const item = document.createElement('div');
+        item.className = 'legend-item';
+        item.appendChild(swatch);
+        item.appendChild(document.createTextNode(`Window ${i}`));
+        el.appendChild(item);
+    }
+
+    // Special swatches
+    const specials = [
+        { color: windowColor(1, 1, 72, 0.95), label: 'Current (real) window', border: '#cf222e' },
+        { color: windowColor(1, 1, 78, 0.80), label: 'Effective window (inner border highlight)', border: '#1f2328' },
+        { color: '#cf222e',                    label: 'Current time marker',    border: 'none' },
+    ];
+    specials.forEach(({ color, label, border }) => {
+        const swatch = document.createElement('div');
+        swatch.className = 'legend-swatch';
+        swatch.style.background = color;
+        swatch.style.border = border !== 'none' ? `2px solid ${border}` : '1px solid #d0d7de';
+
+        const item = document.createElement('div');
+        item.className = 'legend-item';
+        item.appendChild(swatch);
+        item.appendChild(document.createTextNode(label));
+        el.appendChild(item);
+    });
+}
+
+// ─── Decision box ────────────────────────────────────────────────────────────
+function buildDecisionBox(result, windowCount, windowFactor) {
+    const half = result.windowSizeSec * 0.5;
+    const jumped = result.rest > half ? 2 : 1;
+    const box = document.getElementById('decisionBox');
+    box.innerHTML = `
+      <span class="step">Seconds from midnight:</span>
+        <span class="val">${result.realWindowIdx * result.windowSizeSec + result.rest}s</span>
+      <span class="arrow">→</span>
+      <span class="step">Real window (0-idx):</span>
+        <span class="val">${result.realWindowIdx}</span>
+      <span class="arrow">→</span>
+      <span class="step">Rest inside window:</span>
+        <span class="val">${result.rest}s</span>
+        (half = ${half}s)
+      <br>
+      <span class="step">Rest > half?</span>
+        <span class="val">${result.rest > half ? 'YES → jump +2' : 'NO → jump +1'}</span>
+      <span class="arrow">→</span>
+      <span class="step">Raw effective index:</span>
+        <span class="val">${result.rawEffective}</span>
+        = (${result.realWindowIdx} + ${jumped})
+      <br>
+      <span class="step">Effective label:</span>
+        <span class="val">(${result.rawEffective} % ${windowCount}) + 1</span>
+      <span class="arrow">=</span>
+      <span class="outcome">★ Window ${result.effectiveLabel}</span>
+    `;
+}
+
+// ─── Main run function ───────────────────────────────────────────────────────
+function run() {
+    const raw         = document.getElementById('inputTime').value || '00:00:00';
+    // type="time" with step=1 gives HH:MM:SS; without seconds fallback to :00
+    const timeStr     = /^\d{2}:\d{2}$/.test(raw) ? raw + ':00' : raw;
+    if (!/^\d{2}:\d{2}:\d{2}$/.test(timeStr)) return;
+    const [hh, mm, ss] = timeStr.split(':').map(Number);
+    if (hh > 23 || mm > 59 || ss > 59) return;
+    const windowCount = 3;
+    const windowFactor= Math.max(1, parseInt(document.getElementById('inputWindowFactor').value) || 1);
+
+    const totalSec = parseTime(timeStr);
+    const result   = getEffectiveWindow(windowCount, windowFactor, totalSec);
+
+    // Stats
+    document.getElementById('s-time').textContent    = timeStr;
+    document.getElementById('s-rest').textContent    = result.rest + 's / ' + result.windowSizeSec + 's';
+    document.getElementById('s-rawEff').textContent  = result.rawEffective;
+    document.getElementById('s-effLabel').textContent= result.effectiveLabel;
+    document.getElementById('s-totalWindows').textContent = 1440 / windowFactor;
+
+    const expMm = Math.floor(result.exposedWithinSec / 60);
+    const expSs = result.exposedWithinSec % 60;
+    document.getElementById('s-exposed').textContent = expMm > 0 ? `${expMm}m ${expSs}s` : `${expSs}s`;
+
+    // Full-day canvas
+    const barTopFull = 38;
+    const barHFull   = 44;
+    drawTimeline('canvasFull', totalSec, result, windowCount, windowFactor,
+                  0, 86400, barTopFull, barHFull);
+
+    // Zoomed canvas — show from 2 windows before real to 3 windows after effective
+    const winSz    = result.windowSizeSec;
+    const zoomStart= Math.max(0,     (result.realWindowIdx - 2) * winSz);
+    const zoomEnd  = Math.min(86400, (result.rawEffective  + 3) * winSz);
+    const barTopZoom = 42;
+    const barHZoom   = 60;
+    drawTimeline('canvasZoom', totalSec, result, windowCount, windowFactor,
+                  zoomStart, zoomEnd, barTopZoom, barHZoom);
+
+    // Legend & decision box
+    buildLegend('legendFull', windowCount);
+    buildDecisionBox(result, windowCount, windowFactor);
+}
+
+// ── Auto-run ─────────────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    document.getElementById('inputTime').value = `${hh}:${mm}:${ss}`;
+    run();
+});
+window.addEventListener('resize', run);
+['inputTime', 'inputWindowFactor'].forEach(id => {
+    document.getElementById(id).addEventListener('change', run);
+    document.getElementById(id).addEventListener('input',  run);
+});
+</script>
+</body>
+</html>
+++++
