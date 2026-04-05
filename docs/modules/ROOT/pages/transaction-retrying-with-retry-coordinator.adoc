@@ -486,7 +486,8 @@ end
 . On startup, each Orchestrator sends a *RSocket `Request-Response`* message to the Master requesting an available Retry-Coordinator-Slave assignment.
 . The Master applies *Round Robin* to select a Retry-Coordinator-Slave and returns the Retry-Coordinator-Slave's host and port.
 +
-NOTE: If the same Orchestrator instance restarts, it may receive a *different* Retry-Coordinator-Slave assignment, as the Round Robin pointer advances. This ensures balanced Orchestrator distribution across Retry-Coordinator-Slaves over time.
+NOTE: If the same Orchestrator instance restarts, it may receive a *different* Retry-Coordinator-Slave assignment, as the Round Robin pointer advances.
+This ensures balanced Orchestrator distribution across Retry-Coordinator-Slaves over time.
 . The Orchestrator opens a persistent *RSocket `request-stream`* connection to its assigned Retry-Coordinator-Slave and begins listening for sub-range updates.
 
 ==== Phase 3 — Token Range Distribution
@@ -699,3 +700,17 @@ rather than reacting immediately to Retry-Coordinator-Slave disconnections.
 | *Retry-Node*
 | A stable, long-lived Orchestrator instance that handles both transaction processing and transaction retry management.
 |===
+
+== StackSaga Module Interaction for Transaction Re-Invocation
+
+Below diagram shows how the StackSaga Modules interact with each other for transaction re-invocation in high level.
+The diagram is simplified to show only the relevant modules and components for transaction re-invocation, and does not include all the details of the interactions.
+
+image::stacksaga-diagram-module-interaction-for-invocation.svg[]
+
+<1> `stacksaga-ring-coordinator` (Slave) publishes the Orchestrator's assigned token sub-range to the Orchestrator over a persistent RSocket stream to the `stacksaga-ring-connector` module.
+<2> `ReInvokeTaskManager` in one of `stacksaga-{database}-support` implementatons long polls the event-store looking for transactions that should be re-invoked based on the assigned token sub-range.
+<3> The transactions which is eligible for re-invocation are handed over to the `TransactionReInvokeManager` in to one of the `stacksaga-{impl}-support` modules.
+<4> `TransactionReInvokeManager` rebuilds the transaction snapshot to the point of failure by requesting data via the `event-store
+service` from the `stacksaga-{database}-support`.
+<5> Once the transaction snapshot is rebuilt, `TransactionReInvokeManager` sends the snapshot to the `ExecutionManager` within the same module.
