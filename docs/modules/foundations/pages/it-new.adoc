@@ -1,0 +1,239 @@
+:description: Introduction to the Saga Design Pattern, types, orchestration, and eventual consistency in distributed systems.
+:keywords: saga pattern, microservices, orchestration, choreography, eventual consistency, distributed transactions
+
+= Introduction to the Saga Design Pattern
+
+== Overview
+
+In modern distributed systems, handling *long-running transactions* across multiple microservices is a significant challenge.
+
+The Saga pattern addresses this by decomposing a distributed transaction into a sequence of *local transactions*, each executed within a single service boundary. These transactions are coordinated in a way that ensures the system reaches a *consistent state over time* without relying on distributed transactions.
+
+---
+
+[[what_is_saga_architecture_pattern]]
+== What is the Saga Pattern?
+
+The Saga pattern is a microservices architectural pattern that ensures data consistency across multiple services without using distributed transaction protocols such as two-phase commit (2PC).
+
+A saga consists of a sequence of *local ACID transactions*, where each transaction:
+
+* Updates data within a single service
+* Emits an event or response that triggers the next step
+
+If a transaction fails, *compensating transactions* are executed to restore the system to a *semantically consistent state*.
+
+NOTE: Compensation is not a strict rollback. It performs a logical reversal and may not restore the exact previous state.
+
+In the Saga pattern:
+
+* Each transaction and its compensation must be *xref:ROOT:idempotency.adoc[idempotent]*
+* Operations must be *retryable* due to at-least-once execution semantics
+
+These properties ensure that the saga can recover automatically without manual intervention.
+
+The *Saga Execution Coordinator (SEC)* (in orchestration-based approaches) is responsible for enforcing execution guarantees, including ordering, retries, and compensation.
+
+The below diagram shows how to visualize the Saga pattern for an online order processing scenario.
+
+image::stacksaga-diagram-distributed-transaction-with-compensating.svg[alt="saga distributed transaction with compensating"]
+
+---
+
+== Types of Saga
+
+There are two primary types of saga implementations:
+
+[arabic]
+. *Choreography-based Saga*
+
+* Each service performs its local transaction and publishes an event.
+* Other services subscribe to these events and trigger subsequent actions.
+
+*Pros:*
+
+* Loose coupling between services
+* No central coordinator
+
+*Cons:*
+
+* Implicit coupling through event contracts
+* Difficult to trace execution flow
+* Complex failure handling and debugging
+
+. *Orchestration-based Saga*
+
+* A central orchestrator (Saga Execution Coordinator) manages the workflow.
+* The orchestrator sends commands to services and determines the next step based on responses.
+
+*Pros:*
+
+* Explicit control over execution flow
+* Easier to monitor and debug
+* Centralized failure handling
+
+*Cons:*
+
+* Requires durable state management
+* Potential bottleneck if not designed properly
+
+---
+
+[[saga_orchestration_pattern]]
+== Saga Orchestration Pattern
+
+*Saga Orchestration* introduces a central coordinator that controls the execution flow of a saga.
+
+The orchestrator:
+
+* Sends commands to services
+* Waits for responses
+* Determines next steps based on outcomes
+* Triggers compensating actions when necessary
+
+=== Key Characteristics:
+
+[arabic]
+. *Centralized Control*: The orchestrator ensures ordered execution and manages state transitions.
+. *Simplified Microservices*: Services remain focused on local business logic and are not aware of the overall workflow.
+. *Deterministic Execution*: The orchestrator behaves as a *state machine*, making execution predictable and recoverable.
+. *Failure Handling*: The orchestrator decides between:
+
+* *Backward recovery* (compensation)
+* *Forward recovery* (retry)
+
+IMPORTANT: The orchestrator must persist its state (often called a *Saga Log*) to ensure recovery after failures.
+
+---
+
+== Classification of Saga Transactions
+
+A saga is not just a sequence of equal steps. Each step falls into one of the following categories:
+
+=== Compensable Transactions
+
+* Executed before the pivot transaction
+* Can be reversed using compensating actions
+
+Examples:
+
+* Reserve inventory
+* Create provisional resources
+* Hold funds
+
+Each compensable transaction must have a corresponding *compensation*.
+
+---
+
+=== Pivot Transaction
+
+The pivot transaction defines the *commit boundary* of the saga.
+
+* After this step, the saga cannot be fully rolled back using compensation
+* Marks the transition from reversible to non-reversible operations
+
+Examples:
+
+* Charging a payment
+* Finalizing an order
+
+IMPORTANT: Incorrect placement of the pivot transaction can increase system complexity and failure risk.
+
+---
+
+=== Retryable Transactions
+
+* Executed after the pivot transaction
+* Cannot be compensated
+* Must eventually succeed
+
+Failures are handled via *retries* (forward recovery), not rollback.
+
+Examples:
+
+* Sending notifications
+* Updating downstream systems
+
+---
+
+== Eventual Consistency
+
+*Definition:* Eventual consistency guarantees that, if no new updates occur, the system will eventually converge to a consistent state.
+
+*Characteristics:*
+
+* *Latency:* Updates propagate asynchronously
+* *Availability:* System remains operational during partial failures
+* *Partition Tolerance:* Handles network partitions effectively
+
+NOTE: Eventual consistency is the fundamental consistency model used by the Saga pattern.
+
+---
+
+== Eventual Consistency in Saga
+
+*Nature of Saga*
+
+* *Long-Running Transactions:* A saga decomposes a large transaction into smaller independent steps.
+* *Asynchronous Execution:* Steps execute independently across services.
+* *Compensating Actions:* Failures trigger compensation for previously completed steps (before pivot).
+
+*Consistency Behavior*
+
+* Intermediate states may be visible to other services
+* Temporary inconsistencies are expected
+* The system converges to a consistent state over time
+
+IMPORTANT: Sagas do not provide isolation. Concurrent sagas may observe partial updates.
+
+---
+
+== Failure Handling in Saga
+
+Saga execution relies on two recovery strategies:
+
+=== Backward Recovery (Compensation)
+
+* Triggered when failure occurs before the pivot
+* Executes compensating transactions in reverse order
+
+---
+
+=== Forward Recovery (Retry)
+
+* Triggered when failure occurs after the pivot
+* Retries failed operations until success
+
+IMPORTANT: All operations must be idempotent due to retry and duplicate execution scenarios.
+
+---
+
+== Challenges and Considerations Of using Saga
+
+* *Complexity*: Requires careful design of transaction boundaries, compensation logic, and failure handling.
+* *Idempotency*: All operations must be safe to execute multiple times.
+* *State Management*: Saga state must be persisted for recovery and observability.
+* *Concurrency*: Multiple sagas may interact with the same data, leading to conflicts.
+* *Ordering*: Message delivery may be out-of-order and duplicated.
+
+StackSaga framework provides mechanisms to address these challenges, including state tracking, retry handling, and execution coordination.
+
+---
+
+== Summary
+
+The Saga pattern enables reliable distributed transactions by:
+
+* Breaking workflows into local transactions
+* Using compensation before the pivot
+* Using retries after the pivot
+* Persisting state for recovery
+* Embracing eventual consistency
+
+A well-designed saga requires careful attention to:
+
+* transaction classification
+* pivot placement
+* idempotency
+* failure handling strategies
+* state persistence

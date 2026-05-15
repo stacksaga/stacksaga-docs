@@ -148,6 +148,112 @@ with the help of the stacksaga-database-support module and stacksaga-env-support
 . Each update of the transaction is saved in the event-store, and the SEC will publish the events to the configured listeners for each transaction state change.
 . The administrators can see the tracing details of the transaction graphically by accessing the StackSaga Trace-Window via the in-built endpoints that are provided by the stacksaga-database-support module.
 
+
+== Custom Configurations
+
+StackSaga provides the flexibility to customize some advanced features based on your needs.
+
+=== Saga Scheduler Configuration
+
+Stacksaga-Framework (Synchronous) provides a default scheduler configuration for saga execution that uses Project Reactor's BoundedElastic scheduler.
+This configuration is automatically applied unless you provide a custom implementation.
+
+This scheduler is used after 
+
+==== Default Configuration
+
+The default scheduler is provided by the `StackSagaSyncAutoConfiguration` class and requires no additional setup.
+
+===== Default Specifications
+
+[cols="1,2"]
+|===
+| Parameter | Value
+
+| **Scheduler Type**
+| `BoundedElastic`
+
+| **Thread Pool Size**
+| `availableProcessors() × 10`
+
+| **Queue Capacity**
+| `100,000`
+
+| **Thread Name Prefix**
+| `saga-exe`
+
+| **Threading Timeout**
+| `60 seconds`
+
+| **Daemon Threads**
+| `false`
+|===
+
+===== Example Default Behavior
+
+With default configuration on a system with 4 CPU cores:
+- Maximum thread pool size: **40 threads** (4 × 10) - Queue capacity: **100,000 tasks**
+- Idle thread timeout: **60 seconds** before threads are disposed - Threads are non-daemon (will prevent JVM shutdown if pending)
+
+==== Customizing the Scheduler
+
+To customize the scheduler behavior, create your own `AbstractSchedulerProvider` bean in your classpath.
+The framework will automatically detect and use it instead of the default.
+
+===== Implementation Guide
+
+[source,java]
+----
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.stacksaga.util.AbstractSchedulerProvider;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+
+@Configuration
+public class CustomSchedulerConfiguration {
+
+    @Bean
+    public AbstractSchedulerProvider customSchedulerProvider() {
+        return new AbstractSchedulerProvider() {
+            @Override
+            protected Scheduler scheduler() {
+                return Schedulers.newBoundedElastic(
+                    50,              // Custom thread pool size
+                    50_000,          // Custom queue capacity
+                    "custom-saga",   // Custom thread name prefix
+                    120,             // Custom timeout in seconds
+                    true             // Daemon threads (optional)
+                );
+            }
+        };
+    }
+}
+----
+
+===== Customization Options
+
+TIP: The `AbstractSchedulerProvider` is a template that abstracts Reactor's Scheduler creation.
+You can customize any of the following parameters:
+
+* **Thread Pool Size**: Number of threads to maintain in the pool
+* **Queue Capacity**: Maximum number of pending tasks
+* **Thread Name Prefix**: Custom prefix for thread names (useful for debugging and monitoring)
+* **Idle Timeout**: Time in seconds before idle threads are terminated
+* **Daemon Flag**: Whether threads should be daemon threads
+
+===== Best Practices
+
+IMPORTANT: Consider the following when customizing:
+
+* Adjust thread pool size based on your expected saga concurrency
+* Queue capacity should be sized to handle burst loads without OutOfMemoryError
+* Use daemon threads cautiously—non-daemon threads (default) ensure graceful shutdown
+* Monitor thread utilization to right-size your configuration
+* Test configuration changes thoroughly in your specific environment
+
+
+
 ////
 StackSaga consists of four major components in high-level.
 

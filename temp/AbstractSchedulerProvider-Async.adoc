@@ -1,0 +1,140 @@
+= Saga Scheduler Configuration
+
+== Overview
+
+StackSaga sync implementation provides a default scheduler configuration for saga execution that uses Project Reactor's BoundedElastic scheduler.
+This configuration is automatically applied unless you provide a custom implementation.
+
+== Default Configuration
+
+The default scheduler is provided by the `StackSagaSyncAutoConfiguration` class and requires no additional setup.
+
+=== Default Specifications
+
+[cols="1,2"]
+|===
+| Parameter | Value
+
+| **Scheduler Type**
+| `BoundedElastic`
+
+| **Thread Pool Size**
+| `availableProcessors() × 10`
+
+| **Queue Capacity**
+| `100,000`
+
+| **Thread Name Prefix**
+| `saga-exe`
+
+| **Threading Timeout**
+| `60 seconds`
+
+| **Daemon Threads**
+| `false`
+|===
+
+=== Example Default Behavior
+
+With default configuration on a system with 4 CPU cores:
+- Maximum thread pool size: **40 threads** (4 × 10) - Queue capacity: **100,000 tasks**
+- Idle thread timeout: **60 seconds** before threads are disposed - Threads are non-daemon (will prevent JVM shutdown if pending)
+
+== Customizing the Scheduler
+
+To customize the scheduler behavior, create your own `AbstractSchedulerProvider` bean in your classpath.
+The framework will automatically detect and use it instead of the default.
+
+=== Implementation Guide
+
+[source,java]
+----
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.stacksaga.util.AbstractSchedulerProvider;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+
+@Configuration
+public class CustomSchedulerConfiguration {
+
+    @Bean
+    public AbstractSchedulerProvider customSchedulerProvider() {
+        return new AbstractSchedulerProvider() {
+            @Override
+            protected Scheduler scheduler() {
+                return Schedulers.newBoundedElastic(
+                    50,              // Custom thread pool size
+                    50_000,          // Custom queue capacity
+                    "custom-saga",   // Custom thread name prefix
+                    120,             // Custom timeout in seconds
+                    true             // Daemon threads (optional)
+                );
+            }
+        };
+    }
+}
+----
+
+=== Customization Options
+
+TIP: The `AbstractSchedulerProvider` is a template that abstracts Reactor's Scheduler creation.
+You can customize any of the following parameters:
+
+* **Thread Pool Size**: Number of threads to maintain in the pool
+* **Queue Capacity**: Maximum number of pending tasks
+* **Thread Name Prefix**: Custom prefix for thread names (useful for debugging and monitoring)
+* **Idle Timeout**: Time in seconds before idle threads are terminated
+* **Daemon Flag**: Whether threads should be daemon threads
+
+=== Alternative Scheduler Types
+
+While the default uses `BoundedElastic`, you can use other Reactor schedulers:
+
+[source,java]
+----
+// For CPU-bound operations
+return Schedulers.newParallel("my-parallel", 
+    Runtime.getRuntime().availableProcessors());
+
+// For single-threaded execution
+return Schedulers.newSingle("my-single");
+
+// For time-based operations
+return Schedulers.newScheduledThreadPool("my-scheduled");
+----
+
+== How It Works
+
+The framework uses Spring's `@ConditionalOnMissingBean` annotation to provide the default scheduler.
+This means:
+
+1. If no custom `AbstractSchedulerProvider` bean exists → **default is used**
+2. If you create a custom `AbstractSchedulerProvider` bean → **your implementation is used**
+
+This provides maximum flexibility while maintaining sensible defaults.
+
+== Monitoring Thread Usage
+
+You can identify StackSaga threads in your monitoring tools by:
+- **Default threads**: Thread name prefix `saga-exe`
+- **Custom threads**: Your specified thread name prefix
+
+Example with JConsole or similar tools:
+
+```
+saga-exe-1
+saga-exe-2
+saga-exe-3
+...
+```
+
+== Best Practices
+
+IMPORTANT: Consider the following when customizing:
+
+* Adjust thread pool size based on your expected saga concurrency
+* Queue capacity should be sized to handle burst loads without OutOfMemoryError
+* Use daemon threads cautiously—non-daemon threads (default) ensure graceful shutdown
+* Monitor thread utilization to right-size your configuration
+* Test configuration changes thoroughly in your specific environment
