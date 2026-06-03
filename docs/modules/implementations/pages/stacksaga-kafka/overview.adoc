@@ -5,7 +5,8 @@
 
 == Overview
 
-*Stacksaga-Kafka Framework* is a reactive saga orchestration framework built on top of Spring Boot, designed to manage long-running transactions using the saga pattern and Kafka for internal communication.
+*Stacksaga-Kafka Framework* is one of the StackSaga's implementations, which supports asynchronous (event-driven) communication using Kafka as the messaging backbone to handle long-running transactions (LRT) in a microservices systems.
+a reactive saga orchestration framework built on top of Spring Boot, designed to manage long-running transactions using the saga pattern and Kafka for internal communication.
 
 It offers a robust and scalable solution for handling distributed transactions in microservices architecture, ensuring data consistency and reliability across multiple services.
 By leveraging Kafka's event-driven capabilities, Stacksaga-Kafka enables seamless communication between services and simplifies the implementation of the saga pattern, allowing developers to focus on business logic rather than the complexities of distributed transactions.
@@ -16,8 +17,7 @@ By leveraging Kafka's event-driven capabilities, Stacksaga-Kafka enables seamles
 * Built-in compensation actions, timeouts, and retry mechanisms to handle failures and maintain data consistency.
 * Scalability and high performance, utilizing Kafka's distributed architecture to process large volumes of transactions with low latency.
 * Comprehensive monitoring and logging tools to track saga progress and facilitate troubleshooting.
-* Idempotency management to ensure that repeated or duplicate events are processed safely and
-consistently, preventing unintended side effects.
+* Idempotency management to ensure that repeated or duplicate events are processed safely and consistently, preventing unintended side effects.
 
 Stacksaga-Kafka Framework is optimized for Spring Boot applications, making it easy to integrate and extend within your existing microservices-ecosystem.
 
@@ -26,10 +26,12 @@ Stacksaga-Kafka Framework is optimized for Spring Boot applications, making it e
 In modern microservices architecture, managing distributed transactions can be complex and error-prone.
 The Stacksaga-Kafka Framework addresses these challenges by providing a robust framework for implementing the saga pattern, which breaks down long-running transactions into smaller, manageable steps.
 
+Here are some of the key advantages of using the Stacksaga-Kafka Framework over traditional Kafka-based messaging lonely:
+
 * Centralized Transaction State Management
 
-Kafka:: Just delivers messages asynchronously; it doesn’t track the state of a business transaction.
-Stacksaga-Kafka Framework:: Maintains the full transaction lifecycle: +
+Just Kafka:: Just delivers messages asynchronously; it doesn’t track the state of a business transaction.
+Stacksaga-Kafka Framework With Kafka:: Maintains the full transaction lifecycle: +
 Started → In Progress → Completed → Failed → Compensating → Compensated
 +
 Keeps a single source of truth for the saga’s status, even if events arrive out of order.
@@ -38,30 +40,30 @@ Keeps a single source of truth for the saga’s status, even if events arrive ou
 No need to build complex state management into each microservice; orchestrator handles it.
 
 * Resilience and Fault Tolerance
-Kafka:: Provides message durability and delivery guarantees, but doesn’t handle transaction failures.
-Stacksaga-Kafka Framework:: Implements retry logic, timeouts, and compensation actions to recover from failures.
+Just Kafka:: Provides message durability and delivery guarantees, but doesn’t handle transaction failures.
+Stacksaga-Kafka Framework With Kafka:: Implements retry logic, timeouts, and compensation actions to recover from failures.
 +Ensures that the overall transaction can be completed or rolled back gracefully.
 +
 *Advantage:*
 Reduces the risk of data inconsistencies and partial updates across services.
 * Scalability and Performance
-Kafka:: Scales well for high-throughput messaging but doesn’t optimize for transaction workflows.
-Stacksaga-Kafka Framework:: Designed to handle large volumes of transactions efficiently, leveraging Kafka’s distributed architecture.
+Just Kafka:: Scales well for high-throughput messaging but doesn’t optimize for transaction workflows.
+Stacksaga-Kafka Framework With Kafka:: Designed to handle large volumes of transactions efficiently, leveraging Kafka’s distributed architecture.
 +Optimizes the processing of saga steps to minimize latency and maximize throughput.
 +
 *Advantage:*
 Can handle complex transaction workflows without becoming a bottleneck.
 * Simplified Development and Maintenance
-Kafka:: Requires developers to implement saga logic and state management in each service.
-Stacksaga-Kafka Framework:: Provides a clear framework and abstractions for defining sagas, steps, and compensation actions.
+Just Kafka:: Requires developers to implement saga logic and state management in each service.
+Stacksaga-Kafka Framework With Kafka:: Provides a clear framework and abstractions for defining sagas, steps, and compensation actions.
 +
 Reduces boilerplate code and promotes best practices for distributed transactions.
 +
 *Advantage:*
 Speeds up development time and reduces the likelihood of errors.
 * Enhanced Monitoring and Observability
-Kafka:: Offers basic metrics and logging but lacks detailed saga tracking.
-Stacksaga-Kafka Framework:: Includes built-in monitoring tools to track saga progress, failures, and performance metrics.
+Just Kafka:: Offers basic metrics and logging but lacks detailed saga tracking.
+Stacksaga-Kafka Framework With Kafka:: Includes built-in monitoring tools to track saga progress, failures, and performance metrics.
 +
 Provides insights into transaction workflows and helps identify bottlenecks or issues.
 +
@@ -70,16 +72,14 @@ Improves operational visibility and aids in troubleshooting.
 
 == Components of Stacksaga-Kafka Framework
 
-The Stacksaga-Kafka Framework consists of several key components that work together to facilitate saga orchestration and management.
+The Stacksaga-Kafka Framework consists of 2 main components that work together to facilitate saga orchestration and management. the components are categorized based on their roles in the saga orchestration process.
 
-* Saga Orchestrator Service related components:
-** Stacksaga kafka starter
-** Stacksaga Database-Support
-** Stacksaga Environment-Support
-* Target Service related components
-** Stacksaga kafka client
-* Stacksaga Agent service related components
-** stacksaga-agent
+. *stacksaga-kafka-orchestrator*
+- The core component which manages the lifecycle of sagas, coordinates between services, and handles state management, compensation, etc. this is the orchestrator engine of the framework that should be added to the service that you want to make it as the orchestrator service. see more at [more]
+. *stacksaga-kafka-worker*
+- The component that should be added to the target services (utility services) that will participate in the sagas. it provides the necessary tools and abstractions for the target services to interact with the orchestrator service via Kafka. see more at [more]
+
+NOTE: If a microservice acts as an orchestrator service by including the `stacksaga-kafka-orchestrator` component, other StackSaga's basic components (like `stacksaga-core`, `stacksaga-database-support`, and `stacksaga-environment-support`,`stacksaga-retry-support`) are also should be included as dependencies in the orchestrator service.
 
 The usage of each component as follows,
 
