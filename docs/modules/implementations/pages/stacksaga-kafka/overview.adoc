@@ -440,8 +440,8 @@ public class OrderDomainEntity extends DomainEntity { //<2>
     private String username;
     @JsonProperty("order_id")
     private String orderId;
-    @JsonProperty("user_details")
-    private UserDetails userDetails;
+    @JsonProperty("user_validation_data")
+    private UserValidationData userValidationData;
     @JsonProperty("product_items")
     private List<ProductItem> productItems;
     @JsonProperty("metadata")
@@ -455,6 +455,7 @@ public class OrderDomainEntity extends DomainEntity { //<2>
     //<5>
     @Getter
     @Setter
+    @NoArgsConstructor
     public static class ProductItem extends MissingPropertyCollector {
         @JsonProperty("product_id")
         private String productId;
@@ -466,17 +467,13 @@ public class OrderDomainEntity extends DomainEntity { //<2>
 
     @Getter
     @Setter
-    public static class UserDetails extends MissingPropertyCollector {
-        @JsonProperty("user_id")
-        private String userId;
-        @JsonProperty("name")
-        private String name;
-        @JsonProperty("email")
-        private String email;
-        @JsonProperty("address")
-        private String address;
-        @JsonProperty("phone_number")
-        private String phoneNumber;
+    @NoArgsConstructor
+    public static class UserValidationData extends MissingPropertyCollector {
+        @JsonProperty("is_user_validated")
+        private boolean userValidated;
+
+        @JsonProperty("validation_note")
+        private String validationNote;
     }
 }
 ----
@@ -657,8 +654,10 @@ IMPORTANT: it is highly recommended to use the provided `hashGenerator` to produ
 WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
 The framework may invoke it concurrently.
 
+[[sagakafka_topics_and_event_manager]]
 ===== Topic And EventManager
 
+[[sagakafka_topics]]
 ====== StackSaga Topic
 
 StackSaga Topics are constant values that are used to identify the execution endpoint in StackSaga.
@@ -786,13 +785,14 @@ So the EventManager is the component that is responsible for that. let's create 
 ----
 //<2>
 @SagaEventManager(
-        domainRootTopicSuffix = "order-service.place-order", //<3>
-        value = "placeOrderEventManager", //<4>
-        listenerScope = ListenerScope.SHARED //<5>
+        value = "placeOrderEventManager", //<3>
+        listenerScope = ListenerScope.SHARED, //<4>
+        domainRootTopicSuffix = "place-order", //<5>
+        processingMode = ProcessingMode.PARTITION_ORDERED //<6>
 )
 public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEntity, PlaceOrderTopic> { //<1>
 
-    //<6>
+    //<7>
     @Override
     public Supplier<List<PlaceOrderTopic>> registerTopics() {
         return () -> List.of(
@@ -806,7 +806,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
         );
     }
 
-    //<7>
+    //<8>
     @Override
     public @NonNull SagaPrimaryEventAction<PlaceOrderTopic> onNext(PlaceOrderTopic recentTopic, OrderDomainEntity currentDomainEntityState) {
         if (recentTopic.equals(PlaceOrderTopic.DO_FETCH_USER_DETAILS)) {
@@ -828,7 +828,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
         return SagaPrimaryEventAction.error(new IllegalStateException("Unexpected topic: " + recentTopic));
     }
 
-    //<8>
+    //<9>
     @Override
     public void onNextRevert(
             PlaceOrderTopic recentExecutedTopic,
@@ -839,7 +839,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
             Supplier<NavigableMap<Integer, PlaceOrderTopic>> remainingReverts
     ) {
 
-        //<9>
+        //<10>
         {//sample usage of revert hint store and next topic in the onNextRevert method.
             if (nextTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) {
                 revertHintStore.put("BEFORE_NOTE:UNDO_MAKE_PAYMENT", "Sample value before reverting UNDO_MAKE_PAYMENT");
@@ -849,7 +849,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
             }
         }
 
-        //<10>
+        //<11>
         {//sample usage of remaining reverts and recentExecutedTopic
             if (recentExecutedTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) {
                 log.info("Remaining reverts after reverting UNDO_MAKE_PAYMENT: {}", remainingReverts);
@@ -865,18 +865,20 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 
 <1> Create a custom EventManager class by extending the `AbstractEventManager` class and providing the custom your custom DomainEntity and the custom created Topic class as the generic parameters.
 <2> Annotate the custom EventManager class with `@SagaEventManager` annotation. it primarily marks the class as a spring bean.
+<3> *value*: provide the name of the spring bean for the custom EventManager. it is used for identification of the EventManager by the name.
 
-<3> *domainRootTopicSuffix*: provide the common suffix for the topics that are related to the same domain. this is used for creating the domain-root-topic (topic for receiving the response messages from the kafka clint endpoints) internally by the framework.
 
-<4> *value*: provide the name of the spring bean for the custom EventManager. it is used for identification of the EventManager by the name.
+<4> *listenerScope*: Provide the listener scope for the EventManager. it can be either `ListenerScope.SHARED` or `ListenerScope.ISOLATED`. see xref:#topic_model_stacksaga_kafka_orchestrator[] for more details.
 
-<5> *listenerScope*: Provide the listener scope for the EventManager. it can be either `ListenerScope.SHARED` or `ListenerScope.ISOLATED`. see xref:#topic_model[] for more details.
+<5> *domainRootTopicSuffix*: provide the common suffix for the topics that are related to the same domain. this is used for creating the domain-root-topic (topic for receiving the response messages from the kafka clint endpoints) internally by the framework.
 
-<6> Override the `registerTopics()` method to register the topics that are used in the transaction. this method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. you should return the list of the topics via a supplier. in this example, it has been 7 topics that are used in the place-order example. these are the real topics that sends the message to the target services.
+<6> *processingMode*: provide the processing mode for the EventManager that indicates how the events are processed in the EventManager. it can be either `ProcessingMode.PARTITION_ORDERED` or `ProcessingMode.CONCURRENT` or `ProcessingMode.SEQUENTIAL`. see xref:#event_processing_modes[] for more details.
 
-<7> Override the `onNext()` method to determine the next topic based on the recent executed topic and the current state of the domain-entity. this method is invoked by the framework after each successful execution of the primary flow. you can use the provided parameters to evaluate the conditions and determine the next topic that should be triggered. for instance, in the place-order example, if the recent executed topic is `DO_FETCH_USER_DETAILS`, it means that the user's details have been fetched successfully, so we can update the domain-entity state by adding a metadata entry and then return `SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INITIALIZE_ORDER)` to indicate that the next topic that should be triggered is `DO_INITIALIZE_ORDER`. and also if all the spans are processed as expected, you can return `SagaPrimaryEventAction.complete()` to indicate that the transaction is successfully completed.
+<7> Override the `registerTopics()` method to register the topics that are used in the transaction. this method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. you should return the list of the topics via a supplier. in this example, it has been 7 topics that are used in the place-order example. these are the real topics that sends the message to the target services.
 
-<8> Override the `onNextRevert()` (Optional) method to perform any action before reverting the
+<8> Override the `onNext()` method to determine the next topic based on the recent executed topic and the current state of the domain-entity. this method is invoked by the framework after each successful execution of the primary flow. you can use the provided parameters to evaluate the conditions and determine the next topic that should be triggered. for instance, in the place-order example, if the recent executed topic is `DO_FETCH_USER_DETAILS`, it means that the user's details have been fetched successfully, so we can update the domain-entity state by adding a metadata entry and then return `SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INITIALIZE_ORDER)` to indicate that the next topic that should be triggered is `DO_INITIALIZE_ORDER`. and also if all the spans are processed as expected, you can return `SagaPrimaryEventAction.complete()` to indicate that the transaction is successfully completed.
+
+<9> Override the `onNextRevert()` (Optional) method to perform any action before reverting the
 
 In the `EventManager`, there's two methods that are invoked by the Stacksaga engine as follows.
 
@@ -900,18 +902,12 @@ This method should be used only to evaluate conditions based on the provided par
 The reason is that the Stacksaga-engine internally relies on Project Reactor’s reactive pipelines, which run on non-blocking event-loop threads.
 Executing expensive operations here could block those threads, leading to performance bottlenecks and impacting the entire application.
 
-[[topic_model]]
-===== StackSaga Kafka Topic Model
+[[topic_model_stacksaga_kafka_orchestrator]]
+===== StackSaga Kafka Topic Model For `stacksaga-kafka-orchestrator`
 
 StackSaga uses three types of Kafka topics to perform saga orchestration as follows.
 
-. *Regular Topics* [As Consumer in `stacksaga-kafka-worker`] +
-The topics that are used to send the command messages to the worker services. these are the topics that you register in the `EventManager` by overriding the `registerTopics()` method. for instance, in the place-order example, there are 7 regular topics that are used to send the command messages to the worker services as mentioned above.
-If the topics are not exist in the Kafka cluster and auto-creation of topics is enabled framework will create the topics automatically during the application startup. otherwise, you need to create the topics manually in the Kafka cluster before starting the application.
-The special thing is that both `stacksaga-kafka-orchestrator` and `stacksaga-kafka-worker` try to create the topics if they are not exist in the Kafka cluster and auto-creation of topics is enabled to avoid the delay of `metadata polling` that is caused by the first time topic creation. the reason for both trying to create the topics is the `stacksaga-kafka-orchestrator` has the awareness of all the configured topics via the `EventManager` and also the `stacksaga-kafka-worker` has the awareness of the topics that are relevant to their service via the `SagaEndpoint`s.
-
-. *System Topics* +
-.. *Shared Root Topic* [As Consumer in `stacksaga-kafka-orchestrator`] +
+. *Shared Root Topic* +
 This topic is used to consume response messages from Kafka client endpoints.
 All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` use the same shared root topic to receive response messages.
 
@@ -935,7 +931,14 @@ For example, if the service name is `order-service`, the consumer group for the 
 * Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
 Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
 
-.. *Domain-Root Topics* [As Consumer in `stacksaga-kafka-orchestrator`] +
+* A `KafkaReceiver` is created and configured internally by the framework to consume messages from the shared root topic.
+
+- The *Shared Root Topic* architecture as fallows.
++
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Shared kafka receiver in stacksaga kafka orchestrator,width=800]
+
+
+. *Domain-Root Topics* +
 If the `@SagaEventManager` is configured with `listenerScope = ListenerScope.ISOLATED`, the framework creates a dedicated domain-root topic for that EventManager to consume response messages from Kafka client endpoints.
 
 * The name of the domain-root topic is created by concatenating the provided `domainRootTopicSuffix` with the prefix `saga.internal.isolated.{serviceName}.{domainRootTopicSuffix}` For instance, if the service name is `order-service` and the `domainRootTopicSuffix` is `place-order`, the domain-root topic name will be `saga.internal.isolated.order-service.place-order`.
@@ -951,4 +954,193 @@ If the `@SagaEventManager` is configured with `listenerScope = ListenerScope.ISO
 * Same as the shared root topic, Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
 Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
 
+- The *Domain-Root Topics* with *Isolated KafkaReceiver* architecture as fallows.
++
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Isolated kafka receiver in stacksaga kafka orchestrator,width=800]
+
 ===== StackSagaKafkaTemplate
+
+[[topic_model_stacksaga_kafka_worker]]
+===== StackSaga Kafka Topic Model For `stacksaga-kafka-worker`
+
+. *Regular Topics* +
+The topics that are used to send the command messages to the worker services. these are the topics that you register in the `EventManager` by overriding the `registerTopics()` method. for instance, in the place-order example, there are 7 regular topics that are used to send the command messages to the worker services as mentioned above.
+If the topics are not exist in the Kafka cluster and auto-creation of topics is enabled framework will create the topics automatically during the application startup. otherwise, you need to create the topics manually in the Kafka cluster before starting the application.
+The special thing is that both `stacksaga-kafka-orchestrator` and `stacksaga-kafka-worker` try to create the topics if they are not exist in the Kafka cluster and auto-creation of topics is enabled to avoid the delay of `metadata polling` that is caused by the first time topic creation. the reason for both trying to create the topics is the `stacksaga-kafka-orchestrator` has the awareness of all the configured topics via the `EventManager` and also the `stacksaga-kafka-worker` has the awareness of the topics that are relevant to their service via the `SagaEndpoint`s.
+
+* The endpoints which are configured as `@SagaEndpoint(listenerScope=ListenerScope.SHARED)`, bind to a share `KafkaReceiver` to receive messages from the shared root topic. the architecture for this topic model is as follows. +
++
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-worker .svg[Shared kafka receiver in stacksaga kafka worker,width=800]
+
+* The endpoints which are configured as `@SagaEndpoint(listenerScope=ListenerScope.ISOLATED)`, bind to a dedicated `KafkaReceiver` to receive messages from the respective topics that are registered via the `KafkaEndpoint`. the architecture for this topic model is as follows. +
++
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-worker.svg[Isolated kafka receiver in stacksaga kafka worker,width=800]
+
+
+
+*Why `ListenerScope` tuning is important?*
+
+//todo: complete this part.
+
+[[domain_root_topic_event_processing_modes]]
+===== Event Processing Modes
+
+* Stacksaga supports three event processing modes for consuming messages. it can be configured for any of xref:#topic_model_stacksaga_kafka_orchestrator[]
+
+** *Partition-Ordered Mode* `ProcessingMode.PARTITION_ORDERED` [Default] +
+In this mode, Processes records sequentially *per partition* while allowing concurrent execution across multiple partitions.
+
+- Characteristics: +
+. Preserves ordering within each partition
+. Allows partition-level concurrency
+. Balanced throughput and consistency
+. Recommended for most Kafka consumers
+
+** *Concurrent Mode* `ProcessingMode.CONCURRENT` +
+In this mode,Processes records concurrently without preserving ordering.
+- Characteristics: +
+. Highest throughput
+. No ordering guarantees
+. Records from the same partition may complete out of order
+. Suitable for independent or stateless processing
+
+** *Sequential Mode* `ProcessingMode.SEQUENTIAL` +
+In this mode, Processes all records sequentially using a single execution flow regardless Kafka's partitioning.
+
+- Characteristics: +
+. Strict global ordering
+. No concurrent execution
+. Simplest execution model
+. Lower throughput
+
+[[stacksaga_kafka_worker]]
+=== stacksaga-kafka-worker
+
+*Stacksaga-kafka-worker* is the module that provides the functionalities for the worker services to execute the commands that are sent by the orchestrator via the regular topics. it is responsible for consuming the command messages from the regular topics, executing the business logic, and sending the response messages back to the orchestrator via the `response topics` (shared root topic or domain-root topic based on the listener scope configuration).
+
+In high-level, The following duties are done by the `stacksaga-kafka-worker` module.
+
+. Provides the specifications for creating the kafka saga endpoints according to the Stacksaga kafka engine in the target client service.
+
+. Making the response back to the orchestrator service after each invocation.
+
+. Providing immediate retrying facilities in case of retryable exceptions.
+
+
+[[stacksaga_kafka_endpoints]]
+==== Stacksaga Kafka Endpoints
+
+Stacksaga Kafka Endpoints stands for creating topics accordingly Stacksaga engine's form. the endpoint As per the architecture it can be created 2 types of endpoints as fallows,
+
+. *xref:#query-endpoints[]*
+. *xref:#command-endpoints[]*
+
+[[query-endpoints]]
+=== Query Endpoint
+
+If an execution(atomic execution) doesn't make any state change due to executing that execution those kinds of executions are executed in *Query Endpoints*. due to it doesn't make any changes in the database state, it has no any compensation action to undo. +
+these are the topics that define in the in xref:#sagakafka_topics[] with type of `SagaTopicType.QUERY_DO_ACTION`
+
+For instance, in the place-order example, the execution of *fetching user's details and validate* is a query execution because it doesn't make any state change in the database, it just fetches the data and returns it. here is the custom endpoint for that execution.
+
+Query endpoints can be created in two different ways in StackSaga.
+
+. xref:#non-reactive-query-endpoint[]
+. xref:#reactive-query-endpoint[]
+
+
+[[non-reactive-query-endpoint]]
+==== Non-Reactive (Imperative) Query Endpoint
+
+Non-reactive query endpoints are the traditional and blocking way of implementing the query endpoints. in this approach, the method that is responsible for executing the query is implemented in a blocking way. for instance, in the place-order example, the query endpoint for fetching user's details can be implemented as follows.
+
+[source,java]
+----
+//<2>
+@SagaEndpoint(
+        //the real topic name will be saga.do.user-service.validate-user
+        topicNameSuffix = "user-service.get-user", //<3>
+        listenerScope = ListenerScope.SHARED //<4>
+)
+public class UserValidateEndpoint extends QueryEndpoint { //<1>
+
+    //<5>
+    @Override
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord)
+            throws JustRetryableExecutorException, RetryableExecutorException, NonRetryableExecutorException {
+
+        log.info("Message Key (Transaction Id): {}", consumerRecord.key()); //<6>
+        log.info("IdempotencyKey: {}", consumerRecord.value().getIdempotencyKey()); //<7>
+
+        consumerRecord.value().getCurrentDomainEntityStateForUpdate().ifPresent(currentDomainEntityState -> { //<8>
+            log.info("Received payload for before user validation: {}", currentDomainEntityState);
+            try {
+                {
+                    //user validation logic //<9>
+                    String username = currentDomainEntityState.get("username").asText();
+                    log.info("Validating user with username: {}", username);
+                }
+                {//<10>
+                    // put the result into the domain entity state for the next topic to use.
+                    currentDomainEntityState.put("is_user_validated", true);
+                    currentDomainEntityState.put("validation_note", "user validated at " + LocalDateTime.now());
+                }
+            } catch (SomeRetryableException e) {
+                //<11>
+                throw RetryableExecutorException.of(e);
+            } catch (SomeNonRetryableException e) {
+                //<12>
+                throw NonRetryableExecutorException
+                        .buildWith(e)
+                        .put("error_code", "USER_VALIDATION_FAILED")
+                        .put("key-1", "value-1")
+                        .put("key-2", "value-2")
+                        .build();
+            }
+        });
+    }
+}
+----
+
+NOTE: The example has been simplified to focus on the main points. make sure refer each and every concept though the documentation to have a better understanding of the framework and its capabilities.
+
+<1> Create a custom query endpoint class by extending the `QueryEndpoint` class.
+<2> Annotate the custom query endpoint class with `@SagaEndpoint` annotation. it primarily marks the class as a spring bean.
+<3> *topicNameSuffix*: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by concatenating the provided suffix as  `saga.do.user-service.get-user`. the prefix `saga.do` is added by the framework to indicate that this topic is used for the primary execution. this is the topic the `EventManager` will send the command messages to trigger the execution of this endpoint.
+<4> *listenerScope*: Provide the listener scope for the endpoint. it can be either `ListenerScope.SHARED` or `ListenerScope.ISOLATED`. see xref:#topic_model_stacksaga_kafka_worker[]
+
+<5> Override the `doProcess()` method to implement the business logic for executing the query. this method is invoked by the framework when a message is received in the respective topic. you can use the provided `ConsumerRecord` to access the message key, payload, and other metadata withing the method scope.
+
+<6> You can access the message key from the `ConsumerRecord` in string format. the key is the transaction id from the orchestrator that is sent along with the message.
++
+NOTE: For your understanding,The reason is for setting the transaction id as the message key is to ensure that all messages related to the same transaction are sent to the same partition in Kafka, which allows for ordered processing of messages within a transaction.
+
+<7> You can access the idempotency key from the payload of the `ConsumerRecord`. the idempotency key is generated by the framework in the orchestrator side and sent along with the message to ensure that even if the same message is processed multiple times due to retries or duplicates, it will have the same idempotency key, allowing you to implement idempotent processing logic in your endpoint.
+
+<8> You can access the current state of the domain entity from the payload of the `ConsumerRecord` by using the `getCurrentDomainEntityStateForUpdate()` method. this method returns an optional value that contains the current state of the domain entity if it is present. in primary execution, the domain entity state is always present because the state is sent from the orchestrator. the `Optional` provide the safe access.
++
+IMPORTANT: In the target service side, the domain entity state can be got as the Java Object. because the original CustomDomainEntity is in the orchestrator side. in the worker side you can get the domain entity state as a `ObjectNode` which is a JSON tree structure that is provided by the Jackson library. you can use the methods of the `ObjectNode` class to access and manipulate the domain entity state. for instance, you can use the `get("fieldName")` method to access a specific field in the domain entity state, and you can use the `put("fieldName", value)` method to add or update a field in the domain entity state.
+
+<9> Implement the business logic for executing the query. you can use the current state of the domain entity to perform the necessary operations and get the required data. for instance, you can call the internal service class and get the user data from the database based on the username that is provided in the domain entity state.
+
+<10> After getting the required data and performing the necessary operations, you can put the result into the domain entity state for the next topic to use. for instance, you can put a field `is_user_validated` with value `true` to indicate that the user has been validated successfully, and also you can put a field `validation_note` with some note about the validation process.
++
+IMPORTANT: the adding field to the domain entity state in the worker side should have been defined in the CustomDomainEntity class in the orchestrator side because the domain entity state is shared between the orchestrator and the worker via the kafka messages, so the structure of the domain entity state should be defined in a way that both sides can understand. therefore, it is recommended to define all the possible fields that can be added to the domain entity state in the CustomDomainEntity class in the orchestrator side. +
+If you try to add a field in the *worker* side that is not defined in the CustomDomainEntity class in the *orchestrator* side, it will be added to the `missingProperties` map in the domain entity state, and you can access it by using the `getMissingProperties()` or `getMissingProperty(String key)` in the orchestrator side. it helps to avoid the serialization and deserialization issues that can be caused by adding undefined fields in the worker side, but it is recommended to define all the possible fields in the CustomDomainEntity class in the orchestrator side to have a clear contract between the orchestrator and the worker. +
+Even if the undefined fields are added to the `missingProperties` map, it can be accessed in the same way by another next  *worker* that is executed after the current worker.
+
+<11> This is the most important part in the implementation of the endpoint. you must handle the exceptions properly by throwing them with the appropriate type. if the exception is retryable, you should throw it by wrapping with `RetryableExecutorException`. if the exception is non-retryable, you should throw it by wrapping with `NonRetryableExecutorException`.
++
+IMPORTANT: IF the exception is retryable one, the full exception trace message is not sent to the orchestrator, instead, only the exception message is sent to the orchestrator to reduce the redundant information that is sent to the orchestrator because the retryable exceptions are automatically retried by the framework and there is nothing to monitor or debug.
+
+<12> when throwing `NonRetryableExecutorException`, you can also provide additional information by using the `put()` method to add key-value pairs to the exception. this additional information can be useful for future compensation processing. because in the compensation processing, you can access the exception and get the additional information that you provided in the exception to perform the necessary compensation logic. for instance, if you put an `error_code` with value `USER_VALIDATION_FAILED` in the exception, you can access it in the compensation processing and check if the error code is `USER_VALIDATION_FAILED` to perform specific compensation logic for that error code.
++
+IMPORTANT: Make sure not to manage the exception related metadata withing your exception because the exception object is not serialized and sent to the orchestrator. therefore, if you want to send any additional information related to the exception to the orchestrator for future compensation processing, you should use the `put()` method of the `NonRetryableExecutorException` to add that information in a key-value format. this way, the additional information will be serialized and sent to the orchestrator along with the message, and you can access it in the orchestrator side during the compensation processing. (only the exception trace is sent to the orchestrator as a string)
+
+[[reactive-query-endpoint]]
+==== Reactive Query Endpoint
+
+[source,java]
+----
+
+----
