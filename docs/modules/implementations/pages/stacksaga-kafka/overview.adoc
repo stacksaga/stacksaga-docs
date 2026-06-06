@@ -1128,6 +1128,9 @@ IMPORTANT: In the target service side, the domain entity state can be got as the
 IMPORTANT: the adding field to the domain entity state in the worker side should have been defined in the CustomDomainEntity class in the orchestrator side because the domain entity state is shared between the orchestrator and the worker via the kafka messages, so the structure of the domain entity state should be defined in a way that both sides can understand. therefore, it is recommended to define all the possible fields that can be added to the domain entity state in the CustomDomainEntity class in the orchestrator side. +
 If you try to add a field in the *worker* side that is not defined in the CustomDomainEntity class in the *orchestrator* side, it will be added to the `missingProperties` map in the domain entity state, and you can access it by using the `getMissingProperties()` or `getMissingProperty(String key)` in the orchestrator side. it helps to avoid the serialization and deserialization issues that can be caused by adding undefined fields in the worker side, but it is recommended to define all the possible fields in the CustomDomainEntity class in the orchestrator side to have a clear contract between the orchestrator and the worker. +
 Even if the undefined fields are added to the `missingProperties` map, it can be accessed in the same way by another next  *worker* that is executed after the current worker.
++
+WARNING: As mentioned in the architecture, all the modifications that made on the domain entity state within the method are not applied on the state if any exception (RetryableExecutorException or NonRetryableExecutorException) is thrown from the method. +
+the reason is that the original domain entity state (Entered State) is sent from the orchestrator to the worker should be as it is for the re-invocation in case of retrying. on other hand, if it is thrown `NonRetryableExecutorException`, the updated values are not valid due to the compensation process is started and the state will be reverted to the last successful state. if you want to bring some error related data you can use the `put()` method of the `NonRetryableExecutorException` to add that data in a key-value format, and then you can access it in the orchestrator side during the compensation processing.
 
 <11> This is the most important part in the implementation of the endpoint. you must handle the exceptions properly by throwing them with the appropriate type. if the exception is retryable, you should throw it by wrapping with `RetryableExecutorException`. if the exception is non-retryable, you should throw it by wrapping with `NonRetryableExecutorException`.
 +
@@ -1142,5 +1145,54 @@ IMPORTANT: Make sure not to manage the exception related metadata withing your e
 
 [source,java]
 ----
+@Slf4j
+@SagaEndpoint(
+        //the real topic name will be saga.do.user-service.validate-user
+        topicNameSuffix = "user-service.get-user",
+        listenerScope = ListenerScope.SHARED
+)
+public class ReactiveUserValidateEndpoint extends ReactiveQueryEndpoint {//<1>
 
+    //<2>
+    @Override
+    public Mono<Void> doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) {
+        log.info("Message Key (Transaction Id): {}", consumerRecord.key());
+        log.info("IdempotencyKey: {}", consumerRecord.value().getIdempotencyKey());
+        final ObjectNode currentDomainEntityState = consumerRecord
+                .value()
+                .getCurrentDomainEntityStateForUpdate()
+                .orElseThrow();
+        log.info("Received payload for before user validation: {}", currentDomainEntityState);
+        String username = currentDomainEntityState.get("username").asText();
+        return this.internalUserService
+                .getUserDetails(username)
+                .map(userDetails -> {
+                    {
+                        //user validation logic
+                    }
+                    {
+                        // put the result into the domain entity state for the next topic to use.
+                        currentDomainEntityState.put("is_user_validated", true);
+                        currentDomainEntityState.put("validation_note", "user validated at " + LocalDateTime.now());
+                    }
+                    return Mono.empty();
+                })
+                .onErrorResume(SomeRetryableException.class, e -> {
+                    return Mono.error(RetryableExecutorException.of(e));
+                })
+                .onErrorResume(SomeNonRetryableException.class, e -> {
+                    return Mono.error(NonRetryableExecutorException
+                            .buildWith(e)
+                            .put("error_code", "USER_VALIDATION_FAILED")
+                            .build());
+                });
+    }
+}
 ----
+
+IMPORTANT: If you are not familiar with how the endpoints are working in the Stacksaga Kafka Orchestrator, it is recommended to refer to the xref:#non-reactive-query-endpoint[] before going through the reactive query endpoint because all the concepts and the main points have been explained there in a more detailed way.
+
+Most of the points are the same as the xref:#non-reactive-query-endpoint[], the main difference is that in the reactive query endpoint, you need to return a `Mono<Void>` from the `doProcess()` method, and you can use the reactive programming paradigm to implement the business logic for executing the query. you can use the `Mono` and `Flux` types from Project Reactor to handle asynchronous and non-blocking operations in your endpoint implementation. for instance, in the example above, the `internalUserService.getUserDetails(username)` method returns a `Mono<UserDetails>` which is a reactive type that represents a single asynchronous value. you can use the `map()` operator to transform the result and perform the necessary operations, and you can use the `onErrorResume()` operator to handle exceptions and return the appropriate error types.
+
+[[command-endpoints]]
+=== Command Endpoint
