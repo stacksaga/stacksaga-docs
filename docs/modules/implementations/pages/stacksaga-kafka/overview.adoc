@@ -870,7 +870,13 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 
 <4> *value*: provide the name of the spring bean for the custom EventManager. it is used for identification of the EventManager by the name.
 
-<5> *listenerScope*: Provide the listener scope for the EventManager. it can be either `ListenerScope.SHARED` or `ListenerScope.PROTOTYPE`
+<5> *listenerScope*: Provide the listener scope for the EventManager. it can be either `ListenerScope.SHARED` or `ListenerScope.ISOLATED`. see xref:#topic_model[] for more details.
+
+<6> Override the `registerTopics()` method to register the topics that are used in the transaction. this method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. you should return the list of the topics via a supplier. in this example, it has been 7 topics that are used in the place-order example. these are the real topics that sends the message to the target services.
+
+<7> Override the `onNext()` method to determine the next topic based on the recent executed topic and the current state of the domain-entity. this method is invoked by the framework after each successful execution of the primary flow. you can use the provided parameters to evaluate the conditions and determine the next topic that should be triggered. for instance, in the place-order example, if the recent executed topic is `DO_FETCH_USER_DETAILS`, it means that the user's details have been fetched successfully, so we can update the domain-entity state by adding a metadata entry and then return `SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INITIALIZE_ORDER)` to indicate that the next topic that should be triggered is `DO_INITIALIZE_ORDER`. and also if all the spans are processed as expected, you can return `SagaPrimaryEventAction.complete()` to indicate that the transaction is successfully completed.
+
+<8> Override the `onNextRevert()` (Optional) method to perform any action before reverting the
 
 In the `EventManager`, there's two methods that are invoked by the Stacksaga engine as follows.
 
@@ -894,34 +900,28 @@ This method should be used only to evaluate conditions based on the provided par
 The reason is that the Stacksaga-engine internally relies on Project Reactor’s reactive pipelines, which run on non-blocking event-loop threads.
 Executing expensive operations here could block those threads, leading to performance bottlenecks and impacting the entire application.
 
-===== StackSaga Kafka Topic Model
-
-StackSaga use 3 types of topics for do the orchestration as follows.
-
-. Shared Root Topic: this topic is used for receiving the response messages from the kafka client endpoints to the respective service. all the domain that marks the `@SagaEventManager#listenerScope` as `ListenerScope.SHARED` will use the same shared root topic for receiving the response messages.
-- For instance, if the service name is `order-service` and the shared root topic is created by the framework as `saga.internal.shared.order-service`.
-- All the custom domains which marked as `@SagaEventManager#listenerScope=ListenerScope.SHARED` are binding to this topic for receiving the response messages from the kafka client endpoints.
-- If the kafka credentials are allowed to create the topic automatically, the topic will be created by the framework at the starting if the topic is not already exist in the kafka with default partition and replication factor configurations. otherwise, you need to create the topic manually in the kafka with the name with following the convention `saga.internal.shared.{serviceName}`.
-- The consumer-group is set with fallowing convention `{serviceName}-os`. the `os` stands for orchestration-service. for instance, if the service name is `order-service`, the consumer group for the shared root topic will be `order-service-os`.
-service-group.
-- `offset.reset` is set to `earliest` for the shared root topic to make sure that no messages are lost in case of any service downtime. and also to make sure that all the messages are consumed by the service even if there is a downtime.
-- Receiving messages is configured in `at-least-once` semantics to make sure that all the messages are consumed by the service even if there is a downtime. and also to make sure that no messages are lost in case of any service downtime.
-- by ensuring the `at-least-once` semantic the acknowledgement of each message is done after the processing of the message is done successfully. and acknowledged offsets are committed periodically (time-based) with default configurations.
-
-
-
+[[topic_model]]
 ===== StackSaga Kafka Topic Model
 
 StackSaga uses three types of Kafka topics to perform saga orchestration as follows.
 
-. Shared Root Topic: This topic is used to consume response messages from Kafka client endpoints. All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` use the same shared root topic to receive response messages.
-+
+. *Regular Topics* [As Consumer in `stacksaga-kafka-worker`] +
+The topics that are used to send the command messages to the worker services. these are the topics that you register in the `EventManager` by overriding the `registerTopics()` method. for instance, in the place-order example, there are 7 regular topics that are used to send the command messages to the worker services as mentioned above.
+If the topics are not exist in the Kafka cluster and auto-creation of topics is enabled framework will create the topics automatically during the application startup. otherwise, you need to create the topics manually in the Kafka cluster before starting the application.
+The special thing is that both `stacksaga-kafka-orchestrator` and `stacksaga-kafka-worker` try to create the topics if they are not exist in the Kafka cluster and auto-creation of topics is enabled to avoid the delay of `metadata polling` that is caused by the first time topic creation. the reason for both trying to create the topics is the `stacksaga-kafka-orchestrator` has the awareness of all the configured topics via the `EventManager` and also the `stacksaga-kafka-worker` has the awareness of the topics that are relevant to their service via the `SagaEndpoint`s.
+
+. *System Topics* +
+.. *Shared Root Topic* [As Consumer in `stacksaga-kafka-orchestrator`] +
+This topic is used to consume response messages from Kafka client endpoints.
+All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` use the same shared root topic to receive response messages.
 
 * For example, if the service name is `order-service`, the framework creates and uses the following shared root topic: `saga.internal.shared.order-service`
 
 * All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` are bound to this topic and consume response messages from Kafka client endpoints.
 
-* If Kafka is configured to allow automatic topic creation, the framework creates the topic during application startup if it does not already exist. The topic is created using the framework's default partition count and replication factor configuration. Otherwise, the topic must be created manually following the naming convention: `saga.internal.shared.{serviceName}`
+* If Kafka is configured to allow automatic topic creation, the framework creates the topic during application startup if it does not already exist.
+The topic is created using the framework's default partition count and replication factor configuration.
+Otherwise, the topic must be created manually following the naming convention: `saga.internal.shared.{serviceName}`
 
 * The consumer group is configured using the following naming convention: `{serviceName}-os` where `os` stands for *Orchestration Service*. +
 For example, if the service name is `order-service`, the consumer group for the shared root topic will be: `order-service-os`
@@ -932,7 +932,23 @@ For example, if the service name is `order-service`, the consumer group for the 
 
 * To guarantee *At-Least-Once* delivery semantics, each message is acknowledged only after it has been successfully processed.
 
-* Acknowledged offsets are committed periodically using the framework's default time-based commit configuration. Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
+* Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
+Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
 
+.. *Domain-Root Topics* [As Consumer in `stacksaga-kafka-orchestrator`] +
+If the `@SagaEventManager` is configured with `listenerScope = ListenerScope.ISOLATED`, the framework creates a dedicated domain-root topic for that EventManager to consume response messages from Kafka client endpoints.
+
+* The name of the domain-root topic is created by concatenating the provided `domainRootTopicSuffix` with the prefix `saga.internal.isolated.{serviceName}.{domainRootTopicSuffix}` For instance, if the service name is `order-service` and the `domainRootTopicSuffix` is `place-order`, the domain-root topic name will be `saga.internal.isolated.order-service.place-order`.
+
+* the consumer group for the domain-root topic is set as the same way as the shared root topic by following the convention `{serviceName}-os`. therefore, in the previous example, the consumer group for the domain-root topic will be `order-service-os`. the other configurations for the domain-root topic are the same as the shared root topic.
+
+* Same as the shared root topic, the domain-root topics are also configured with `auto.offset.reset=earliest` to ensure that previously published messages can be consumed after a service restart when no committed offset is available.
+
+* Same as the shared root topic, the domain-root topics are also configured with *At-Least-Once* delivery semantics, and the offsets are acknowledged and committed in the same way as the shared root topic.
+
+* Same as the shared root topic, each message is acknowledged only after it has been successfully processed, and if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
+
+* Same as the shared root topic, Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
+Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
 
 ===== StackSagaKafkaTemplate
