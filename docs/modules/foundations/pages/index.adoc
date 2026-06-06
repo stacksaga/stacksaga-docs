@@ -45,33 +45,31 @@ image:stacksaga-diagram-monolithic-architecture-vs-microservices-architecture.dr
 
 The above diagram shows how to migrate the stem from monolithic architecture to microservices' architecture.
 
-== Distributed Transaction
+== Distributed Transactions
 
-In the microservice architecture, a distributed transaction refers to a transaction that spans multiple microservices.
-Traditional monolithic applications often use a single database and ACID (Atomicity, Consistency, Isolation, Durability) transactions to ensure data integrity within a single transaction.
-However, in the microservice environment, each microservice typically has its own database or data store, and transactions may need to span multiple services.
+In a microservices architecture, a distributed transaction is a business process that spans multiple microservices, each typically managing its own database or data store.
+Unlike monolithic applications, which rely on single-database ACID (Atomicity, Consistency, Isolation, Durability) transactions, microservices must coordinate data consistency across service boundaries.
 
-As an example, Just imagine that there is an e-commerce application that makes online orders, and it has been implemented with microservice architecture.
-In general, the following microservices can be involved to make the entire order placing request.
+Consider an e-commerce application implemented using microservices.
+The order placement workflow may involve the following services:
 
 * order-service
-** initialize the order.
-** update the order status
+** Initializes the order
+** Updates the order status
 * payment-service
-** make pre-auth
-** make real payment
-* Stock-service
-** update the inventory, and so on.
+** Processes the payment
+* inventory-service
+** Updates inventory levels
 
-Even though the entire transaction is pace-order, that transaction has many sub atomic-transactions.
-Those transactions have been distributed along with many microservices.
-Each service performs a single local transaction to implement the individual functionalities.
+Although the overall operation is a single business transaction (place-order), it is decomposed into several distributed, service-local transactions (atomic transactions).
+Each microservice executes its own local transaction to fulfill its part of the workflow.
 
-image:stacksaga-diagram-distributed-transaction.drawio.svg[alt="distributed transaction"]
+image:stacksaga-diagram-distributed-transaction.svg[alt="distributed transaction"]
 
-To make a successful transaction, all 4 atomic-transactions (three microservices) must be completed.
-If any of the microservices fails to complete one of the local transactions, all the completed atomic transactions until where the failure happened should be rolled back to ensure data integrity.
+To ensure end-to-end consistency, all atomic transactions across the involved microservices must succeed.
+If any microservice fails to complete its local transaction, all previously committed operations must be compensated or rolled back to maintain data integrity.
 
+For example, if the *make-payment* atomic transaction fails, compensating actions must be triggered in the other services to revert their changes, ensuring the system remains in a consistent state.
 As per the example, if the *make-payment* atomic transaction (transaction-4) is failed, all other successfully executed transactions should be rolled back to ensure data integrity.
 
 == Challenges of Distributed Transaction

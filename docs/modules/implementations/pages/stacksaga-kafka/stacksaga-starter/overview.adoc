@@ -47,6 +47,42 @@ These specifications provide a structured way to implement sagas in your applica
 ** xref:implementations:stacksaga-kafka/aggregator/aggregator_versioning_and_casting.adoc[Aggregator Versioning and Casting related specifications]
 ** xref:implementations:stacksaga-kafka/saga-topic/saga-topic.adoc[SagaTopic specifications]
 ** xref:implementations:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[Saga Step Manager related specifications]
+
 * Configuration Properties
 
+== Customizations and Configurations
 
+=== Reply Message Listener Configurations and Customizations
+
+By default, Stacksaga Kafka Orchestrator maps all aggregator reply topics to a shared message listener container.
+For example, if your application has two saga domains such as `process-order` and `process-cancel-order`, the framework creates one reply topic per domain (based on the value provided in the `@Aggregator` annotation) and attaches both topics to the same default listener.
+As a result, replies from those topics are consumed by a common listener unless you override the behavior.
+
+To customize the message listener for specific topic, update the attributes of the `@SagaEventManager` annotation on your custom `EventManager` class that extends `AbstractEventManager`. This allows you to define isolated listeners for specific domain.
+
+
+[source,java]
+----
+@SagaEventManager(
+        domainRootTopicSuffix = "tc4_po",
+        //<1>
+        listenerScope = ListenerScope.ISOLATED, // create a dedicated listener for this topic.
+        //<2>
+        concurrency = 1, // consumer concurrency for this listener (optional, default: 1)
+        value = "TC4PlaceOrderEventManager"
+)
+public class PlaceOrderEventManager1 extends AbstractEventManager<PlaceOrderAggregator,PlaceOrderTopic> {
+ //...
+}
+----
+
+<1> Setting `listenerScope` to `ISOLATED` creates a dedicated listener container for the target response topic.
+This is useful when you need stronger isolation, independent scaling, or domain-specific processing controls. +
+
+<2> `concurrency` defines how many consumer threads are assigned to the listener container.
+The default value is `1`, which preserves sequential consumption per assigned partition.
+Increasing this value enables parallel consumption and can improve throughput, depending on topic partitioning. +
++
+IMPORTANT: If a topic has only one partition, setting `concurrency > 1` does not increase true parallelism for that partition and can introduce perceived ordering issues at the processing layer.
+For multi-partition topics, higher concurrency allows parallel processing across partitions, which improves throughput but may produce out-of-order handling at the aggregate/business level if your partition key strategy is incorrect.
+Choose `concurrency` based on your domain ordering guarantees and Kafka partitioning design.
