@@ -372,7 +372,7 @@ The Domain-Entity’s state is updated at each significant event, and every vers
 Initially, the Domain-Entity's state is saved as the transaction’s starting state in the event-store.
 After each executor completes, the updated Domain-Entity state's snapshot is again saved, tagged with the atomic execution’s name (Span).
 
-This approach is known as aggregator event sourcing.
+This approach is known as domain-entity event sourcing.
 
 *Domain-Entity event sourcing provides two main benefits:*
 
@@ -444,6 +444,8 @@ public class OrderDomainEntity extends DomainEntity { //<2>
     private UserDetails userDetails;
     @JsonProperty("product_items")
     private List<ProductItem> productItems;
+    @JsonProperty("metadata")
+    private Map<String, String> metadata;
 
     protected OrderDomainEntity() {
         //<3>
@@ -480,17 +482,17 @@ public class OrderDomainEntity extends DomainEntity { //<2>
 ----
 
 <1> The custom domain-entity class should be annotated with `@SagaDomainEntity`. +
-*name*: The name of the aggregator. this is used for identification of the aggregator by the name. +
-*version*: version will be used for the identification of the aggregator versioning. it is helpful for the *event-upper-casting* and *event-down-casting*. `@SagaDomainEntityVersion` annotation help you to provide the version of the aggregator. +
+*name*: The name of the aggregator. this is used for identification of the DomainEntity by the name. +
+*version*: version will be used for the identification of the DomainEntity versioning. it is helpful for the *event-upper-casting* and *event-down-casting*. `@SagaDomainEntityVersion` annotation help you to provide the version of the aggregator. +
 xref:#further_configurations[see further customizations]
 <2> The custom domain-entity class should be extended from the `DomainEntity` class.
-It provides the shep of aggregator in the framework.
+It provides the shep of DomainEntity in the framework.
 <3> Create the default constructor of the custom domain-entity class. and inside the constructor, call the super method by passing the same class of the custom domain-entity. +
 Due to framework initiates the object, it's not recommended to have another constructor with parameters and it's pointless +
 <4> The custom domain-entity class can have any number of attributes that you want to store. it is recommended to use `@JsonProperty` annotation for each attribute to avoid any serialization disruptions. +
 here you can see some attributes that are used in the place order example. +
-if the custom domain-entity needs complex objects, you can create inner static classes or separate classes for that purpose. and those classes should be implemented by `org.stacksaga.MissingPropertyCollector`. `MissingPropertyCollector` do a most important job role to collect any missing properties(only there are missing properties by mistaken ) while deserializing the aggregator object from the event-store.
-<5> Sample inner static classes that are used in the aggregator.
+if the custom domain-entity needs complex objects, you can create inner static classes or separate classes for that purpose. and those classes should be implemented by `org.stacksaga.MissingPropertyCollector`. `MissingPropertyCollector` do a most important job role to collect any missing properties(only there are missing properties by mistaken ) while deserializing the DomainEntity object from the event-store.
+<5> Sample inner static classes that are used in the DomainEntity.
 
 IMPORTANT: Due to the fact that the framework identifies the custom domain-entity by its name that provided via the `@SagaDomainEntity` annotation, you area able to change the class name and package of the custom domain-entity class without affecting the framework in case of any refactoring or any other reason. but the name that provided in the `@SagaDomainEntity` annotation should be the same as before to avoid any disruption in the framework. and also it can not be created two different custom domain-entity classes with the same name.
 
@@ -504,7 +506,7 @@ Furthermore, you can provide some additional configurations for the custom domai
 . xref:#custom_key_generator_provider_for_domain_entity[]
 
 [[custom_mapper_provider_for_domain_entity]]
-===== Custom Mapper Provider for Domain-Entity
+====== Custom Mapper Provider for Domain-Entity
 
 By default, stacksaga uses the default `ObjectMapper` that spring boot provides via `DefaultAggregatorMapperProvider`.
 in case if you want to customize the `ObjectMapper` for your target aggregator, you can create and provide a custom `objectMapper` object for the target Domain-Entity as a custom implementation of `AbstractDomainEntityMapperProvider`.
@@ -542,12 +544,395 @@ IMPORTANT: `provide()` method is invoked only once at the initialization phase o
 
 <3> Override the method for providing the custom `ObjectMapper` object.
 <4> return the customized `ObjectMapper` object.
-<5> *mapper*: provide your custom aggregator mapper provider class in the aggregator class.
+<5> *mapper*: provide your custom domain entity mapper provider class in the DomainEntity class.
 
 [[custom_key_generator_provider_for_domain_entity]]
-===== Custom Key Generator Provider for Domain-Entity
+====== Custom Key Generator Provider for Domain-Entity
 
-Key generator is responsible for generating the unique identifier for each transaction instance. by default, stacksaga uses `DefaultDomainEntityKeyGenerator` as the key generator for all domain-entities. but if you want to customize the key generator for your target domain-entity, you can create and provide a custom key generator for the target Domain-Entity as a custom implementation of `AbstractDomainEntityKeyGeneratorProvider`. it can be created any number of custom key generator providers for different domain-entities as needed as below.
+Key generator is responsible for generating the unique identifier for each transaction instance. by default, stacksaga uses `DefaultDomainEntityKeyGenerator` as the key generator for all domain-entities. but if you want to customize the key generator for your target domain-entity, you can create and provide a custom key generator for the target Domain-Entity as a custom implementation of `AbstractDomainEntityKeyGeneratorProvider`. it can be created any number of custom key generator providers for different domain-entities as needed.
+
+`AbstractDomainEntityKeyGenerator` provide two `default` methods. ech has default implementation, but you can override them to provide your custom logic for generating the keys. those methods are,
+
+- xref:#generateTransactionKey[`generateTransactionKey`] - generates a unique identifier for a new saga transaction.
+- xref:#generateIdempotencyKey[`generateIdempotencyKey`] - generates an idempotency key for each span of the transaction.
+
+[[generateTransactionKey]]
+====== Generating Unique Identifiers for Saga Transactions (Default-Implementation)
+
+Every saga transaction requires a globally unique identifier To supply a custom key generator for an Aggregator.
+implement the `AggregatorKeyGenerator` interface.
+Its `generateKey` method provides rich context you can leverage to construct a deterministic or randomized identifier: `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`,`executionMode`, and the `sagaAggregator` metadata.
+
+Providing a custom KeyGen is optional.
+StackSaga ships with a production-ready default (`DefaultKeyGen.class`).
+A custom generator can still be valuable to:
+
+- align identifiers with your sharding/partitioning strategy,
+- improve index locality or read/write patterns,
+- embed minimal routing or observability hints,
+- satisfy organization-specific compliance or traceability rules.
+
+The default generator produces time-ordered, high-entropy identifiers using this shape:
+
+* `<serviceInitials>-<epochMillis>-<nanoId>`
+
+For example, with a service named `order-service`, default IDs might look like:
+
+* `OS-1713809175237-021575259417101`
+* `OS-1713809468378-117401549843120`
+* `OS-1713809493499-012220401009440`
+
+NOTE: https://github.com/aventrix/jnanoid[jnanoid] is used to generate the random NanoID segment, providing excellent entropy and collision resistance.
+
+[[generateIdempotencyKey]]
+====== Generating Idempotency Keys for Saga Spans
+
+NOTE: If you are new to term of idempotent, refer xref:ROOT:idempotency.adoc[] first.
+
+Each span of a saga transaction, (i.e., each execution invocation) requires an `idempotency key` to ensure safe retries.
+The `generateIdempotencyKey` method provides all the necessary context to create a robust idempotency key that uniquely identifies the execution attempt. the context is provided by categorizing into two main input objects: `SafeIdempotentInput` and `UnSafeIdempotentInput` based on the safety of their content for logging and debugging purposes.
+
+IMPORTANT: The `UnSafeIdempotentInput` is not recommended to be used for generating the idempotency at all, because might not be the same withing the transaction lifecycle, and it can be cased by uniqueness of the idempotent key. the `UnSafeIdempotentInput` can be used for logging and debugging purposes only, but not for generating the idempotency key. instead, it is highly recommended to use the `SafeIdempotentInput` for generating the idempotency key because it provides a consistent and reliable.
+
+The default implementation of the `generateIdempotencyKey` method produces a fixed-length hash by concatenating the `transactionId`, `currentExecutor`, and `executionMode` from the `SafeIdempotentInput` and then applying the provided `hashGenerator` to create a compact, consistent, and collision-resistant idempotency key.
+
+====== Custom Idempotency Key Generation Implementation
+
+Here is an example of how to override the `generateIdempotencyKey` method to provide custom logic for generating idempotency keys and how it can be configured to the custom `DomainEntity` class.
+
+NOTE: Due to the fact that the `AggregatorKeyGenerator`'s all methods are `default` methods, no need to implement all methods. you can implement only the required methods as needed.
 
 [source,java]
 ----
+@Component //<1>
+public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenerator { //<2>
+
+    @Override //<3>
+    // this method is called when each transaction is initialized
+    public String generateTransactionKey(String serviceName, String applicationVersion, String instanceId, String region, String zone, SagaDomainEntity sagaDomainEntity) {
+
+        StringBuilder regionKey = new StringBuilder();
+        for (char c : region.toCharArray()) {
+            regionKey.append((int) c);
+        }
+        return String.format("%s-%s-%s", serviceName , regionKey , UUID.randomUUID());
+    }
+
+    @Override //<4>
+    public String generateIdempotencyKey(SafeIdempotentInput safeIdempotentInput, UnSafeIdempotentInput unSafeIdempotentInput) {
+         final String rowKey = new StringJoiner(":")
+                .add(safeIdempotentInput.transactionId())
+                .add(safeIdempotentInput.currentExecutionName())
+                .add(safeIdempotentInput.executionMode().name().toLowerCase())
+                .toString();
+       return this.hashGenerator.generateHash(rowKey, HashGenerator.ALGType.MD5);
+    }
+}
+
+//: Configure The custom KeyGen With Custom DomainEntity
+
+@Getter
+@Setter
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity",
+        mapper = OrderDomainEntityMapperProvider.class,
+        keyGen = OrderDomainEntityKeyGenerator.class //<5>
+)
+public class OrderDomainEntity extends DomainEntity {
+    //...
+}
+----
+
+<1> *@Component*: Mark your custom key generator implementation as a Spring bean.
+<2> Extend the custom class by `AbstractDomainEntityKeyGenerator`.
+<3> Override the `generateTransactionKey` method and create your custom key for the transaction. +
+#the method is called when each transaction is initialized.#
+<4> Override the `generateIdempotencyKey` method and create your custom idempotency key for each span. +
+#the method is called when before each span execution is invoked.#
+<5> provide your custom class as `keyGen` of the `@SagaDomainEntity` in your DomainEntity class.
+
+IMPORTANT: it is highly recommended to use the provided `hashGenerator` to produce a fixed-length hash of a composite string for generating the idempotency key, rather than returning a raw concatenation of input values. this approach ensures that the idempotency key is compact, consistent in length, and has a low risk of collisions, even when the input values are long or contain variable content.
+
+WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
+The framework may invoke it concurrently.
+
+===== Topic And EventManager
+
+====== StackSaga Topic
+
+StackSaga Topics are constant values that are used to identify the execution endpoint in StackSaga.
+Topic are nothing but the kafka topics that are used to send the command messages to the worker services.
+Stacksaga topics contains additional metadata such as the name of the topic, the type of the topic (primary or compensation), and the span name that is used to identify the execution point.
+Stacksaga topics are used in the `EventManager` to determine which topic should be triggered next based on the execution flow.
+
+As per the place-order example, there were 4 atomic executions (Spans) in the primary flow like fetching user's details, initialize order, make the payment,and inventory update. and also there were 3 atomic executions in the compensation flow like cancel order, refund payment, and release inventory. so there are 7 spans in total. here is the sample topics that are used in the place-order example,
+
+[source,java]
+----
+class PlaceOrderTopic extends AbstractTopic<PlaceOrderTopic> {//<1>
+
+    //<2>
+    protected PlaceOrderTopic(String topicName, float topicKey, SagaEventType sagaEventType, String targetService) {
+        super(topicName, topicKey, sagaEventType, targetService);
+    }
+
+
+    //<3>
+    protected PlaceOrderTopic(String topicName, float topicKey, SagaEventType sagaEventType, String targetService, PlaceOrderTopic parent) {
+        super(topicName, topicKey, sagaEventType, targetService, parent);
+    }
+
+    //<4>
+    //primary execution topics.
+    public static final PlaceOrderTopic DO_FETCH_USER_DETAILS = new PlaceOrderTopic("user.fetch", 1, SagaEventType.QUERY_DO_ACTION, "user-service");
+    public static final PlaceOrderTopic DO_INITIALIZE_ORDER = new PlaceOrderTopic("order.init", 2, SagaEventType.COMMAND_DO_ACTION, "order-service");
+    public static final PlaceOrderTopic DO_MAKE_PAYMENT = new PlaceOrderTopic("payment.make", 3, SagaEventType.COMMAND_DO_ACTION, "payment-service");
+    public static final PlaceOrderTopic DO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory.update", 4, SagaEventType.COMMAND_DO_ACTION, "inventory-service");
+
+    //<5>
+    //revert/compensation topics.
+    public static final PlaceOrderTopic UNDO_INITIALIZE_ORDER = new PlaceOrderTopic("order.init", -2, SagaEventType.COMMAND_UNDO_ACTION, "order-service", DO_INITIALIZE_ORDER);
+    public static final PlaceOrderTopic UNDO_MAKE_PAYMENT = new PlaceOrderTopic("payment.make", -3, SagaEventType.COMMAND_UNDO_ACTION, "payment-service", DO_MAKE_PAYMENT);
+    public static final PlaceOrderTopic UNDO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory.update", -4, SagaEventType.COMMAND_UNDO_ACTION, "inventory-service", DO_INVENTORY_UPDATE);
+}
+----
+
+<1> Create the custom topic class by extending the `AbstractTopic` class.
+<2> Override the constructors for primary execution topic instantiation. +
+*`topicName`*: the name of the topic that is used in the kafka. see xref:#topic_name_specification[Topic Name Specification] for more details +
+*`topicKey`*: the constant and unique (withing the domain) float value to represent the topic. see xref:#topic_key_specification[Topic Key Specification] for more details. +
+*`sagaEventType`*: the type of the topic. it can be either `SagaEventType.QUERY_DO_ACTION` for query execution or `SagaEventType.COMMAND_DO_ACTION` for command execution. +
+*`targetService`*: the name of the target service that is responsible for executing the command. this is used for logging and debugging purposes.
+<3> Override the constructors for compensation execution topic instantiation. +
+the parameters are the same as the primary execution topic constructor with an additional parameter for the parent topic. +
+*`parent`*: the primary execution topic that is related to the compensation topic. this is used to indicate the relationship between the primary execution and the compensation execution. for instance, in the place-order example, the compensation topic `UNDO_INITIALIZE_ORDER` is related to the primary execution topic `DO_INITIALIZE_ORDER`.
+<4> Create the primary execution topics as static final fields in the custom topic class by fallowing the conventions.
+<5> Create the compensation execution topics as static final fields in the custom topic class by fallowing the conventions.
+
+IMPORTANT: The custom topic class is not a spring bean at all. make sure not to annotate it with any spring annotations.
+
+[[topic_name_specification]]
+====== Topic Name Specification In StackSaga-Kafka
+
+The topic name is the name of the kafka topic that is used to send the messages to the worker services. it is recommended to use a clear and descriptive name for the topic that reflects the purpose of the execution. for instance, in the place-order example, the topic name for `DO_FETCH_USER_DETAILS` is `do.user.fetch`, the topic name for `DO_INITIALIZE_ORDER` is `do.order.init`, the topic name for `DO_MAKE_PAYMENT` is `do.payment.make`, and the topic name for `DO_INVENTORY_UPDATE` is `do.inventory.update`. and also for compensation topics, it is recommended to use the same topic name as the primary execution topic to indicate that they are related. for instance, in the place-order example, the topic name for `UNDO_INITIALIZE_ORDER` is also `undo.order.init`, the topic name for `UNDO_MAKE_PAYMENT` is also `undo.payment.make`, and the topic name for `UNDO_INVENTORY_UPDATE` is also `undo.inventory.update`.
+
+NOTE: The prefix `do.` for the primary execution topics and `undo.` for the compensation topics the must accordingly to StackSaga guidelines. but you can freely mention the topic name without mentioning the prefix as well, because internally the framework will create the topics by adding the prefix as per the topic type. for instance, if you mention the topic name for `DO_FETCH_USER_DETAILS` as `user.fetch`, the framework will create the topic name as `do.user.fetch` internally and you are able to see that real topic in the kafka topic list.
+
+Rules for topic naming in StackSaga-Kafka:
+
+. Use `.` as a separator to create a hierarchical structure in topic names (e.g., `do.order.init`) and it is not allowed to use any other separator such as `-` or `_` in the topic name.
+
+[[topic_key_specification]]
+====== Topic Key Specification In StackSaga-Kafka
+
+The topic key is used for serialization and deserialization process.
+The row topic names are not passed via the header of the kafka messages, instead, the topic key is used for that purpose. therefore, the keys can not be changed once it is used in the system. therefore, it is highly recommended to use a constant and unique float value for each topic within the same domain. for instance, in the place-order example, the topic key for `DO_FETCH_USER_DETAILS` is 1, the topic key for `DO_INITIALIZE_ORDER` is 2, the topic key for `DO_MAKE_PAYMENT` is 3, and the topic key for `DO_INVENTORY_UPDATE` is 4. and also for compensation topics, it is recommended to use negative float values to differentiate them from primary execution topics. for instance, in the place-order example, the topic key for `UNDO_INITIALIZE_ORDER` is -2, the topic key for `UNDO_MAKE_PAYMENT` is -3, and the topic key for `UNDO_INVENTORY_UPDATE` is -4.
+
+As per the custom topic class that is mentioned above, here is the list of topics with their keys and names that are used in the place-order example,
+
+[cols="2,2,2,3",options="header"]
+|===
+| Execution
+| Topic Type
+| Mentioned Topic Name
+| Real Topic Name
+
+| Fetch User Details
+| `QUERY_DO_ACTION`
+| `user.fetch`
+| `saga.do.user.fetch`
+
+| Initialize Order
+| `COMMAND_DO_ACTION`
+| `order.init`
+| `saga.do.order.init`
+
+| Make Payment
+| `COMMAND_DO_ACTION`
+| `payment.make`
+| `saga.do.payment.make`
+
+| Inventory Update
+| `COMMAND_DO_ACTION`
+| `inventory.update`
+| `saga.do.inventory.update`
+
+| Cancel Order
+| `COMMAND_UNDO_ACTION`
+| `order.init`
+| `saga.undo.order.init`
+
+| Refund Payment
+| `COMMAND_UNDO_ACTION`
+| `payment.make`
+| `saga.undo.payment.make`
+
+| Release Inventory
+| `COMMAND_UNDO_ACTION`
+| `inventory.update`
+| `saga.undo.inventory.update`
+
+|===
+
+NOTE: `COMMAND_UNDO_BEFORE_ACTION` and `COMMAND_UNDO_AFTER_ACTION` are not supported in the current version of the framework, but they will be supported in the upcoming versions. therefore, it is not recommended to use those types of topic types.
+
+====== EventManager
+
+Stacksaga-Kafka supports fully runtime dynamic execution navigation based on your conditions and the state of the transaction.
+So the EventManager is the component that is responsible for that. let's create a custom EventManager for the `OrderDomainEntity` as below.
+
+[source,java]
+----
+//<2>
+@SagaEventManager(
+        domainRootTopicSuffix = "order-service.place-order", //<3>
+        value = "placeOrderEventManager", //<4>
+        listenerScope = ListenerScope.SHARED //<5>
+)
+public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEntity, PlaceOrderTopic> { //<1>
+
+    //<6>
+    @Override
+    public Supplier<List<PlaceOrderTopic>> registerTopics() {
+        return () -> List.of(
+                PlaceOrderTopic.DO_FETCH_USER_DETAILS,
+                PlaceOrderTopic.DO_INITIALIZE_ORDER,
+                PlaceOrderTopic.DO_MAKE_PAYMENT,
+                PlaceOrderTopic.DO_INVENTORY_UPDATE,
+                PlaceOrderTopic.UNDO_INITIALIZE_ORDER,
+                PlaceOrderTopic.UNDO_MAKE_PAYMENT,
+                PlaceOrderTopic.UNDO_INVENTORY_UPDATE
+        );
+    }
+
+    //<7>
+    @Override
+    public @NonNull SagaPrimaryEventAction<PlaceOrderTopic> onNext(PlaceOrderTopic recentTopic, OrderDomainEntity currentDomainEntityState) {
+        if (recentTopic.equals(PlaceOrderTopic.DO_FETCH_USER_DETAILS)) {
+            currentDomainEntityState.getMetadata().put("userDetailsFetched", "true");
+            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INITIALIZE_ORDER);
+        }
+        if (recentTopic.equals(PlaceOrderTopic.DO_INITIALIZE_ORDER)) {
+            currentDomainEntityState.getMetadata().put("orderInitialized", "true");
+            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
+        }
+        if (recentTopic.equals(PlaceOrderTopic.DO_MAKE_PAYMENT)) {
+            currentDomainEntityState.getMetadata().put("paymentMade", "true");
+            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INVENTORY_UPDATE);
+        }
+        if (recentTopic.equals(PlaceOrderTopic.DO_INVENTORY_UPDATE)) {
+            currentDomainEntityState.getMetadata().put("inventoryUpdated", "true");
+            return SagaPrimaryEventAction.complete();
+        }
+        return SagaPrimaryEventAction.error(new IllegalStateException("Unexpected topic: " + recentTopic));
+    }
+
+    //<8>
+    @Override
+    public void onNextRevert(
+            PlaceOrderTopic recentExecutedTopic,
+            PlaceOrderTopic nextTopic,
+            OrderDomainEntity lastDomainEntityState,
+            NonRetryableExecutorException nonRetryableExecutorException,
+            RevertHintStore revertHintStore,
+            Supplier<NavigableMap<Integer, PlaceOrderTopic>> remainingReverts
+    ) {
+
+        //<9>
+        {//sample usage of revert hint store and next topic in the onNextRevert method.
+            if (nextTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) {
+                revertHintStore.put("BEFORE_NOTE:UNDO_MAKE_PAYMENT", "Sample value before reverting UNDO_MAKE_PAYMENT");
+            }
+            if (nextTopic.equals(PlaceOrderTopic.UNDO_INITIALIZE_ORDER)) {
+                revertHintStore.put("BEFORE_NOTE:UNDO_INITIALIZE_ORDER", "Sample value before reverting UNDO_INITIALIZE_ORDER");
+            }
+        }
+
+        //<10>
+        {//sample usage of remaining reverts and recentExecutedTopic
+            if (recentExecutedTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) {
+                log.info("Remaining reverts after reverting UNDO_MAKE_PAYMENT: {}", remainingReverts);
+            }
+
+            if (recentExecutedTopic.equals(PlaceOrderTopic.UNDO_INITIALIZE_ORDER)) {
+                log.info("Remaining reverts after reverting UNDO_INITIALIZE_ORDER: {}", remainingReverts);
+            }
+        }
+    }
+}
+----
+
+<1> Create a custom EventManager class by extending the `AbstractEventManager` class and providing the custom your custom DomainEntity and the custom created Topic class as the generic parameters.
+<2> Annotate the custom EventManager class with `@SagaEventManager` annotation. it primarily marks the class as a spring bean.
+
+<3> *domainRootTopicSuffix*: provide the common suffix for the topics that are related to the same domain. this is used for creating the domain-root-topic (topic for receiving the response messages from the kafka clint endpoints) internally by the framework.
+
+<4> *value*: provide the name of the spring bean for the custom EventManager. it is used for identification of the EventManager by the name.
+
+<5> *listenerScope*: Provide the listener scope for the EventManager. it can be either `ListenerScope.SHARED` or `ListenerScope.PROTOTYPE`
+
+In the `EventManager`, there's two methods that are invoked by the Stacksaga engine as follows.
+
+. `onNext()`
+. `onNextRevert()`
+
+====== `onNext()` method
+
+`onNext()` method is executed by stacksaga-engine #after each primary execution is succeeded# by providing the update state of the aggregator until the last successful execution, and the recent successful topic name.
+It gives you the chance to determine what topic should be triggered next.
+Not only next, the following actions can be taken conditionally in oneNext method.
+
+. *SagaPrimaryEventAction.next(`nextTopic`)*: As we mentioned above you can pass the next topic along with this static method.
+. *SagaPrimaryEventAction.error(`exception`)* Conditionally if you want to stop going forward and start compensation you can return an exception with this method.
++
+NOTE: As an alternative approach you can just throw an exception as well but as a best practice make sure to return your exception by wrapping with `SagaPrimaryEventAction.error()` method.
+. *SagaPrimaryEventAction.done()* if all the spans are processed as you expected you can indicate the transaction is successfully done by using this method.
+
+WARNING: As a best practice, avoid performing any I/O-intensive or CPU-intensive operations inside the event navigator.
+This method should be used only to evaluate conditions based on the provided parameters. +
+The reason is that the Stacksaga-engine internally relies on Project Reactor’s reactive pipelines, which run on non-blocking event-loop threads.
+Executing expensive operations here could block those threads, leading to performance bottlenecks and impacting the entire application.
+
+===== StackSaga Kafka Topic Model
+
+StackSaga use 3 types of topics for do the orchestration as follows.
+
+. Shared Root Topic: this topic is used for receiving the response messages from the kafka client endpoints to the respective service. all the domain that marks the `@SagaEventManager#listenerScope` as `ListenerScope.SHARED` will use the same shared root topic for receiving the response messages.
+- For instance, if the service name is `order-service` and the shared root topic is created by the framework as `saga.internal.shared.order-service`.
+- All the custom domains which marked as `@SagaEventManager#listenerScope=ListenerScope.SHARED` are binding to this topic for receiving the response messages from the kafka client endpoints.
+- If the kafka credentials are allowed to create the topic automatically, the topic will be created by the framework at the starting if the topic is not already exist in the kafka with default partition and replication factor configurations. otherwise, you need to create the topic manually in the kafka with the name with following the convention `saga.internal.shared.{serviceName}`.
+- The consumer-group is set with fallowing convention `{serviceName}-os`. the `os` stands for orchestration-service. for instance, if the service name is `order-service`, the consumer group for the shared root topic will be `order-service-os`.
+service-group.
+- `offset.reset` is set to `earliest` for the shared root topic to make sure that no messages are lost in case of any service downtime. and also to make sure that all the messages are consumed by the service even if there is a downtime.
+- Receiving messages is configured in `at-least-once` semantics to make sure that all the messages are consumed by the service even if there is a downtime. and also to make sure that no messages are lost in case of any service downtime.
+- by ensuring the `at-least-once` semantic the acknowledgement of each message is done after the processing of the message is done successfully. and acknowledged offsets are committed periodically (time-based) with default configurations.
+
+
+
+===== StackSaga Kafka Topic Model
+
+StackSaga uses three types of Kafka topics to perform saga orchestration as follows.
+
+. Shared Root Topic: This topic is used to consume response messages from Kafka client endpoints. All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` use the same shared root topic to receive response messages.
++
+
+* For example, if the service name is `order-service`, the framework creates and uses the following shared root topic: `saga.internal.shared.order-service`
+
+* All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` are bound to this topic and consume response messages from Kafka client endpoints.
+
+* If Kafka is configured to allow automatic topic creation, the framework creates the topic during application startup if it does not already exist. The topic is created using the framework's default partition count and replication factor configuration. Otherwise, the topic must be created manually following the naming convention: `saga.internal.shared.{serviceName}`
+
+* The consumer group is configured using the following naming convention: `{serviceName}-os` where `os` stands for *Orchestration Service*. +
+For example, if the service name is `order-service`, the consumer group for the shared root topic will be: `order-service-os`
+
+* The consumer is configured with: `auto.offset.reset=earliest` This ensures that previously published messages can be consumed after a service restart when no committed offset is available.
+
+* Message consumption is configured using *At-Least-Once* delivery semantics to ensure that messages are not lost, even in the event of service downtime or unexpected failures.
+
+* To guarantee *At-Least-Once* delivery semantics, each message is acknowledged only after it has been successfully processed.
+
+* Acknowledged offsets are committed periodically using the framework's default time-based commit configuration. Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
+
+
+===== StackSagaKafkaTemplate
