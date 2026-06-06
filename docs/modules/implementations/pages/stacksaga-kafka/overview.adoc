@@ -440,6 +440,10 @@ public class OrderDomainEntity extends DomainEntity { //<2>
     private String username;
     @JsonProperty("order_id")
     private String orderId;
+    @JsonProperty("total_amount")
+    private double totalAmount;
+    @JsonProperty("payment_reference_id")
+    private String paymentReferenceId;
     @JsonProperty("user_validation_data")
     private UserValidationData userValidationData;
     @JsonProperty("product_items")
@@ -1039,7 +1043,7 @@ Stacksaga Kafka Endpoints stands for creating topics accordingly Stacksaga engin
 === Query Endpoint
 
 If an execution(atomic execution) doesn't make any state change due to executing that execution those kinds of executions are executed in *Query Endpoints*. due to it doesn't make any changes in the database state, it has no any compensation action to undo. +
-these are the topics that define in the in xref:#sagakafka_topics[] with type of `SagaTopicType.QUERY_DO_ACTION`
+these are the topics that define in the in xref:#sagakafka_topics[] with type of `SagaEventType.QUERY_DO_ACTION`
 
 For instance, in the place-order example, the execution of *fetching user's details and validate* is a query execution because it doesn't make any state change in the database, it just fetches the data and returns it. here is the custom endpoint for that execution.
 
@@ -1196,3 +1200,74 @@ Most of the points are the same as the xref:#non-reactive-query-endpoint[], the 
 
 [[command-endpoints]]
 === Command Endpoint
+
+If an atomic execution makes state change in the database those kinds of executions are executed in *Command Endpoints*. due to it makes changes in the database, it has compensation action to undo. +
+xref:#sagakafka_topics[] which creates as the type of `SagaEventType.COMMAND_DO_ACTION` and `SagaEventType.COMMAND_UNDO_ACTION` are configured in the command endpoints.
+
+For instance, in the place-order example, the execution of *Make Payment* execution is a command execution because it makes state change in the payment service's database by creating a new payment record and updating the user's balance. in case the entire process should be compensated after successfully executing the *Make Payment* execution, the compensation action will be triggered to undo the payment. here is the custom command endpoint for that execution.
+
+[source,java]
+----
+@Slf4j
+@SagaEndpoint(
+        listenerScope = ListenerScope.SHARED
+)
+class MakePaymentEndpoint extends CommandEndpoint { //<1>
+
+    //<2>
+    @Override
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord)
+            throws JustRetryableExecutorException, RetryableExecutorException, NonRetryableExecutorException {
+        //the theory is the same as the query endpoint.
+    }
+
+    //<2>
+    @Override
+    public void undoProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws JustRetryableExecutorException, RetryableExecutorException {
+        log.info("Message Key (Transaction Id): {}", consumerRecord.key());
+        log.info("IdempotencyKey: {}", consumerRecord.value().getIdempotencyKey());
+        //<3>
+        final JsonNode lastDomainEntityState = consumerRecord.value().getDomainEntityState();
+        log.info("Last domain entity state {}", lastDomainEntityState);
+
+        try {
+            {//undo payment logic
+                final double totalAmount = lastDomainEntityState.get("total_amount").asDouble();
+                final String paymentRef = lastDomainEntityState.get("payment_reference_id").asText();
+                this.internalPaymentSerivce.refundPayment(paymentRef, totalAmount);
+                //update some hints for the next revert execution if needed.
+                consumerRecord.value().getHintStore().ifPresent(hintStore -> {//<4>
+                    hintStore.put("last_refund_time", LocalDateTime.now().toString());
+                });
+            }
+        } catch (SomeRetryableException e) {//<5>
+            throw RetryableExecutorException.of(e);
+        }
+    }
+}
+----
+
+NOTE: The `doProcess()` method implementation is not provided in the example because the main focus is on the `undoProcess()` method to explain the compensation processing in the command endpoints. but the theory for implementing the `doProcess()` method is the same as the query endpoint that is explained in the previous section. read the xref:#non-reactive-query-endpoint[] to understand how to implement the `doProcess()` method.
+
+<1> Create a custom command endpoint class by extending the `CommandEndpoint` class.
+<2> Override the `doProcess()` method to implement the business logic for executing the command. this is exactly the same as the query endpoint, you can refer xref:non-reactive-query-endpoint[] example to get the details about how to implement the `doProcess()` method.
+
+
+<3> Override the `undoProcess()` method to implement the business logic for undoing the command. this method is invoked by the framework when a compensation action is triggered for the respective command execution. you can use the provided `ConsumerRecord` to access the message key, payload, and other metadata within the method scope.
++
+IMPORTANT: the payload of the `ConsumerRecord` in the `undoProcess()` method contains the last state of the domain entity before the execution of the command that is being compensated. you can access this state by using the `getDomainEntityState()` method of the payload. this allows you to have the necessary information to perform the compensation logic based on the last known state of the domain entity. `getDomainEntityState()` method returns a `JsonNode` which is a JSON tree structure that is provided by the Jackson library. you can use the methods of the `JsonNode` class to access the fields in the last domain entity state. for instance, you can use the `get("fieldName")` method to access a specific field in the last domain entity state. but you can not modify the last domain entity state because it is immutable in the compensation processing.
+
+<4> If you want to send some hints or additional information from the current compensation execution to the next compensation execution in the next step, you can use the `getHintStore()` method of the payload to access the hint store and put the necessary information in it. the hint store is a key-value store that allows you to share information between different compensation executions. for instance, if you want to put the last refund time as a hint for the next compensation execution, you can use the `put()` method of the hint store to add that information with a specific key as shown in the example.
++
+IMPORTANT: The updated or added hints in the hint store is applied only if there is no any error that is thrown from the `undoProcess()` method. if `RetryableExecutorException` is thrown from the `undoProcess()` method, the compensation process will be retried based on the retry configurations, and the hints that are added or updated in the current execution will not be applied in the next retry execution because it is expected to have the same conditions for the retry executions until it is succeeded. therefore, make sure to manage the hints properly in the compensation processing to ensure that they are applied correctly in the next compensation execution. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated and the hints that are added or updated in the current execution will not be applied because there will be no next compensation execution due to the termination of the transaction.
+
+<5> Identify the retryable exceptions that can be thrown from the compensation logic and make sure to throw them by wrapping with `RetryableExecutorException` to enable the retrying mechanism for the compensation process. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated. therefore, it is important to handle the exceptions properly in the compensation logic to ensure that the compensation process can retry when necessary and to avoid unexpected termination of the transaction. in `undoProcess()` only can throw `JustRetryableExecutorException` and `RetryableExecutorException`.
+
+
+
+
+
+
+
+
+
