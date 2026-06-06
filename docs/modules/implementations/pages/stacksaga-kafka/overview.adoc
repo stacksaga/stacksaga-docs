@@ -1040,7 +1040,7 @@ Stacksaga Kafka Endpoints stands for creating topics accordingly Stacksaga engin
 . *xref:#command-endpoints[]*
 
 [[query-endpoints]]
-=== Query Endpoint
+===== Query Endpoint
 
 If an execution(atomic execution) doesn't make any state change due to executing that execution those kinds of executions are executed in *Query Endpoints*. due to it doesn't make any changes in the database state, it has no any compensation action to undo. +
 these are the topics that define in the in xref:#sagakafka_topics[] with type of `SagaEventType.QUERY_DO_ACTION`
@@ -1054,7 +1054,7 @@ Query endpoints can be created in two different ways in StackSaga.
 
 
 [[non-reactive-query-endpoint]]
-==== Non-Reactive (Imperative) Query Endpoint
+====== Non-Reactive (Imperative) Query Endpoint
 
 Non-reactive query endpoints are the traditional and blocking way of implementing the query endpoints. in this approach, the method that is responsible for executing the query is implemented in a blocking way. for instance, in the place-order example, the query endpoint for fetching user's details can be implemented as follows.
 
@@ -1145,7 +1145,7 @@ IMPORTANT: IF the exception is retryable one, the full exception trace message i
 IMPORTANT: Make sure not to manage the exception related metadata withing your exception because the exception object is not serialized and sent to the orchestrator. therefore, if you want to send any additional information related to the exception to the orchestrator for future compensation processing, you should use the `put()` method of the `NonRetryableExecutorException` to add that information in a key-value format. this way, the additional information will be serialized and sent to the orchestrator along with the message, and you can access it in the orchestrator side during the compensation processing. (only the exception trace is sent to the orchestrator as a string)
 
 [[reactive-query-endpoint]]
-==== Reactive Query Endpoint
+====== Reactive Query Endpoint
 
 [source,java]
 ----
@@ -1199,12 +1199,23 @@ IMPORTANT: If you are not familiar with how the endpoints are working in the Sta
 Most of the points are the same as the xref:#non-reactive-query-endpoint[], the main difference is that in the reactive query endpoint, you need to return a `Mono<Void>` from the `doProcess()` method, and you can use the reactive programming paradigm to implement the business logic for executing the query. you can use the `Mono` and `Flux` types from Project Reactor to handle asynchronous and non-blocking operations in your endpoint implementation. for instance, in the example above, the `internalUserService.getUserDetails(username)` method returns a `Mono<UserDetails>` which is a reactive type that represents a single asynchronous value. you can use the `map()` operator to transform the result and perform the necessary operations, and you can use the `onErrorResume()` operator to handle exceptions and return the appropriate error types.
 
 [[command-endpoints]]
-=== Command Endpoint
+===== Command Endpoint
 
 If an atomic execution makes state change in the database those kinds of executions are executed in *Command Endpoints*. due to it makes changes in the database, it has compensation action to undo. +
 xref:#sagakafka_topics[] which creates as the type of `SagaEventType.COMMAND_DO_ACTION` and `SagaEventType.COMMAND_UNDO_ACTION` are configured in the command endpoints.
 
-For instance, in the place-order example, the execution of *Make Payment* execution is a command execution because it makes state change in the payment service's database by creating a new payment record and updating the user's balance. in case the entire process should be compensated after successfully executing the *Make Payment* execution, the compensation action will be triggered to undo the payment. here is the custom command endpoint for that execution.
+For instance, in the place-order example, the execution of *Make Payment* execution is a command execution because it makes state change in the payment service's database by creating a new payment record and updating the user's balance. in case the entire process should be compensated after successfully executing the *Make Payment* execution, the compensation action will be triggered to undo the payment.
+
+*Command endpoints* can be created in two different ways in StackSaga.
+
+. xref:#non-reactive-command-endpoint[]
+. xref:#reactive-command-endpoint[]
+
+
+[[non-reactive-command-endpoint]]
+====== Non-Reactive (Imperative) Command Endpoint
+
+Non-reactive command endpoints are the traditional and blocking way of implementing the command endpoints. in this approach, the method that is responsible for executing the command is implemented in a blocking way.
 
 [source,java]
 ----
@@ -1263,8 +1274,10 @@ IMPORTANT: The updated or added hints in the hint store is applied only if there
 
 <5> Identify the retryable exceptions that can be thrown from the compensation logic and make sure to throw them by wrapping with `RetryableExecutorException` to enable the retrying mechanism for the compensation process. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated. therefore, it is important to handle the exceptions properly in the compensation logic to ensure that the compensation process can retry when necessary and to avoid unexpected termination of the transaction. in `undoProcess()` only can throw `JustRetryableExecutorException` and `RetryableExecutorException`.
 
+[[reactive-command-endpoint]]
+====== Reactive (Imperative) Command Endpoint
 
-
+If you are in a reactive programming environment and want to implement the command endpoints in a non-blocking way, you can extend the `ReactiveCommandEndpoint` class and implement the `doProcess()` and `undoProcess()` methods by using the reactive programming paradigm with Project Reactor's `Mono` and `Flux` types. the theory for implementing the reactive command endpoint is the same as the non-reactive command endpoint, but you need to return a `Mono<Void>` from both methods and use the reactive operators to handle asynchronous operations and exceptions. for instance, you can use the `map()`, `flatMap()`, and `onErrorResume()` operators to implement the business logic and exception handling in a reactive way.
 
 
 
