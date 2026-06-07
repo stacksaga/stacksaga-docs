@@ -791,12 +791,11 @@ So the EventManager is the component that is responsible for that. let's create 
 @SagaEventManager(
         value = "placeOrderEventManager", //<3>
         listenerScope = ListenerScope.SHARED, //<4>
-        domainRootTopicSuffix = "place-order", //<5>
-        processingMode = ProcessingMode.PARTITION_ORDERED //<6>
+        domainRootTopicSuffix = "place-order" //<5>
 )
 public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEntity, PlaceOrderTopic> { //<1>
 
-    //<7>
+    //<6>
     @Override
     public Supplier<List<PlaceOrderTopic>> registerTopics() {
         return () -> List.of(
@@ -810,7 +809,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
         );
     }
 
-    //<8>
+    //<7>
     @Override
     public @NonNull SagaPrimaryEventAction<PlaceOrderTopic> onNext(PlaceOrderTopic recentTopic, OrderDomainEntity currentDomainEntityState) {
         if (recentTopic.equals(PlaceOrderTopic.DO_FETCH_USER_DETAILS)) {
@@ -832,7 +831,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
         return SagaPrimaryEventAction.error(new IllegalStateException("Unexpected topic: " + recentTopic));
     }
 
-    //<9>
+    //<8>
     @Override
     public void onNextRevert(
             PlaceOrderTopic recentExecutedTopic,
@@ -843,7 +842,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
             Supplier<NavigableMap<Integer, PlaceOrderTopic>> remainingReverts
     ) {
 
-        //<10>
+        //<9>
         {//sample usage of revert hint store and next topic in the onNextRevert method.
             if (nextTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) {
                 revertHintStore.put("BEFORE_NOTE:UNDO_MAKE_PAYMENT", "Sample value before reverting UNDO_MAKE_PAYMENT");
@@ -853,7 +852,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
             }
         }
 
-        //<11>
+        //<10>
         {//sample usage of remaining reverts and recentExecutedTopic
             if (recentExecutedTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) {
                 log.info("Remaining reverts after reverting UNDO_MAKE_PAYMENT: {}", remainingReverts);
@@ -876,13 +875,16 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 
 <5> *domainRootTopicSuffix*: provide the common suffix for the topics that are related to the same domain. this is used for creating the domain-root-topic (topic for receiving the response messages from the kafka clint endpoints) internally by the framework.
 
-<6> *processingMode*: provide the processing mode for the EventManager that indicates how the events are processed in the EventManager. it can be either `ProcessingMode.PARTITION_ORDERED` or `ProcessingMode.CONCURRENT` or `ProcessingMode.SEQUENTIAL`. see xref:#event_processing_modes[] for more details.
+<6> Override the `registerTopics()` method to register the topics that are used in the transaction. this method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. you should return the list of the topics via a supplier. in this example, it has been 7 topics that are used in the place-order example. these are the real topics that sends the message to the target services.
 
-<7> Override the `registerTopics()` method to register the topics that are used in the transaction. this method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. you should return the list of the topics via a supplier. in this example, it has been 7 topics that are used in the place-order example. these are the real topics that sends the message to the target services.
+<7> Override the `onNext()` method to determine the next topic based on the recent executed topic and the current state of the domain-entity. this method is invoked by the framework after each successful execution of the primary flow. you can use the provided parameters to evaluate the conditions and determine the next topic that should be triggered. for instance, in the place-order example, if the recent executed topic is `DO_FETCH_USER_DETAILS`, it means that the user's details have been fetched successfully, so we can update the domain-entity state by adding a metadata entry and then return `SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INITIALIZE_ORDER)` to indicate that the next topic that should be triggered is `DO_INITIALIZE_ORDER`. and also if all the spans are processed as expected, you can return `SagaPrimaryEventAction.complete()` to indicate that the transaction is successfully completed.
 
-<8> Override the `onNext()` method to determine the next topic based on the recent executed topic and the current state of the domain-entity. this method is invoked by the framework after each successful execution of the primary flow. you can use the provided parameters to evaluate the conditions and determine the next topic that should be triggered. for instance, in the place-order example, if the recent executed topic is `DO_FETCH_USER_DETAILS`, it means that the user's details have been fetched successfully, so we can update the domain-entity state by adding a metadata entry and then return `SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INITIALIZE_ORDER)` to indicate that the next topic that should be triggered is `DO_INITIALIZE_ORDER`. and also if all the spans are processed as expected, you can return `SagaPrimaryEventAction.complete()` to indicate that the transaction is successfully completed.
+<8> Override the `onNextRevert()` (Optional) method to perform any action before reverting the executions in the compensation flow. this method is invoked by the framework before executing each compensation execution.
 
-<9> Override the `onNextRevert()` (Optional) method to perform any action before reverting the
+<9> Sample usage of the `RevertHintStore` and the `nextTopic` parameters in the `onNextRevert()` method. you can store any metadata that is required for the compensation execution in the `RevertHintStore` and you can also use the `nextTopic` parameter to determine which compensation topic is going to be executed next.
+you can use the provided parameters to perform any action before reverting the execution as you can see in the example. see the Javadoc of the class for more details about the parameters of this method.
+
+<10> Sample usage of the `remainingReverts` and the `recentExecutedTopic` parameters in the `onNextRevert()` method.
 
 In the `EventManager`, there's two methods that are invoked by the Stacksaga engine as follows.
 
@@ -901,7 +903,7 @@ Not only next, the following actions can be taken conditionally in oneNext metho
 NOTE: As an alternative approach you can just throw an exception as well but as a best practice make sure to return your exception by wrapping with `SagaPrimaryEventAction.error()` method.
 . *SagaPrimaryEventAction.done()* if all the spans are processed as you expected you can indicate the transaction is successfully done by using this method.
 
-WARNING: As a best practice, avoid performing any I/O-intensive or CPU-intensive operations inside the event navigator.
+WARNING: As a best practice, avoid performing any I/O-intensive or High CPU-intensive operations inside the event navigator.
 This method should be used only to evaluate conditions based on the provided parameters. +
 The reason is that the Stacksaga-engine internally relies on Project Reactor’s reactive pipelines, which run on non-blocking event-loop threads.
 Executing expensive operations here could block those threads, leading to performance bottlenecks and impacting the entire application.
@@ -1016,6 +1018,38 @@ In this mode, Processes all records sequentially using a single execution flow r
 . No concurrent execution
 . Simplest execution model
 . Lower throughput
+
+===== Configuration Properties Of stacksaga-kafka-orchestrator
+
+[cols="5,1,1,3",options="header"]
+[.properties-table]
+|===
+| Property
+| DataType
+| Default Value
+| Description
+
+| `stacksaga.kafka.orchestrator.domain-entity-scan`
+| `String[]`
+| `[]`
+| A comma-separated list of package names to scan for `@SagaDomainEntity` annotated classes. for instance, `com.example.domain,com.example.anotherdomain`.
+
+| `stacksaga.kafka.orchestrator.auto-create`
+| `boolean`
+| `true`
+| A flag to enable or disable automatic creation of Kafka topics when the application starts.
+
+| `stacksaga.kafka.orchestrator.shared-response-listener.processing-mode`
+| `SharedListenerProcessingMode`
+| PARTITION_ORDERED`
+| The processing mode for the shared response listener. see more xref:#domain_root_topic_event_processing_modes[] for more details about the processing modes.
+
+| `stacksaga.kafka.orchestrator.shared-response-listener.concurrency`
+| `int`
+| `128`
+| if the `shared-response-listener.processing-mode` is set to `CONCURRENT`, this property defines the level of concurrency for processing messages in the shared response listener. it is ignored for other processing modes.
+
+|===
 
 [[stacksaga_kafka_worker]]
 === stacksaga-kafka-worker
@@ -1292,6 +1326,8 @@ public class ReactiveMakePaymentEndpoint extends ReactiveCommandEndpoint {
     //...
 }
 ----
+
+IMPORTANT: the `scheduler()` method is invoked only once when the application starts and the returned the `Scheduler` and then framework will cache it for the future use.
 
 In this example, we created a custom `MakePaymentExecutionSchedulerProvider` that extends the `AbstractSagaEndpointSchedulerProvider` and overrides the `scheduler()` method to provide a custom `Scheduler` configuration. then we configured the custom `SchedulerProvider` in the `ReactiveMakePaymentEndpoint` for both primary execution and revert execution by using the `primaryExecutionSchedulerProvider` and `revertExecutionSchedulerProvider` attributes of the `@SagaEndpoint` annotation. you can configure different `SchedulerProvider` for primary execution and revert execution if you want to have different configurations for each execution as well.
 
@@ -1600,5 +1636,3 @@ By default, the framework will use a *bounded elastic scheduler* suitable for bl
 It is not recommended to provide separate schedulers for each unless if it is necessary for your use case, as it may lead to resource contention and inefficient thread usage.
 In most cases, a shared scheduler for all endpoints is sufficient and more efficient. but using shared default scheduler can lead to starvation of tasks. see the xref:#configure_custom_scheduler_for_non_reactive_endpoints[] section to see how it can be configured a custom scheduler or see the xref:#override_default_scheduler_configurations[] section to see how to override the existing default shared scheduler configurations.
 //todo: explain about starvation of tasks when sharing the same scheduler.
-. `autoCreateTopic`
-- Indicates whether the framework should automatically create the respective Kafka topic if it does not exist.
