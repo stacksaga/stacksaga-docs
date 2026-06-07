@@ -1139,10 +1139,66 @@ the reason is that the original domain entity state (Entered State) is sent from
 <11> This is the most important part in the implementation of the endpoint. you must handle the exceptions properly by throwing them with the appropriate type. if the exception is retryable, you should throw it by wrapping with `RetryableExecutorException`. if the exception is non-retryable, you should throw it by wrapping with `NonRetryableExecutorException`.
 +
 IMPORTANT: IF the exception is retryable one, the full exception trace message is not sent to the orchestrator, instead, only the exception message is sent to the orchestrator to reduce the redundant information that is sent to the orchestrator because the retryable exceptions are automatically retried by the framework and there is nothing to monitor or debug.
++
+IMPORTANT: By throwing the `RetryableExecutorException`, stacksaga support asynchronous retrying based on scheduling. but it is recommended to implement immediate retrying by using the `JustRetryableExecutorException` before throwing the `RetryableExecutorException` to have a better user experience and reduce the overall processing time of the transaction. because the `JustRetryableExecutorException` will trigger an immediate retry without waiting for the scheduled retry, and if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt. in case the immediate retry is failed, you can throw the `RetryableExecutorException` to trigger the scheduled retry as a fallback mechanism. see here how the `JustRetryableExecutorException` can be used for immediate retrying in the endpoint implementation.
 
 <12> when throwing `NonRetryableExecutorException`, you can also provide additional information by using the `put()` method to add key-value pairs to the exception. this additional information can be useful for future compensation processing. because in the compensation processing, you can access the exception and get the additional information that you provided in the exception to perform the necessary compensation logic. for instance, if you put an `error_code` with value `USER_VALIDATION_FAILED` in the exception, you can access it in the compensation processing and check if the error code is `USER_VALIDATION_FAILED` to perform specific compensation logic for that error code.
 +
 IMPORTANT: Make sure not to manage the exception related metadata withing your exception because the exception object is not serialized and sent to the orchestrator. therefore, if you want to send any additional information related to the exception to the orchestrator for future compensation processing, you should use the `put()` method of the `NonRetryableExecutorException` to add that information in a key-value format. this way, the additional information will be serialized and sent to the orchestrator along with the message, and you can access it in the orchestrator side during the compensation processing. (only the exception trace is sent to the orchestrator as a string)
+
+====== Immediate retry with `JustRetryableExecutorException`
+
+Immediate retry with `JustRetryableExecutorException`  only support for the non-reactive endpoints because the reactive endpoints already support immediate retry by using the reactive programming paradigm without the need for a specific exception type. in the non-reactive endpoints, you can throw `JustRetryableExecutorException` to trigger an immediate retry without waiting for the scheduled retry. if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt. in case the immediate retry is failed, you can throw the `RetryableExecutorException` to trigger the scheduled retry as a fallback mechanism. in the non-reactive endpoints, the retry is handled behind the scenes by the framework by using spring retry-template. so you are able to use all the features that are provided by the xref:https://docs.spring.io/spring-batch/docs/4.3.10/reference/html/retry.html#retryTemplate[spring retry-template] for retrying in the non-reactive endpoints.
+Here is an example of how the `JustRetryableExecutorException` can be used for immediate retrying in the non-reactive query endpoint implementation.
+
+[source,java]
+----
+@Slf4j
+@SagaEndpoint(
+        topicNameSuffix = "payment.service.make-payment",
+        listenerScope = ListenerScope.SHARED
+)
+public class MakePaymentEndpoint extends CommandEndpoint {
+
+    @Override
+    public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord)
+            throws JustRetryableExecutorException, RetryableExecutorException, NonRetryableExecutorException {
+        consumerRecord
+                .value()
+                .getCurrentDomainEntityStateForUpdate()
+                .ifPresent(currentDomainEntityState -> {
+                    final String paymentReferenceId = currentDomainEntityState.get("payment_reference_id").asText();
+                    final double totalAmount = currentDomainEntityState.get("total_amount").asDouble();
+                    try {
+                        this.internalPaymentService.makePayment(paymentReferenceId, totalAmount);
+                    } catch (SomeRetryableException e) {
+                        RetryContext retryContext = consumerRecord.value().getRetryContext().orElseThrow();
+                        if (retryContext.getRetryCount() >= 3) {
+                            //if the retry count has reached the threshold, we can throw a NonRetryableExecutorException to stop further retries.
+                            throw NonRetryableExecutorException
+                                    .buildWith(e)
+                                    .put("error_code", "PAYMENT_FAILED_AFTER_RETRIES")
+                                    .build();
+                        } else {
+                            throw JustRetryableExecutorException.of("Payment failed, retrying... attempt " + (retryContext.getRetryCount() + 1));
+                        }
+                    } catch (SomeNonRetryableException e) {
+                        throw NonRetryableExecutorException
+                                .buildWith(e)
+                                .put("error_code", "PAYMENT_FAILED")
+                                .build();
+                    }
+                });
+    }
+
+    @Override
+    public void undoProcess(ConsumerRecord<String, SagaPayload> consumerRecord) throws
+            JustRetryableExecutorException, RetryableExecutorException {
+    }
+}
+----
+
+This example shows how to implement immediate retrying in the `MakePaymentEndpoint` command endpoint by using the `JustRetryableExecutorException`. in this example, if the `makePayment()` method throws a retryable exception, it checks the retry count from the `RetryContext` that is provided in the payload of the `ConsumerRecord`. although it has been wrapped with `Optional` you can safely access it because the retry context is always present if the executor is a non-reactive one. if the retry count has reached the threshold (in this example, it is 3), it throws a `NonRetryableExecutorException` to stop further immediate retries and indicate to the framework to schedule the retry based on the retry configurations. if the retry count has not reached the threshold, it throws a `JustRetryableExecutorException` with a message indicating to the framework to invoke an immediate retry. if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt.
 
 [[reactive-query-endpoint]]
 ====== Reactive Query Endpoint
@@ -1170,7 +1226,7 @@ public class ReactiveUserValidateEndpoint extends ReactiveQueryEndpoint {//<1>
         String username = currentDomainEntityState.get("username").asText();
         return this.internalUserService
                 .getUserDetails(username)
-                .map(userDetails -> {
+                .flatMap(userDetails -> {
                     {
                         //user validation logic
                     }
@@ -1206,6 +1262,12 @@ xref:#sagakafka_topics[] which creates as the type of `SagaEventType.COMMAND_DO_
 
 For instance, in the place-order example, the execution of *Make Payment* execution is a command execution because it makes state change in the payment service's database by creating a new payment record and updating the user's balance. in case the entire process should be compensated after successfully executing the *Make Payment* execution, the compensation action will be triggered to undo the payment.
 
+In the Command endpoints, there are two methods that you need to implement to handle the primary execution and the compensation execution. the `doProcess()` method is responsible for executing the primary execution and the `undoProcess()` method is responsible for executing the compensation logic to undo the changes that are made by the primary execution in case of any failure in the next steps after the primary execution. therefore, you need to implement both methods to have a complete command endpoint implementation.
+
+* in the `doProcess()` method, it can be thrown `RetryableExecutorException` and `NonRetryableExecutorException` to indicate the failure of the primary execution to the framework. if `RetryableExecutorException` is thrown, the framework will schedule the transaction for retrying based on the retry configurations. if `NonRetryableExecutorException` is thrown, the framework will trigger the compensation process to undo the transaction.
+
+* If it is thrown `NonRetryableExecutorException` from the `doProcess()` method, the modified values withing the method is not applied to the domain entity state because the compensation process is started and the state will be reverted to the last successful state. see more in details in the example.
+
 *Command endpoints* can be created in two different ways in StackSaga.
 
 . xref:#non-reactive-command-endpoint[]
@@ -1221,6 +1283,7 @@ Non-reactive command endpoints are the traditional and blocking way of implement
 ----
 @Slf4j
 @SagaEndpoint(
+        topicNameSuffix = "payment.service.make-payment",
         listenerScope = ListenerScope.SHARED
 )
 class MakePaymentEndpoint extends CommandEndpoint { //<1>
@@ -1279,8 +1342,48 @@ IMPORTANT: The updated or added hints in the hint store is applied only if there
 
 If you are in a reactive programming environment and want to implement the command endpoints in a non-blocking way, you can extend the `ReactiveCommandEndpoint` class and implement the `doProcess()` and `undoProcess()` methods by using the reactive programming paradigm with Project Reactor's `Mono` and `Flux` types. the theory for implementing the reactive command endpoint is the same as the non-reactive command endpoint, but you need to return a `Mono<Void>` from both methods and use the reactive operators to handle asynchronous operations and exceptions. for instance, you can use the `map()`, `flatMap()`, and `onErrorResume()` operators to implement the business logic and exception handling in a reactive way.
 
+[source,java]
+----
+@Slf4j
+@SagaEndpoint( //<2>
+        topicNameSuffix = "payment.service.make-payment",
+        listenerScope = ListenerScope.SHARED
+)
+class ReactiveMakePaymentEndpoint extends ReactiveCommandEndpoint { //<1>
 
+    @Override
+    public Mono<Void> doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) {
+        //the theory is the same as the query endpoint.
+    }
 
+    @Override
+    public Mono<Void> undoProcess(ReceiverRecord<String, SagaPayload> consumerRecord) {
+        log.info("Message Key (Transaction Id): {}", consumerRecord.key());
+        log.info("IdempotencyKey: {}", consumerRecord.value().getIdempotencyKey());
+        final JsonNode lastDomainEntityState = consumerRecord.value().getDomainEntityState();
+        log.info("Last domain entity state {}", lastDomainEntityState);
+        final double totalAmount = lastDomainEntityState.get("total_amount").asDouble();
+        final String paymentRef = lastDomainEntityState.get("payment_reference_id").asText();
+        this.internalPaymentSerivce
+                .refundPayment(paymentRef, totalAmount)
+                .flatMap(response -> {
+                        //update some hints for the next revert execution if needed.
+                        consumerRecord.value().getHintStore().ifPresent(hintStore -> {
+                            hintStore.put("last_refund_time", LocalDateTime.now().toString());
+                        });
+                        return Mono.empty();
+                })
+                .onErrorResume(SomeRetryableException.class, e -> {//<3>
+                    return Mono.error(RetryableExecutorException.of(e));
+                });
+    }
+}
+----
 
+NOTE: `doProcess()` method implementation is not provided in the example because the main focus is on the `undoProcess()` method to explain the compensation processing in the command endpoints. but the theory for implementing the `doProcess()` method is the same as the query endpoint that is explained in the previous section. read the xref:#non-reactive-query-endpoint[] to understand how to implement the `doProcess()` method.
 
+<1> Create a custom reactive command endpoint class by extending the `ReactiveCommandEndpoint` class.
+<2> Annotate the custom reactive command endpoint class with `@SagaEndpoint` annotation. it primarily marks the class as a spring bean.
+<3> Identify the retryable exceptions that can be thrown from the compensation logic and make sure to handle them by using the `onErrorResume()` operator to return a `Mono.error()` with `RetryableExecutorException` to enable the retrying mechanism for the compensation process. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated. therefore, it is important to handle the exceptions properly in the compensation logic to ensure that the compensation process can retry when necessary and to avoid unexpected termination of the transaction.
 
+IMPORTANT: Based on the `RetryableExecutorException` Stacksaga framework provide only the asynchronous retrying (scheduling retry). if you want to have the immediate retrying( in the same thread), you can manage it withing the pipeline by using the `retryWhen()` operator of the reactive programming. it is recommended implement the immediate retrying logic first before throwing the `RetryableExecutorException` to have a better control over the retrying mechanism and to avoid unnecessary scheduling of retries when the retry can be done immediately. in case the immediate retry is exhausted, you can throw the `RetryableExecutorException` to schedule the retry based on the retry configurations. read more about Retry to better understand the retrying mechanisms.
