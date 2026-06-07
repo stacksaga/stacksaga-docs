@@ -1151,6 +1151,8 @@ IMPORTANT: Make sure not to manage the exception related metadata withing your e
 Immediate retry with `JustRetryableExecutorException`  only support for the non-reactive endpoints because the reactive endpoints already support immediate retry by using the reactive programming paradigm without the need for a specific exception type. in the non-reactive endpoints, you can throw `JustRetryableExecutorException` to trigger an immediate retry without waiting for the scheduled retry. if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt. in case the immediate retry is failed, you can throw the `RetryableExecutorException` to trigger the scheduled retry as a fallback mechanism. in the non-reactive endpoints, the retry is handled behind the scenes by the framework by using spring retry-template. so you are able to use all the features that are provided by the xref:https://docs.spring.io/spring-batch/docs/4.3.10/reference/html/retry.html#retryTemplate[spring retry-template] for retrying in the non-reactive endpoints.
 Here is an example of how the `JustRetryableExecutorException` can be used for immediate retrying in the non-reactive query endpoint implementation.
 
+NOTE: Immediate retry with `RetryTemplate` is supported for `doProcess()` method in both non-reactive command and query endpoints and also for `undoProcess()` method in the non-reactive command endpoints.
+
 [source,java]
 ----
 @Slf4j
@@ -1199,6 +1201,67 @@ public class MakePaymentEndpoint extends CommandEndpoint {
 ----
 
 This example shows how to implement immediate retrying in the `MakePaymentEndpoint` command endpoint by using the `JustRetryableExecutorException`. in this example, if the `makePayment()` method throws a retryable exception, it checks the retry count from the `RetryContext` that is provided in the payload of the `ConsumerRecord`. although it has been wrapped with `Optional` you can safely access it because the retry context is always present if the executor is a non-reactive one. if the retry count has reached the threshold (in this example, it is 3), it throws a `NonRetryableExecutorException` to stop further immediate retries and indicate to the framework to schedule the retry based on the retry configurations. if the retry count has not reached the threshold, it throws a `JustRetryableExecutorException` with a message indicating to the framework to invoke an immediate retry. if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt.
+
+====== Configure Custom ExecutionSchedulerProvider for Non-Reactive Endpoints
+
+Due to the fact that StackSaga works in non-blocking and reactive under the hood, If the endpoint is one of *non-reactive*, it should be configured the `Scheduler` for executing the blocking code in a non-blocking way. the framework provides a default shared Scheduler for both primary execution and revert execution of the non-reactive endpoints, but you can configure a custom `Scheduler` for your endpoints by creating a custom `ExecutionSchedulerProvider` and configuring it in the endpoint. because sometimes the default shared `Scheduler` may not be suitable for your use case, for instance, if you want to have a dedicated `Scheduler` for each endpoint or if you want to configure the `Scheduler` with specific configurations.
+
+The default shared `Scheduler` that is provided by the framework is a `boundedElastic` Scheduler with the fallowing configurations:
+
+. Primary Execution Scheduler
+* threadCap : `Runtime.getRuntime().availableProcessors() * 10`
+* queuedTaskCap: `100_000`
+* ttlSeconds: `60`
+* daemon: `false`
+
+. Revert Execution Scheduler
+* threadCap : `Runtime.getRuntime().availableProcessors() * 3`
+* queuedTaskCap: `100_000`
+* ttlSeconds: `60`
+* daemon: `false`
+
+Here is an example of how to create a custom `ExecutionSchedulerProvider` and configure it in the endpoint.
+
+
+
+
+[[configure_retry_template_for_non_reactive_endpoints]]
+===== Configure `RetryTemplate` for Non-Reactive Endpoints
+
+As we mentioned above, the non-reactive endpoints use `RetryTemplate` for handling retries, and you can configure the `RetryTemplate` to customize the retry behavior for your endpoints. you can configure the `RetryTemplateBuilder` by defining a bean of type `AbstractRetryTemplateProvider` in your application context and overriding the `retryTemplateBuilder()` method to provide your custom configuration for the `RetryTemplate`. here is an example of how to configure the `RetryTemplate` for non-reactive endpoints.
+
+[source,java]
+----
+@Component
+public class MakePaymentRetryTemplateProvider extends AbstractRetryTemplateProvider {
+    @Override
+    protected RetryTemplateBuilder retryTemplateBuilder() {
+        SimpleRetryPolicy simpleRetryPolicy = new SimpleRetryPolicy();
+        simpleRetryPolicy.setMaxAttempts(3);
+        return RetryTemplate.builder().customPolicy(simpleRetryPolicy);
+    }
+}
+----
+
+IMPORTANT: The `MakePaymentRetryTemplateProvider` class is annotated with `@Component` to make it a Spring bean.
+
+After creating the custom `RetryTemplateProvider`, you can configure it into the endpoint as below.
+
+[source,java]
+----
+@Slf4j
+@SagaEndpoint(
+        topicNameSuffix = "payment.service.make-payment",
+        listenerScope = ListenerScope.SHARED,
+        primaryExecutionRetryTemplate = MakePaymentRetryTemplateProvider.class, //<1>
+        revertExecutionRetryTemplate = MakePaymentRetryTemplateProvider.class //<2>
+)
+public class MakePaymentEndpoint extends CommandEndpoint {
+    //...
+}
+----
+
+In this example, the `MakePaymentRetryTemplateProvider` is configured for both primary execution and revert execution by using the `primaryExecutionRetryTemplate` and `revertExecutionRetryTemplate` attributes of the `@SagaEndpoint` annotation. you can configure different `RetryTemplateProvider` for primary execution and revert execution if you want to have different retry behavior for each execution.
 
 [[reactive-query-endpoint]]
 ====== Reactive Query Endpoint
@@ -1387,3 +1450,84 @@ NOTE: `doProcess()` method implementation is not provided in the example because
 <3> Identify the retryable exceptions that can be thrown from the compensation logic and make sure to handle them by using the `onErrorResume()` operator to return a `Mono.error()` with `RetryableExecutorException` to enable the retrying mechanism for the compensation process. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated. therefore, it is important to handle the exceptions properly in the compensation logic to ensure that the compensation process can retry when necessary and to avoid unexpected termination of the transaction.
 
 IMPORTANT: Based on the `RetryableExecutorException` Stacksaga framework provide only the asynchronous retrying (scheduling retry). if you want to have the immediate retrying( in the same thread), you can manage it withing the pipeline by using the `retryWhen()` operator of the reactive programming. it is recommended implement the immediate retrying logic first before throwing the `RetryableExecutorException` to have a better control over the retrying mechanism and to avoid unnecessary scheduling of retries when the retry can be done immediately. in case the immediate retry is exhausted, you can throw the `RetryableExecutorException` to schedule the retry based on the retry configurations. read more about Retry to better understand the retrying mechanisms.
+
+====== @SagaEndpoint Annotation
+
+`@SagaEndpoint` is the main annotation that is used to mark the custom endpoint classes in Stacksaga Kafka worker applications. it is a meta-annotation that is used to create custom annotations for different types of endpoints such as query endpoints and command endpoints. the `@SagaEndpoint` annotation provides several attributes that can be used to configure the behavior of the endpoint, such as the topic name suffix, listener scope, and other configurations. by using this annotation, you can easily create and configure your custom endpoints in a consistent way across your application. here we are going to see all the attributes of the `@SagaEndpoint` annotation and how to use them to tuning the behavior of your endpoints for your specific use case.
+
+. `value`
+- Description: This attribute is used to provide a unique name for the endpoint. it is optional and can be used for better readability and debugging purposes. if not provided, the framework will use the class name as the default value for the endpoint name.
+Spring bean is created with the name provided in this attribute.
+. `topicNameSuffix`
+- provide the suffix of the topic name for this endpoint. the framework will create the real topic name by concatenating the provided suffix as  `saga.do.user-service.get-user`. the prefix `saga.do` is added by the framework to indicate that this topic is used for the primary execution. this is the topic the `EventManager` will send the command messages to trigger the execution of this endpoint. therefore, it is important to provide the correct topic name suffix that matches the topic name that is used in the `EventManager` to ensure that the messages are sent to the correct topic and consumed by the correct endpoint.
+. `listenerScope`
+- Provide the listener scope for the endpoint. `listenerScope` defines how the message listeners are created and managed for the endpoint. it can be either `ListenerScope.SHARED` or `ListenerScope.ISOLATED`. if it is set to `ListenerScope.SHARED`, the framework binds the respective topic to the default shared message listener container. if it is set to `ListenerScope.ISOLATED`, the framework creates a dedicated message listener container for the respective topic. if you want to have an isolated listener for a specific endpoint, you can set the `listenerScope` to `ListenerScope.ISOLATED` for that endpoint. this allows you to have better control over the message consumption and processing for that specific endpoint without affecting other endpoints that share the same listener. listenerScope tuning is one of the most important configurations that should be highly considered. read the xref:#[ListenerScope tuning] section in the best practices chapter to understand how to choose the appropriate listener scope for your endpoints based on your use case and requirements.
+
+. `processingMode`
+- if the `listenerScope` is set to `ListenerScope.ISOLATED`, here is where you can define the processing mode for the isolated listener. it can be one of fallowing values.
+
+** *Partition-Ordered Mode* `ProcessingMode.PARTITION_ORDERED` [Default] +
+In this mode, Processes records sequentially *per partition* while allowing concurrent execution across multiple partitions.
+
+*** Preserves ordering within each partition
+*** Allows partition-level concurrency
+*** Balanced throughput and consistency
+*** Recommended for most Kafka consumers
+
+** *Concurrent Mode* `ProcessingMode.CONCURRENT` +
+In this mode,Processes records concurrently without preserving ordering.
+*** Highest throughput
+*** No ordering guarantees
+*** Records from the same partition may complete out of order
+*** Suitable for independent or stateless processing
+
+** *Sequential Mode* `ProcessingMode.SEQUENTIAL` +
+In this mode, Processes all records sequentially using a single execution flow regardless Kafka's partitioning.
+*** Strict global ordering
+*** No concurrent execution
+*** Simplest execution model
+*** Lower throughput
+
+. `primaryExecutionConcurrency`
+- Specifies the concurrency level used for primary record processing (for `doProcess()`) when `processingMode` is configured as `ProcessingMode.CONCURRENT`.
+Multiple records may be processed concurrently using the configured number of worker threads. +
+The value may be provided either as a numeric literal or as a Spring property placeholder. +
+For example: +
+`primaryExecutionConcurrency = "10"` +
+`primaryExecutionConcurrency = "${saga.sample1.primary.concurrency}"`
++
+When a property placeholder is used, the value is resolved from the application configuration.
+`saga.sample1.primary.concurrency=10`
++
+`Default: Runtime.getRuntime().availableProcessors() * 2`
+
+. `revertExecutionConcurrency`
+- Specifies the concurrency level used for compensation record processing (for `undoProcess()`) when `processingMode` is configured as `ProcessingMode.CONCURRENT`.
+Multiple records may be processed concurrently using the configured number of worker threads. +
+The value may be provided either as a numeric literal or as a Spring property placeholder. +
+For example: +
+`revertExecutionConcurrency = "5"` +
+`revertExecutionConcurrency = "${saga.sample1.revert.concurrency}"`
++
+When a property placeholder is used, the value is resolved from the application configuration.
+`saga.sample1.revert.concurrency=5`
++
+Default: `Runtime.getRuntime().availableProcessors()`
++
+This is not applicable for the `QueryEndpoint` because it does not have compensation processing, so the `revertExecutionConcurrency` will be ignored if it is provided in the `@SagaEndpoint` annotation of a `QueryEndpoint`.
+
+. `primaryExecutionRetryTemplate`
+- Specifies the `RetryTemplateProvider` class to be used for primary execution retries for non-reactive `CommandEndpoint` and `QueryEndpoint`'s `doProcess()` method. see xref:configure_retry_template_for_non_reactive_endpoints[] for more details.
+
+. `revertExecutionRetryTemplate`
+- Specifies the `RetryTemplateProvider` class to be used for compensation execution retries for non-reactive `CommandEndpoint`'s `undoProcess()` method. see xref:configure_retry_template_for_non_reactive_endpoints[] for more details.
+
+. `primaryExecutionSchedulerProvider`
+- Only applicable with primary executions (`CommandEndpoint.doProcess(ConsumerRecord)`, `QueryEndpoint.doProcess(ConsumerRecord)`).
+Provides a custom `AbstractPrimaryExecutionSchedulerProvider` for controlling the scheduler on which the primary execution processing occurs.
+#This is important for isolating blocking operations from the Kafka consumer thread to prevent performance degradation and ensure responsiveness#.
+By default, the framework will use a *bounded elastic scheduler* suitable for blocking workloads via `DefaultSchedulerConfig`, but you can provide your own implementation to customize pool size, naming, and other characteristics.
+It is not recommended to provide separate schedulers for each unless if it is necessary for your use case, as it may lead to resource contention and inefficient thread usage.
+In most cases, a shared scheduler for all endpoints is sufficient and more efficient. but using shared default scheduler can lead to starvation of tasks.
+//todo: explain about starvation of tasks when sharing the same scheduler.
+
