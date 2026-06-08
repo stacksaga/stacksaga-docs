@@ -1188,6 +1188,44 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
 ===== Handler Architecture
 
 StackSaga team suggests to implement the saga transaction related things in a separate class called `Handler` that is responsible for starting, listening and checking the status of the saga transactions.
+The below code snippet is showing the recommended architecture for the Handler.
+
+
+[source,java]
+----
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
+
+    private StackSagaKafkaTemplate<OrderDomainEntity, PlaceOrderTopic> stackSagaKafkaTemplate;
+
+    public String handle(String username, double amount, List<String> items) { //<1>
+        return this
+                .stackSagaKafkaTemplate
+                .init(() -> {
+                  //....
+                })
+                .....
+    }
+
+    public CustomOrderStatusView getCurrentState(String orderId) { //<2>
+        return this
+                .stackSagaKafkaTemplate
+                .getCurrentState(orderId)
+                ......
+
+    }
+    @Override
+    public void onStateChanged(TransactionState<OrderDomainEntity> transactionState) { //<3>
+        //....
+    }
+}
+----
+
+<1> The `handle` method is responsible for starting the saga transaction by using the `StackSagaKafkaTemplate` and providing the required parameters to start the transaction.
+<2> Fetch the current state of the transaction by using the `StackSagaKafkaTemplate`
+<3> Implement the `onStateChanged` method to listen to the transaction status changes by implementing the `TransactionEventListener` interface and override the `onStateChanged` method.
 
 
 
