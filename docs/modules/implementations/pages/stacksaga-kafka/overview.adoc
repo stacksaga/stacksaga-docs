@@ -1044,6 +1044,8 @@ public class PlaceOrderHandler {
 <10> Log the current state of the domain entity.
 <11> Get the started time of the transaction from the `TransactionState` object and log it.
 
+NOTE: There is another way to being updated about the transaction status changes by using the xref:#event_listener_for_stage_change_events[EventListener].
+
 IMPORTANT: Go through the Javadoc of the `TransactionState` class to see all the features that are provided in the transaction state object to get more insights about the transaction.
 
 ====== StackSagaKafkaTemplate In Reactive environment
@@ -1100,6 +1102,94 @@ class ReactivePlaceOrderHandler {
 ----
 
 NOTE: All the things are the same except the usage of `executeAsync` instead of `execute` to start the execution in a non-blocking way and also to get the current state in a non-blocking way. read the xref:#stackSagaKafkaTemplate_usage_in_non_reactive_environment[blocking example] to get the details explained about the usage of the `StackSagaKafkaTemplate`.
+
+[[event_listener_for_stage_change_events]]
+===== EventListener For Stage Change Events
+
+After handing over the transaction to the StackSaga-Kafka engine by calling the `execute` or `executeAsync` method of the `StackSagaKafkaTemplate`, the transaction is being executed and updated the status time to time after each execution (primary and compensation) in the transaction flow.
+so if you want to keep listening to the transaction status changes and perform any action based on that, framework provides the way to do that.
+
+It also can be implemented based on the environment.
+
+. `TransactionEventListener` for non-reactive environment.
+. `ReactiveTransactionEventListener` for reactive environment.
+
+If you want to get notified about the transaction status changes, there are two ways are available in the framework.
+
+. Using `SagaKafkaTemplate.getCurrentState`
+. Using `TransactionEventListener` or `ReactiveTransactionEventListener`.
+
+IMPORTANT: using `SagaKafkaTemplate.getCurrentState` method to get the current state of the transaction by providing the transactionId approach is not efficient because when you call this method, the engine fetches the current state of the transaction from the event-store.
+but if you are using the listeners, you will be notified about the transaction status changes after each execution in the transaction flow without the need to call any method to get the current state of the transaction because the current state of the transaction is being passed to the callback method of those listeners realtime.
+due to it is happening realtime you don't want to pool the transaction state. for instance in the place-order example, after executing you can push the notification to update the user about the order status changes by using those listeners.
+but in some cases you might want to get the current state of the transaction even after the transaction is completed. for instance after use might need to see the details after placing order. then you can use the `SagaKafkaTemplate.getCurrentState` method to get the current state of the transaction by providing the transactionId.
+The use cases are different for both approaches, so you can choose the one that is suitable for your use case.
+
+IMPORTANT: While you are using the `onChange` method of the listeners, be aware that the method is invoked after each execution in the transaction flow, so make sure to perform only the required action in that method and avoid doing any heavy processing in that method because it can be caused to delay the entire transaction flow.
+if you want to do some heavy processing based on the transaction status changes, it is recommended make a deep copy of the `TransactionState` object and then perform the heavy processing with a separate thread by letting the saga thread to continue the execution without being unnecessarily delayed. or you can use the `SagaKafkaTemplate.getCurrentState` method to get the current state of the transaction and then perform the heavy processing based on that.
+
+====== TransactionEventListener
+
+You can implement the `TransactionEventListener` interface to listen to the transaction events in a non-reactive environment as below.
+
+[source,java]
+----
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
+    @Override
+    public void onStateChanged(TransactionState<OrderDomainEntity> state) {
+        TransactionCompleteStatus currentStatus = state.getCurrentStatus();
+        log.info("Current status of transaction: {}", currentStatus);
+        NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();
+        log.info("Execution history of transaction: {}", executionHistory);
+        OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
+        log.info("Current domain entity state: {}", currentDomainEntity);
+        ZonedDateTime startedDateTime = state.getStartedDateTime();
+        log.info("Transaction started at: {}", startedDateTime.toLocalDateTime());
+    }
+}
+----
+
+====== ReactiveTransactionEventListener
+
+You can implement the `ReactiveTransactionEventListener` interface to listen to the transaction events in reactive environment as below.
+
+[source,java]
+----
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {
+    @Override
+    public Mono<Void> onStateChanged(TransactionState<OrderDomainEntity> transactionState) {
+        return Mono
+                .just(transactionState)
+                .doOnNext(state -> {
+                    TransactionCompleteStatus currentStatus = state.getCurrentStatus();
+                    log.info("Current status of transaction: {}", currentStatus);
+                    NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();
+                    log.info("Execution history of transaction: {}", executionHistory);
+                    OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
+                    log.info("Current domain entity state: {}", currentDomainEntity);
+                    ZonedDateTime startedDateTime = state.getStartedDateTime();
+                    log.info("Transaction started at: {}", startedDateTime.toLocalDateTime());
+                })
+                .flatMap(orderDomainEntityTransactionState -> {
+                    //simulate some async processing here.
+                    return Mono.delay(Duration.ofSeconds(1))
+                            .then();
+                });
+    }
+}
+----
+
+===== Handler Architecture
+
+StackSaga team suggests to implement the saga transaction related things in a separate class called `Handler` that is responsible for starting, listening and checking the status of the saga transactions.
+
+
 
 [[domain_root_topic_event_processing_modes]]
 ===== Event Processing Modes
