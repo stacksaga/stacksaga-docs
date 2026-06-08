@@ -386,10 +386,7 @@ This approach is known as domain-entity event sourcing.
 *Domain-Entity event sourcing provides two main benefits:*
 
 . Transaction Re-Invoke (Retrying and Restoring)
-- If an atomic execution fails due to a transient issue (such as a temporary resource unavailability), the system can retry the operation. or if the transaction is stopped due to a critical failure, it can be restored and re-invoked after the issue is resolved.
-
-when the retry is begun, the transaction should be started where the transaction was stopped previously. to start the transaction from the same point, it has to be restored the same data that was used when the transaction was stopped.
-
+- If an atomic execution fails due to a transient issue (such as a temporary resource unavailability), the system can retry the operation. or if the transaction is stopped due to a critical failure, it can be restored and re-invoked after the issue is resolved. when the retry is begun, the transaction should be started where the transaction was stopped previously. to start the transaction from the same point, it has to be restored the same data that was used when the transaction was stopped.
 . Transaction Traceability via Dashboard
 - By storing every change to the domain-entity, the system enables detailed debugging and auditing.
 Administrators can inspect the domain-entity’s state before and after each execution runs, making it easy to trace the transaction’s evolution step by step through the Trace-Window dashboard.
@@ -427,6 +424,7 @@ image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="sta
 
 NOTE: In the compensating executions, it can not be used the domain-entity object to update the data. because the domain-entity is used only for the primary executions in Stacksaga. the revert Revert-Hint-Store can be used for compensation executions to store any metadata that is required for the compensating executions.
 
+[[creating_custom_domain_entity]]
 ===== Creating Custom Domain-Entity
 
 To create a custom domain-entity, you need to create a class that extends the `SagaDomainEntity` class provided by the framework. and you can add any fields that are required for your transaction in that class. for instance, if you are going to create a domain-entity for order processing, you can create an `OrderDomainEntity` class and add fields such as username, total amount, items that the customer bought, etc. and also you can add any other fields that are required for your transaction. and then you can use this custom domain-entity class when starting the transaction by passing an instance of it to the `SagaKafkaTemplate.process(...)` method.
@@ -670,7 +668,7 @@ The framework may invoke it concurrently.
 [[sagakafka_topics_and_event_manager]]
 ===== Topic And EventManager
 
-[[sagakafka_topics]]
+[[custom_topic_implementation]]
 ====== StackSaga Topic
 
 StackSaga Topics are constant values that are used to identify the execution endpoint in StackSaga.
@@ -896,49 +894,46 @@ you can use the provided parameters to perform any action before reverting the e
 
 <10> Sample usage of the `remainingReverts` and the `recentExecutedTopic` parameters in the `onNextRevert()` method.
 
-In the `EventManager`, there's two methods that are invoked by the Stacksaga engine as follows.
-
-. `onNext()`
-. `onNextRevert()`
-
-====== `onNext()` method
-
-`onNext()` method is executed by stacksaga-engine #after each primary execution is succeeded# by providing the update state of the aggregator until the last successful execution, and the recent successful topic name.
-It gives you the chance to determine what topic should be triggered next.
-Not only next, the following actions can be taken conditionally in oneNext method.
-
-. *SagaPrimaryEventAction.next(`nextTopic`)*: As we mentioned above you can pass the next topic along with this static method.
-. *SagaPrimaryEventAction.error(`exception`)* Conditionally if you want to stop going forward and start compensation you can return an exception with this method.
-+
-NOTE: As an alternative approach you can just throw an exception as well but as a best practice make sure to return your exception by wrapping with `SagaPrimaryEventAction.error()` method.
-. *SagaPrimaryEventAction.done()* if all the spans are processed as you expected you can indicate the transaction is successfully done by using this method.
-
 WARNING: As a best practice, avoid performing any I/O-intensive or High CPU-intensive operations inside the event navigator.
 This method should be used only to evaluate conditions based on the provided parameters. +
 The reason is that the Stacksaga-engine internally relies on Project Reactor’s reactive pipelines, which run on non-blocking event-loop threads.
 Executing expensive operations here could block those threads, leading to performance bottlenecks and impacting the entire application.
 
 [[topic_model_stacksaga_kafka_orchestrator]]
-===== StackSaga Kafka Topic Model For `stacksaga-kafka-orchestrator`
+===== Topics And Listener Models In `stacksaga-kafka-orchestrator`
 
-StackSaga uses three types of Kafka topics to perform saga orchestration as follows.
+===== Topics
 
-. *Shared Root Topic* +
-This topic is used to consume response messages from Kafka client endpoints.
-All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` use the same shared root topic to receive response messages.
+In `stacksaga-kafka-orchestrator`,it creates dedicated topic for each `EventManager` of the `DomainEntity` to receive the response messages from the kafka worker endpoints.
+The name of the topic is created by concatenating the provided `domainRootTopicSuffix` with the prefix `saga.internal.{serviceName}.{domainRootTopicSuffix}` for instance, if the service name is `order-service` and the `domainRootTopicSuffix` is `place-order`, the topic name will be `saga.internal.order-service.place-order`.
 
-* For example, if the service name is `order-service`, the framework creates and uses the following shared root topic: `saga.internal.shared.order-service`
+the `domainRootTopicSuffix` is configured in the `@SagaEventManager` annotation of the EventManager as below.
 
-* All saga domains configured with `@SagaEventManager(listenerScope = ListenerScope.SHARED)` are bound to this topic and consume response messages from Kafka client endpoints.
+[source,java]
+----
+@SagaEventManager(
+        domainRootTopicSuffix = "place-order"
+)
+----
 
-* If Kafka is configured to allow automatic topic creation, the framework creates the topic during application startup if it does not already exist.
-The topic is created using the framework's default partition count and replication factor configuration.
-Otherwise, the topic must be created manually following the naming convention: `saga.internal.shared.{serviceName}`
+===== Listener Models
+
+Even though it creates dedicated topic for each `EventManager`, there are two different listener models that are used to consume the messages from those topics based on the `listenerScope` configuration of the `EventManager` which is mentioned in the `@SagaEventManager` annotation. those two listener models are,
+
+====== SHARED
+
+If the `@SagaEventManager` is configured with `listenerScope = ListenerScope.SHARED`, the framework bind the relevant response-topic of that EventManager to a shared-listener. +
+If you have multiple EventManagers with `listenerScope = ListenerScope.SHARED` all the topics that are related to those EventManagers will be bind to the same shared-listener.
+
+Here is the architecture for the shared listener model in `stacksaga-kafka-orchestrator`.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Shared kafka receiver in stacksaga kafka orchestrator,width=800]
+
 
 * The consumer group is configured using the following naming convention: `{serviceName}-os` where `os` stands for *Orchestration Service*. +
 For example, if the service name is `order-service`, the consumer group for the shared root topic will be: `order-service-os`
 
-* The consumer is configured with: `auto.offset.reset=earliest` This ensures that previously published messages can be consumed after a service restart when no committed offset is available.
+* The shared listener/receiver is configured with: `auto.offset.reset=earliest` This ensures that previously published messages can be consumed after a service restart when no committed offset is available.
 
 * Message consumption is configured using *At-Least-Once* delivery semantics to ensure that messages are not lost, even in the event of service downtime or unexpected failures.
 
@@ -947,21 +942,20 @@ For example, if the service name is `order-service`, the consumer group for the 
 * Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
 Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
 
-* A `KafkaReceiver` is created and configured internally by the framework to consume messages from the shared root topic.
+====== ISOLATED
 
-- The *Shared Root Topic* architecture as fallows.
-+
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Shared kafka receiver in stacksaga kafka orchestrator,width=800]
+If the `@SagaEventManager` is configured with `listenerScope = ListenerScope.ISOLATED`, the framework will create a dedicated listener for the relevant response-topic of that EventManager. therefore, if you have multiple EventManagers with `listenerScope = ListenerScope.ISOLATED`, each EventManager will have its own dedicated listener and its own dedicated topic to receive the response messages from the kafka worker endpoints. this approach provides better isolation and can help to avoid any potential interference between different EventManagers, but it can also increase the resource consumption due to having multiple listeners.
 
+Here is the architecture for the isolated-listener model in `stacksaga-kafka-orchestrator`.
 
-. *Domain-Root Topics* +
-If the `@SagaEventManager` is configured with `listenerScope = ListenerScope.ISOLATED`, the framework creates a dedicated domain-root topic for that EventManager to consume response messages from Kafka client endpoints.
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Isolated kafka receiver in stacksaga kafka orchestrator,width=800]
+
 
 * The name of the domain-root topic is created by concatenating the provided `domainRootTopicSuffix` with the prefix `saga.internal.isolated.{serviceName}.{domainRootTopicSuffix}` For instance, if the service name is `order-service` and the `domainRootTopicSuffix` is `place-order`, the domain-root topic name will be `saga.internal.isolated.order-service.place-order`.
 
 * the consumer group for the domain-root topic is set as the same way as the shared root topic by following the convention `{serviceName}-os`. therefore, in the previous example, the consumer group for the domain-root topic will be `order-service-os`. the other configurations for the domain-root topic are the same as the shared root topic.
 
-* Same as the shared root topic, the domain-root topics are also configured with `auto.offset.reset=earliest` to ensure that previously published messages can be consumed after a service restart when no committed offset is available.
+* Same as the shared, the domain-root topics are also configured with `auto.offset.reset=earliest` to ensure that previously published messages can be consumed after a service restart when no committed offset is available.
 
 * Same as the shared root topic, the domain-root topics are also configured with *At-Least-Once* delivery semantics, and the offsets are acknowledged and committed in the same way as the shared root topic.
 
@@ -970,33 +964,142 @@ If the `@SagaEventManager` is configured with `listenerScope = ListenerScope.ISO
 * Same as the shared root topic, Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
 Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
 
-- The *Domain-Root Topics* with *Isolated KafkaReceiver* architecture as fallows.
-+
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Isolated kafka receiver in stacksaga kafka orchestrator,width=800]
-
-===== StackSagaKafkaTemplate
-
-[[topic_model_stacksaga_kafka_worker]]
-===== StackSaga Kafka Topic Model For `stacksaga-kafka-worker`
-
-. *Regular Topics* +
-The topics that are used to send the command messages to the worker services. these are the topics that you register in the `EventManager` by overriding the `registerTopics()` method. for instance, in the place-order example, there are 7 regular topics that are used to send the command messages to the worker services as mentioned above.
-If the topics are not exist in the Kafka cluster and auto-creation of topics is enabled framework will create the topics automatically during the application startup. otherwise, you need to create the topics manually in the Kafka cluster before starting the application.
-The special thing is that both `stacksaga-kafka-orchestrator` and `stacksaga-kafka-worker` try to create the topics if they are not exist in the Kafka cluster and auto-creation of topics is enabled to avoid the delay of `metadata polling` that is caused by the first time topic creation. the reason for both trying to create the topics is the `stacksaga-kafka-orchestrator` has the awareness of all the configured topics via the `EventManager` and also the `stacksaga-kafka-worker` has the awareness of the topics that are relevant to their service via the `SagaEndpoint`s.
-
-* The endpoints which are configured as `@SagaEndpoint(listenerScope=ListenerScope.SHARED)`, bind to a share `KafkaReceiver` to receive messages from the shared root topic. the architecture for this topic model is as follows. +
-+
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-worker .svg[Shared kafka receiver in stacksaga kafka worker,width=800]
-
-* The endpoints which are configured as `@SagaEndpoint(listenerScope=ListenerScope.ISOLATED)`, bind to a dedicated `KafkaReceiver` to receive messages from the respective topics that are registered via the `KafkaEndpoint`. the architecture for this topic model is as follows. +
-+
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-worker.svg[Isolated kafka receiver in stacksaga kafka worker,width=800]
-
-
-
 *Why `ListenerScope` tuning is important?*
 
 //todo: complete this part.
+
+===== StackSagaKafkaTemplate
+
+`StackSagaKafkaTemplate` is the main entry point for accessing the StackSaga-Kafka engine (SEC) functionalities in the orchestrator service.
+it provides the main APIs for starting a new saga transaction and checking the status of the existing transactions.
+
+`StackSagaKafkaTemplate` can be used in both reactive and non-reactive programming models. if you are in non-reactive environment, it can be used as below.
+
+[[stackSagaKafkaTemplate_usage_in_non_reactive_environment]]
+====== StackSagaKafkaTemplate In Non-Reactive environment
+
+This demonstrates how to use the `StackSagaKafkaTemplate` to start a new saga transaction for placing an order and also how to check the current state of the transaction.
+
+[source,java]
+----
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class PlaceOrderHandler {
+
+    private StackSagaKafkaTemplate<OrderDomainEntity, PlaceOrderTopic> stackSagaKafkaTemplate; //<1>
+
+    public String handle(String username, double amount, List<String> items) {
+        String transactionId = this.stackSagaKafkaTemplate
+                //<2>
+                .init(() -> {
+                    OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
+                    {//initializing the domain entity with the required properties for the saga execution.
+                        orderDomainEntity.setUsername(username);
+                        orderDomainEntity.setTotalAmount(amount);
+                        //...
+                    }
+                    return orderDomainEntity;
+                })
+                //<3>
+                .peek(orderDomainEntity -> {
+                    log.info("transactionId {}:", orderDomainEntity.getTransactionId());
+                })
+                //<4>
+                .startWith(PlaceOrderTopic.DO_FETCH_USER_DETAILS, OrderEventManager.class)
+                //<5>
+                .execute();
+        log.info("Started place order saga with transactionId: {}", transactionId);
+        return transactionId;
+    }
+
+    public void printCurrentState(String transactionId) {
+        TransactionState<OrderDomainEntity> state = this
+                .stackSagaKafkaTemplate
+                //<6>
+                .getCurrentState(transactionId)
+                .execute();
+
+        TransactionCompleteStatus currentStatus = state.getCurrentStatus(); //<7>
+        log.info("Current status of transaction {}: {}", transactionId, currentStatus);
+        NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();//<8>
+        log.info("Execution history of transaction {}: {}", transactionId, executionHistory);
+        OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity(); //<9>
+        log.info("Current domain entity state: {}", currentDomainEntity); //<10>
+        ZonedDateTime startedDateTime = state.getStartedDateTime(); //<11>
+        log.info("Transaction {} started at: {}", transactionId, startedDateTime.toLocalDateTime());
+    }
+}
+----
+
+<1> Autowire the `StackSagaKafkaTemplate` in your class. you have to provide the custom xref:#creating_custom_domain_entity[`DomainEntity`] and the custom xref:#custom_topic_implementation[`Topic`] class as the generic parameters of the `StackSagaKafkaTemplate`.
+<2> Use the `init` operator to initialize the transaction by providing a supplier of the custom DomainEntity. this method is used to create the initial state of the transaction by providing the required properties for the saga execution in the DomainEntity.
+<3> Use the `peek` operator (optional) to perform any action with the initialized DomainEntity before starting the execution. the usage of this operator is that is to see the generated transactionId after initializing the DomainEntity because #the transactionId is generated and set in the DomainEntity by the framework at the time of passing via `init` operator#. therefore, you can use this operator to see the generated transactionId before starting the execution.
+<4> Use the `startWith` operator to specify the first topic that should be triggered to start the execution and also provide the EventManager class that is related to the transaction. this operator is used to indicate the starting point of the execution by providing the first topic that should be triggered and also the EventManager class that is responsible for navigating the execution flow.
+<5> Use the `execute` operator to start the execution of the transaction in blocking way.
+<6> Use the `getCurrentState` operator to get the current state of the transaction by providing the transactionId. this method is used to retrieve the current state of the transaction at any point in time by providing the transactionId. yu can see all the details about the transaction state in the returned `TransactionState` object such as the current status of the transaction, the execution history, the current state of the domain entity, the started time and many more details.
+<7> Get the current status of the transaction from the `TransactionState` object.
+<8> Get the execution history of the transaction from the `TransactionState` object. the execution history is a navigable map that contains all the executed endpoints in the transaction flow (primary and compensation) with their metadata such as the execution status, completed time event name and more.
+<9> Get the current state of the domain entity from the `TransactionState` object. this is the latest state of the domain entity after applying all the changes that are done by the executed endpoints in the transaction flow.
+<10> Log the current state of the domain entity.
+<11> Get the started time of the transaction from the `TransactionState` object and log it.
+
+IMPORTANT: Go through the Javadoc of the `TransactionState` class to see all the features that are provided in the transaction state object to get more insights about the transaction.
+
+====== StackSagaKafkaTemplate In Reactive environment
+
+If you are in a reactive environment, you can use the `StackSagaKafkaTemplate` in a non-blocking way by using the reactive operators provided by the template as below.
+
+[source,java]
+----
+@Component
+@RequiredArgsConstructor
+class ReactivePlaceOrderHandler {
+    private StackSagaKafkaTemplate<OrderDomainEntity, PlaceOrderTopic> stackSagaKafkaTemplate;
+
+    public Mono<String> handle(String username, double amount, List<String> items) {
+        return this
+                .stackSagaKafkaTemplate
+                .init(() -> {
+                    OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
+                    {//initializing the domain entity with the required properties for the saga execution.
+                        orderDomainEntity.setUsername(username);
+                        orderDomainEntity.setTotalAmount(amount);
+                        //...
+                    }
+                    return orderDomainEntity;
+                })
+                .peek(orderDomainEntity -> {
+                    log.info("transactionId {}:", orderDomainEntity.getTransactionId());
+                })
+                .startWith(PlaceOrderTopic.DO_FETCH_USER_DETAILS, OrderEventManager.class)
+                .executeAsync()
+                .doOnNext(transactionId -> {
+                    log.info("Started place order saga with transactionId: {}", transactionId);
+                });
+    }
+    public Mono<Void> printAndCurrentState(String transactionId) {
+        return this
+                .stackSagaKafkaTemplate
+                .getCurrentState(transactionId)
+                .executeAsync()
+                .doOnNext(state -> {
+                    TransactionCompleteStatus currentStatus = state.getCurrentStatus();
+                    log.info("Current status of transaction {}: {}", transactionId, currentStatus);
+                    NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();
+                    log.info("Execution history of transaction {}: {}", transactionId, executionHistory);
+                    OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
+                    log.info("Current domain entity state: {}", currentDomainEntity);
+                    ZonedDateTime startedDateTime = state.getStartedDateTime();
+                    log.info("Transaction {} started at: {}", transactionId, startedDateTime.toLocalDateTime());
+                })
+                .then();
+
+    }
+}
+----
+
+NOTE: All the things are the same except the usage of `executeAsync` instead of `execute` to start the execution in a non-blocking way and also to get the current state in a non-blocking way. read the xref:#stackSagaKafkaTemplate_usage_in_non_reactive_environment[blocking example] to get the details explained about the usage of the `StackSagaKafkaTemplate`.
 
 [[domain_root_topic_event_processing_modes]]
 ===== Event Processing Modes
@@ -1087,7 +1190,7 @@ Stacksaga Kafka Endpoints stands for creating topics accordingly Stacksaga engin
 ===== Query Endpoint
 
 If an execution(atomic execution) doesn't make any state change due to executing that execution those kinds of executions are executed in *Query Endpoints*. due to it doesn't make any changes in the database state, it has no any compensation action to undo. +
-these are the topics that define in the in xref:#sagakafka_topics[] with type of `SagaEventType.QUERY_DO_ACTION`
+these are the topics that define in the in xref:#custom_topic_implementation[] with type of `SagaEventType.QUERY_DO_ACTION`
 
 For instance, in the place-order example, the execution of *fetching user's details and validate* is a query execution because it doesn't make any state change in the database, it just fetches the data and returns it. here is the custom endpoint for that execution.
 
@@ -1437,7 +1540,7 @@ Most of the points are the same as the xref:#non-reactive-query-endpoint[], the 
 ===== Command Endpoint
 
 If an atomic execution makes state change in the database those kinds of executions are executed in *Command Endpoints*. due to it makes changes in the database, it has compensation action to undo. +
-xref:#sagakafka_topics[] which creates as the type of `SagaEventType.COMMAND_DO_ACTION` and `SagaEventType.COMMAND_UNDO_ACTION` are configured in the command endpoints.
+xref:#custom_topic_implementation[] which creates as the type of `SagaEventType.COMMAND_DO_ACTION` and `SagaEventType.COMMAND_UNDO_ACTION` are configured in the command endpoints.
 
 For instance, in the place-order example, the execution of *Make Payment* execution is a command execution because it makes state change in the payment service's database by creating a new payment record and updating the user's balance. in case the entire process should be compensated after successfully executing the *Make Payment* execution, the compensation action will be triggered to undo the payment.
 
@@ -1647,6 +1750,22 @@ It is not recommended to provide separate schedulers for each unless if it is ne
 In most cases, a shared scheduler for all endpoints is sufficient and more efficient. but using shared default scheduler can lead to starvation of tasks. see the xref:#configure_custom_scheduler_for_non_reactive_endpoints[] section to see how it can be configured a custom scheduler or see the xref:#override_default_scheduler_configurations[] section to see how to override the existing default shared scheduler configurations.
 //todo: explain about starvation of tasks when sharing the same scheduler.
 
+
+[[topic_model_stacksaga_kafka_worker]]
+===== StackSaga Kafka Topic Model For `stacksaga-kafka-worker`
+
+. *Regular Topics* +
+The topics that are used to send the command messages to the worker services. these are the topics that you register in the `EventManager` by overriding the `registerTopics()` method. for instance, in the place-order example, there are 7 regular topics that are used to send the command messages to the worker services as mentioned above.
+If the topics are not exist in the Kafka cluster and auto-creation of topics is enabled framework will create the topics automatically during the application startup. otherwise, you need to create the topics manually in the Kafka cluster before starting the application.
+The special thing is that both `stacksaga-kafka-orchestrator` and `stacksaga-kafka-worker` try to create the topics if they are not exist in the Kafka cluster and auto-creation of topics is enabled to avoid the delay of `metadata polling` that is caused by the first time topic creation. the reason for both trying to create the topics is the `stacksaga-kafka-orchestrator` has the awareness of all the configured topics via the `EventManager` and also the `stacksaga-kafka-worker` has the awareness of the topics that are relevant to their service via the `SagaEndpoint`s.
+
+* The endpoints which are configured as `@SagaEndpoint(listenerScope=ListenerScope.SHARED)`, bind to a share `KafkaReceiver` to receive messages from the shared root topic. the architecture for this topic model is as follows. +
++
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-worker .svg[Shared kafka receiver in stacksaga kafka worker,width=800]
+
+* The endpoints which are configured as `@SagaEndpoint(listenerScope=ListenerScope.ISOLATED)`, bind to a dedicated `KafkaReceiver` to receive messages from the respective topics that are registered via the `KafkaEndpoint`. the architecture for this topic model is as follows. +
++
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-worker.svg[Isolated kafka receiver in stacksaga kafka worker,width=800]
 
 ===== Configuration Properties Of stacksaga-kafka-worker
 
