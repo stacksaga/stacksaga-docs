@@ -1,0 +1,273 @@
+:description: Deep-dive technical reference for the StackSaga-Kafka Framework — reactive saga orchestration in Spring Boot microservices using Kafka for asynchronous, event-driven distributed transaction management.
+:keywords: StackSaga-Kafka, saga orchestration, microservices, Java, Spring Boot, Kafka, distributed transactions, event sourcing, reactive programming, transaction management, idempotency, fault tolerance, workflow compensation, Reactor Kafka, LRT
+
+= StackSaga-Kafka Framework (Asynchronous)
+
+== Overview
+
+*StackSaga-Kafka Framework* (`stacksaga-kafka-spring-boot-starter`) is the asynchronous transport implementation of the StackSaga ecosystem.
+It replaces synchronous inter-service calls with Kafka as the messaging backbone, enabling fully event-driven saga execution for long-running transactions (LRT) in a microservices system.
+
+Unlike a simple choreography approach where each service publishes and reacts to domain events independently, StackSaga-Kafka follows a *centralized orchestration* model: a single orchestrator service owns the full saga lifecycle, emits commands to target worker services via dedicated Kafka topics, and collects responses through a framework-managed per-domain reply topic.
+This separation gives you the scalability and decoupling of Kafka while retaining the deterministic control flow and auditability of the saga orchestration pattern.
+
+The framework is built on top of Spring Boot and integrates with StackSaga's core engine for event sourcing, state management, retry scheduling, and cluster coordination.
+Each saga execution is fully persisted — every state transition of the `SagaDomainEntity` (the saga's aggregate root and payload carrier) is written to the event store through `stacksaga-database-support` — so that any in-progress transaction can be recovered, retried, or inspected at any point in time.
+
+*Key capabilities:*
+
+* *Asynchronous saga orchestration* — the orchestrator issues commands to worker services via Kafka and advances the saga state only upon receiving the worker's reply, with no blocking thread held during the wait.
+* *Forward and backward recovery* — built-in support for compensating transactions: when a saga step fails, the framework invokes `onNextRevert()` on the `SagaEventNavigator` in reverse step order, triggering rollback actions on each previously completed service.
+* *Per-domain reply topology* — outbound command topics are created per worker intent; inbound reply topics are created per saga domain by the framework.
+A system with three saga domains maintains exactly three reply topics, keeping Kafka partition management predictable.
+* *Durable state via event sourcing* — the full `SagaDomainEntity` payload and status (`STARTED → IN_PROGRESS → COMPLETED | FAILED → COMPENSATING → COMPENSATED`) is persisted on every state transition, enabling point-in-time recovery and complete audit trails.
+* *Distributed retry with token ring partitioning* — failed or stalled transactions are retried by the owning orchestrator instance as determined by Murmur3-based token ring partitioning, coordinated through the `stacksaga-ring-coordinator`.
+* *Idempotency guarantees* — duplicate Kafka message delivery is handled safely through the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window], preventing unintended re-execution of already-completed saga steps.
+* *Reactive and imperative support* — the framework's worker-side `KafkaWorkerEndpoints` abstraction supports both reactive (`Mono`/`Flux`) and blocking handler implementations, giving application developers freedom to choose their programming model without affecting saga coordination.
+
+== Glossary
+
+The following terms are used throughout this documentation.
+Familiarising yourself with them before reading the technical sections will significantly reduce the learning curve.
+
+[cols="1,3",options="header"]
+[.properties-table]
+|===
+| Term | Definition
+
+| *LRT (Long-Running Transaction)*
+| A business transaction that spans multiple services and may take seconds, minutes, or longer to complete.
+LRTs require durable state management, distributed coordination, and compensation support for partial failures.
+
+| *Saga Domain*
+| A specific type of LRT identified by its `DomainEntity` subclass.
+All saga instances of the same type (e.g., every `PlaceOrder` transaction) belong to the same saga domain.
+Each domain has its own `EventManager`, Kafka reply topic, and set of spans.
+
+| *Span*
+| A single atomic execution step within a saga.
+Each span targets one worker service via a dedicated Kafka topic.
+A saga is composed of one or more sequential spans in the primary flow, each with an optional corresponding compensation span.
+
+| *SEC (Saga Execution Coordinator)*
+| The internal engine component responsible for driving a saga forward: evaluating the `EventManager`, dispatching commands to workers, receiving replies, persisting state transitions, and triggering compensation when needed.
+`StackSagaKafkaTemplate` is the developer-facing entry point to the SEC.
+
+| *Domain Entity*
+| The aggregate root for a single saga instance.
+Carries the full accumulated business payload and current execution state throughout the saga lifecycle.
+Every state transition is persisted as a snapshot to the event store.
+
+| *EventManager*
+| The orchestrator-side component that defines the routing logic for a saga domain.
+Determines which topic to trigger next after each successful span (`onNext()`) and provides hooks for the compensation sequence (`onNextRevert()`).
+
+| *Executor*
+| A worker-side handler that executes the business logic for a specific saga step.
+Implemented as a `QueryEndpoint` (read-only, no compensation) or a `CommandEndpoint` (state-changing, has a compensation action).
+
+| *Compensation*
+| The reverse process that undoes previously completed steps when a saga fails.
+Executed in reverse order via `onNextRevert()` in the `EventManager` and `undoProcess()` in `CommandEndpoint` implementations.
+
+| *Event Store*
+| The persistent storage layer for all saga state transitions and domain entity snapshots.
+Provided by `stacksaga-database-support`.
+Enables point-in-time recovery, retry, and full audit trails.
+
+| *Revert Hint Store*
+| A key-value store that carries metadata forward through the compensation sequence.
+Values written during one `undoProcess()` call are available to the next compensation step.
+
+| *Topic Key*
+| A unique `float` value assigned to each saga topic.
+Used in Kafka message headers instead of the raw topic name, keeping messages compact and decoupling the wire format from topic name refactoring.
+
+| *Ring Coordinator*
+| A standalone service (`stacksaga-ring-coordinator`) that manages token ring partitioning for retry ownership.
+Distributes Murmur3 token sub-ranges among orchestrator instances so each stalled transaction is retried by exactly one instance without distributed locking.
+
+|===
+
+== Why StackSaga-Kafka Over Raw Kafka?
+
+Using Kafka alone for service-to-service communication in a saga does not automatically give you saga orchestration.
+A raw Kafka topology requires every participating service to understand the broader transaction context: which step it is in, what has already succeeded, what to roll back if something goes wrong, and how to track overall saga progress.
+This logic inevitably leaks into every service, making the system fragile and difficult to evolve.
+
+The following comparison explains the specific gaps StackSaga-Kafka closes.
+
+=== Centralized Transaction State Management
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw Kafka*
+| Kafka delivers messages durably but has no concept of a business transaction. There is no built-in mechanism to know that "step 2 of 5 has completed" or that a transaction is in a compensating state.
+
+| *StackSaga-Kafka*
+| The orchestrator tracks the full saga lifecycle through well-defined states: `STARTED → IN_PROGRESS → COMPLETED \| FAILED → COMPENSATING → COMPENSATED`. The `SagaDomainEntity` is the single source of truth: it carries the transaction payload (all accumulated data from previous steps) and the current execution cursor. State transitions are persisted atomically to the event store on every step completion or failure.
+
+| *Advantage*
+| No saga coordination logic needs to be implemented in individual worker services. The orchestrator is the sole authority on saga state.
+|===
+
+=== Resilience and Fault Tolerance
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw Kafka*
+| Kafka provides delivery durability and at-least-once guarantees, but it does not know what to do when the message is consumed and the downstream operation fails. Retry logic, timeouts, and compensation decisions must be built separately.
+
+| *StackSaga-Kafka*
+| The framework implements configurable retry windows, boundary guard thresholds, and automatic compensation invocation. If a worker service returns a failure response, the saga engine immediately begins the reverse traversal of the `SagaEventNavigator`, calling `onNextRevert()` for each completed forward step in reverse order. For transient failures (timeouts, infrastructure errors), the retry subsystem re-invokes the saga from the last unacknowledged step using the Murmur3 token ring scheduler.
+
+| *Advantage*
+| Data consistency is maintained across services even under partial failures, without embedding retry or rollback logic in each service.
+|===
+
+=== Simplified Development
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw Kafka*
+| Developers must implement state machine logic, idempotency checks, saga step routing, and compensation orchestration in every service that participates in a business transaction.
+
+| *StackSaga-Kafka*
+| The orchestrator-side abstraction (`SagaKafkaTemplate`, `SagaEventNavigator`, `SagaDomainEntity`) and the worker-side abstraction (`KafkaWorkerEndpoints`) provide clear contracts for each role. Developers define what the steps *do* and in what order; the framework handles routing, persistence, retrying, and compensation sequencing.
+
+| *Advantage*
+| Reduces boilerplate significantly and confines distributed transaction concerns to a small, testable layer.
+|===
+
+=== Operational Observability
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw Kafka*
+| Consumer lag metrics and broker-level monitoring are available, but there is no concept of "transaction X is stuck at step 3" or "compensation for order Y failed".
+
+| *StackSaga-Kafka*
+| The `stacksaga-trace-window-connector` exposes APIs consumed by the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] UI, providing per-transaction step-level traces, execution timelines, failure points, retry counts, and compensation status.
+
+| *Advantage*
+| Operations teams can diagnose stalled or failed sagas at the business-transaction level, not just at the Kafka consumer level.
+|===
+
+== Components
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stacksaga-kafka-basic-components.svg[StackSaga-Kafka Framework Component Overview,width=800]
+
+The StackSaga-Kafka Framework is split into two artifacts with distinct responsibilities.
+They communicate with each other exclusively through Kafka: the orchestrator sends outbound command messages to worker-designated topics, and workers send reply messages back to the framework-managed per-domain reply topic.
+
+. xref:#stacksaga-kafka-orchestrator[`stacksaga-kafka-orchestrator`]
+. xref:#stacksaga-kafka-worker[`stacksaga-kafka-worker`]
+
+[[stacksaga-kafka-orchestrator]]
+=== stacksaga-kafka-orchestrator
+
+`stacksaga-kafka-orchestrator` is the core runtime dependency added to the *orchestrator service* — the single service responsible for initiating and driving the saga lifecycle.
+
+It exposes:
+
+* xref:stacksaga-kafka/saga-kafka-template/saga-kafka-template.adoc[`SagaKafkaTemplate`] — the entry point for starting a new saga execution or resuming a recovered one.
+Accepts an initialized `SagaDomainEntity` and hands it off to the saga engine.
+* xref:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[`SagaEventNavigator`] — defines the ordered steps and compensation steps of a saga.
+The engine calls `onNext()` sequentially for forward progress and `onNextRevert()` in reverse order during compensation.
+* xref:stacksaga-kafka/aggregator/aggregator.adoc[`SagaDomainEntity`] — the aggregate root for a saga instance.
+Carries the accumulated business payload and the current execution state.
+It is serialized and persisted to the event store on every state transition.
+
+To run your application as an orchestrator service, first add the `stacksaga-kafka-orchestrator-starter` dependency to your project.
+
+[source,xml]
+----
+
+<dependencyManagement>
+    <dependencies>
+        <dependency> <!--Only for stacksaga dependencies version management-->
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-kafka-orchestrator-starter</artifactId>
+    </dependency>
+</dependencies>
+----
+
+IMPORTANT: It has been built internally using reactive programming principles, ensuring high scalability and performance.
+It primarily uses *Reactor Kafka* for interacting with Kafka.
+Even though the framework operates reactively under the hood, it fully supports both reactive and non-reactive (imperative) application models.
+
+IMPORTANT: If your orchestrator service should work as the worker for another saga domain owned by a different orchestrator, no need to add the worker dependency (`stacksaga-kafka-worker-starter`) separately. because the orchestrator dependency already includes the worker dependency transitively.
+
+Additionally, the orchestrator service must include:
+
+* `stacksaga-database-support` — provides the event store integration (MySQL, Cassandra, or ScyllaDB depending on configuration) for persisting `SagaDomainEntity` snapshots and state transitions.
+* `stacksaga-ring-coordinator-connector` _(optional, required for retry)_ — connects the orchestrator instance to the `Ring Coordinator Service`, registers it as a retry node, and receives its assigned Murmur3 token sub-range.
+Enables the retry subsystem to re-invoke failed transactions owned by this instance.
+* xref:stacksaga:stacksaga-environment-support:overview/stacksaga-environment-support.adoc[`stacksaga-environment-support`] _(optional)_ — provides environment metadata to the framework for service discovery and instance identity resolution in environments such as Eureka or Kubernetes.
+
+[[stacksaga-kafka-worker]]
+=== stacksaga-kafka-worker
+
+`stacksaga-kafka-worker` is the dependency added to every *worker service* (also called a target service or utility service) that participates in sagas initiated by an orchestrator.
+
+The worker dependency provides:
+
+* A Kafka listener infrastructure that subscribes to the topic(s) designated for that service by the framework's topic configuration.
+* xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-endpoints.adoc[`KafkaWorkerEndpoints`] — the abstraction through which application developers implement the forward processing logic and the compensation logic for each saga step handled by this service.
+* Automatic response dispatch — after the endpoint handler completes (successfully or with a failure result), the worker sends the outcome back to the framework via the orchestrator's per-domain reply topic.
+The application developer does not manage this reply flow directly.
+
+Worker services do not interact with the event store or the ring coordinator.
+They are stateless with respect to the saga: they receive a command, execute the relevant business operation, and return a result.
+
+NOTE: A single worker service can handle steps for multiple orchestrator domains (i.e., multiple saga types), each routed to the correct `KafkaWorkerEndpoints` implementation by the framework.
+
+To add the worker dependency, include `stacksaga-kafka-worker-starter` in your worker project as below.
+
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency> <!--Only for stacksaga dependencies version management-->
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+<dependencies>
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-kafka-worker-starter</artifactId>
+    </dependency>
+</dependencies>
+----

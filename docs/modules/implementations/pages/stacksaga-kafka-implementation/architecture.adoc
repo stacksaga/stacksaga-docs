@@ -1,0 +1,220 @@
+:description: StackSaga-Kafka four-stage architecture walkthrough — from basic setup to production-ready deployment with retry, observability, and environment support.
+:keywords: StackSaga-Kafka, architecture, Kafka saga, retry ring coordinator, trace window, environment support
+
+= Architecture
+
+The following sections describe the StackSaga-Kafka architecture progressively across four deployment stages.
+Each stage builds on the previous one, adding production-readiness capabilities incrementally.
+This staged approach makes it possible to start with a minimal setup and harden the system as requirements grow.
+
+. xref:#stacksaga-kafka-architecture-1st-stage[Stage 1: Basic Setup] — orchestrator + worker communication over Kafka.
+. xref:#stacksaga-kafka-architecture-2nd-stage[Stage 2: Retry-Ready Setup] — distributed retry via ring coordinator.
+. xref:#stacksaga-kafka-architecture-3rd-stage[Stage 3: Monitoring Setup] — saga-level observability via trace window.
+. xref:#stacksaga-kafka-architecture-4th-stage[Stage 4: Environment Support] — service discovery and multi-environment integration.
+
+[[stacksaga-kafka-architecture-1st-stage]]
+== Stage 1 — Basic Setup
+
+This stage establishes the minimal viable topology: an orchestrator service that can start and drive sagas, and one or more worker services that can receive commands and return results over Kafka.
+No retry coordination or external monitoring is configured at this stage.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-1-minimal-architecture-overview.svg[StackSaga-Kafka Architecture: Stage 1 — Basic Setup,width=800]
+
+=== Dependencies
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| Service
+| Dependency
+| Purpose
+
+| Orchestrator
+| `stacksaga-kafka-orchestrator`
+| Provides the saga engine, `SagaKafkaTemplate`, `SagaEventNavigator`, and the Kafka producer for outbound command topics.
+
+| Orchestrator
+| `stacksaga-database-support`
+| Provides the event store adapter for persisting `SagaDomainEntity` state and execution history.
+
+| Worker
+| `stacksaga-kafka-worker`
+| Provides the Kafka consumer infrastructure and `KafkaWorkerEndpoints` abstraction.
+|===
+
+=== Request and Execution Flow
+
+. An inbound HTTP request (e.g., `POST /order`) reaches the `OrderController` on the orchestrator service.
+. The controller instantiates a `PlaceOrderDomainEntity` — the `SagaDomainEntity` subclass for the order placement saga — populates its initial payload, and calls `SagaKafkaTemplate.process(...)`.
+From this point the saga engine takes full control.
+. The engine evaluates the `PlaceOrderEventNavigator` to determine the first step and calls `onNext()` with the current domain entity.
+. The `onNext()` implementation produces a command message to the designated outbound Kafka topic for the target service (e.g., the payment service's command topic).
+The message carries the saga step identifier and the serialized domain entity payload.
+. The worker service, which has the `stacksaga-kafka-worker` dependency, consumes the message from its designated topic via the registered `KafkaWorkerEndpoints` handler.
+It executes the business operation (e.g., charge the payment) and produces a reply message to the *per-domain reply topic* managed by the framework.
+For the `PlaceOrderDomainEntity` domain, this is a single, dedicated reply topic created automatically by the framework.
+. The orchestrator's internal Kafka consumer reads the reply from the domain reply topic.
+If the step succeeded, the engine updates the domain entity state, persists the new snapshot to the event store, and advances to the next step by calling `onNext()` again.
+. If the worker replies with a failure, the engine transitions the saga to `FAILED`, persists the failure state, and begins compensation by calling `onNextRevert()` on each previously completed step in reverse order.
+Each `onNextRevert()` produces a compensation command to the relevant worker topic.
+Workers handle compensation commands through their dedicated `KafkaWorkerEndpoints` compensation handler and reply via the same domain reply topic.
+. Each state transition — step completion, failure, compensation start, compensation completion — is written to the event store via `stacksaga-database-support`.
+
+
+NOTE: The diagram above shows a single span (`MakePaymentSpan`) for clarity.
+In practice, a saga can traverse any number of spans across different worker services, each with its own command topic.
+All replies — regardless of which worker sent them — flow back to the single per-domain reply topic.
+The reply topic consumer is configured with `auto.offset.reset=earliest` and at-least-once delivery semantics.
+This is safe because the framework's built-in idempotency check (via the per-span idempotency key) detects any duplicate re-delivery that may occur after a consumer rebalance or an offset commit delay, and discards the duplicate without re-executing the saga step.
+
+[[stacksaga-kafka-architecture-2nd-stage]]
+== Stage 2 — Retry-Ready Setup
+
+Stage 2 introduces the distributed retry capability.
+Without this stage, a saga that stalls due to a transient infrastructure failure (e.g., a worker service being temporarily unavailable, a Kafka broker partition becoming unavailable, or a timeout) will remain in an incomplete state indefinitely.
+Stage 2 makes the system self-healing for such failures.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-2-retry-ready-architecture-overview.svg[StackSaga-Kafka Architecture: Stage 2 — Retry-Ready Setup,width=800]
+
+=== New Components at This Stage
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| Service
+| New Component
+| Purpose
+
+| Ring Coordinator Service
+| `stacksaga-ring-coordinator`
+| A standalone service that manages the token ring. It tracks available orchestrator instances, distributes Murmur3 token sub-ranges among them, and handles range rebalancing when instances join or leave the cluster.
+
+| Orchestrator
+| `stacksaga-ring-coordinator-connector`
+| Connects the orchestrator instance to the ring coordinator (via RSocket `request-stream`), receives and holds its assigned token sub-range, and enables the local retry scheduler to scan the event store for transactions whose Murmur3 hash falls within the owned range.
+|===
+
+=== Retry Mechanism
+
+By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, the instance is promoted to a *retry node*.
+The ring coordinator assigns each registered orchestrator instance a contiguous sub-range of the Murmur3 token ring.
+The retry scheduler on each instance periodically scans the event store for transactions that are in a non-terminal state (e.g., `IN_PROGRESS`, `COMPENSATING`) and whose transaction ID hashes into the locally owned token range.
+When such a transaction is found, the scheduler re-submits it to the saga engine for re-execution from the last incomplete step.
+
+This partitioning ensures that in a multi-instance orchestrator deployment, each stuck transaction is retried by exactly one instance — there is no duplication of retry work and no need for distributed locking.
+When an instance restarts or a new instance joins, the ring coordinator rebalances token ranges and the new assignment is delivered over the existing RSocket stream.
+
+NOTE: The ring coordinator is a separate service (`stacksaga-ring-coordinator-spring-boot-starter`) that must be deployed independently.
+It is a lightweight coordination service and does not participate in the business logic or the Kafka message flow.
+
+[[stacksaga-kafka-architecture-3rd-stage]]
+== Stage 3 — Monitoring and Observability Setup
+
+Stage 3 adds the observability layer, enabling the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] to query real-time and historical saga execution data from the orchestrator service.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-3-monitoring-and-retry-ready-architecture-overview.svg[StackSaga-Kafka Architecture: Stage 3 — Monitoring + Retry-Ready,width=800]
+
+=== New Component at This Stage
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| Service
+| New Component
+| Purpose
+
+| Orchestrator
+| `stacksaga-trace-window-connector`
+| Exposes a set of internal APIs (consumed by the StackSaga Trace Window UI) that surface per-transaction execution traces, step-level timelines, failure details, retry histories, and compensation status from the event store.
+|===
+
+=== What Becomes Visible
+
+With the trace window connector in place, the StackSaga Trace Window provides:
+
+* Per-saga execution graphs showing each step, its execution timestamp, duration, status, and any error payload.
+* Compensation traces showing which `onNextRevert()` calls were made, in what order, and whether they succeeded.
+* Retry audit logs showing how many retry attempts were made, which retry node handled each attempt, and the outcome.
+* Live transaction status for in-progress sagas.
+
+This layer does not change the Kafka topology or the retry behavior — it is a passive observability connector that reads from the existing event store and exposes the data through an API consumed by the Trace Window UI.
+
+[[stacksaga-kafka-architecture-4th-stage]]
+== Stage 4 — Environment Support Setup
+
+Stage 4 adds environment awareness to the framework, enabling it to resolve service instance metadata correctly when running in dynamic environments such as Eureka-based service meshes or Kubernetes deployments.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-4-env-support-and-monitoring-and-retry-ready-architecture-overview.svg[StackSaga-Kafka Architecture: Stage 4 — Environment Support + Monitoring + Retry-Ready,width=800]
+
+=== New Component at This Stage
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| Service
+| New Component
+| Purpose
+
+| Orchestrator + Ring Coordinator Agent
+| `stacksaga-environment-support`
+| Provides the framework with environment-specific metadata: the current instance's host, port, and service identity as visible to the service discovery mechanism. This is required for the ring coordinator to correctly register and deregister orchestrator instances as they come up and go down in dynamic environments.
+|===
+
+NOTE: "Ring Coordinator Agent" in this context refers to the orchestrator service instance that has `stacksaga-ring-coordinator-connector` included — i.e., the same service that acts as a retry node.
+Adding `stacksaga-environment-support` to this service enables the ring coordinator to correctly identify the instance in environments where the host or port is dynamically assigned.
+
+=== Environment Support and Topic Resolution
+
+In cloud-native deployments, the environment support module ensures that:
+
+* The orchestrator instance registers with the ring coordinator using its actual reachable address, not a loopback or internal Docker address.
+* Instance-level metrics and trace data surfaced in the Trace Window are attributed to the correct service instance.
+* Service discovery metadata (e.g., Eureka instance ID or Kubernetes pod name) is available to the framework for logging and observability correlation.
+
+With Stage 4 in place, the full StackSaga-Kafka deployment is production-ready: it supports asynchronous saga execution, distributed retry with token ring partitioning, comprehensive observability, and correct operation in dynamic cloud environments.
+
+[[stacksaga-kafka-state-machine]]
+== Saga Transaction State Machine
+
+Every saga instance transitions through a well-defined set of states.
+Understanding these states and their transition triggers is essential for interpreting transaction history in the Trace Window and for implementing correct exception handling in endpoints and the `EventManager`.
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| State | Type | Triggered By
+
+| `STARTED`
+| Intermediate
+| `StackSagaKafkaTemplate.execute()` or `executeAsync()` is called successfully and the first span is queued for dispatch.
+
+| `IN_PROGRESS`
+| Intermediate
+| The first worker reply is received and the engine advances to the next span.
+
+| `COMPLETED`
+| *Terminal — success*
+| `SagaPrimaryEventAction.complete()` is returned from `onNext()` after the last span completes successfully.
+
+| `FAILED`
+| Intermediate
+| A `NonRetryableExecutorException` is thrown from a worker's `doProcess()`, or any exception is thrown from `onNext()` in the `EventManager`.
+Immediately triggers the compensation sequence.
+
+| `COMPENSATING`
+| Intermediate
+| Follows `FAILED`. The engine begins calling `onNextRevert()` and dispatching compensation commands to workers in reverse step order.
+
+| `COMPENSATED`
+| *Terminal — success*
+| All compensation spans complete successfully.
+
+| Compensation Failed
+| *Terminal — failure*
+| An unhandled exception is thrown from `onNextRevert()` in the `EventManager`, or a compensation step exhausts its configured retry limit.
+See xref:stacksaga-database-support:overview/database-support-overview.adoc[stacksaga-database-support] for retry limit and dead-letter configuration.
+
+|===
+
+NOTE: A saga in any non-terminal state (`STARTED`, `IN_PROGRESS`, `FAILED`, `COMPENSATING`) is eligible for recovery by the ring coordinator retry scheduler if it stalls.
+Only the three terminal states — `COMPLETED`, `COMPENSATED`, and Compensation Failed — are considered permanently resolved and will not be retried.
