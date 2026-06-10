@@ -55,7 +55,14 @@ image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="sta
 
 == Domain Entity Lifecycle
 
-- The Saga Domain-Entity object is created by you as the developer, yor are supposed to create the custom domain-domain-entity object before starting the transaction. you can create the object by adding the initial data that is required for the transaction. for instance, if you are going to start a transaction related to order processing, you can create an `OrderDomainEntity` object and add the initial data such as username, total amount, items that the customer bought, etc. and it is passed to the saga orchestration engine as an argument when you start the transaction by accessing the saga orchestration engine via the `SagaKafkaTemplate.process(...)` method. and the initial state of the domain-entity is saved in the event-store as the starting point of the transaction. that means, the first version of the domain-entity is created and stored in the event-store at the moment.
+- The Saga Domain-Entity object is created by you as the developer,
+yor are supposed to create the custom domain-domain-entity object before starting the transaction.
+you can create the object by adding the initial data that is required for the transaction.
+for instance, if you are going to start a transaction related to order processing,
+you can create an `OrderDomainEntity` object and add the initial data such as username,
+total amount, items that the customer bought, etc.
+and it is passed to the saga orchestration engine as an argument when you start the transaction by accessing the saga orchestration engine via the `StackSagaKafkaTemplate.init(...).startWith(..).execute();` method.
+and the initial state of the domain-entity is saved in the event-store as the starting point of the transaction. that means, the first version of the domain-entity is created and stored in the event-store at the moment.
 - After that giving the control to the saga orchestration engine, the domain-entity is updated continuously from time to time by the executors as needed. that means, after executing each execution, the domain-entity is updated by the executor by adding any data that is required for the upcoming executions. for instance, after fetching the user's details, the user's details are stored in the domain-entity object to be used in upcoming executions. and also after making the payment, the reference ID that is returned from the payment-service is stored in the domain-entity object to be used in upcoming executions. and each time when the domain-entity is updated. if there is no any pivot execution,(failure point) and if the LRT is done as expected, the Domain-Entity object end the lifecycle by reaching the `COMPLETED` state. but if there is a pivot execution (failure point), the Domain-Entity object end the lifecycle by reaching the `FAILED` state.
 
 NOTE: In the compensating executions, it can not be used the domain-entity object to update the data. because the domain-entity is used only for the primary executions in Stacksaga. the revert Revert-Hint-Store can be used for compensation executions to store any metadata that is required for the compensating executions.
@@ -63,7 +70,7 @@ NOTE: In the compensating executions, it can not be used the domain-entity objec
 [[creating_custom_domain_entity]]
 == Creating Custom Domain-Entity
 
-To create a custom domain-entity, you need to create a class that extends the `SagaDomainEntity` class provided by the framework. and you can add any fields that are required for your transaction in that class. for instance, if you are going to create a domain-entity for order processing, you can create an `OrderDomainEntity` class and add fields such as username, total amount, items that the customer bought, etc. and also you can add any other fields that are required for your transaction. and then you can use this custom domain-entity class when starting the transaction by passing an instance of it to the `SagaKafkaTemplate.process(...)` method.
+To create a custom domain-entity, you need to create a class that extends the `SagaDomainEntity` class provided by the framework. and you can add any fields that are required for your transaction in that class. for instance, if you are going to create a domain-entity for order processing, you can create an `OrderDomainEntity` class and add fields such as username, total amount, items that the customer bought, etc. and also you can add any other fields that are required for your transaction. and then you can use this custom domain-entity class when starting the transaction by passing an instance of it to the `StackSagaKafkaTemplate.init(...).startWith(..).execute();` method.
 
 [source,java]
 ----
