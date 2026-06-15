@@ -1,4 +1,3 @@
-:toclevels: 5
 :description: Reference guide for the Transaction Retry Architecture of the StackSaga framework. Intended for architects, DevOps engineers, and developers who integrate, deploy, or operate StackSaga-based microservices.
 :keywords: stacksaga agent, transaction retry, microservices, event-store, consistent hashing, deployment
 :stem: latexmath
@@ -25,7 +24,7 @@ Topics covered:
 
 * Identifying retryable vs non-retryable errors
 * Why instance-level retrying is insufficient
-* Deployment modes: Standard-Node vs Retry-Node
+* Orchestrator Deployment modes: Standard-Node vs Retry-Node
 * The three-component retry ecosystem: Orchestrator, Retry-Coordinator-Slave, and Retry-Coordinator-Master
 * Token ring partitioning using Murmur3
 * RSocket communication patterns between components
@@ -70,9 +69,9 @@ image:ROOT:stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt
 
 StackSaga solves this by *decoupling transaction retrying from the originating node* entirely, using a three-component architecture described in the next sections.
 
-== Deployment Modes
+== Orchestrator Deployment Modes
 
-Because standard nodes are ephemeral, StackSaga defines two distinct deployment modes for an orchestrator service:
+Because orchestrator standard nodes are ephemeral, StackSaga defines two distinct deployment modes for an orchestrator service:
 
 *Standard-Node*::
 The regular orchestrator service (with StackSaga enabled) that processes transactions and handles business logic.
@@ -718,3 +717,89 @@ service` from the `stacksaga-{database}-support`.
 <6> Finally, the transaction is executed by the engine as usual.
 
 NOTE: Even though `stacksaga-env-{impl}-support` is not shown in the diagram, it is responsible for providing the deployment environment specific metadata.
+
+== Ring-Coordinator Deployment Topologies
+
+It can be deployed in various topologies depending on the scale and performance requirements of the system.
+Here are some common deployment topologies:
+
+* Embedded Ring-Coordinator Deployment
+** Shared Mode
+** Dedicated Mode
+** Hybrid Mode
+
+* Clustered Ring-Coordinator Deployment
+** Shared Mode
+** Dedicated Mode
+** Hybrid Mode
+
+=== Embedded Ring-Coordinator Deployment
+
+In this topology, the Ring-Coordinator Master and Slave are embedded within the same physical service instance.
+it can be used in smaller and mid-sized deployments. but still the instance can handle a big number of Orchestrator instances due to the non-blocking Netty stack via RSocket.
+
+==== Shared Mode Of Embedded Ring-Coordinator Deployment
+
+In this mode, a single service instance hosts a shared embedded Ring-Coordinator Master and Slave that serves multiple microservice domains within the same physical region.
+This is more resource efficient, but it may introduce some coupling between the domains, as they share the same Ring-Coordinator.
+For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be one shared service instance (Shared-Service) with a shared embedded Ring-Coordinator Master and Slave serving all three domains.
+
+See the diagram below,
+
+image::stacksaga-diagram-embedded-ring-coordinator-shared-mode.svg[]
+
+==== Dedicated Mode Of Embedded Ring-Coordinator Deployment
+
+In this mode, each microservice domain has its own embedded Ring-Coordinator Master and Slave within the same service instance.
+This provides a high level of isolation and fault tolerance, as each domain has its own dedicated Ring-Coordinator.
+For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be three separate service instances (Order-Service, Payment-Service, Inventory-Service), each with its own embedded Ring-Coordinator Master and Slave.
+
+See the diagram below,
+
+image::stacksaga-diagram-embedded-ring-coordinator-dedicated-mode.svg[]
+
+==== Hybrid Mode Of Embedded Ring-Coordinator Deployment
+
+In this mode, some microservice domains have their own embedded Ring-Coordinator Master and Slave within the same service instance, while others share a common embedded Ring-Coordinator Master and Slave.
+This provides flexibility in deployment, allowing domains with higher isolation requirements to have their own Ring-Coordinator, while others can share resources.
+For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, the Order domain may have its own embedded Ring-Coordinator Master and Slave within the Order-Service instance, while the Payment and Inventory domains share a common embedded Ring-Coordinator Master and Slave within the Shared-Service instance.
+
+See the diagram below,
+
+image::stacksaga-diagram-embedded-ring-coordinator-hybrid-mode.svg[]
+
+
+=== Clustered Ring-Coordinator Deployment
+
+In this topology, the master and slave instances are deployed as separate services(instances) for scalability and fault tolerance.
+it can be further categorized into three modes.
+
+
+==== Shared Mode Of Clustered Ring-Coordinator Deployment
+
+This is a bit more resource efficient deployment topology where a single Ring-Coordinator Cluster (one Master and multiple Slaves) is shared across multiple microservice domains within the same physical region.
+For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be one shared Ring-Coordinator Cluster (Shared-RC-Cluster) with one Master and multiple Slaves serving all three domains.
+
+See the diagram below,
+
+image::stacksaga-diagram-clustered-ring-coordinator-shared-mode.svg[]
+
+
+==== Dedicated Mode Of Clustered Ring-Coordinator Deployment
+
+This is the maximally decoupled deployment topology where the Ring-Coordinator Master and Slave are deployed as separate services for each microservice domain separately.
+This mode provides the highest level of isolation and fault tolerance, as each domain has its own dedicated Ring-Coordinator Cluster withing the same physical region.
+For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be three separate Ring-Coordinator Clusters (Order-RC-Cluster, Payment-RC-Cluster, Inventory-RC-Cluster), each with its own Master and Slaves.
+
+See the diagram below,
+
+image::stacksaga-diagram-clustered-ring-coordinator-dedicated-mode.svg[]
+
+==== Hybrid Mode Of Clustered Ring-Coordinator Deployment
+
+This is a flexible deployment topology where some microservice domains have their own dedicated Ring-Coordinator Cluster, while others share a common Ring-Coordinator Cluster.
+For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, the Order domain may have its own dedicated Ring-Coordinator Cluster (Order-RC-Cluster), while the Payment and Inventory domains share a common Ring-Coordinator Cluster (Shared-RC-Cluster).
+
+See the diagram below,
+
+image::stacksaga-diagram-clustered-ring-coordinator-hybrid-mode.svg[]

@@ -1,0 +1,36 @@
+= Ring-Coordinator
+
+== Overview
+
+As mentioned in the xref:transaction-retrying-with-retry-coordinator.adoc[previous section], the retry ring-coordinator is separate service that can run as the `master` and the `slave` by configuring the type. let's see how the retry ring-coordinator is set up and how it works.
+
+== Ring-Coordinator As `Master`
+
+If the retry ring-coordinator is configured as `master`, it will be responsible for managing the entire ring and sharing along with the `slave` retry ring-coordinator that are connected to it withing the configured region.
+
+Here you can see how the `stacksaga-ring-coordinator-starter` is added to the project.
+
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency> <!--Only for stacksaga dependencies version management-->
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-ring-coordinator-starter</artifactId>
+    </dependency>
+</dependencies>
+----
+
+IMPORTANT: To run the retry ring-coordinator as a spring application it is not required to add any web related dependencies like `spring-boot-starter-web` or `spring-boot-starter-webflux` because the retry ring-coordinator does not expose any http endpoints, it only provide `Rsocket` endpoints for the `slave` retry ring-coordinator to connect to it, so you can run the retry ring-coordinator as a non-web application. +
+But in the production environment it is needed to see the metrics and other monitoring data of the retry ring-coordinator instance. so then you have to add the `spring-boot-starter-actuator` dependency to your project to expose the actuator endpoints for monitoring and management of the retry ring-coordinator instance then you should explicitly add any of the web starters to your project expose the actuator endpoints over `http`.
