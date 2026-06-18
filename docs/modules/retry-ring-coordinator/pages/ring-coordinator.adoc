@@ -2,19 +2,76 @@
 
 == Overview
 
-As mentioned in the xref:transaction-retrying-with-retry-coordinator.adoc[previous section], the retry ring-coordinator is separate service (apart from the utility microservices) that can run as the `master` and the `slave` by configuring the type. let's see how the retry ring-coordinator is set up and how it works.
+As mentioned in the xref:transaction-retrying-with-retry-coordinator.adoc[previous section], the retry ring-coordinator is a separate service — distinct from your utility microservices — that runs as either a `master` or a `slave`, depending on how it is configured. This section walks through how the retry ring-coordinator is set up and how it works.
 
-IMPORTANT: The `Master` and `Slave` retry ring-coordinator instances can be deployed in the same service instance as well. refer the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section for more details.
+IMPORTANT: The `Master` and `Slave` retry ring-coordinator instances can also be deployed within the same service instance. Refer to the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section for more details.
 
-IMPORTANT: After adding the `stacksaga-ring-coordinator-starter` dependency to your project and configuring the retry ring-coordinator as `master` or `slave`, you can run the retry ring-coordinator as a spring application.
+IMPORTANT: After adding the `stacksaga-ring-coordinator-starter` dependency to your project and configuring the retry ring-coordinator as `master` or `slave`, you can run the retry ring-coordinator as a Spring Boot application.
+
+=== How Master and Slave Connect
+
+Before configuring each role, it helps to see how a Master and a Slave find each other. On startup, a Slave opens a persistent `RSocket` connection to the Master using the host and port configured via `stacksaga.coordinator.slave.target-master.*`. The Master accepts the connection and adds the Slave to its registry — from its next 30-second publish cycle onward, the Master starts sending that Slave its token-range updates.
+
+[plantuml,target=ring-coordinator-master-slave-handshake,format=svg]
+----
+@startuml ring-coordinator-master-slave-handshake
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam sequenceMessageAlign center
+
+skinparam participant {
+  BackgroundColor #EEF4FF
+  BorderColor #4A6FA5
+  FontColor #1A1A2E
+}
+
+skinparam sequence {
+  ArrowColor #4A6FA5
+  LifeLineBorderColor #4A6FA5
+  LifeLineBackgroundColor #EEF4FF
+  NoteBackgroundColor #FFF9E6
+  NoteBorderColor #E0A800
+}
+
+title <b>Ring-Coordinator — Master/Slave Connection</b>
+
+participant "Ring-Coordinator\n(Master)" as master
+participant "Ring-Coordinator\n(Slave)" as slave
+
+slave -> master : RSocket request-stream\nconnect to target-master.host:target-master.port
+master -> slave : ACK — connection established\n(persistent stream open)
+
+note right of master
+  Master adds the Slave to its
+  live registry. Waits for the
+  30th-second publish cycle.
+end note
+
+== Every 30 seconds ==
+master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
+
+note right of slave
+  Slave sub-divides its range
+  across connected Orchestrators
+  (see the Ring-Coordinator
+  Connector page).
+end note
+
+@enduml
+----
+
+The xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[Retry-Coordinator-Slave section] of the architecture guide covers what happens next — how the Slave divides its range across Orchestrator instances.
 
 [[ring-coordinator-master]]
 == Ring-Coordinator As `Master`
 
-If the retry ring-coordinator is configured as `master`, it will be responsible for managing the entire ring and sharing along with the `slave` retry ring-coordinator that are connected to it withing the same region and the same cluster. read more xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-master[here].
+If the retry ring-coordinator is configured as `master`, it is responsible for managing the entire token ring and sharing partitions of it with every `slave` retry ring-coordinator connected to it within the same region and cluster. Read more about the Master's responsibilities xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-master[here].
 
-Here you can see how the `stacksaga-ring-coordinator-starter` is added to the project.
+Add the `stacksaga-ring-coordinator-starter` dependency to your project as follows:
 
+.pom.xml
 [source,xml]
 ----
 <dependencyManagement>
@@ -37,104 +94,102 @@ Here you can see how the `stacksaga-ring-coordinator-starter` is added to the pr
 </dependencies>
 ----
 
-IMPORTANT: To run the retry ring-coordinator as a spring application it is not required to add any web related dependencies like `spring-boot-starter-web` or `spring-boot-starter-webflux` because the retry ring-coordinator does not expose any http endpoints, it only provides `Rsocket` endpoints for the `slave` retry ring-coordinator to connect to it, so you can run the retry ring-coordinator as a non-web application. +
-But in the production environment it is needed to see the metrics and other monitoring data of the retry ring-coordinator instance. so then you have to add the `spring-boot-starter-actuator` dependency to your project to expose the actuator endpoints for monitoring and management of the retry ring-coordinator instance then you should explicitly add any of the web starters to your project expose the actuator endpoints over `http`.
+[IMPORTANT]
+====
+To run the retry ring-coordinator as a Spring application, you do not need any web-related dependencies such as `spring-boot-starter-web` or `spring-boot-starter-webflux` — the retry ring-coordinator exposes no HTTP endpoints of its own, only `RSocket` endpoints for `slave` instances to connect to. It can therefore run as a non-web application.
+
+In production, however, you will usually want visibility into its metrics and other monitoring data. Add the `spring-boot-starter-actuator` dependency to expose those endpoints, and additionally add one of the web starters only if you need the actuator endpoints reachable over `HTTP`.
+====
 
 === Configuration
 
-The retry ring-coordinator can be configured using the `application.properties` or `application.yml` file.
-Here is an example for a minimal configuration for the retry ring-coordinator as `master`:
+The retry ring-coordinator can be configured via `application.properties` or `application.yml`. Below is a minimal configuration for the retry ring-coordinator as `master`:
 
+.application.properties
 [source,properties]
 ----
 #stacksaga-master coordinator configuration
-stacksaga.coordinator.instance-type=master //<1>
-stacksaga.coordinator.target-services=order-service //<2>
+stacksaga.coordinator.instance-type=master #<1>
+stacksaga.coordinator.target-services=order-service #<2>
 
 #stacksaga-instance configuration
-stacksaga.instance.cluster=cluster1 //<3>
-stacksaga.instance.region=us-east-1 //<4>
-stacksaga.instance.zone=us-east-1a //<5>
+stacksaga.instance.cluster=cluster1 #<3>
+stacksaga.instance.region=us-east-1 #<4>
+stacksaga.instance.zone=us-east-1a #<5>
 
 #rsocket server configuration
-spring.rsocket.server.port=1000 //<6>
-spring.rsocket.server.address=localhost //<7>
-spring.rsocket.server.transport=tcp //<8>
+spring.rsocket.server.port=1000 #<6>
+spring.rsocket.server.address=localhost #<7>
+spring.rsocket.server.transport=tcp #<8>
 
 ----
 
-<1> Due to the retry ring-coordinator is deployed as a `master` instance, the `stacksaga.coordinator.instance-type` property is set to `master`.
+<1> Set `stacksaga.coordinator.instance-type` to `master`, since this instance runs as the Master.
 
-<2> Which is the target service that the retry ring-coordinator will manage and coordinate the retry requests for. at this demo, the `order-service` is the target service that the retry ring-coordinator will manage and coordinate the retry requests for. it can be a single service or multiple services, you can specify the target services as a comma-separated list if you want to deploy the master retry ring-coordinator to manage and coordinate the retry requests for multiple services as per the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
+<2> The target service(s) this Master coordinates retries for — `order-service` in this example. This can be a comma-separated list when a single Master manages multiple services; see the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
 
-<3> Which the `cluster` that the retry ring-coordinator instance belongs to. only the slave retry ring-coordinator instances and the orchestration service that are in the same cluster can connect to the master retry ring-coordinator instance. see xref:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Cluster] section for more details.
+<3> The `cluster` this instance belongs to. Only `slave` retry ring-coordinator instances and Orchestrators in the same cluster can connect to this Master — see the xref:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Cluster] section.
 
-<4> Which the `region` that the retry ring-coordinator instance belongs to. only the slave retry ring-coordinator instances and the orchestration service that are in the same region can connect to the master retry ring-coordinator instance. see xref:transaction-retrying-with-retry-coordinator.adoc#multi-region-deployment[Regional Deployment] section for more details.
+<4> The `region` this instance belongs to. Only `slave` retry ring-coordinator instances and Orchestrators in the same region can connect to this Master — see the xref:transaction-retrying-with-retry-coordinator.adoc#multi-region-deployment[Regional Deployment] section.
 
+<5> The `zone` this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
 
-<5> Which the `zone` that the retry ring-coordinator instance belongs to.
-No impact but it should be mentioned as per the stacksaga core specification.
+<6> The `RSocket` server port. `slave` retry ring-coordinator instances connect to the Master over `RSocket` — backed by the default RSocket server provided by `spring-boot-starter-rsocket` — and Orchestrators use the same port to look up which `slave` instance to connect to.
 
-<6> As mentioned xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-master[here], the coordinator services use `Rsocket` protocol for communication between the services (slaves and orchestration service). so stacksaga uses the default `Rsocket` server which is provided by the `spring-boot-starter-rsocket` dependency to expose the `Rsocket` endpoints for the slave retry ring-coordinator instances to connect to the master retry ring-coordinator instance and also for the orchestration service to look up the slave retry ring-coordinator instances and connect to them. so you have to configure the `Rsocket` server port that should be run.
+<7> The `RSocket` network address that the server binds to.
 
-<7> The `Rsocket` network address of the Rsocket server that should be run.
-<8> The `Rsocket` transport protocol.
-It should be `tcp` for the retry ring-coordinator services.
+<8> The `RSocket` transport protocol. It must be `tcp` for retry ring-coordinator services.
 
+[[ring-coordinator-slave]]
 == Ring-Coordinator As `Slave`
 
-If the retry ring-coordinator is configured as `slave`, it will be responsible for connecting to the `master` retry ring-coordinator for subscribe and receiving the ring potions and publish the sub rings potions to the subscribed orchestration service instances withing the same region and the same cluster. read more xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[here].
+If the retry ring-coordinator is configured as `slave`, it is responsible for connecting to the `master` retry ring-coordinator, subscribing to receive its assigned ring portion, and publishing sub-ring portions to the Orchestrator instances subscribed to it within the same region and cluster. Read more about the Slave's responsibilities xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[here].
 
-* Adding the `stacksaga-ring-coordinator-starter` to the project is exact the same as the xref:#ring-coordinator-master[master] retry ring-coordinator due to the fact that the same starter is used for both the `master` and the `slave`.
-But the configuration is different as below:
+Adding the `stacksaga-ring-coordinator-starter` dependency is exactly the same as for the xref:#ring-coordinator-master[Master] — both roles use the same starter. Only the configuration differs, as shown below.
 
 === Configuration
 
+.application.properties
 [source,properties]
 ----
 #stacksaga-slave coordinator configuration
-stacksaga.coordinator.instance-type=slave //<1>
-stacksaga.coordinator.target-services=order-service //<2>
+stacksaga.coordinator.instance-type=slave #<1>
+stacksaga.coordinator.target-services=order-service #<2>
 
 #stacksaga-instance configuration
-stacksaga.instance.cluster=cluster1 //<3>
-stacksaga.instance.region=us-east-1 //<4>
-stacksaga.instance.zone=us-east-1a //<5>
+stacksaga.instance.cluster=cluster1 #<3>
+stacksaga.instance.region=us-east-1 #<4>
+stacksaga.instance.zone=us-east-1a #<5>
 
 #rsocket server configuration
-spring.rsocket.server.port=1001 //<6>
-spring.rsocket.server.address=localhost //<7>
-spring.rsocket.server.transport=tcp //<8>
+spring.rsocket.server.port=1001 #<6>
+spring.rsocket.server.address=localhost #<7>
+spring.rsocket.server.transport=tcp #<8>
 
 #connecting to the master retry ring-coordinator
-stacksaga.coordinator.slave.target-master.port=1000 //<9>
-stacksaga.coordinator.slave.target-master.host=localhost //<10>
+stacksaga.coordinator.slave.target-master.port=1000 #<9>
+stacksaga.coordinator.slave.target-master.host=localhost #<10>
 
 ----
 
-<1> Due to the retry ring-coordinator is deployed as a `slave` instance, the `stacksaga.coordinator.instance-type` property is set to `slave`.
+<1> Set `stacksaga.coordinator.instance-type` to `slave`, since this instance runs as a Slave.
 
-<2> Which is the target service that the slave retry ring-coordinator will subscribe to the master retry ring-coordinator for receiving the ring potions and publish the sub rings potions to the subscribed orchestration service instances for. at this demo, the `order-service` is the target service that the slave retry ring-coordinator will subscribe to the master retry ring-coordinator for receiving the ring potions and publish the sub rings potions to the subscribed orchestration service instances for. it can be a single service or multiple services, you can specify the target services as a comma-separated list if you want to deploy the slave retry ring-coordinator to subscribe to the master retry ring-coordinator for multiple services as per the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
+<2> The target service(s) this Slave subscribes to on the Master, receiving their ring portion and publishing sub-ring portions to the subscribed Orchestrator instances. This can be a comma-separated list when a single Slave subscribes for multiple services; see the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
 +
-IMPORTANT: If the salve does support multiple services, that all the services should be supported by the master retry ring-coordinator as well. otherwise, the connection is not established between the master and the slave retry ring-coordinator instances.
+IMPORTANT: If a Slave supports multiple services, all of those services must also be supported by the Master. Otherwise, the connection between the Master and Slave will not be established.
 
-<3> Which the `cluster` that the slave retry ring-coordinator instance belongs to. master retry ring-coordinator instance should be in the same cluster for the connection to be established between them. and also the orchestration service instances that want to subscribe to the slave retry ring-coordinator instance should be in the same cluster as well. see xref:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Cluster] section for more details.
+<3> The `cluster` this instance belongs to — same semantics as for the xref:#ring-coordinator-master[Master]. The Master, and any Orchestrator instances that want to subscribe to this Slave, must share this cluster name for the connection to succeed.
 
-<4> Which the `region` that the slave retry ring-coordinator instance belongs to. master retry ring-coordinator instance should be in the same region for the connection to be established between them. and also the orchestration service instances that want to subscribe to the slave retry ring-coordinator instance should be in the same region as well. see xref:transaction-retrying-with-retry-coordinator.adoc#multi-region-deployment[Regional Deployment] section for more details.
+<4> The `region` this instance belongs to — same semantics as for the xref:#ring-coordinator-master[Master]. The Master, and any subscribing Orchestrator instances, must share this region for the connection to succeed.
 
+<5> The `zone` this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
 
-<5> Which the `zone` that the slave retry ring-coordinator instance belongs to.
-No impact but it should be mentioned as per the stacksaga core specification.
+<6> The `RSocket` server port. Orchestrator instances connect to this Slave over `RSocket` to receive their sub-range updates.
 
-<6> As mentioned xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[here], the slave coordinator services use `Rsocket` protocol for communication between the services (master and orchestration service) so stacksaga uses the default `Rsocket` server which is provided by the `spring-boot-starter-rsocket` dependency to expose the `Rsocket` endpoints for the orchestration service instances to connect to the slave retry ring-coordinator instance, so you have to configure the `Rsocket` server port that should be run.
+<7> The `RSocket` network address that the server binds to.
 
-<7> The `Rsocket` network address of the Rsocket server that should be run.
+<8> The `RSocket` transport protocol. It must be `tcp` for retry ring-coordinator services.
 
-<8> The `Rsocket` transport protocol.
-It should be `tcp` for the retry ring-coordinator services.
+<9> The `RSocket` server port of the Master this Slave connects to, in the same region and cluster.
 
-<9> The `Rsocket` server port of the master retry ring-coordinator instance that should connect to in the same region and the same cluster.
-
-<10> The `Rsocket` server host of the master retry ring-coordinator instance that should connect to in the same region and the same cluster.
-
-
+<10> The `RSocket` server host of the Master this Slave connects to, in the same region and cluster.
