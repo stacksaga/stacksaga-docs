@@ -564,6 +564,7 @@ Timeline example:
 Because each Orchestrator holds a *non-overlapping sub-range* for a *defined time window*, two Orchestrator instances can never claim responsibility for the same transaction simultaneously.
 This eliminates the need for distributed locking when retrying transactions.
 
+[[multi-region-deployment]]
 == Multi-Region Deployment
 
 For systems deployed across multiple geographic regions, StackSaga uses the `region` property to scope retry ownership.
@@ -602,6 +603,7 @@ Some systems require that a partial infrastructure failure never affects more th
 
 Virtual clusters address both concerns by dividing a single physical deployment into *multiple independent master-slave groups*, each operating as a completely separate retry coordination unit within the same region.
 
+[[virtual-cluster]]
 === What Is a Virtual Cluster?
 
 A virtual cluster is a named group of Retry-Coordinator-Master, Retry-Coordinator-Slave, and Orchestrator instances that operate in full isolation from other groups.
@@ -718,26 +720,28 @@ service` from the `stacksaga-{database}-support`.
 
 NOTE: Even though `stacksaga-env-{impl}-support` is not shown in the diagram, it is responsible for providing the deployment environment specific metadata.
 
+[[ring-coordinator-deployment-topologies]]
 == Ring-Coordinator Deployment Topologies
 
 It can be deployed in various topologies depending on the scale and performance requirements of the system.
 Here are some common deployment topologies:
 
 * Embedded Ring-Coordinator Deployment
-** Shared Mode
-** Dedicated Mode
-** Hybrid Mode
+** xref:#shared-embedded-ring-coordinator-deployment[Shared Mode]
+** xref:#dedicated-embedded-ring-coordinator-deployment[Dedicated Mode]
+** xref:#hybrid-embedded-ring-coordinator-deployment[Hybrid Mode]
 
 * Clustered Ring-Coordinator Deployment
-** Shared Mode
-** Dedicated Mode
-** Hybrid Mode
+** xref:#shared-clustered-ring-coordinator-deployment[Shared Mode]
+** xref:#dedicated-clustered-ring-coordinator-deployment[Dedicated Mode]
+** xref:#hybrid-clustered-ring-coordinator-deployment[Hybrid Mode]
 
 === Embedded Ring-Coordinator Deployment
 
 In this topology, the Ring-Coordinator Master and Slave are embedded within the same physical service instance.
 it can be used in smaller and mid-sized deployments. but still the instance can handle a big number of Orchestrator instances due to the non-blocking Netty stack via RSocket.
 
+[[shared-embedded-ring-coordinator-deployment]]
 ==== Shared Mode Of Embedded Ring-Coordinator Deployment
 
 In this mode, a single service instance hosts a shared embedded Ring-Coordinator Master and Slave that serves multiple microservice domains within the same physical region.
@@ -748,6 +752,7 @@ See the diagram below,
 
 image::stacksaga-diagram-embedded-ring-coordinator-shared-mode.svg[]
 
+[[dedicated-embedded-ring-coordinator-deployment]]
 ==== Dedicated Mode Of Embedded Ring-Coordinator Deployment
 
 In this mode, each microservice domain has its own embedded Ring-Coordinator Master and Slave within the same service instance.
@@ -758,6 +763,7 @@ See the diagram below,
 
 image::stacksaga-diagram-embedded-ring-coordinator-dedicated-mode.svg[]
 
+[[hybrid-embedded-ring-coordinator-deployment]]
 ==== Hybrid Mode Of Embedded Ring-Coordinator Deployment
 
 In this mode, some microservice domains have their own embedded Ring-Coordinator Master and Slave within the same service instance, while others share a common embedded Ring-Coordinator Master and Slave.
@@ -768,13 +774,12 @@ See the diagram below,
 
 image::stacksaga-diagram-embedded-ring-coordinator-hybrid-mode.svg[]
 
-
 === Clustered Ring-Coordinator Deployment
 
 In this topology, the master and slave instances are deployed as separate services(instances) for scalability and fault tolerance.
 it can be further categorized into three modes.
 
-
+[[shared-clustered-ring-coordinator-deployment]]
 ==== Shared Mode Of Clustered Ring-Coordinator Deployment
 
 This is a bit more resource efficient deployment topology where a single Ring-Coordinator Cluster (one Master and multiple Slaves) is shared across multiple microservice domains within the same physical region.
@@ -784,7 +789,7 @@ See the diagram below,
 
 image::stacksaga-diagram-clustered-ring-coordinator-shared-mode.svg[]
 
-
+[[dedicated-clustered-ring-coordinator-deployment]]
 ==== Dedicated Mode Of Clustered Ring-Coordinator Deployment
 
 This is the maximally decoupled deployment topology where the Ring-Coordinator Master and Slave are deployed as separate services for each microservice domain separately.
@@ -795,6 +800,7 @@ See the diagram below,
 
 image::stacksaga-diagram-clustered-ring-coordinator-dedicated-mode.svg[]
 
+[[hybrid-clustered-ring-coordinator-deployment]]
 ==== Hybrid Mode Of Clustered Ring-Coordinator Deployment
 
 This is a flexible deployment topology where some microservice domains have their own dedicated Ring-Coordinator Cluster, while others share a common Ring-Coordinator Cluster.
