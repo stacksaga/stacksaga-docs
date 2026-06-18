@@ -77,7 +77,7 @@ Because orchestrator standard nodes are ephemeral, StackSaga defines two distinc
 The regular orchestrator service (with StackSaga enabled) that processes transactions and handles business logic.
 Standard nodes can be freely scaled up or down based on traffic.
 
-*Retry-Node*::
+*xref:#retry-node[Retry-Node]*::
 A specialised node that handles transaction retries in addition to regular transaction processing.
 Retry-Nodes are intended to be more stable and long-lived than Standard-Nodes, ensuring reliable retry management even as the rest of the cluster scales.
 
@@ -196,17 +196,17 @@ Here is a brief orientation before the detailed descriptions:
 |===
 | Component | Responsibility
 
-| *Retry-Coordinator-Master*
+| xref:#ring-coordinator-master[*Retry-Coordinator-Master*]
 | Single authority for the domain.
 Divides the full token ring equally across Retry-Coordinator-Slaves every 30 seconds.
 Tells new Orchestrators which Retry-Coordinator-Slave to connect to (Round Robin).
 
-| *Retry-Coordinator-Slave*
+| xref:#ring-coordinator-slave[*Retry-Coordinator-Slave*]
 | Relay between Master and Orchestrators.
 Receives its ring slice from the Master and divides it further across its connected Orchestrators.
 Delivers each Orchestrator its personal sub-range every minute.
 
-| *Orchestrator (Retry-Node)*
+| xref:#retry-node[*Orchestrator (Retry-Node)*]
 | Holds its sub-range for the current minute.
 Polls the database for paused transactions whose token falls in that sub-range and re-invokes them — without ever conflicting with another instance.
 |===
@@ -347,12 +347,16 @@ These transactions remain safely stored in the database with status `FAILED_WITH
 ====
 
 [[retry-node]]
-=== Orchestrator (Retry-Node)
+=== Orchestrator With Ring-Coordinator connector (Retry-Node)
 
-==== What It Is
+Retry-Node stands for an Orchestrator instance that is deployed with the StackSaga xref:ring-coordinator-connector.adoc[] enabled to participate in the transaction retry ecosystem.
+It is specialised node that handles transaction retries in addition to regular transaction processing.
+Retry-Nodes are intended to be more stable and *long-lived* than Standard-Nodes, ensuring reliable retry management even as the rest of the cluster scales.
 
-The Orchestrator is your microservice, augmented by StackSaga to execute distributed transactions.
-When deployed as a *Retry-Node*, it also manages transaction retrying.
+* To make a Standard-Node into a Retry-Node, simply add the `stacksaga-ring-coordinator-connector` dependency to the existing Orchestrator service and configure the connection properties.
+* There is no technical restriction on scaling Retry-Nodes up or down — the distinction is operational: they are simply the nodes you choose to keep stable.
+* Once configured as a Retry-Node, the Orchestrator automatically participates in the retry ecosystem. initially it connects to the Master to look up a Retry-Coordinator-Slave to be registered with, then it receives token sub-ranger(respective partition of the node) from the assigned Retry-Coordinator-Slave and starts retrying transactions that fall into the sub-range.
+
 It runs two jobs side by side at all times.
 
 ==== Two Concurrent Jobs
@@ -709,7 +713,7 @@ The diagram is simplified to show only the relevant modules and components for t
 
 image::stacksaga-diagram-module-interaction-for-invocation.svg[]
 
-<1> `stacksaga-ring-coordinator` (Slave) publishes the Orchestrator's assigned token sub-range to the Orchestrator over a persistent RSocket stream to the `stacksaga-ring-connector` module.
+<1> `stacksaga-ring-coordinator` (Slave) publishes the Orchestrator's assigned token sub-range to the Orchestrator over a persistent RSocket stream to the xref:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] module.
 <2> `ReInvokeTaskManager` in one of `stacksaga-{database}-support` implementatons long polls the event-store looking for transactions that should be re-invoked based on the assigned token sub-range.
 <3> The transactions which is eligible for re-invocation are handed over to the `TransactionReInvokeManager` in to one of the `stacksaga-{impl}-support` modules.
 <4> `TransactionReInvokeManager` rebuilds the transaction snapshot to the point of failure by requesting data via the `event-store

@@ -1,0 +1,130 @@
+= Ring-Coordinator Connector
+
+== Overview
+
+The Ring-Coordinator Connector is the supporting module that turns a standard Orchestrator service into a `Retry Node` in the retry ring architecture.
+It connects to the configured Master Ring-Coordinator, looks up an available Slave Ring-Coordinator, connects to that Slave, and keeps the connection alive to receive the ring-partition information needed to execute retry tasks.
+Read more in the xref:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Node] section for a better understanding.
+
+To turn a standard Orchestrator service into a `Retry Node`, add the `stacksaga-ring-coordinator-connector` dependency to the Orchestrator service and configure the connection details of the Master Ring-Coordinator.
+The Orchestrator service then connects to the Master Ring-Coordinator automatically and starts receiving the ring-partition information to execute retry tasks.
+
+== Dependency Management
+
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency> <!--Only for stacksaga dependencies version management-->
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-ring-coordinator-connector</artifactId>
+    </dependency>
+</dependencies>
+----
+
+After adding the dependency, configure the connection details of the Master Ring-Coordinator in your application configuration file (`application.yml` or `application.properties`).
+
+[[common_configuration_properties]]
+== Configuration Properties
+
+Configure the following properties in your application configuration file (`application.yml` or `application.properties`) so the Connector can reach the Master Ring-Coordinator and receive ring-partition information.
+
+NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory and have no default — you must set them explicitly.
+
+[cols="3,1,1,5",options="header"]
+[.properties-table]
+|===
+|Property Name|Default|Type|Description
+
+4+s| General
+
+|`stacksaga.coordinator.connector.enabled`
+|`false`
+|`boolean`
+|Whether the Ring-Coordinator Connector module is enabled. Set it to `true` to turn the standard Orchestrator service into a `Retry Node`. It is disabled by default so the same Orchestrator service can run unchanged when you do not need the retry ring architecture — avoiding the need to build and deploy two separate Orchestrator services, one with the connector and one without.
+
+4+s| Master connection — initial lookup of an available Slave
+
+|`stacksaga.coordinator.connector.master.requester.host`
+|-
+|`String`
+|The host of the Master Ring-Coordinator that the Connector contacts to look up an available Slave Ring-Coordinator.
+
+|`stacksaga.coordinator.connector.master.requester.port`
+|-
+|`int`
+|The port of the Master Ring-Coordinator that the Connector contacts to look up an available Slave Ring-Coordinator.
+
+|`stacksaga.coordinator.connector.master.requester.connect-timeout`
+|`5s`
+|`Duration`
+|How long the client waits to establish the TCP connection to the Master before failing.
+
+|`stacksaga.coordinator.connector.master.requester.max-retries`
+|`10`
+|`int`
+|Maximum number of reconnection attempts on the *current* connection to the Master after a connection loss. Once this limit is reached, the Connector discards that connection and establishes a brand-new one from the configured host and port — it does not shut down. Building a new connection re-resolves the host, so even though there is a single Master in the cluster, the Connector can pick up a new IP address (working around JVM DNS caching) if the Master was restarted or rescheduled, instead of retrying a stale address indefinitely.
+
+|`stacksaga.coordinator.connector.master.requester.backoff-duration`
+|`2s`
+|`Duration`
+|Initial backoff before the first reconnection attempt after a connection loss. A short delay lets transient issues resolve without causing excessive downtime.
+
+|`stacksaga.coordinator.connector.master.requester.max-backoff-duration`
+|`5s`
+|`Duration`
+|Upper bound on the reconnection backoff. The growing backoff between attempts never exceeds this value.
+
+4+s| Master connection — retry when no Slave is available in the registry
+
+|`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.max-attempts`
+|`Integer.MAX_VALUE`
+|`int`
+|Maximum number of retry attempts when the connection to the Master succeeds but its registry currently has no Slave to serve the request. The Connector reconnects to the Master and asks for fresh Slave details on each attempt. Defaults to `Integer.MAX_VALUE` (retry indefinitely until a Slave becomes available) for maximum resilience; lower it if you would rather cap the attempts during prolonged outages.
+
+|`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.backoff-duration`
+|`2s`
+|`Duration`
+|Initial backoff before the first retry when no Slave is available. A short delay lets transient issues resolve without causing excessive downtime.
+
+|`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.max-backoff-duration`
+|`5s`
+|`Duration`
+|Upper bound on the no-Slave retry backoff. The growing backoff between attempts never exceeds this value.
+
+4+s| Slave connection — once an available Slave has been looked up
+
+|`stacksaga.coordinator.connector.slave.requester.connect-timeout`
+|`5s`
+|`Duration`
+|How long the client waits to establish the TCP connection to the looked-up Slave before failing.
+
+|`stacksaga.coordinator.connector.slave.requester.max-retries`
+|`10`
+|`int`
+|Maximum number of reconnection attempts to the *current* Slave connection after a connection loss. Once this limit is reached, the Connector stops retrying that Slave and looks up a fresh Slave from the Master's registry, since the original Slave may have been restarted or replaced.
+
+|`stacksaga.coordinator.connector.slave.requester.backoff-duration`
+|`2s`
+|`Duration`
+|Initial backoff before the first reconnection attempt after a connection loss. A short delay lets transient issues resolve without causing excessive downtime.
+
+|`stacksaga.coordinator.connector.slave.requester.max-backoff-duration`
+|`5s`
+|`Duration`
+|Upper bound on the reconnection backoff. The growing backoff between attempts never exceeds this value.
+|===
+
+
+
