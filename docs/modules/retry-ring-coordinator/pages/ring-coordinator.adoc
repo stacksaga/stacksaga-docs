@@ -219,30 +219,106 @@ It must be `tcp` for retry ring-coordinator services.
 [[configuration-properties]]
 == Configuration Properties Reference
 
-The following table summarizes all the configuration properties for the retry ring-coordinator, both for `master` and `slave` instances.
+The following table summarizes all the configuration properties for the retry ring-coordinator. The first group applies to both `master` and `slave` instances; the second group applies only to `slave` instances.
 
-[cols="1,1,1,<1"]
+NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory and have no default — you must set them explicitly.
+
+[cols="3,1,1,5", options="header"]
 [.properties-table]
 |===
-|Property Name|Default Value|Type|Description
-4+| Both Master and Slave instances share the following configuration properties.
-|`stacksaga.coordinator.instance-type` |-|`InstanceType`[Enum]| Whether this instance runs as a `master` or a `slave`. This is the main property that determines the role of this retry ring-coordinator instance, and therefore which responsibilities it has and how it connects to other components in the architecture.
-|`stacksaga.coordinator.target-services`|-|`String`| The service(s) this retry ring-coordinator instance manages. This is a comma-separated list of service names, and is used by the Master to determine which Slaves can connect to it, and by the Slaves to determine which Master to connect to. If a Slave supports multiple services, all of those services must also be supported by the Master for the connection to be established. but master can support more services than slave does.
-|`spring.rsocket.server.port`| - | int | The port that the embedded RSocket server binds to. Slave instances connect to the Master over RSocket, and Orchestrators connect to the Slave over RSocket, so this port is used for both types of connections.
-|`spring.rsocket.server.address`| - | String | The network address that the embedded RSocket server binds to.
-|`spring.rsocket.server.transport`| - | String | The transport protocol for the embedded RSocket server. It must be `tcp` for retry ring-coordinator services.
-|`stacksaga.instance.cluster`| - | String | All the components in the architecture have a `cluster` property, which is used to determine which instances can connect to each other. it should be set to the same value for all Master and Slave retry ring-coordinator instances that need to connect to each other, and also for the Orchestrator instances that need to connect to those Slaves.
-|`stacksaga.instance.region`| - | String | All the components in the architecture have a `region` property, which is used to determine which instances can connect to each other. It should be set to the same value for all Master and Slave retry ring-coordinator instances that need to connect to each other, and also for the Orchestrator instances that need to connect to those Slaves.
-|`stacksaga.instance.zone`| - | String | All the components in the architecture have a `zone` property. it has no functional impact here, but should be set as per the StackSaga core specification.
-4+| The following configuration properties are specific to `slave` instances.
-|`stacksaga.coordinator.slave.target-master.port`| - | int | The port of the Master retry ring-coordinator instance that this Slave connects to, in the same region and cluster. This is used to establish the RSocket connection from the Slave to the Master.
-|`stacksaga.coordinator.slave.target-master.host`| - | String | The host of the Master retry ring-coordinator instance that this Slave connects to, in the same region and cluster. This is used to establish the RSocket connection from the Slave to the Master.
-|`stacksaga.coordinator.slave.target-master.reconnect.max-retries` | `10` | int | Maximum number of TCP reconnect attempts before giving up on connecting to the Master retry ring-coordinator instance. If the Slave cannot connect to the Master after this many attempts, the instance shuts down.
-|`stacksaga.coordinator.slave.target-master.reconnect.backoff-duration` | `2s` | Duration | The backoff duration between TCP reconnect attempts to the Master retry ring-coordinator instance. If the Slave cannot connect to the Master, it waits this long before trying again, up to the maximum number of retries.
-|`stacksaga.coordinator.slave.target-master.reconnect.max-backoff-duration` | `6s` | Duration | The maximum backoff duration between TCP reconnect attempts to the Master retry ring-coordinator instance. If the Slave lose the connectivity to the Master, it waits this long before trying again, up to the maximum number of retries.
-|`stacksaga.coordinator.slave.target-master.retry.max-retries` | `Long.MAX_VALUE` | long | Maximum number of RSocket retry attempts before giving up on connecting to the Master retry ring-coordinator instance. Defaults to Long.MAX_VALUE for effectively infinite retries, which is the recommended setting for production to ensure the stream is always eventually recovered. this is different from the TCP reconnect attempts and this property is used for the RSocket stream retry attempts.
-|`stacksaga.coordinator.slave.target-master.retry.backoff-duration` | `2s` | Duration | The backoff duration between RSocket retry attempts to the Master retry ring-coordinator instance. If the Slave cannot connect to the Master, it waits this long before trying again, up to the maximum number of retries.
-|`stacksaga.coordinator.slave.target-master.retry.max-backoff-duration` | `6s` | Duration | The maximum backoff duration between RSocket retry attempts to the Master retry ring-coordinator instance. If the Slave lose the connectivity to the Master, it waits this long before trying again, up to the maximum number of retries.
-|`stacksaga.coordinator.slave.target-master.retry.jitter` | `0.5` | double | The jitter factor to apply to the backoff duration between RSocket retry attempts to the Master retry ring-coordinator instance. This adds a random amount of jitter to the backoff duration to avoid thundering herd problems when multiple Slaves are trying to reconnect to the Master at the same time. The value should be between 0 and 1, where 0 means no jitter and 1 means full jitter (i.e., a random amount between 0 and the backoff duration).
-| `stacksaga.coordinator.slave.lookup.ip-prefer` | `false` | boolean | Whether the Slave should prefer IP addresses over hostnames when looking up the available slaves from the master by the orchestrator services. If set to `true`, the master returns the IP addresses of the slaves to the orchestrator services to connect to. If set to `false`, the master returns the hostnames of the slaves to the orchestrator services to connect to. The default value is `false`.
+|Property Name|Default|Type|Description
+
+4+s| Common — applies to both Master and Slave instances
+
+|`stacksaga.coordinator.instance-type`
+|-
+|`InstanceType` (Enum)
+|The role this instance runs as — `master` or `slave`. This is the primary property that determines the instance's responsibilities and how it connects to the other components in the architecture.
+
+|`stacksaga.coordinator.target-services`
+|-
+|`String`
+|A comma-separated list of the service(s) this instance handles. The Master uses it to decide which Slaves may connect to it; a Slave uses it to decide which Master to connect to. Every service supported by a Slave must also be supported by its Master, otherwise the connection is rejected — but a Master may support more services than any single Slave.
+
+|`spring.rsocket.server.port`
+|-
+|`int`
+|The port the embedded RSocket server binds to. Slaves connect to the Master on this port, and Orchestrators connect to a Slave on this port, so it serves both connection types.
+
+|`spring.rsocket.server.address`
+|-
+|`String`
+|The network address the embedded RSocket server binds to.
+
+|`spring.rsocket.server.transport`
+|-
+|`String`
+|The transport protocol for the embedded RSocket server. Must be `tcp` for retry ring-coordinator services.
+
+|`stacksaga.instance.cluster`
+|-
+|`String`
+|The cluster this instance belongs to. Components only connect to one another when their `cluster` values match, so it must be identical across every Master, Slave, and Orchestrator that needs to connect.
+
+|`stacksaga.instance.region`
+|-
+|`String`
+|The region this instance belongs to. Components only connect to one another when their `region` values match, so it must be identical across every Master, Slave, and Orchestrator that needs to connect.
+
+|`stacksaga.instance.zone`
+|-
+|`String`
+|The zone this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
+
+4+s| Slave-only — applies to `slave` instances
+
+|`stacksaga.coordinator.slave.target-master.host`
+|-
+|`String`
+|The host of the Master this Slave connects to (in the same region and cluster). Used to establish the RSocket connection from the Slave to the Master.
+
+|`stacksaga.coordinator.slave.target-master.port`
+|-
+|`int`
+|The port of the Master this Slave connects to (in the same region and cluster). Used to establish the RSocket connection from the Slave to the Master.
+
+|`stacksaga.coordinator.slave.target-master.reconnect.max-retries`
+|`10`
+|`int`
+|Maximum number of TCP reconnect attempts when establishing the connection to the Master. If the Slave still cannot connect after this many attempts, the instance shuts down.
+
+|`stacksaga.coordinator.slave.target-master.reconnect.backoff-duration`
+|`2s`
+|`Duration`
+|The initial backoff between TCP reconnect attempts. After a failed attempt the Slave waits this long before retrying, growing on each subsequent attempt up to `max-backoff-duration`.
+
+|`stacksaga.coordinator.slave.target-master.reconnect.max-backoff-duration`
+|`6s`
+|`Duration`
+|The upper bound on the TCP reconnect backoff. The growing backoff between reconnect attempts never exceeds this value.
+
+|`stacksaga.coordinator.slave.target-master.retry.max-retries`
+|`Long.MAX_VALUE`
+|`long`
+|Maximum number of RSocket stream retry attempts before giving up. This governs recovery of the RSocket stream itself, and is distinct from the TCP `reconnect` attempts above. Defaults to `Long.MAX_VALUE` (effectively infinite), which is recommended in production so the stream is always eventually recovered.
+
+|`stacksaga.coordinator.slave.target-master.retry.backoff-duration`
+|`2s`
+|`Duration`
+|The initial backoff between RSocket stream retry attempts. After a failed attempt the Slave waits this long before retrying, growing on each subsequent attempt up to `max-backoff-duration`.
+
+|`stacksaga.coordinator.slave.target-master.retry.max-backoff-duration`
+|`6s`
+|`Duration`
+|The upper bound on the RSocket stream retry backoff. The growing backoff between retry attempts never exceeds this value.
+
+|`stacksaga.coordinator.slave.target-master.retry.jitter`
+|`0.5`
+|`double`
+|The jitter factor applied to the RSocket stream retry backoff. Randomizing the backoff avoids a thundering-herd problem when many Slaves reconnect to the Master at once. Must be between `0` (no jitter) and `1` (full jitter — a random value between 0 and the backoff duration).
+
+|`stacksaga.coordinator.slave.lookup.ip-prefer`
+|`false`
+|`boolean`
+|Controls what the Master hands back to Orchestrators when they look up the available Slaves to connect to. When `true`, the Master returns Slave IP addresses; when `false` (the default), it returns Slave hostnames.
 |===
