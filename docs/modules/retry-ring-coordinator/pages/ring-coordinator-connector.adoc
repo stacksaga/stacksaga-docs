@@ -91,7 +91,7 @@ NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory a
 |`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.max-attempts`
 |`Integer.MAX_VALUE`
 |`int`
-|Maximum number of retry attempts when the connection to the Master succeeds but its registry currently has no Slave to serve the request. The Connector reconnects to the Master and asks for fresh Slave details on each attempt. Defaults to `Integer.MAX_VALUE` (retry indefinitely until a Slave becomes available) for maximum resilience; lower it if you would rather cap the attempts during prolonged outages.
+|Maximum number of retry attempts when the connection to the Master is already successful but its cache currently holds no Slave to serve the request. Here the Master connection stays up — there is nothing to reconnect — so the Connector simply re-requests Slave details from the Master on each attempt until one becomes available, and only then connects to that Slave (governed by the `slave.requester.*` properties below). Defaults to `Integer.MAX_VALUE` (retry indefinitely) for maximum resilience; lower it if you would rather cap the attempts during prolonged outages.
 
 |`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.backoff-duration`
 |`2s`
@@ -113,7 +113,7 @@ NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory a
 |`stacksaga.coordinator.connector.slave.requester.max-retries`
 |`10`
 |`int`
-|Maximum number of reconnection attempts to the *current* Slave connection after a connection loss. Once this limit is reached, the Connector stops retrying that Slave and looks up a fresh Slave from the Master's registry, since the original Slave may have been restarted or replaced.
+|Maximum number of reconnection attempts on the *current* Slave connection after a connection loss. Once this limit is reached, the Connector stops retrying that Slave and goes back to the Master to look up a *different* Slave — the Master itself is healthy; only this Slave connection has failed. If the Slave is down or unhealthy it has very likely already been dropped from the Master's registry too, since the Master keeps that registry updated as Slave connections come and go, so the lookup returns a fresh, healthy Slave.
 
 |`stacksaga.coordinator.connector.slave.requester.backoff-duration`
 |`2s`
