@@ -165,7 +165,6 @@ This staged approach makes it possible to start with a minimal setup and harden 
 . xref:#stacksaga-kafka-architecture-1st-stage[Stage 1: Basic Setup] — orchestrator + worker communication over Kafka.
 . xref:#stacksaga-kafka-architecture-2nd-stage[Stage 2: Retry-Ready Setup] — distributed retry via ring coordinator.
 . xref:#stacksaga-kafka-architecture-3rd-stage[Stage 3: Monitoring Setup] — saga-level observability via trace window.
-. xref:#stacksaga-kafka-architecture-4th-stage[Stage 4: Environment Support] — service discovery and multi-environment integration.
 
 [[stacksaga-kafka-architecture-1st-stage]]
 === Stage 1 — Basic Setup
@@ -214,7 +213,6 @@ If the step succeeded, the engine updates the domain entity state, persists the 
 Each `onNextRevert()` produces a compensation command to the relevant worker topic.
 Workers handle compensation commands through their dedicated `KafkaWorkerEndpoints` compensation handler and reply via the same domain reply topic.
 . Each state transition — step completion, failure, compensation start, compensation completion — is written to the event store via `stacksaga-database-support`.
-
 
 NOTE: The diagram above shows a single span (`MakePaymentSpan`) for clarity.
 In practice, a saga can traverse any number of spans across different worker services, each with its own command topic.
@@ -292,30 +290,6 @@ With the trace window connector in place, the StackSaga Trace Window provides:
 
 This layer does not change the Kafka topology or the retry behavior — it is a passive observability connector that reads from the existing event store and exposes the data through an API consumed by the Trace Window UI.
 
-[[stacksaga-kafka-architecture-4th-stage]]
-=== Stage 4 — Environment Support Setup
-
-Stage 4 adds environment awareness to the framework, enabling it to resolve service instance metadata correctly when running in dynamic environments such as Eureka-based service meshes or Kubernetes deployments.
-
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-4-env-support-and-monitoring-and-retry-ready-architecture-overview.svg[StackSaga-Kafka Architecture: Stage 4 — Environment Support + Monitoring + Retry-Ready,width=800]
-
-==== New Component at This Stage
-
-[cols="1,1,2",options="header"]
-[.properties-table]
-|===
-| Service
-| New Component
-| Purpose
-
-| Orchestrator + Ring Coordinator Agent
-| `stacksaga-environment-support`
-| Provides the framework with environment-specific metadata: the current instance's host, port, and service identity as visible to the service discovery mechanism. This is required for the ring coordinator to correctly register and deregister orchestrator instances as they come up and go down in dynamic environments.
-|===
-
-NOTE: "Ring Coordinator Agent" in this context refers to the orchestrator service instance that has `stacksaga-ring-coordinator-connector` included — i.e., the same service that acts as a retry node.
-Adding `stacksaga-environment-support` to this service enables the ring coordinator to correctly identify the instance in environments where the host or port is dynamically assigned.
-
 ==== Environment Support and Topic Resolution
 
 In cloud-native deployments, the environment support module ensures that:
@@ -324,7 +298,7 @@ In cloud-native deployments, the environment support module ensures that:
 * Instance-level metrics and trace data surfaced in the Trace Window are attributed to the correct service instance.
 * Service discovery metadata (e.g., Eureka instance ID or Kubernetes pod name) is available to the framework for logging and observability correlation.
 
-With Stage 4 in place, the full StackSaga-Kafka deployment is production-ready: it supports asynchronous saga execution, distributed retry with token ring partitioning, comprehensive observability, and correct operation in dynamic cloud environments.
+With Stage 3 in place, the full StackSaga-Kafka deployment is production-ready: it supports asynchronous saga execution, distributed retry with token ring partitioning, comprehensive observability, and correct operation in dynamic cloud environments.
 
 == Comprehensive Technical Reference
 
@@ -1910,8 +1884,6 @@ The default processing mode for the isolated listener is `PARTITION_ORDERED` to 
 
 ** `IsolatedListenerProcessingMode.SEQUENTIAL`: In this mode, messages are processed sequentially without any concurrency. this mode is used when the order of processing is critical and must be preserved across all partitions. +
 The `SEQUENTIAL` processing mode is not recommended for high-throughput scenarios due to its sequential nature, which can become a bottleneck. it is recommended to use this mode only when the strict ordering of message processing is a hard requirement and the expected message volume is low to moderate.
-
-
 
 [[configuration_properties_stacksaga_kafka_worker]]
 ===== Configuration Properties Of stacksaga-kafka-worker
