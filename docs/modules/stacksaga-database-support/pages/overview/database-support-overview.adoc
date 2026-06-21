@@ -1,4 +1,28 @@
-include::event_store.adoc[leveloffset=+1]
+:description: Learn about Stacksaga Event Store, its benefits, configuration, and use cases in microservice architectures.
+:keywords: saga desing pattern, spring boot, stacksaga, event store, microservices, event sourcing, retries, monitoring, database per service
+
+= Stacksaga Event Store
+
+An event store is a log or database designed to store a sequence of state changes (events), rather than just the final state.
+In stacksaga, #you are able to use your primary database as the event-store by providing a separate schema#, instead of managing a totally separate system or database for the event-store.
+it reduces the operational overhead and complexity of managing multiple databases.
+
+In stacksaga you can configure the database for the event-store as the pattern of database per service.
+
+NOTE: Even though it is possible to have a single event-store for all services, it is not recommended in production environments due to potential performance bottlenecks and single points of failure and the microservice architecture principles.
+
+== What are the reasons for saving the states in the event-store?
+
+* *Reliable Retries*
++
+When an execution fails due to a `RetryableExecutorException` (such as network issues), StackSaga enables safe retries.
+In microservice architectures, failures like network errors should not be treated as final exceptions, since transactions often span multiple services, and any service may become temporarily unavailable.
+By persisting each transaction state in the event store, StackSaga ensures that failed executions can be retried reliably, reducing the risk of data loss or inconsistency.
+
+* *Analysis and Monitoring*
++
+StackSaga provides a dashboard—xref:trace-window:stacksaga-trace-window.adoc[Stacksaga Trace-Window]—for monitoring transaction traces and reviewing errors.
+All displayed data is sourced from the event store, where transaction records are securely persisted for analysis and troubleshooting.
 
 == StackSaga Database Support modules
 
@@ -8,10 +32,6 @@ and also it provides the necessary APIs for accessing tracing details from the x
 as the recorded approach you can choose the appropriate database support module based on your orchestrator service's primary database. +
 For instance, if Mysql database is used as the primary database of the orchestrator service, then the database support module should be `stacksaga-mysql-support`.
 
-Here you can see where the database support modules fit into the overall Stacksaga architecture.
-
-image::stacksaga-database-support:stacksaga-diagram-stacksaga-components-database-support.svg[alt="stacksaga components overview with database support",title="Stacksaga components overview with database support"]
-
 NOTE: As you can see in the diagram, the stacksaga-agent module sends the retrying request to the orchestrator service. +
 to access the orchestrator service, the in built endpoints are provided through database-support module. refer the respective database support implementation for more details.
 
@@ -20,13 +40,26 @@ to access the orchestrator service, the in built endpoints are provided through 
 The following database support implementations are available currently.
 
 |===
-| Database | Module | Description
+| Database | Module | Description | Type
 
 | Mysql
 | xref:mysql-database-support/stacksaga-mysql-support.adoc[stacksaga-mysql-support]
 | Database support for Mysql
+| SQL
+
+| Postgresql
+| xref:mysql-database-support/stacksaga-mysql-support.adoc[stacksaga-mysql-support]
+| Database support for Postgresql
+| SQL
 
 | Cassandra
 | xref:cassandra-database-support/stacksaga-cassandra-support.adoc[stacksaga-cassandra-support]
 | Database support for Cassandra
+| NOSQL
+
+| Scylladb
+| xref:scylladb-database-support/stacksaga-scylladb-support.adoc[scylladb-cassandra-support]
+| Database support for Scylladb
+| NOSQL
+
 |===
