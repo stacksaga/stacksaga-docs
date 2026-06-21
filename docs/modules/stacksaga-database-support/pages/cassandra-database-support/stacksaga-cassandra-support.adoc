@@ -348,6 +348,37 @@ And the transactions that are ahead of the boundary go to the schedule after the
 include::image$cassandra/window-visualizer.html[]
 ++++
 
+== Configuring Properties
+
+[cols="1,1,1,<1"]
+[.properties-table]
+|===
+|Property Name|Default Value|Type|Property Description
+|`stacksaga.cassandra.read-consistency-level`|`LOCAL_QUORUM`|`SagaSupportConsistencyLevel`[QUORUM,LOCAL_QUORUM]|Consistency level for read operations. Default is `LOCAL_QUORUM`, which provides a good balance between consistency. The consistency level that provided via `stacksaga-cassandra.conf` will override this value internally by the framework. Stacksaga only supports `QUORUM` and `LOCAL_QUORUM` consistency levels for read.
+|`stacksaga.cassandra.write-consistency-level`|`LOCAL_QUORUM`|`SagaSupportConsistencyLevel`[QUORUM,LOCAL_QUORUM]|Consistency level for write operations. Default is `LOCAL_QUORUM`, which provides a good balance between consistency and availability. The consistency level that provided via `stacksaga-cassandra.conf` will override this value internally by the framework. Stacksaga only supports `QUORUM` and `LOCAL_QUORUM` consistency levels for write.
+|`stacksaga.cassandra.config`|`classpath:stacksaga-cassandra.conf`|`Resource`|Location of the configuration file to use. See https://docs.datastax.com/en/developer/java-driver/4.17/manual/core/configuration/index.html[configuration options] for more details about how to provide the .conf file and the available configuration options in the .conf file.
+
+4+|
+*Transaction Properties:* The following properties configure transaction lifetime, retry/restore scheduling, and the in-memory streaming buffer used by the recovery pipeline.
+
+|`stacksaga.cassandra.transaction.lifetime`|`24h`|`Duration`|how long time the transaction keep as live. after reaching the lifetime the transaction will not be exposed for retrying even if the transaction still in processing monde. +
+default- 24hours
+|`stacksaga.cassandra.transaction.retry.delay-in-minutes`|`1`|`int`|How long the transaction should be kept waiting to next expose the transaction for retrying. This ensures that avoiding the transaction retrying frequently withing a short period of time. the transaction is frozen for some period of time, even the transaction is failed again after retrying recently. The value must evenly divide 1440. (24*60) the delay time can be fluctuated withing delayInMinutes to delayInMinutes+(delayInMinutes/2). for example, if the delayInMinutes is 2, the transaction can be exposed for retrying after 2 minutes to 3 minutes. +
+https://docs.stacksaga.org/stacksaga/latest/stacksaga-database-support/cassandra-database-support/stacksaga-cassandra-support.html[read more] +
+default: two-minute
+|`stacksaga.cassandra.transaction.restore.delay-in-minutes`|`480`|`int`|from how long time the transaction should be considered as crashed and should be restored for retrying. in rare case, the transactions may be crashed without acknowledging the failure such as application crash. in such case, the transaction is not exposed for retrying because the transaction is not updated for a long time. this value is used to determine after how long time the transaction should be considered as crashed and should be exposed for restoring the transaction and retrying. The value must evenly divide 24. the delay time can be fluctuated withing delayInMinutes to delayInMinutes+(delayInMinutes/2). for example, if the delayInMinutes is 540, the transaction can be exposed for restoring after 540 minutes to 810 minutes. +
+https://docs.stacksaga.org/stacksaga/latest/stacksaga-database-support/cassandra-database-support/stacksaga-cassandra-support.html[read more] +
+default: 480 minutes (8hours)
+|`stacksaga.cassandra.transaction.stream.batch-size`|`100`|`int`|Controls how many transactions are fetched from the database at once into the in-memory buffer. This maps to the highTide parameter of Reactor's limitRate(). A higher value reduces the number of database round trips but increases memory usage. A lower value keeps memory footprint small but increases database pressure. +
+default: 100
+|`stacksaga.cassandra.transaction.stream.refill-threshold`|`75`|`int`|Controls when the framework triggers the next database fetch to refill the buffer. This maps to the lowTide parameter of Reactor's limitRate(). When the number of buffered transactions drops to this value, a new fetch is triggered in the background — so processing never stalls waiting for data. Should always be less than batch-size. A common rule of thumb is 75% of batch-size. +
+default: 75
+|`stacksaga.cassandra.transaction.stream.concurrency`|`100`|`int`|Controls how many transactions are processed simultaneously in the recovery pipeline. This maps to the concurrency parameter of Reactor's `flatMap(concurrency)`. Each concurrent slot handles one transaction's full retry/restore pipeline, which may involve multiple database calls per transaction. Therefore, the concurrency value should always be less than or equal to the dedicated recovery connection pool size to avoid connection starvation and pipeline stalls. +
+*Recommended:* Set concurrency to 50–70% of the recovery connection pool size when the recovery pipeline performs multiple database operations per transaction. If the recovery datasource is isolated (dedicated pool), concurrency can be pushed closer to `pool-size - 2` to reserve connections for background fetch operations. +
+*Warning:* Setting concurrency equal to or greater than the connection pool size risks starving the background `limitRate` refill fetch query, which silently stalls the entire recovery pipeline.
+|`stacksaga.cassandra.transaction.stream.pre-fetch`|`70`|`int`|Controls how many transactions are pre-fetched and buffered in memory before processing begins. This maps to the prefetch parameter of Reactor's `flatMap(concurrency, prefetch)`. Prefetching allows the framework to have a ready supply of transactions to process without waiting for the completion of the previous batch, thus improving throughput and reducing latency.
+|===
+
 ////
 == Round Robin Table Rotation
 
