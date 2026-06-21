@@ -55,12 +55,9 @@ image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="sta
 
 == Domain Entity Lifecycle
 
-- The Saga Domain-Entity object is created by you as the developer,
-yor are supposed to create the custom domain-domain-entity object before starting the transaction.
+- The Saga Domain-Entity object is created by you as the developer, yor are supposed to create the custom domain-domain-entity object before starting the transaction.
 you can create the object by adding the initial data that is required for the transaction.
-for instance, if you are going to start a transaction related to order processing,
-you can create an `OrderDomainEntity` object and add the initial data such as username,
-total amount, items that the customer bought, etc.
+for instance, if you are going to start a transaction related to order processing, you can create an `OrderDomainEntity` object and add the initial data such as username, total amount, items that the customer bought, etc.
 and it is passed to the saga orchestration engine as an argument when you start the transaction by accessing the saga orchestration engine via the `StackSagaKafkaTemplate.init(...).startWith(..).execute();` method.
 and the initial state of the domain-entity is saved in the event-store as the starting point of the transaction. that means, the first version of the domain-entity is created and stored in the event-store at the moment.
 - After that giving the control to the saga orchestration engine, the domain-entity is updated continuously from time to time by the executors as needed. that means, after executing each execution, the domain-entity is updated by the executor by adding any data that is required for the upcoming executions. for instance, after fetching the user's details, the user's details are stored in the domain-entity object to be used in upcoming executions. and also after making the payment, the reference ID that is returned from the payment-service is stored in the domain-entity object to be used in upcoming executions. and each time when the domain-entity is updated. if there is no any pivot execution,(failure point) and if the LRT is done as expected, the Domain-Entity object end the lifecycle by reaching the `COMPLETED` state. but if there is a pivot execution (failure point), the Domain-Entity object end the lifecycle by reaching the `FAILED` state.
@@ -308,6 +305,18 @@ IMPORTANT: it is highly recommended to use the provided `hashGenerator` to produ
 WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
 The framework may invoke it concurrently.
 
+== Domain-Entity Versioning
+
+Domain-Entity versioning is the most important thing in StackSaga.
+All the applications are being updated with new features time to time.
+Any kind of changes that you make regarding the entire transaction, it caused for a version update of the particular Domain-Entity.
+It can be adding new fields, removing fields, changing the data type of the existing fields, etc.
+all those changes are considered as the version update of the Domain-Entity.
+and it is important to update the version of the Domain-Entity by using the `@SagaDomainEntityVersion` annotation whenever you make any kind of changes in the Domain-Entity.
+and also it is important to maintain the backward compatibility of the Domain-Entity when you make any kind of changes in it. because there might be some transactions that are still running with the old version of the Domain-Entity, and if you make any breaking changes in the Domain-Entity without maintaining the backward compatibility, it can cause disruption in those transactions.
+
+
 ////
-todo: add about versioning. and also mention about changing the topic names effect.
+todo: add about versioning.
 ////
+
