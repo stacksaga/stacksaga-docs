@@ -1,0 +1,168 @@
+= Architecture - Stacksaga-Framework (Synchronous)
+
+The following sections describe the Stacksaga-Framework (Synchronous) architecture progressively across three deployment stages.
+Each stage builds on the previous one, adding production-readiness capabilities incrementally.
+This staged approach makes it possible to start with a minimal setup and harden the system as requirements grow.
+
+. xref:#stacksaga-synchronous-architecture-1st-stage[Stage 1: Basic Setup] — orchestrator service + utility microservices communication any protocol (e.g., REST, gRPC).
+. xref:#stacksaga-synchronous-architecture-2nd-stage[Stage 2: Retry-Ready Setup] — Configuring Retry Sub System — distributed retry via ring coordinator.
+. xref:#stacksaga-synchronous-architecture-3rd-stage[Stage 3: Monitoring Setup] — saga-level observability via trace window.
+
+
+
+[[stacksaga-identifying-service-roles]]
+== Service Classification: Orchestrator, and Standard Utility
+
+Before going any further into the architecture, it is important to first recognize the different types of services within the *StackSaga Synchronous ecosystem*.
+Understanding *how* a service is classified makes everything that follows — the staged architecture, the dependency tables, the request flow — far easier to map back onto your own system.
+
+[cols="1,3",options="header"]
+[.properties-table]
+|===
+| Role | Description
+
+| *Orchestrator service*
+| Any existing service that has been given the additional role of driving a saga's business transaction end-to-end. Simply, the applications that has the `stacksaga-spring-boot-starter` dependency are considered orchestrator services. They are responsible for starting sagas, sending commands to workers, and coordinating the overall flow of the saga.
+
+| *Standard utility service*
+| The baseline role every service has. A service that has *no* StackSaga dependency and is never invoked by the orchestrator remains purely a standard utility service. However, they also can be invoked by the orchestrator as part of a saga via the exposed endpoints, but they do not have any StackSaga dependencies themselves. They are not involved in the saga's retry coordination or monitoring etc.
+|===
+
+*Orchestrator* is StackSaga-ecosystem role labels, not new kinds of deployments or separate services entirely built for stacksaga.
+Every microservice in a system — `order-service`, `payment-service`, `user-service`, and so on — is, first and foremost, a *standard utility service*: it keeps exposing its own REST/gRPC endpoints, running its own business logic, and serving its own consumers exactly as it did before StackSaga entered the picture.
+
+Adding a StackSaga dependency to one of these services does not replace or restrict what it already does — it overlays an additional role on top.
+For example, if `order-service` adds `stacksaga-spring-boot-starter`, it keeps doing everything it already did (exposing its own endpoints, calling other internal services, etc.) and *additionally* gains the orchestrator role for driving a specific saga.
+Within the StackSaga ecosystem, that service is now referred to as the *orchestrator service* — but only in the context of that saga.
+
+TIP: This is one of the biggest advantages of StackSaga: it can be introduced into any existing microservice with zero disruption.
+There is no need to peel a service out of its domain, stand up a new dedicated orchestration service, or rewrite existing endpoints and business logic to make room for it.
+You simply add the relevant StackSaga dependency to a service that already lives in your system, and it takes on the orchestrator role *alongside* its existing responsibilities.
+Adoption is incremental and additive, not a redesign.
+
+[[stacksaga-synchronous-architecture-1st-stage]]
+== Stage 1: Basic Setup
+
+This stage establishes the minimal viable topology: an orchestrator service that can start and drive sagas, and one or more utility services that can receive execution request via endpoints and return results.
+
+No retry coordination or external monitoring is configured at this stage.
+
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-1-minimal-architecture-overview.svg[StackSaga-Sync Architecture: Stage 1 — Basic Setup,width=800]
+
+=== Dependencies
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| Service
+| Dependency
+| Purpose
+
+////
+todo: link the items
+////
+
+
+| Orchestrator
+| `stacksaga-spring-boot-starter`
+| Provides the saga engine`SEC`, ,`StackSagaTemplate`,`TransactionEventListener`, `Executor`, and the necessary infrastructure for defining and executing sagas.
+
+| Orchestrator
+| `stacksaga-database-support`
+| Provides the event store adapter for persisting `SagaDomainEntity` state and execution history.
+|===
+
+=== Request and Execution Flow
+
+. An inbound HTTP request (e.g., `POST /order`) reaches the `OrderController` on the orchestrator service.
+. The controller instantiates a `PlaceOrderDomainEntity` — the xref:#[`SagaDomainEntity`] subclass for the order placement saga — populates its initial payload, and calls xref:#[`StackSagaTemplate.init(...).startWith(..).fireAndForget().execute();`].
+From this point the saga engine takes full control.
+. Each spans (xref:#[executors]) will be executed one by one based on the programmatic navigation by keeping the state in the event-store in case of retrying and tracing.
+with the help of the `stacksaga-database-support` module.
+. If there is any *primary execution failure* , SEC will trigger the compensation executions in reverse order.
+. Each and every State Change is notified to the `TransactionEventListener` for monitoring and observability. the user can be notified then.
+
+NOTE: The diagram above shows only 2 spans for clarity.
+In practice, a saga can traverse any number of spans across different utility services with help of executors.
+
+[[stacksaga-synchronous-architecture-2nd-stage]]
+== Stage 2 — Retry-Ready Setup
+
+Stage 2 introduces the distributed retry capability with retry subsystems.
+The retry subsystem is responsible for coordinating the retry of sagas that have stalled due to transient failures in the infrastructure.
+Without this stage, a saga that stalls due to a transient infrastructure failure (e.g., a utility service being temporarily unavailable, any network timeout) will remain in an incomplete state indefinitely.
+Stage 2 makes the system self-healing for such failures.
+
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-2-retry-ready-architecture-overview.svg[StackSaga-Sync Architecture: Stage 2 — Retry-Ready Setup,width=800]
+
+=== New Components at This Stage
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| Service
+| New Component
+| Purpose
+
+| Ring Coordinator Service
+| `stacksaga-ring-coordinator`
+| A standalone service that manages the token ring. It tracks available orchestrator instances, distributes Murmur3 token sub-ranges among them, and handles range rebalancing when instances join or leave the cluster. see xref:#
+
+| Orchestrator
+| `stacksaga-ring-coordinator-connector`
+| Connects the orchestrator instance to the ring coordinator (via RSocket `request-stream`), receives and holds its assigned token sub-range, and enables the local retry scheduler to scan the event store for transactions whose Murmur3 hash falls within the owned range.
+|===
+
+=== Retry Mechanism
+
+By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, the instance is promoted to a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry Node].
+The ring coordinator assigns each registered orchestrator instance a contiguous sub-range of the Murmur3 token ring.
+The retry scheduler on each instance periodically scans the event store for transactions that are in a non-terminal state (e.g., `IN_PROGRESS`, `COMPENSATING`) and whose transaction ID hashes into the locally owned token range.
+When such a transaction is found, the scheduler re-submits it to the saga engine for re-execution from the last incomplete step.
+
+This partitioning ensures that in a multi-instance orchestrator deployment, each stuck transaction is retried by exactly one instance — there is no duplication of retry work and no need for distributed locking.
+When an instance restarts or a new instance joins, the ring coordinator rebalances token ranges and the new assignment is delivered over the existing RSocket stream.
+
+NOTE: The ring coordinator is a separate service (`stacksaga-ring-coordinator-spring-boot-starter`) that must be deployed independently.
+It is a lightweight coordination service and does not participate in the business logic. +
+It is recommended read xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[] to understand the retry mechanism in depth and how the ring coordinator works.
+
+[[stacksaga-synchronous-architecture-3rd-stage]]
+== Stage 3 — Monitoring and Observability Setup
+
+Stage 3 adds the observability layer, enabling the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] to query real-time and historical saga execution data from the orchestrator service.
+
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-3-monitoring-and-retry-ready-architecture-overview.svg[StackSaga-Sync Architecture: Stage 3 — Monitoring + Retry-Ready,width=800]
+
+=== New Component at This Stage
+
+[cols="1,1,2",options="header"]
+[.properties-table]
+|===
+| Service
+| New Component
+| Purpose
+
+| Orchestrator
+| `stacksaga-trace-window-connector`
+| Exposes a set of internal APIs (consumed by the StackSaga Trace Window UI) that surface per-transaction execution traces, step-level timelines, failure details, retry histories, and compensation status from the event store.
+|===
+
+=== What Becomes Visible
+
+With the trace window connector in place, the StackSaga Trace Window provides:
+
+* Per-saga execution graphs showing each step, its execution timestamp, duration, status, and any error payload.
+* Compensation traces showing which executors executed, in what order, and whether they succeeded.
+* Retry audit logs showing how many retry attempts were made, which retry node handled each attempt, and the outcome.
+* Live transaction status for in-progress sagas.
+
+This layer does not change the Kafka topology or the retry behavior — it is a passive observability connector that reads from the existing event store and exposes the data through an API consumed by the Trace Window UI.
+
+With Stage 3 in place, the full StackSaga-Kafka deployment is production-ready: it supports asynchronous saga execution, distributed retry with token ring partitioning, comprehensive observability via the Trace Window.
+
+////
+todo: link to environment support section once it's written
+////
+
+See more about how the application is deployed in environments.

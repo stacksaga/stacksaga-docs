@@ -3,13 +3,56 @@
 
 = Architecture
 
-The following sections describe the StackSaga-Kafka architecture progressively across four deployment stages.
+The following sections describe the StackSaga-Kafka architecture progressively across three deployment stages.
 Each stage builds on the previous one, adding production-readiness capabilities incrementally.
 This staged approach makes it possible to start with a minimal setup and harden the system as requirements grow.
 
 . xref:#stacksaga-kafka-architecture-1st-stage[Stage 1: Basic Setup] — orchestrator + worker communication over Kafka.
 . xref:#stacksaga-kafka-architecture-2nd-stage[Stage 2: Retry-Ready Setup] — distributed retry via ring coordinator.
 . xref:#stacksaga-kafka-architecture-3rd-stage[Stage 3: Monitoring Setup] — saga-level observability via trace window.
+
+[[stacksaga-kafka-identifying-service-roles]]
+== Service Classification: Orchestrator, Worker, and Standard Utility
+
+Before going any further into the architecture, it is important to first recognize the different types of services within the StackSaga ecosystem.
+Understanding *how* a service is classified makes everything that follows — the staged architecture, the dependency tables, the request flow — far easier to map back onto your own system.
+
+*Orchestrator* and *worker* are StackSaga-ecosystem role labels, not new kinds of deployments or separate services.
+Every microservice in a system — `order-service`, `payment-service`, `user-service`, and so on — is, first and foremost, a *standard utility service*: it keeps exposing its own REST/gRPC endpoints, running its own business logic, and serving its own consumers exactly as it did before StackSaga-Kafka entered the picture.
+
+Adding a StackSaga dependency to one of these services does not replace or restrict what it already does — it overlays an additional role on top.
+For example, if `order-service` adds `stacksaga-kafka-orchestrator`, it keeps doing everything it already did (exposing its own endpoints, calling other internal services, etc.) and *additionally* gains the orchestrator role for driving a specific saga.
+Within the StackSaga ecosystem, that service is now referred to as the *orchestrator service* — but only in the context of that saga.
+The same applies to a worker: `payment-service` keeps functioning as a normal utility service while also picking up saga commands through `KafkaWorkerEndpoints`, earning the *worker service* label.
+
+TIP: This is one of the biggest advantages of StackSaga: it can be introduced into any existing microservice with zero disruption.
+There is no need to peel a service out of its domain, stand up a new dedicated orchestration service, or rewrite existing endpoints and business logic to make room for it.
+You simply add the relevant StackSaga dependency to a service that already lives in your system, and it takes on the orchestrator or worker role *alongside* its existing responsibilities.
+Adoption is incremental and additive, not a redesign.
+
+These labels exist purely to make the saga topology easier to reason about.
+Every service in the system falls into one (or two, for orchestrator/worker-with-utility-duties) of three categories:
+
+[cols="1,3",options="header"]
+[.properties-table]
+|===
+| Role | How to Identify It
+
+| *Orchestrator service*
+| Any existing service that has been given the additional role of driving a saga's business transaction end-to-end. Identified by the `stacksaga-kafka-orchestrator` dependency (plus `stacksaga-database-support` for event store persistence). Within the saga, it owns the `StackSagaKafkaTemplate`, the `SagaEventNavigator`, and all `onNext()` / `onNextRevert()` step logic — outside the saga, it is unchanged.
+
+| *Worker service*
+| Any existing service that has been given the additional role of participating in a saga by exchanging command/reply messages with the orchestrator. Identified by the `stacksaga-kafka-worker` dependency and a registered `KafkaWorkerEndpoints` handler. Outside of handling saga commands, it continues to operate as a normal standard utility service.
+
+| *Standard utility service*
+| The baseline role every service has. A service that has *no* StackSaga dependency and is never invoked by the orchestrator remains purely a standard utility service — its behavior is completely unaffected by StackSaga-Kafka.
+|===
+
+NOTE: A single service is almost always a standard utility service *and* one of the StackSaga roles at the same time — e.g., `payment-service` keeps its normal APIs while also handling saga commands via `KafkaWorkerEndpoints`.
+The orchestrator/worker labels describe a service's *involvement in a given saga*, not a separate deployment unit.
+Only one service per saga acts as the orchestrator.
+
+See the <<stacksaga-kafka-architecture-1st-stage,Stage 1 Dependencies table>> for the exact dependency artifacts associated with each role.
 
 [[stacksaga-kafka-architecture-1st-stage]]
 == Stage 1 — Basic Setup
@@ -85,7 +128,7 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-2-retry-read
 
 | Ring Coordinator Service
 | `stacksaga-ring-coordinator`
-| A standalone service that manages the token ring. It tracks available orchestrator instances, distributes Murmur3 token sub-ranges among them, and handles range rebalancing when instances join or leave the cluster.
+| A standalone service that manages the token ring. It tracks available orchestrator instances, distributes Murmur3 token sub-ranges among them, and handles range rebalancing when instances join or leave the cluster. see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[]
 
 | Orchestrator
 | `stacksaga-ring-coordinator-connector`
@@ -94,7 +137,7 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-2-retry-read
 
 === Retry Mechanism
 
-By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, the instance is promoted to a *retry node*.
+By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, the instance is promoted to a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry Node].
 The ring coordinator assigns each registered orchestrator instance a contiguous sub-range of the Murmur3 token ring.
 The retry scheduler on each instance periodically scans the event store for transactions that are in a non-terminal state (e.g., `IN_PROGRESS`, `COMPENSATING`) and whose transaction ID hashes into the locally owned token range.
 When such a transaction is found, the scheduler re-submits it to the saga engine for re-execution from the last incomplete step.
@@ -103,7 +146,8 @@ This partitioning ensures that in a multi-instance orchestrator deployment, each
 When an instance restarts or a new instance joins, the ring coordinator rebalances token ranges and the new assignment is delivered over the existing RSocket stream.
 
 NOTE: The ring coordinator is a separate service (`stacksaga-ring-coordinator-spring-boot-starter`) that must be deployed independently.
-It is a lightweight coordination service and does not participate in the business logic or the Kafka message flow.
+It is a lightweight coordination service and does not participate in the business logic or the Kafka message flow. +
+It is recommended read xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[] to understand the retry mechanism in depth and how the ring coordinator works.
 
 [[stacksaga-kafka-architecture-3rd-stage]]
 == Stage 3 — Monitoring and Observability Setup
@@ -136,7 +180,6 @@ With the trace window connector in place, the StackSaga Trace Window provides:
 * Live transaction status for in-progress sagas.
 
 This layer does not change the Kafka topology or the retry behavior — it is a passive observability connector that reads from the existing event store and exposes the data through an API consumed by the Trace Window UI.
-
 
 With Stage 3 in place, the full StackSaga-Kafka deployment is production-ready: it supports asynchronous saga execution, distributed retry with token ring partitioning, comprehensive observability via the Trace Window.
 
