@@ -1,4 +1,6 @@
-= Stage-1 Quick Example: MySQL
+= Quick Example: MySQL
+
+== Stage-1 [Minimal Implementation]
 
 This example demonstrates a simple implementation of StackSaga's synchronous orchestration using MySQL as the database (event-store).
 
@@ -10,10 +12,8 @@ This example demonstrates a simple implementation of StackSaga's synchronous orc
 . xref:#tuning-configuration[]
 . xref:#running-application[]
 
-
-
 [[getting-started]]
-== Getting Started - Initial project setup
+=== Getting Started - Initial project setup
 
 At this demo we use Spring Mvc as the web framework and MySQL as the primary database for the event-store.
 
@@ -65,7 +65,7 @@ It provides the necessary components to implement the StackSaga pattern in your 
 It includes the necessary components and configurations to integrate MySQL with StackSaga, allowing you to store and manage events in a MySQL database while leveraging reactive programming paradigms. xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[]
 
 [[creating-domain-entity]]
-== Creating the Domain-Entity
+=== Creating the Domain-Entity
 
 Domain-Entity is the main entity that will be used in the transaction flow, it represents the main data structure that will be manipulated and processed throughout the transaction.  xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc[read more]
 
@@ -106,14 +106,14 @@ xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#domain_entit
 <3> The constructor calls the superclass constructor with the class type, which is necessary for StackSaga to properly manage and serialize the domain entity during the transaction flow.
 
 [[creating-executors]]
-== Creating the Executors
+=== Creating the Executors
 
 The next step is to create the executors for each span (atomic steps) of the LRT (long-running transaction).
 Executors are responsible for executing the business logic of each step in the transaction flow. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[read more]
 
 In this quick example, we will create 3 executors, one for *validating the user*, *revering order* and another for processing the *make payment*. (it is only for demonstration purposes, in a real-world application you would have more complex logic and more steps in the transaction flow).
 
-=== Creating ValidateUserExecutor
+==== Creating ValidateUserExecutor
 
 ValidateUserExecutor is responsible for validating the user information in the transaction flow.
 It checks if the user is valid and updates the domain entity accordingly.
@@ -155,7 +155,7 @@ The lambda function provides event-name indicating that the user has been valida
 
 IMPORTANT: The 1st executor can be a `QueryExecutor` or a `CommandExecutor`. there is no any restriction on the type of the 1st executor in the transaction flow.
 
-=== Creating ReserveOrderExecutor
+==== Creating ReserveOrderExecutor
 
 ReserveOrderExecutor is responsible for reserving the order in the transaction flow.
 It checks if the order can be reserved and do the necessary operations to reserve the order, updating the domain entity accordingly.
@@ -219,7 +219,7 @@ It takes the exception that caused the rollback, the final state of the domain e
 
 <6> The lambda function provides the event-name indicating that the order has been reverted.
 
-=== Creating MakePaymentExecutor
+==== Creating MakePaymentExecutor
 
 MakePaymentExecutor is responsible for processing the payment in the transaction flow.
 It checks if the payment can be processed and do the necessary operations to process the payment, updating the domain entity accordingly.
@@ -283,13 +283,31 @@ RetryableExecutorException is used in next stage with retry-subsystem.
 It takes the exception that caused the rollback, the final state of the domain entity, a revert hint store for storing any necessary information for the revert operation, and an idempotency key. in this example, since the `MakePaymentExecutor` is the last step in the transaction flow, there is no need to implement the revert logic for this executor, because if the payment processing fails, we want to trigger the compensation for the previous successful step, which is the order reservation, and we want to revert that action by calling the `doRevert` method of the `ReserveOrderExecutor`. so we can simply throw an `UnsupportedOperationException` in the `doRevert` method of the `MakePaymentExecutor` to indicate that this will not be executed until there is another executor after this executor in the flow. if there was another executor after this executor in the flow, then we would need to implement the revert logic for this executor as well, to handle the case where the subsequent step fails and triggers compensation. in real payment processing scenarios, you definitely need to implement the revert logic for the payment processing.
 
 [[create-handler]]
-== Creating the Handler
+=== Creating the Handler
 
-Handler is responsible for handling the transaction and receiving the transaction events emitted by the StackSaga engine during the transaction flow. xref:implementations:stacksaga-sync/orchestrator
+Handler is responsible for handling the transaction and receiving the transaction events emitted by the StackSaga engine during the transaction flow. xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc[See more]
 
+[source,java]
+----
+@Slf4j
+@Component//<1>
+public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {//<2>
+    @Override//<3>
+    public void onStateChanged(TransactionState<OrderDomainEntity> transactionState) {
+        log.info("onStateChanged : {}", transactionState.getCurrentStatus());
+    }
+}
+----
+
+<1> Annotate the class with `@Component` to make it a Spring bean, so that it can be automatically detected and registered by the Spring container.
+
+<2> The `PlaceOrderHandler` class implements the `TransactionEventListener` interface, which allows it to listen to transaction events emitted by the StackSaga engine during the transaction flow. xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[read more] +
+NOTE: `TransactionEventListener` has blocking and non-blocking versions. see the full details in xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[TransactionEventListener] and xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[ReactiveTransactionEventListener].
+
+<3> The `onStateChanged` method is overridden to handle the transaction state changes. it receives the current state of the transaction as a parameter, which includes information such as the current status of the transaction, the execution history, the current domain entity state, and the timestamps. in this example, we simply log the current status of the transaction whenever it changes. you can implement any logic you need in this method based on your use case, such as sending notifications to users about the transaction status changes or updating other systems based on the transaction events.
 
 [[creating-controller]]
-== Creating the Controller to trigger the transaction accessing `StackSagaTemplate`
+=== Creating the Controller to trigger the transaction accessing `StackSagaTemplate`
 
 Here we will create a simple REST controller with an endpoint to trigger the transaction flow by accessing the `StackSagaTemplate` which is the main API for interacting with the StackSaga engine to execute transactions. xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc[read more]
 
@@ -360,7 +378,7 @@ public class PlaceOrderController {
 It is not recommended to use the domain-entity class as the request body directly to avoid coupling the API layer with the domain layer, and to have better control over the API contract.
 
 [[tuning-configuration]]
-== Tune Configuration
+=== Tune Configuration
 
 To run the application, you need to configure the fallowing properties in your `application.properties` or `application.yml` file.
 
@@ -395,7 +413,7 @@ stacksaga.mysql.jdbc.password=${MYSQL_PASSWORD:mafei}
 JDBC connection is used by internally Liquibase to database migration and schema creation.
 
 [[running-application]]
-== Running the application and testing the transaction flow
+=== Running the application and testing the transaction flow
 
 Run the application and test the transaction flow by sending a POST request to the `/api/v1/order` endpoint with the necessary request body to place an order. try many times until the payment processing fails to see the compensation mechanism in action😉.
 
@@ -419,3 +437,155 @@ Run the application and test the transaction flow by sending a POST request to t
 2026-06-21T23:54:29.980+05:30  INFO 17792 --- [order-service] [oundedElastic-3] o.e.o.handler.PlaceOrderHandler          : onStateChanged : REVERTING
 2026-06-21T23:54:32.546+05:30  INFO 17792 --- [order-service] [oundedElastic-3] o.e.o.handler.PlaceOrderHandler          : onStateChanged : REVERT_COMPLETED
 ----
+
+== Stage-2 [Adding Retry Capability]
+
+In the previous stage, we have implemented a simple transaction flow for the happy path with a simulation. but in real-world scenarios, you will definitely have some transient failures that can be retried, such as network issues, temporary unavailability of external services, or database deadlocks. so in the next stage we will enhance our implementation by adding retry capability to handle such transient failures and make our transaction flow more resilient. we will implement a retry mechanism that allows us to automatically retry failed steps in the transaction flow based on configurable retry policies. stay tuned😉.
+
+StackSaga has subsystem for handling the retrying. the fallowing are the main steps to add retry capability to the transaction flow:
+
+. Create the xref:stacksaga:retry-ring-coordinator:ring-coordinator.adoc[Ring Coordinator Application] by using the `stacksaga-ring-coordinator-spring-boot-starter` as a separate application that will run alongside your orchestrator application, and it will be responsible for coordinating the token ranges withing the available orchestrator instances in the cluster.
+
+. Adding the xref:stacksaga:retry-ring-coordinator:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] dependency to your orchestrator application to enable the integration with the Ring Coordinator, which is responsible for receiving the relevant token range that has been allocated for the instance by the Ring Coordinator(Slave).
+
+=== Creating the Ring Coordinator Application (Master & Slave Hybrid)
+
+Just create a new Spring Boot application and add the following dependency in your `pom.xml` to enable the Ring Coordinator functionality.
+It is not necessary to have the web or any other dependencies. but you are totally free to add any other dependencies that you need for your application.
+
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-ring-coordinator-spring-boot-starter</artifactId>
+</dependency>
+----
+
+IMPORTANT: It is recommended to http://initializer.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+
+After adding the dependency, you need to configure the fallowing properties in your `application.properties` or `application.yml` file to configure the Ring Coordinator server.
+
+[source,properties]
+----
+spring.application.name=order-service-ring-coordinator
+#rsocket-server for master //<1>
+spring.rsocket.server.address=localhost
+spring.rsocket.server.port=4455
+#master and slave both //<2>
+stacksaga.coordinator.target-services=order-service
+stacksaga.coordinator.instance-type=master,slave
+#stacksaga-instance properties //<3>
+stacksaga.instance.cluster=local-cluster
+stacksaga.instance.region=local-region
+stacksaga.instance.zone=local-zone
+#Master connection details for slave to connect to master //<4>
+stacksaga.coordinator.slave.target-master.port=4455
+stacksaga.coordinator.slave.target-master.host=localhost
+----
+
+<1> The `spring.rsocket.server` properties are used to configure the RSocket server for the Ring Coordinator application. you need to provide the address and port for the RSocket server, which will be used by the slave instances to connect to the master instance.
+<2> The `stacksaga.coordinator.target-services` property is used to specify the target services that the Ring Coordinator will manage. in this example, we are specifying the `order-service` as the target service. the `stacksaga.coordinator.instance-type` property is used to specify the instance type for the Ring Coordinator application, which can be either `master`, `slave` both due to sample small size cluster. in a real-world scenario, you would typically have one master instance and multiple slave instances for better scalability and fault tolerance.
+
+<3> The `stacksaga.instance` properties are used to configure the instance information for the Ring Coordinator application. the *cluster* and the *region* should be the same as the ones configured in the orchestrator application to ensure that they are in the same cluster and region for proper coordination.
+<4> Due to the instance acts as s slave as well, it needs to connect to the master instance to receive the token range information, so you need to provide the connection details of the master instance using the `stacksaga.coordinator.slave.target-master` properties.
+
+=== Adding `stacksaga-ring-coordinator-connector` in existing orchestrator
+
+Go to the pom.xml of your existing orchestrator application and add the following dependency to enable the integration with the Ring Coordinator.
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-ring-coordinator-connector</artifactId>
+</dependency>
+----
+
+And the update the fallowing properties in your `application.properties` or `application.yml` file to configure the Ring Coordinator connection.
+
+[source,properties]
+----
+#retry properties
+stacksaga.mysql.transaction.retry.delay=1m //<1>
+stacksaga.coordinator.connector.enabled=true //<2>
+stacksaga.coordinator.connector.master.requester.host=localhost //<3>
+stacksaga.coordinator.connector.master.requester.port=4455
+----
+
+<1> The `stacksaga.mysql.transaction.retry.delay` property is used to configure how long time the transaction should be frozen without exposing for retrying. as per the configured value, the transaction will be exposed for retrying after one minute. +
+retry delay property comes with the database support module. the retry mechanism can have some different configurations based on the database support you are using, so it is recommended to check the documentation of the database support module you are using for more details about the available retry configurations.
+<2> The `stacksaga.coordinator.connector.enabled` property is used to enable the Ring Coordinator Connector in the orchestrator application. you need to set it to `true` to turn the standard Orchestrator service into a `Retry Node` that can receive the token range information from the Ring Coordinator and handle the retrying of transactions accordingly.
+
+<3> Host and the port properties for connecting to the master instance. after connection is established, master will suggest an available slave node (at this time only one we have,) and internally it connect with the slave node and subscribe to the token range information.
+
+=== Simulating retry scenario
+
+Here we are going to update the `ReserveOrderExecutor` to simulate a transient failure that can be retried, such as a temporary unavailability of an external service. we will throw a `RetryableExecutorException` at the first attempt and the second attempt (by the retry) will be successful to demonstrate the retry mechanism in action.
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-server", value = "ReserveOrderExecutor")
+public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+
+    //<1>
+    private final AtomicReference<Map<String, Integer>> counter = new AtomicReference<>(new HashMap<>());
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            OrderDomainEntity currentDomainEntityState,
+            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        //<2>
+        if (counter.get().containsKey(currentDomainEntityState.getTransactionId())) {
+            counter.get().put(currentDomainEntityState.getTransactionId(), counter.get().get(currentDomainEntityState.getTransactionId()) + 1);
+        } else {
+            counter.get().put(currentDomainEntityState.getTransactionId(), 1);
+            throw RetryableExecutorException.of("Simulate a retryable exception for transactionId: " + currentDomainEntityState.getTransactionId());
+        }
+
+        //call the internal service and reserve the order
+        try {
+            //simulate some delay for make the request
+            Thread.sleep(new Random().nextInt(1000, 3000));
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        return stepManager.next(MakePaymentExecutor.class, () -> "ORDER_RESERVED");
+    }
+
+    @NonNull
+    @Override
+    public SagaExecutionEventName doRevert(
+            NonRetryableExecutorException primaryExecutionException,
+            OrderDomainEntity finalDomainEntityState,
+            RevertHintStore revertHintStore,
+            String idempotencyKey
+    ) throws RetryableExecutorException {
+        //call the internal service to revert the reserve order action
+        try {
+            //simulate some delay for make the request
+            Thread.sleep(new Random().nextInt(1000, 3000));
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        return () -> "ORDER_REVERTED";
+    }
+}
+----
+
+<1> We are using an `AtomicReference` to hold a counter map that keeps track of the number of attempts for each transaction id. this is just for simulation purposes to determine when to throw the `RetryableExecutorException`. in a real-world scenario, you would typically have some actual logic to determine whether to throw a `RetryableExecutorException` based on the type of failure you encounter, such as catching specific exceptions from external service calls or checking certain conditions.
+<2> In the `doProcess` method, we check the counter for the current transaction id. if it is the first attempt (counter value is 1), we throw a `RetryableExecutorException` to simulate a transient failure that can be retried. if it is the second attempt (counter value is 2), we proceed with the normal flow and call `stepManager.next` to move to the next step in the transaction flow. this way, we can demonstrate the retry mechanism in action, where the first attempt fails and triggers a retry, and the second attempt succeeds.
