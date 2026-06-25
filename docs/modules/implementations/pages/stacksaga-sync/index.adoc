@@ -1,0 +1,248 @@
+:description: Deep-dive technical reference for the StackSaga Framework (Synchronous) — reactive saga orchestration in Spring Boot microservices over synchronous transports (REST, gRPC, GraphQL) for long-running distributed transaction management.
+:keywords: StackSaga, saga orchestration, microservices, Java, Spring Boot, REST, gRPC, GraphQL, distributed transactions, event sourcing, reactive programming, transaction management, idempotency, fault tolerance, workflow compensation, LRT, CHES
+
+= StackSaga Framework (Synchronous)
+
+== Overview
+
+*StackSaga Framework (Synchronous)* (`stacksaga-spring-boot-starter`) is the synchronous transport implementation of the StackSaga ecosystem.
+It coordinates long-running distributed transactions (LRT) across microservices that already communicate over synchronous protocols — REST (over HTTP), gRPC (over HTTP/2), or GraphQL (over HTTP) — without introducing a message broker into your topology.
+
+Unlike a choreography approach where each service reacts to events independently, StackSaga follows a *centralized orchestration* model: a single orchestrator service owns the full saga lifecycle, invokes the required operation on each participating service through that service's existing endpoint, and advances the saga based on the response it receives.
+This gives you the deterministic control flow and auditability of the saga orchestration pattern while letting every participating service keep its existing synchronous API untouched.
+
+The framework is built on top of Spring Boot and integrates with StackSaga's core engine for event sourcing, state management, retry scheduling, and cluster coordination.
+Each saga execution is fully persisted — every state transition of the `SagaDomainEntity` (the saga's aggregate root and payload carrier, also referred to as the *Aggregator*) is written to the event store through `stacksaga-database-support` — so that any in-progress transaction can be recovered, retried, or inspected at any point in time.
+
+NOTE: Even though the engine runs reactively under the hood, it is fully compatible with both *reactive* and *non-reactive* (imperative) Spring environments.
+You choose your programming model with the `SagaTemplate` (blocking) or `ReactiveSagaTemplate` (reactive) entry point; the saga coordination behaves identically either way.
+
+*Key capabilities:*
+
+* *Synchronous saga orchestration* — the orchestrator invokes each step against a utility service through its existing REST/gRPC/GraphQL endpoint and advances the saga state based on the returned result, all coordinated by the Saga Execution Coordinator (SEC).
+* *Forward and backward recovery* — built-in support for compensating transactions: when a step fails, the framework invokes `doRevert()` on each previously completed executor in reverse step order, triggering the rollback action for each affected service.
+* *Zero-dependency utility services* — only the orchestrator carries a StackSaga dependency.
+Participating utility services keep their existing endpoints and need no StackSaga code at all, so adoption is incremental and non-invasive.
+* *Durable state via event sourcing* — the full `SagaDomainEntity` payload and status (`STARTED → IN_PROGRESS → COMPLETED | FAILED → COMPENSATING → COMPENSATED`) is persisted on every state transition, enabling point-in-time recovery and complete audit trails.
+* *Distributed retry with token ring partitioning* — failed or stalled transactions are retried by the owning orchestrator instance as determined by Murmur3-based token ring partitioning, coordinated through the `stacksaga-ring-coordinator`.
+* *Reactive and imperative support* — the developer-facing `SagaTemplate` / `ReactiveSagaTemplate` and the `CommandExecutor` / `QueryExecutor` abstractions support both blocking and reactive (`Mono`/`Flux`) handler implementations, giving application developers freedom to choose their programming model without affecting saga coordination.
+
+== Glossary
+
+The following terms are used throughout this documentation.
+Familiarising yourself with them before reading the technical sections will significantly reduce the learning curve.
+
+[cols="1,3",options="header"]
+[.properties-table]
+|===
+| Term | Definition
+
+| *LRT (Long-Running Transaction)*
+| A business transaction that spans multiple services and may take seconds, minutes, or longer to complete.
+LRTs require durable state management, distributed coordination, and compensation support for partial failures.
+
+| *Saga Domain*
+| A specific type of LRT identified by its `DomainEntity` (Aggregator) subclass.
+All saga instances of the same type (e.g., every `PlaceOrder` transaction) belong to the same saga domain.
+The class type itself — not any field value — is the discriminator used to identify the domain.
+
+| *Span*
+| A single atomic execution step within a saga.
+Each span is performed by one executor on the orchestrator, which invokes a single operation on a target utility service.
+A saga is composed of one or more sequential spans in the primary flow, each with an optional corresponding compensation.
+
+| *SEC (Saga Execution Coordinator)*
+| The internal engine component responsible for driving a saga forward: invoking each executor, navigating to the next step, persisting state transitions, and triggering compensation when needed.
+`SagaTemplate` / `ReactiveSagaTemplate` is the developer-facing entry point to the SEC.
+
+| *Domain Entity (Aggregator)*
+| The aggregate root for a single saga instance.
+Carries the full accumulated business payload and current execution state throughout the saga lifecycle.
+Every state transition is persisted as a snapshot to the event store.
+The framework uses the terms *Domain Entity* (`SagaDomainEntity`) and *Aggregator* interchangeably across components.
+
+| *Executor*
+| The orchestrator-side handler that executes the business logic for a single saga step.
+Implemented as a `QueryExecutor` (read-only, no compensation), a `CommandExecutor` (state-changing, has a `doRevert()` compensation), or a *Sub Executor* (extra compensation steps that run before/after a command executor's revert).
+
+| *Step Manager*
+| The utility passed into each executor used to navigate the saga — `stepManager.next(NextExecutor.class, ...)` advances to the next span, and `stepManager.complete(...)` finishes the saga.
+Forward routing is expressed programmatically inside the executors rather than in a central routing table.
+
+| *Compensation*
+| The reverse process that undoes previously completed steps when a saga fails.
+Executed in reverse order via `doRevert()` on each completed `CommandExecutor`, optionally extended by sub-before and sub-after executors.
+
+| *Event Store*
+| The persistent storage layer for all saga state transitions and domain entity snapshots.
+Provided by `stacksaga-database-support`.
+Enables point-in-time recovery, retry, and full audit trails.
+
+| *Revert Hint Store*
+| A key-value store that carries metadata forward through the compensation sequence.
+Values written during one `doRevert()` call are available to subsequent compensation steps.
+
+| *Idempotency Key*
+| A stable key generated per span so that re-invoking the same executor for the same transaction is safe.
+The key is identical across every retry of the same executor invocation within a transaction.
+
+| *Ring Coordinator*
+| A standalone service (`stacksaga-ring-coordinator`) that manages token ring partitioning for retry ownership.
+Distributes Murmur3 token sub-ranges among orchestrator instances so each stalled transaction is retried by exactly one instance without distributed locking.
+
+| *CHES & D Layered Architecture*
+| The StackSaga design pattern that extends Spring's layered architecture with a *Handler* layer and an *Executor* layer — *C*ontroller, *H*andler, *E*xecutor, *S*ervice, and *D*ata Access.
+See xref:stacksaga-sync/orchestrator/Saga-CHES-architecture.adoc[CHES & D layered architecture].
+
+|===
+
+== Why StackSaga Over Direct Service-to-Service Calls?
+
+Wiring microservices together with direct synchronous calls (REST, gRPC, or GraphQL) does not by itself give you saga orchestration.
+A hand-rolled topology requires every participating service — or the calling service — to understand the broader transaction context: which step it is in, what has already succeeded, what to roll back if something goes wrong, and how to track overall saga progress.
+This logic inevitably leaks across services, making the system fragile and difficult to evolve.
+
+The following comparison explains the specific gaps StackSaga closes.
+
+=== Centralized Transaction State Management
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw synchronous calls*
+| A direct call returns a response, but there is no concept of a business transaction that spans many calls. Nothing tracks that "step 2 of 5 has completed" or that a transaction is in a compensating state.
+
+| *StackSaga*
+| The orchestrator tracks the full saga lifecycle through well-defined states: `STARTED → IN_PROGRESS → COMPLETED \| FAILED → COMPENSATING → COMPENSATED`. The `SagaDomainEntity` is the single source of truth: it carries the transaction payload (all accumulated data from previous steps) and the current execution cursor. State transitions are persisted atomically to the event store on every step completion or failure.
+
+| *Advantage*
+| No saga coordination logic needs to be implemented in the participating utility services. The orchestrator is the sole authority on saga state.
+|===
+
+=== Resilience and Fault Tolerance
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw synchronous calls*
+| When a downstream call fails or times out, the caller is left holding a partially completed transaction. Retry logic, timeout handling, and compensation decisions must be built — and kept consistent — by hand in every flow.
+
+| *StackSaga*
+| The framework implements configurable retry windows and automatic compensation invocation. If an executor signals a non-retryable failure, the saga engine immediately begins the reverse traversal, calling `doRevert()` for each completed forward step in reverse order. For transient failures (timeouts, resource unavailability) wrapped in a `RetryableExecutorException`, the retry subsystem re-invokes the saga from the last unacknowledged step using the Murmur3 token ring scheduler.
+
+| *Advantage*
+| Data consistency is maintained across services even under partial failures, without embedding retry or rollback logic in each service.
+|===
+
+=== Simplified Development
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw synchronous calls*
+| Developers must implement state machine logic, idempotency checks, saga step routing, and compensation orchestration by hand in the service that drives the transaction.
+
+| *StackSaga*
+| The orchestrator-side abstractions (`SagaTemplate` / `ReactiveSagaTemplate`, `SagaDomainEntity`, and the `Executor` family) provide clear contracts for each role. Developers define what each step *does*, its compensation, and which step comes next; the framework handles persistence, retrying, and compensation sequencing. The xref:stacksaga-sync/orchestrator/Saga-CHES-architecture.adoc[CHES & D layered architecture] keeps these concerns in dedicated layers.
+
+| *Advantage*
+| Reduces boilerplate significantly and confines distributed transaction concerns to a small, testable layer.
+|===
+
+=== Operational Observability
+
+[cols="1,2",options="header"]
+[.properties-table]
+|===
+| Concern
+| Detail
+
+| *Raw synchronous calls*
+| Per-service logs and metrics are available, but there is no concept of "transaction X is stuck at step 3" or "compensation for order Y failed" across the whole flow.
+
+| *StackSaga*
+| The `stacksaga-trace-window-connector` exposes APIs consumed by the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] UI, providing per-transaction step-level traces, execution timelines, failure points, retry counts, and compensation status.
+
+| *Advantage*
+| Operations teams can diagnose stalled or failed sagas at the business-transaction level, not just at the level of an individual service call.
+|===
+
+== Components
+
+The synchronous framework overlays the *orchestrator* role onto an existing service via a single dependency.
+In contrast to the StackSaga-Kafka transport — which adds a dependency to both the orchestrator and every worker — a synchronous deployment requires the StackSaga dependency only on the orchestrator.
+The participating *utility services* are invoked through their existing synchronous endpoints and need no StackSaga dependency at all.
+
+[[stacksaga-spring-boot-starter]]
+=== stacksaga-spring-boot-starter
+
+`stacksaga-spring-boot-starter` is the core runtime dependency added to the *orchestrator service* — the single service responsible for initiating and driving the saga lifecycle.
+It provides the saga engine (SEC) and the developer-facing abstractions below.
+
+* xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[`SagaTemplate` / `ReactiveSagaTemplate`] — the entry point for starting a new saga execution or resuming a recovered one.
+Accepts an initialized Aggregator (`SagaDomainEntity`) and the first executor, then hands control to the saga engine.
+* xref:stacksaga-sync/orchestrator/domain-entity.adoc[`SagaDomainEntity` (Aggregator)] — the aggregate root for a saga instance.
+Carries the accumulated business payload and the current execution state, and is serialized and persisted to the event store on every state transition.
+* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Executors] — `CommandExecutor`, `QueryExecutor`, and Sub Executors that encapsulate each atomic step.
+Each executor invokes the target utility service through its synchronous endpoint, navigates forward with `stepManager.next(...)`, and (for command executors) defines its compensation in `doRevert()`.
+* xref:stacksaga-sync/orchestrator/event-listener.adoc[`TransactionEventListener` / `ReactiveTransactionEventListener`] — observe per-transaction state changes in real time for monitoring, notifications, and side effects.
+
+To run your application as an orchestrator service, add the `stacksaga-spring-boot-starter` dependency to your project.
+
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency> <!--Only for stacksaga dependencies version management-->
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>${org.stacksaga.version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-spring-boot-starter</artifactId>
+    </dependency>
+</dependencies>
+----
+
+IMPORTANT: The engine is built internally using reactive programming principles, ensuring high scalability and performance.
+Even though the framework operates reactively under the hood, it fully supports both reactive and non-reactive (imperative) application models through the `ReactiveSagaTemplate` and `SagaTemplate` entry points respectively.
+
+Additionally, the orchestrator service must (or may) include:
+
+* xref:stacksaga-database-support:overview/database-support-overview.adoc[stacksaga-database-support] _(required)_ — provides the event store integration (MySQL, Cassandra, or ScyllaDB depending on configuration) for persisting `SagaDomainEntity` snapshots and state transitions.
+* xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[stacksaga-ring-coordinator-connector] _(optional, required for retry)_ — connects the orchestrator instance to the `Ring Coordinator Service`, registers it as a retry node, and receives its assigned Murmur3 token sub-range.
+Enables the retry subsystem to re-invoke failed transactions owned by this instance.
+* xref:trace-window:stacksaga-trace-window.adoc[stacksaga-trace-window-connector] _(optional, required for monitoring)_ — exposes the internal APIs consumed by the StackSaga Trace Window UI for per-transaction traces, timelines, and compensation status.
+* `stacksaga-env-support` _(optional)_ — provides environment-related geographical metadata (region, zone, instance ID, etc.) to the SEC, selected per deployment target (e.g., xref:stacksaga-environment-support:eureka-support/stacksaga-env-eureka-support.adoc[Eureka] or xref:stacksaga-environment-support:k8s-support/stacksaga_env_k8s_support.adoc[Kubernetes]).
+
+[[utility-services]]
+=== Utility services
+
+A *utility service* is any service invoked by the orchestrator as a step in a saga — for example `user-service`, `payment-service`, or `inventory-service`.
+
+Utility services do not interact with the event store, the ring coordinator, or any StackSaga abstraction.
+They keep exposing their existing REST/gRPC/GraphQL endpoints and remain stateless with respect to the saga: the orchestrator's executor calls the endpoint, the service performs its business operation, and it returns a result.
+
+NOTE: Because the saga logic (forward call, navigation, and compensation) lives entirely in the orchestrator's executors, the same utility service can participate in sagas owned by different orchestrators without any awareness of StackSaga.
+
+== Next Steps
+
+* xref:stacksaga-sync/architecture.adoc[Architecture] — the staged deployment model (basic, retry-ready, and monitoring) and how the orchestrator and utility services fit together.
+* xref:stacksaga-sync/orchestrator/Saga-CHES-architecture.adoc[CHES & D Layered Architecture] — the design pattern StackSaga introduces on top of Spring's layered architecture.
+* xref:stacksaga-sync/overview.adoc[Components & Custom Configuration] — the StackSaga ecosystem components and advanced configuration options such as the saga scheduler.
