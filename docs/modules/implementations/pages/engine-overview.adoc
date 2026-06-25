@@ -7,8 +7,8 @@ They are the components responsible for coordinating distributed transactions ac
 
 The available Saga Orchestrator Engine's implementations as follows,
 
-* xref:implementations:stacksaga-sync/overview.adoc[]
-* xref:implementations:stacksaga-kafka/overview.adoc[]
+* xref:implementations:stacksaga-sync/architecture.adoc[]
+* xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc[]
 
 == How do Orchestrator Engines fit into the StackSaga ecosystem?
 
@@ -34,4 +34,48 @@ StackSaga is more than just the orchestrators — it’s a full ecosystem.
 * Support Retrying & Replay – Recover from transient failures or manually restart failed workflows.
 * Expose Status for Monitoring – Feed data to the StackSaga Dashboard for real-time transaction tracing.
 
-include::SEC.adoc[leveloffset=+1]
+== StackSaga execution coordinator. (SEC) [[SEC]]
+
+Due to the reason of Stacksaga is one of Saga orchestration implementations, a central orchestration engine is required to handle the workflow based on the *programmatic navigation*
+like invoking *primary-executions*, *compensation-executions* and as well as *retrying the transaction* in case of resource unavailability or any other transient errors.
+The engine, which manages all the responsibilities in saga workflow, is called as *StackSaga execution coordinator(SEC)* in Stacksaga.
+
+SEC performs the following duties.
+
+=== Duties of SEC
+
+. Execute the primary and compensation executions of the LRT.
+. Navigate the transaction work flow based on the programmatic navigation.
+. Identifying the errors of the atomic executions.
+. Retrying the transactions
+. Scheduling the executions
+. Managing dual consistency problem
+. State management
+. Event publishing
+. Aggregator states serialization and Deserialization
+
+NOTE: The above duties are discussed in detail in each implementation's respective sections.
+
+Let's see the fundamental involvement of SEC in the framework with an example.
+
+Let's get the same example that E-Commerce application.
+Then you know we have to create an aggregator for storing necessary data.
+And also we have to create the executors for each atomic transaction.
+Creating aggregator and executors is not enough to start the execution.
+To run the execution, we have to notify SEC with the starting executor and the starting aggregator.
+Then the SEC will execute each executor one by one based on the navigation that each executor does.
+As an example, if we provide the starting executor as order-init executor, it's started from that executor, and when it's executed, that particular executor will navigate to the next executor based on the logic.
+(Providing the execution flow is fully dynamic in Stacksaga.
+It shouldn't be a pre-defined one)
+
+Here you can see how the SEC does work for managing work flow in common approach.
+
+* The request comes to the orchestration service, and it is handed off to SEC with the SEC to process them asynchronously.
+* SEC will pick up the request and start the execution from the configured starting point
+* Each step will be executed one by one based on the programmatic navigation by keeping the state in the event-store in case of retrying and tracing.
+* If there is any primary execution failure, SEC will trigger the compensation executions in reverse order.
+* If there is any failure in the compensation execution due to any resource unavailability or any other transient error, SEC will keep the transaction in retry mode and retry the transaction based on the configured retry policy.
+* The SEC will publish the events to the configured listeners for each transaction state change.
+
+NOTE: SEC acts different in different Stacksaga implementations with their endemic components.
+see the respective implementation's SEC section for more details.
