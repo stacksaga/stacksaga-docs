@@ -2,8 +2,6 @@
 :keywords: StackSaga, AbstractTopic, EventManager, onNext, onNextRevert, topic name, topic key, ListenerScope, SHARED, ISOLATED
 = Topics and EventManager
 
-[[sagakafka_topics_and_event_manager]]
-
 [[custom_topic_implementation]]
 == StackSaga Topic
 
@@ -235,7 +233,8 @@ Return `SagaPrimaryEventAction.next(topic)` to advance to the next step, or `Sag
 *Call timing*: this method is called *after* `recentExecutedTopic` has completed its compensation successfully and *before* `nextTopic` is dispatched to the worker.
 Both parameters are therefore available at the same time — you can react to what just finished and prepare context for what is about to run.
 
-NOTE: The `nextTopic` parameter was introduced in preparation for an upcoming sub-execution feature that will allow additional before/after sub-steps to be attached to a compensation execution. In the current version it reflects the next top-level compensation topic.
+NOTE: The `nextTopic` parameter was introduced in preparation for an upcoming sub-execution feature that will allow additional before/after sub-steps to be attached to a compensation execution.
+In the current version it reflects the next top-level compensation topic.
 
 <9> Sample usage of the `RevertHintStore` and the `nextTopic` parameters in the `onNextRevert()` method.
 Use `nextTopic` to determine which compensation topic is about to be dispatched, and use `revertHintStore` to store any metadata that the upcoming compensation execution will need.
@@ -341,7 +340,8 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-rec
 
 * the consumer group for the domain-root topic is set as the same way as the shared root topic by following the convention `{serviceName}-os`. therefore, in the previous example, the consumer group for the domain-root topic will be `order-service-os`. the other configurations for the domain-root topic are the same as the shared root topic.
 +
-NOTE: The consumer group name is intentionally kept identical to the shared listener (`{serviceName}-os`) so that switching an `EventManager` from `ListenerScope.SHARED` to `ListenerScope.ISOLATED` (or back) at any time does not reset offset tracking. Without this, changing the listener scope would cause the new consumer group to start from `earliest`, potentially re-processing a large backlog of already-completed reply messages.
+NOTE: The consumer group name is intentionally kept identical to the shared listener (`{serviceName}-os`) so that switching an `EventManager` from `ListenerScope.SHARED` to `ListenerScope.ISOLATED` (or back) at any time does not reset offset tracking.
+Without this, changing the listener scope would cause the new consumer group to start from `earliest`, potentially re-processing a large backlog of already-completed reply messages.
 
 * Same as the shared, the domain-root topics are also configured with `auto.offset.reset=earliest` to ensure that previously published messages can be consumed after a service restart when no committed offset is available.
 

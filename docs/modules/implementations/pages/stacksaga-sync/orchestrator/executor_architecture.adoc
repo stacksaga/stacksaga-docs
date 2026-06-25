@@ -7,26 +7,7 @@ It acts as the bridge between your business logic and the saga orchestration eng
 Saga Executors are categorized as either command executors (handling both primary and compensating executions for operations that modify state) or query executors (handling read-only operations).
 By isolating each atomic transaction in its own executor, StackSaga enables precise control, retry, and compensation mechanisms, reducing the risk of data anomalies and ensuring eventual consistency across microservices.
 
-====
-*Understanding Atomic Operation*
-
-An atomic transaction is a set of operations that must either all succeed or all fail as a single unit.
-Within microservices, such a unit is referred to as an atomic execution.
-
-image:executor/stacksaga-diagram-atomic-transaction.svg[]
-
-For instance, in the placing-order scenario, there are 4 atomic operations.
-Each atomic execution can itself consist of multiple service-level operations.
-it is totally acceptable to have multiple service-level operations inside a single atomic execution, as long as they are part of the same logical unit of work.
-
-
-IMPORTANT: *Fetching user details* is quite different from the other atomic executions. because it is a read-only operation that doesn't change any state in the user-service's database.
-So it can be considered as an atomic operation, but it is not a atomic transaction. but others are atomic transactions. because they change the state in their respective service's databases.
-
-Understanding the atomic execution is crucial for implementing the executors correctly in StackSaga.
-because there is no rollback mechanism after committing each atomic executions onm their service's databases.
-
-====
+IMPORTANT: If you are new to the saga pattern, it is recommended to read the xref:foundations:idempotency.adoc[] to understand the concept of idempotency and atomic operations in distributed systems.
 
 Typically, an atomic execution consists of two phases: *primary execution* and *compensating execution*.
 
@@ -75,7 +56,8 @@ In *Command executor* has two methods for making the primary execution and makin
 * Reserve the items
 * Make the payment
 
-==== Code Example of Command Executor
+[[blocking-command-executors]]
+==== Blocking Command-Executor
 
 [source,java]
 ----
@@ -184,7 +166,8 @@ it is optional to use. if there is no need to execute any sub-before-executors, 
 <11> The `@RevertAfter` annotation is used to specify #starting sub-after-executor# that should be started after the main compensating execution of this command executor.
 it is optional to use. if there is no need to execute any sub-after-executors, you can avoid that annotation.
 
-==== Code Example of Reactive Command Executor
+[[reactive-command-executors]]
+==== Non-Blocking Command-Executor
 
 NOTE: Only highlighted parts are described from the above example.
 
@@ -265,7 +248,8 @@ In *Query Executor* has only one method for making the primary execution.
 * collecting user delivery details +
 because it doesn't make any change to the user-service's database. it's a read-only operation.
 
-==== Code Example of Query Executor
+[[blocking-query-executors]]
+==== Blocking Query Executor
 
 [source,java]
 ----
@@ -329,7 +313,8 @@ you can wrap the original exception by using the `NonRetryableExecutorException.
 it can be accessed later in the next compensating execution by using the `RevertHintStore` that is passed to the `doRevert` method of the command executor. +
 if you throw your own exception without wrapping to the `NonRetryableExecutorException`, it doesn't matter in this case, because the SEC will consider it as a non-retryable exception internally, and it will stop the transaction forward and start the compensating executions in reverse order immediately.
 
-=== Code Example of Reactive Query Executor
+[[non-blocking-query-executors]]
+==== Non-Blocking Query-Executor
 
 [source,java]
 ----
@@ -414,7 +399,7 @@ The diagram shows the order and relationship between the sub-before-executor, an
 
 image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.drawio.svg[alt=" Stacksaga Executors",width=100%,opts=interactive,scaledwidth=100%]
 
-==== Code Example of Sub-Before-Executor
+==== Blocking Sub-Before-Executor
 
 [source,java]
 ----
@@ -443,7 +428,7 @@ it should provide the aggregator class that is used in the entire transaction as
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
 If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next` method.
 
-==== Code Example of Reactive Sub-Before-Executor
+==== Non-Blocking Sub-Before-Executor
 
 [source,java]
 ----
@@ -495,7 +480,7 @@ it should be provided the event name supplier that will be used to store the eve
 If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next`. +
 you can pass another sub-before-executor class that you want to navigate and also the event name that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor.
 
-==== Code Example of Sub-After-Executor
+==== Blocking Sub-After-Executor
 
 [source,java]
 ----
@@ -523,7 +508,7 @@ it should provide the aggregator class that is used in the entire transaction as
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-after-executor. +
 If you have more than one sub-after-executor, you can navigate to the next sub-after-executor by using the `stepManager.next` method.
 
-==== Code Example of Reactive-Sub-After-Executor
+==== Non-Blocking Sub-After-Executor
 
 [source,java]
 ----
