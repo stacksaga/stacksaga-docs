@@ -1,5 +1,5 @@
 :description: Deep-dive technical reference for the StackSaga-Kafka Framework — reactive saga orchestration in Spring Boot microservices using Kafka for asynchronous, event-driven distributed transaction management.
-:keywords: StackSaga-Kafka, saga orchestration, microservices, Java, Spring Boot, Kafka, distributed transactions, event sourcing, reactive programming, transaction management, idempotency, fault tolerance, workflow compensation, Reactor Kafka, LRT
+:keywords: StackSaga-Kafka, saga orchestration, microservices, Java, Spring Boot, Kafka, Kafka 4, KIP-932, share groups, distributed transactions, event sourcing, reactive programming, transaction management, idempotency, fault tolerance, workflow compensation, LRT
 
 = StackSaga-Kafka Framework (Asynchronous)
 
@@ -17,6 +17,8 @@ Each saga execution is fully persisted — every state transition of the `SagaDo
 *Key capabilities:*
 
 * *Asynchronous saga orchestration* — the orchestrator issues commands to worker services via Kafka and advances the saga state only upon receiving the worker's reply, with no blocking thread held during the wait.
+* *Built for Kafka 4 with KIP-932 share groups* — both the orchestrator and the worker can consume either through the classic consumer-group protocol or through the *Kafka 4 share-group protocol (KIP-932)*, a queue-style consumption model whose parallelism is *not capped by the partition count*.
+The protocol is selectable per endpoint and per event manager through the `groupType` attribute, so you can scale saga processing beyond the number of partitions without repartitioning topics.
 * *Forward and backward recovery* — built-in support for compensating transactions: when a saga step fails, the framework invokes `onNextRevert()` on the `SagaEventNavigator` in reverse step order, triggering rollback actions on each previously completed service.
 * *Per-domain reply topology* — outbound command topics are created per worker intent; inbound reply topics are created per saga domain by the framework.
 A system with three saga domains maintains exactly three reply topics, keeping Kafka partition management predictable.
@@ -218,9 +220,9 @@ To run your application as an orchestrator service, first add the `stacksaga-kaf
 </dependencies>
 ----
 
-IMPORTANT: It has been built internally using reactive programming principles, ensuring high scalability and performance.
-It primarily uses *Reactor Kafka* for interacting with Kafka.
-Even though the framework operates reactively under the hood, it fully supports both reactive and non-reactive (imperative) application models.
+IMPORTANT: The framework targets *Kafka 4* and *Spring Boot 4* and integrates directly with Spring for Apache Kafka's listener containers.
+It fully supports the *Kafka 4 share-group protocol (KIP-932)* for queue-style consumption in addition to the classic consumer-group protocol, selectable per event manager and per endpoint via the `groupType` attribute.
+Application code can be written in either a reactive (`Mono`/`Flux`) or a non-reactive (imperative/blocking) style — both are first-class and fully supported.
 
 IMPORTANT: If your orchestrator service should work as the worker for another saga domain owned by a different orchestrator, no need to add the worker dependency (`stacksaga-kafka-worker-starter`) separately. because the orchestrator dependency already includes the worker dependency transitively.
 
