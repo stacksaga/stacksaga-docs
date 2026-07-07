@@ -1,5 +1,5 @@
-:description: Configuration properties reference for stacksaga-kafka-orchestrator-spring-boot-starter — domain entity scanning, Kafka topic auto-creation, shared response listener processing modes, concurrency, and instance cluster/region/zone settings.
-:keywords: StackSaga-Kafka, configuration properties, stacksaga-kafka-orchestrator, domain-entity-scan, auto-create, shared response listener, processing mode, concurrency, instance cluster, region, zone
+:description: Configuration properties reference for stacksaga-kafka-orchestrator-spring-boot-starter — domain entity scanning, the global callback listener group protocol (consumer group or Kafka 4 share group) and concurrency, and instance cluster/region/zone settings.
+:keywords: StackSaga-Kafka, configuration properties, stacksaga-kafka-orchestrator, domain-entity-scan, global-callback-listener, group-type, share group, KIP-932, concurrency, instance cluster, region, zone
 
 [[configuration_properties_for_stacksaga_kafka_orchestrator]]
 = Configuration Properties Of `stacksaga-kafka-orchestrator-spring-boot-starter`
@@ -17,20 +17,15 @@
 | `[]`
 | A comma-separated list of package names to scan for `@SagaDomainEntity` annotated classes. for instance, `com.example.domain,com.example.anotherdomain`.
 
-| `stacksaga.kafka.orchestrator.auto-create`
-| `boolean`
-| `true`
-| A flag to enable or disable automatic creation of Kafka topics when the application starts.
+| `stacksaga.kafka.orchestrator.global-callback-listener.group-type`
+| `GroupType`
+| `SHARE`
+| The Kafka group protocol used by the global callback listener container that consumes the callback topics of all `SHARED_GLOBAL` event managers. `SHARE` uses the Kafka 4 share-group protocol (KIP-932, queue-style consumption); `CONSUMER` uses the classic consumer-group protocol. xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_model_stacksaga_kafka_orchestrator[See more] about the listener models.
 
-| `stacksaga.kafka.orchestrator.shared-response-listener.processing-mode`
-| `SharedListenerProcessingMode`
-| PARTITION_ORDERED`
-| The processing mode for the shared response listener.  xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#isolated_listener_models_for_orchestrator[see more] for more details about the processing modes.
-
-| `stacksaga.kafka.orchestrator.shared-response-listener.concurrency`
+| `stacksaga.kafka.orchestrator.global-callback-listener.concurrency`
 | `int`
-| `128`
-| if the `shared-response-listener.processing-mode` is set to `CONCURRENT`, this property defines the level of concurrency for processing messages in the shared response listener. it is ignored for other processing modes.
+| `20`
+| The concurrency level of the global callback listener container. With `group-type: SHARE`, this can be set to any desired value because share groups are not limited by the partition count. With `group-type: CONSUMER`, it should not exceed the total number of partitions of the callback topics bound to the global container.
 
 |`stacksaga.instance.cluster`
 |`String`

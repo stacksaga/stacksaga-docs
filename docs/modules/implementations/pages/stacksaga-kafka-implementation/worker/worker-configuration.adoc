@@ -1,5 +1,5 @@
-:description: stacksaga-kafka-worker listener models (SHARED and ISOLATED) and configuration properties reference.
-:keywords: stacksaga-kafka-worker, ListenerScope, SHARED, ISOLATED, configuration properties, processing mode, concurrency, retry
+:description: stacksaga-kafka-worker listener-container scopes (SHARED_GLOBAL, SHARED_GROUP, ISOLATED), Kafka group protocols (CONSUMER and Kafka 4 share groups / KIP-932), and configuration properties reference.
+:keywords: stacksaga-kafka-worker, WorkerListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, Kafka 4, concurrency, configuration properties, retry
 
 = Endpoint Listener Models and Configuration
 
@@ -8,82 +8,81 @@
 == Endpoint Topic Listener Models
 
 * *Endpoint Topics* +
-The topics that are used to send the command messages to the worker services are called as `Endpoint Topics`.
-these are the topics that you register in the `EventManager` by overriding the `registerTopics()` method in `stacksaga-kafka-orchestrator` and also the topics that are registered via the `KafkaEndpoint` annotation in the `stacksaga-kafka-worker`. these If the topics are not exist in the Kafka cluster and auto-creation of topics is enabled framework will create the topics automatically during the application startup.
-otherwise, you need to create the topics manually in the Kafka cluster before starting the application.
-The special thing is that both `stacksaga-kafka-orchestrator` and `stacksaga-kafka-worker` try to create the topics if they are not exist in the Kafka cluster and auto-creation of topics is enabled to avoid the delay of `metadata polling` that is caused by the first time topic creation.
-the reason for both trying to create the topics is the `stacksaga-kafka-orchestrator` has the awareness of all the configured topics via the `EventManager` and also the `stacksaga-kafka-worker` has the awareness of the topics that are relevant to their service via the `SagaEndpoint`s.
+The topics that are used to send the command messages to the worker services are called `Endpoint Topics`.
+These are the topics that you register in the `EventManager` by overriding the `registerTopics()` method in `stacksaga-kafka-orchestrator`, and the same topics that are registered via the `@SagaEndpoint` annotation in the `stacksaga-kafka-worker`.
++
+The endpoint topics must exist in the Kafka cluster before they are consumed.
+StackSaga does not create endpoint topics programmatically; their creation depends on the *broker's* topic-management behavior.
+If the broker is configured to auto-create topics (`auto.create.topics.enable=true`), a topic is created on first use with the broker's default partition and replication settings.
+For production it is recommended to pre-create the topics explicitly so that partitions and replication factors are managed deliberately, rather than relying on broker auto-creation.
 
-Even though there are separate topics in kafka, the framework provides two different listener models for consuming messages from the topics in the worker application based on the `listenerScope` configuration in the `@SagaEndpoint` annotation.
-The fallowing are the two listener models for consuming messages from the topics in the worker application.
+The framework provides three listener-container *scopes* for consuming messages from the endpoint topics in the worker application, selected per endpoint via the `listenerScope` attribute of the `@SagaEndpoint` annotation:
 
-. xref:#shared_listener_scope_endpoint_topics[]
+. xref:#shared_global_listener_scope_endpoint_topics[]
+. xref:#shared_group_listener_scope_endpoint_topics[]
 . xref:#isolated_listener_scope_endpoint_topics[]
 
-Let's dive into the details of each listener model.
+Independently of the scope, each container consumes using one of two Kafka group protocols, selected per endpoint via the `groupType` attribute — see xref:#worker_group_type[].
 
-[[shared_listener_scope_endpoint_topics]]
-=== SHARED
+[[worker_group_type]]
+=== Group Protocol (`groupType`)
 
-* If the `@SagaEndpoint` is configured with `listenerScope=ListenerScope.SHARED`, the framework binds the relevant topic(s) to the shared receiver to consume messages for the respective endpoint.
-all the endpoints that are configured with `listenerScope=ListenerScope.SHARED` are bind into this shared `KafkaReceiver`.
+Every listener container speaks exactly one Kafka group protocol, chosen with the `groupType` attribute of `@SagaEndpoint`:
 
-Here is the architecture of the shared listener model for the endpoint topics in stacksaga-kafka-worker application.
+* `GroupType.CONSUMER` — the classic Kafka *consumer-group* protocol, backed by a Spring `ConcurrentMessageListenerContainer`.
+Effective parallelism is capped by the number of partitions of the consumed topics (a partition is processed by at most one consumer in the group).
 
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-worker .svg[Shared kafka receiver in stacksaga kafka worker,width=800]
+* `GroupType.SHARE` — the *Kafka 4 share-group* protocol (KIP-932), backed by a `ShareKafkaMessageListenerContainer`.
+Records are distributed cooperatively at the broker in a queue style, so consumer parallelism is *no longer capped by the partition count* — you can raise `concurrency` beyond the number of partitions to scale processing.
+`GroupType.SHARE` requires a Kafka 4.x broker with share groups enabled.
 
-* The *consumer group* is configured using the following naming convention: `{serviceName}-ws` where `ws` stands for worker service.
-for instance, if the service name is `payment-service`, the consumer group name will be `payment-service-ws`.
+IMPORTANT: A single container speaks only one protocol. Therefore every endpoint that shares a container — all `SHARED_GLOBAL` endpoints, or all members of a given `SHARED_GROUP` (`containerId`) — must declare the *same* `groupType`. A mismatch fails fast at application startup.
 
-* The shared listener/receiver is configured with: `auto.offset.reset=earliest` This ensures that previously published messages can be consumed after a service restart when no committed offset is available.
-* Message consumption is configured using *At-Least-Once* delivery semantics to ensure that messages are not lost, even in the event of service downtime or unexpected failures.
-* To guarantee *At-Least-Once* delivery semantics, each message is acknowledged only after it has been successfully processed.
-* Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
-Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
-* *Processing mode:* The shared listener can be configured via `stacksaga.kafka.worker.shared-topic-listener.processing-mode` property to control the processing mode for the messages consumed by the shared listener. it can be either `SharedListenerProcessingMode.CONCURRENT` or `SharedListenerProcessingMode.PARTITION_ORDERED`.
-the default processing mode for the shared listener is `SharedListenerProcessingMode.PARTITION_ORDERED` to ensure that messages from the same partition of the same topic are processed in order.
-in `SharedListenerProcessingMode.CONCURRENT` mode, messages are processed concurrently without preserving the order of messages from the same partition.
-And +
-In `SharedListenerProcessingMode.PARTITION_ORDERED` mode, messages from the same partition of the same topic are processed sequentially to preserve the order, while messages from different partitions can be processed concurrently.
-The default processing mode for the shared listener is `SharedListenerProcessingMode.PARTITION_ORDERED` to ensure that messages from the same partition of the same topic are processed in order, which is important for maintaining data consistency and integrity in many use cases.
-however, you can change it to `SharedListenerProcessingMode.CONCURRENT` if your use case allows for concurrent processing without strict ordering requirements, which can improve throughput and performance.
-See more relevant xref:#configuration_properties_stacksaga_kafka_worker[]
+Let's dive into the details of each listener scope.
+
+[[shared_global_listener_scope_endpoint_topics]]
+=== SHARED_GLOBAL
+
+If the `@SagaEndpoint` is configured with `listenerScope = WorkerListenerScope.SHARED_GLOBAL`, the framework binds the endpoint's topic(s) to a single, global listener container that is shared by *all* endpoints declaring `SHARED_GLOBAL`.
+This is the default and the right choice for most endpoints: it keeps consumer-thread usage low by pooling every endpoint into one container instead of spinning up a container per endpoint.
+
+Here is the architecture of the shared listener model for the endpoint topics in a stacksaga-kafka-worker application.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-worker .svg[Shared listener container in stacksaga kafka worker,width=800]
+
+* The *group protocol* and *concurrency* of the global container are configured application-wide through the `stacksaga.kafka.worker.global-endpoint-topic-listener.group-type` and `stacksaga.kafka.worker.global-endpoint-topic-listener.concurrency` properties (see xref:#configuration_properties_stacksaga_kafka_worker[]). The default group protocol is `SHARE`.
+* The global container uses a single shared consumer group derived from the service name (of the form `saga-ws-{serviceName}-…`) where `ws` stands for *worker service*.
+* The listener is configured with `auto.offset.reset=earliest`, so previously published messages can still be consumed after a service restart when no committed offset is available.
+* Message consumption uses *At-Least-Once* delivery semantics, so messages are not lost even during service downtime or unexpected failures.
+* To guarantee At-Least-Once delivery, each message is acknowledged only after it has been successfully processed. With `GroupType.SHARE`, acknowledgement is handled per record at the broker (implicit share acknowledgement); with `GroupType.CONSUMER`, acknowledged offsets are committed periodically. In either case, if a failure occurs after a message has been processed but before its acknowledgement/offset is durably recorded, the message may be delivered again and reprocessed after recovery — the framework's idempotency check discards genuine duplicates.
+
+[[shared_group_listener_scope_endpoint_topics]]
+=== SHARED_GROUP
+
+If the `@SagaEndpoint` is configured with `listenerScope = WorkerListenerScope.SHARED_GROUP`, the endpoint is pooled into a container shared only with *other* endpoints that declare the same `containerId`.
+This lets you isolate a specific subset of endpoints into their own container, separate from the global one, typically because they benefit from dedicated concurrency or should be shielded from the load of unrelated endpoints.
+For example, tagging both `UserValidateEndpoint` and `InventoryCheckEndpoint` with `containerId = "validation-group"` places them in the same dedicated container.
+
+* `containerId` is *required* for this scope — it is the group key that other endpoints repeat to join the same container.
+* All endpoints in the group must declare the *same* `groupType` (validated at startup).
+* The container's concurrency is the *maximum* `concurrency` declared across all endpoints in the group, so raising the concurrency of one member raises it for the whole group.
+* Offset/acknowledgement, delivery semantics, and `auto.offset.reset=earliest` behave the same as xref:#shared_global_listener_scope_endpoint_topics[SHARED_GLOBAL].
 
 [[isolated_listener_scope_endpoint_topics]]
 === ISOLATED
 
-If the `@SagaEndpoint` is configured with `listenerScope=ListenerScope.ISOLATED`, the framework creates a dedicated `KafkaReceiver` for the respective topic(s) to consume messages for that endpoint.
-this approach allows for better isolation and control over the message consumption and processing for that specific endpoint without affecting other endpoints that share the same listener.
-but it can increase the resource consumption as well.
+If the `@SagaEndpoint` is configured with `listenerScope = WorkerListenerScope.ISOLATED`, the framework creates a dedicated listener container for that endpoint's topic(s), consumed by no other endpoint.
+This gives the best isolation and control over consumption and processing for that specific endpoint — useful for high-throughput or latency-sensitive topics where sharing a container could cause head-of-line blocking or contention over consumer threads — at the cost of higher resource usage.
 
-Here is the architecture of the isolated listener model for the endpoint topics in stacksaga-kafka-worker application.
+Here is the architecture of the isolated listener model for the endpoint topics in a stacksaga-kafka-worker application.
 
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-worker.svg[Isolated kafka receiver in stacksaga kafka worker,width=800]
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-worker.svg[Isolated listener container in stacksaga kafka worker,width=800]
 
-* The *consumer group* is configured using the following naming convention: `{serviceName}-ws` where `ws` stands for worker service. for instance, if the service name is `payment-service`, the consumer group name will be `payment-service-ws`.
-* Each isolated listener is configured with: `auto.offset.reset=earliest` This ensures that previously published messages can be consumed after a service restart when no committed offset is available.
-* Message consumption is configured using *At-Least-Once* delivery semantics to ensure that messages are not lost, even in the event of service downtime or unexpected failures.
+* The dedicated container is named `{beanName}ListenerContainer`, where `{beanName}` is the endpoint's bean name.
+* Its `groupType` and `concurrency` come from the endpoint's own `@SagaEndpoint` attributes.
+* Offset/acknowledgement, delivery semantics, and `auto.offset.reset=earliest` behave the same as xref:#shared_global_listener_scope_endpoint_topics[SHARED_GLOBAL].
 
-* To guarantee *At-Least-Once* delivery semantics, each message is acknowledged only after it has been successfully processed.
-* Acknowledged offsets are committed periodically using the framework's default time-based commit configuration.
-Therefore, if a failure occurs after a message has been processed and acknowledged but before the offset has been committed, the message may be delivered again and reprocessed after recovery.
-
-** *Scheduler Config For Non-Reactive Endpoint*: If the endpoint is *non-reactive* one, it can be provided a separate `Scheduler` for the primary execution and compensation execution by using the `primaryExecutionSchedulerProvider` and `revertExecutionSchedulerProvider` attributes in the `@SagaEndpoint` annotation.
-by default a shared two `Schedulers` are provided for all the endpoints in the application via `AbstractDefaultPrimaryExecutionSchedulerProvider` and `AbstractDefaultRevertExecutionSchedulerProvider` which are configured to use bounded elastic schedulers that are suitable for blocking workloads.
-but you can provide your own implementation of the `AbstractSagaEndpointSchedulerProvider` to primary and compensation separately for better isolation and control over the thread management for each execution type of each endpoint. see xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#configure_custom_scheduler_for_non_reactive_endpoints[] for the implementation.
-
-* *Processing mode:* The isolated listener can be configured via `processingMode` attribute in the `@SagaEndpoint` annotation which determines how messages are processed in the isolated listener. it can be configured for either fallowing modes,
-
-** `IsolatedListenerProcessingMode.CONCURRENT` mode, messages are processed concurrently without preserving the order of messages from the same partition.
-+
-NOTE: If the processing mode `IsolatedListenerProcessingMode.CONCURRENT`, the concurrency can be customized by using the `primaryExecutionConcurrency` and `revertExecutionConcurrency` attributes in the `@SagaEndpoint` annotation.
-it allows to control the number of concurrent threads for processing primary and compensation executions respectively.
-
-** `IsolatedListenerProcessingMode.PARTITION_ORDERED`: In this mode, messages are processed sequentially per partition while allowing concurrent execution across multiple partitions. +
-The default processing mode for the isolated listener is `PARTITION_ORDERED` to ensure a balance between throughput and consistency while preserving the order of messages within each partition.
-
-** `IsolatedListenerProcessingMode.SEQUENTIAL`: In this mode, messages are processed sequentially without any concurrency. this mode is used when the order of processing is critical and must be preserved across all partitions. +
-The `SEQUENTIAL` processing mode is not recommended for high-throughput scenarios due to its sequential nature, which can become a bottleneck. it is recommended to use this mode only when the strict ordering of message processing is a hard requirement and the expected message volume is low to moderate.
+NOTE: When `groupType = GroupType.CONSUMER`, the effective parallelism of any scope is still bounded by the partition count of the consumed topics. Choose `groupType = GroupType.SHARE` when you need to scale processing beyond the number of partitions.
 
 [[configuration_properties_stacksaga_kafka_worker]]
 == Configuration Properties Of `stacksaga-kafka-worker`
@@ -96,65 +95,60 @@ The `SEQUENTIAL` processing mode is not recommended for high-throughput scenario
 | Default Value
 | Description
 
-| `stacksaga.kafka.worker.auto-create-topics`
-| `boolean`
-| `true`
-| Whether the worker should automatically create the necessary Kafka topics (the topics that configured via `SagaEndpoint`s) if they do not exist.
+| `stacksaga.kafka.worker.global-endpoint-topic-listener.group-type`
+| `GroupType`
+| `SHARE`
+| The Kafka group protocol used by the global endpoint listener container that backs all `SHARED_GLOBAL` endpoints. `SHARE` uses the Kafka 4 share-group protocol (KIP-932, queue-style consumption); `CONSUMER` uses the classic consumer-group protocol. See xref:#worker_group_type[].
 
-| `stacksaga.kafka.worker.shared-topic-listener.processing-mode`
-| `SharedListenerProcessingMode`
-| `PARTITION_ORDERED`
-| The processing mode for the shared endpoint message listener. Default is `PARTITION_ORDERED`, which ensures that messages from the same partition of the same topic are processed in order.
-
-|`stacksaga.kafka.worker.shared-topic-listener.concurrency`
+| `stacksaga.kafka.worker.global-endpoint-topic-listener.concurrency`
 | `int`
-| `Runtime.getRuntime().availableProcessors() * 3`
-| The concurrency level for the shared endpoint message listener when the processing mode is set to `CONCURRENT`. This defines how many messages can be processed in parallel.
+| `20`
+| The concurrency level of the global endpoint listener container. With `group-type: SHARE`, this can be set to any desired value because share groups are not limited by the partition count. With `group-type: CONSUMER`, it should not exceed the total number of partitions of the endpoint topics bound to the global container.
 
-4+| Retry Configurations for Non-Reactive Endpoints : *Primary execution*
+4+| Retry Configurations for Non-Reactive Endpoints : *Primary execution* (immediate, in-process retries)
 
 | `stacksaga.kafka.worker.retry.primary.max-attempts`
 | `int`
-| `3`
-| The maximum number of retry attempts.
+| `5`
+| The maximum number of attempts (the initial attempt plus retries).
 
 | `stacksaga.kafka.worker.retry.primary.initial-interval`
 | `Duration`
 | `1s`
-| The initial interval between retry attempts.
+| The interval before the first retry.
 
 | `stacksaga.kafka.worker.retry.primary.max-interval`
 | `Duration`
-| `1s`
+| `10s`
 | The maximum interval between retry attempts.
 
 | `stacksaga.kafka.worker.retry.primary.multiplier`
 | `double`
 | `2.0`
-| The multiplier for the retry interval. For example, with an initial interval of 1 second and a multiplier of 2.0, the retry intervals would be 1s, 2s, 4s, etc., up to the maximum interval.
+| The multiplier applied to the retry interval on each attempt (exponential backoff). For example, with an initial interval of 1s and a multiplier of 2.0, the intervals grow 1s, 2s, 4s, … up to the maximum interval.
 
-4+| Retry Configurations for Non-Reactive Endpoints: *Revert execution*
+4+| Retry Configurations for Non-Reactive Endpoints: *Revert execution* (immediate, in-process retries)
 
 | `stacksaga.kafka.worker.retry.revert.max-attempts`
 | `int`
-| `3`
-| The maximum number of retry attempts.
+| `5`
+| The maximum number of attempts (the initial attempt plus retries).
 
 | `stacksaga.kafka.worker.retry.revert.initial-interval`
 | `Duration`
 | `1s`
-| The initial interval between retry attempts.
+| The interval before the first retry.
 
 | `stacksaga.kafka.worker.retry.revert.max-interval`
 | `Duration`
-| `1s`
+| `10s`
 | The maximum interval between retry attempts.
 
 | `stacksaga.kafka.worker.retry.revert.multiplier`
 | `double`
 | `2.0`
-| The multiplier for the retry interval. For example, with an initial interval of 1 second and a multiplier of 2.0, the retry intervals would be 1s, 2s, 4s, etc., up to the maximum interval.
-
+| The multiplier applied to the retry interval on each attempt (exponential backoff). For example, with an initial interval of 1s and a multiplier of 2.0, the intervals grow 1s, 2s, 4s, … up to the maximum interval.
 
 |===
 
+NOTE: These `retry.*` properties tune the *immediate, in-process* retries of non-reactive endpoints (the Spring `RetryTemplate` behind `JustRetryableExecutorException`). The *deferred, scheduled* retries triggered by `RetryableExecutorException` are configured separately through `stacksaga-database-support`.
