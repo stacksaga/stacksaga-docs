@@ -110,7 +110,7 @@ We will build it in the following order:
 Make sure you have the following installed and running before getting started:
 
 . Java 17+
-. Apache Kafka 3.x — a running broker (the orchestrator and workers communicate exclusively over Kafka).
+. Apache Kafka 4.x — a running broker with share groups enabled (the orchestrator and workers communicate exclusively over Kafka; the default `groupType = SHARE` uses the Kafka 4 share-group protocol / KIP-932).
 . MySQL 8+ — used by the orchestrator as the event store.
 . Maven
 
@@ -276,7 +276,8 @@ This custom event manager creates a domain-topic for receiving the response from
 //<2>
 @SagaEventManager(
         value = "placeOrderEventManager",
-        listenerScope = ListenerScope.SHARED,
+        listenerScope = OrchestratorListenerScope.SHARED_GLOBAL,
+        groupType = GroupType.SHARE,
         domainRootTopicSuffix = "place-order"
 )
 public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEntity, PlaceOrderTopic> { //<1>
@@ -319,7 +320,8 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 
 <2> Annotate the class with `@SagaEventManager` and configure the required properties. +
 * `value` The name of the bean.
-* `listenerScope` The scope for receiving the events from the target service to the domain-response topic. at this example it has been marked `ListenerScope.SHARED` and it does not create a separate receiver for the event manager and use the default shared receiver.
+* `listenerScope` The container scope for consuming the callback (reply) topic. Here it is `OrchestratorListenerScope.SHARED_GLOBAL`, so this event manager pools into the single global callback listener container shared by all default event managers instead of getting a dedicated one.
+* `groupType` The Kafka group protocol used by that container. Here it is `GroupType.SHARE` (the Kafka 4 share-group protocol / KIP-932, queue-style consumption); use `GroupType.CONSUMER` for the classic consumer-group protocol.
 * `domainRootTopicSuffix` Suffix for creating the domain-response topic. +
 read more xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_model_stacksaga_kafka_orchestrator[]
 
@@ -509,7 +511,7 @@ Next, create the custom `UserValidationEndpoint` class that handles the _Validat
 [source,java]
 ----
 @Slf4j
-@SagaEndpoint(topicNameSuffix = "user-service.validate-user", listenerScope = ListenerScope.SHARED) //<2>
+@SagaEndpoint(topicNameSuffix = "user-service.validate-user", listenerScope = WorkerListenerScope.SHARED_GLOBAL, groupType = GroupType.SHARE) //<2>
 public class UserValidationEndpoint extends QueryEndpoint { //<1>
 
     @Override //<3>
@@ -537,7 +539,8 @@ public class UserValidationEndpoint extends QueryEndpoint { //<1>
 <1> Create the custom `UserValidationEndpoint` by extending from `QueryEndpoint` abstract class.
 <2> Mark the @SagaEndpoint annotation to the class and configure the required properties. +
 * `topicNameSuffix`: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by concatenating the provided suffix as  `saga.do.user-service.validate-user`. the prefix `saga.do` is added by the framework to indicate that this topic is used for the primary execution. this is the topic the `EventManager` will send the command messages to trigger the execution of this endpoint.
-* `listenerScope`: The scope for receiving the events from the orchestrator service to this endpoint topics(do/undo). at this example it has been marked `ListenerScope.SHARED` and it does not create a separate receiver for receiving messages and use the shared one.
+* `listenerScope`: the container scope for consuming this endpoint's topic(s). `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container shared by all default endpoints instead of creating a dedicated one.
+* `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932, queue-style consumption); use `GroupType.CONSUMER` for the classic consumer-group protocol.
 <3> Override `doProcess` to implement your user-validation logic.
 The `consumerRecord` carries everything about the transaction — the current domain-entity state, transaction id, idempotency key, and xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[much more].
 
@@ -577,7 +580,7 @@ We only need to create the endpoint that reserves the ordered items.
 [source,java]
 ----
 @Slf4j
-@SagaEndpoint(topicNameSuffix = "order-service.reserve-order", listenerScope = ListenerScope.SHARED) //<2>
+@SagaEndpoint(topicNameSuffix = "order-service.reserve-order", listenerScope = WorkerListenerScope.SHARED_GLOBAL, groupType = GroupType.SHARE) //<2>
 public class ReserverOrderEndpoint extends CommandEndpoint { //<1>
 
     //<3>
@@ -635,7 +638,8 @@ public class ReserverOrderEndpoint extends CommandEndpoint { //<1>
 * `topicNameSuffix`: the suffix of the topic this endpoint listens on.
 The framework prefixes it to build the real topic name — here `order-service.reserve-order` becomes `saga.do.order-service.reserve-order` (the `saga.do.` prefix marks a primary execution).
 This is the topic the `EventManager` dispatches the `DO_ORDER_RESERVED` command to.
-* `listenerScope`: the scope used to receive commands for this endpoint's `do`/`undo` topics. `ListenerScope.SHARED` (used here) reuses a single shared receiver instead of creating a dedicated one.
+* `listenerScope`: the container scope used to consume this endpoint's `do`/`undo` topics. `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container instead of creating a dedicated one.
+* `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932); use `GroupType.CONSUMER` for the classic consumer-group protocol.
 <3> Override `doProcess` to implement the forward reserve-order logic.
 The `consumerRecord` carries everything about the transaction — the current domain-entity state, transaction id, idempotency key, and xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[much more].
 <4> Override `undoProcess` to implement the *compensation* logic that releases the reservation.
@@ -690,7 +694,7 @@ To make the compensation flow observable, this endpoint deliberately *fails the 
 [source,java]
 ----
 @Slf4j
-@SagaEndpoint(topicNameSuffix = "payment-service.make-payment", listenerScope = ListenerScope.SHARED)
+@SagaEndpoint(topicNameSuffix = "payment-service.make-payment", listenerScope = WorkerListenerScope.SHARED_GLOBAL, groupType = GroupType.SHARE)
 public class MakePaymentEndpoint extends CommandEndpoint {
     @Override
     public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord)
@@ -773,7 +777,7 @@ Every saga participant — orchestrator or worker — must share the same cluste
 === Running the Application and Testing the Transaction Flow
 
 Start all three services — *order-service*, *user-service*, and *payment-service* — with your Kafka broker and MySQL up.
-On first start-up the framework auto-creates the required Kafka topics and (via Liquibase) the event-store schema.
+On first start-up the event-store schema is created (via Liquibase). The required Kafka topics must already exist — either created by the broker's auto-create behavior (`auto.create.topics.enable=true`) or provisioned ahead of time.
 
 Trigger the saga with a `POST` request to the order-service's `/api/v1/order` endpoint:
 
