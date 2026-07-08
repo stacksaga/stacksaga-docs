@@ -29,16 +29,16 @@ class PlaceOrderTopic extends AbstractTopic<PlaceOrderTopic> {//<1>
 
     //<4>
     //primary execution topics.
-    public static final PlaceOrderTopic DO_FETCH_USER_DETAILS = new PlaceOrderTopic("user.fetch", 1, SagaEventType.QUERY_DO_ACTION, "user-service");
-    public static final PlaceOrderTopic DO_INITIALIZE_ORDER = new PlaceOrderTopic("order.init", 2, SagaEventType.COMMAND_DO_ACTION, "order-service");
-    public static final PlaceOrderTopic DO_MAKE_PAYMENT = new PlaceOrderTopic("payment.make", 3, SagaEventType.COMMAND_DO_ACTION, "payment-service");
-    public static final PlaceOrderTopic DO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory.update", 4, SagaEventType.COMMAND_DO_ACTION, "inventory-service");
+    public static final PlaceOrderTopic DO_FETCH_USER_DETAILS = new PlaceOrderTopic("user-service.fetch-user-details", 1, SagaEventType.QUERY_DO_ACTION, "user-service");
+    public static final PlaceOrderTopic DO_INITIALIZE_ORDER = new PlaceOrderTopic("order-service.initialize-order", 2, SagaEventType.COMMAND_DO_ACTION, "order-service");
+    public static final PlaceOrderTopic DO_MAKE_PAYMENT = new PlaceOrderTopic("payment-service.make-payment", 3, SagaEventType.COMMAND_DO_ACTION, "payment-service");
+    public static final PlaceOrderTopic DO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory-service.update-inventory", 4, SagaEventType.COMMAND_DO_ACTION, "inventory-service");
 
     //<5>
     //revert/compensation topics.
-    public static final PlaceOrderTopic UNDO_INITIALIZE_ORDER = new PlaceOrderTopic("order.init", -2, SagaEventType.COMMAND_UNDO_ACTION, "order-service", DO_INITIALIZE_ORDER);
-    public static final PlaceOrderTopic UNDO_MAKE_PAYMENT = new PlaceOrderTopic("payment.make", -3, SagaEventType.COMMAND_UNDO_ACTION, "payment-service", DO_MAKE_PAYMENT);
-    public static final PlaceOrderTopic UNDO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory.update", -4, SagaEventType.COMMAND_UNDO_ACTION, "inventory-service", DO_INVENTORY_UPDATE);
+    public static final PlaceOrderTopic UNDO_INITIALIZE_ORDER = new PlaceOrderTopic("order-service.initialize-order", -2, SagaEventType.COMMAND_UNDO_ACTION, "order-service", DO_INITIALIZE_ORDER);
+    public static final PlaceOrderTopic UNDO_MAKE_PAYMENT = new PlaceOrderTopic("payment-service.make-payment", -3, SagaEventType.COMMAND_UNDO_ACTION, "payment-service", DO_MAKE_PAYMENT);
+    public static final PlaceOrderTopic UNDO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory-service.update-inventory", -4, SagaEventType.COMMAND_UNDO_ACTION, "inventory-service", DO_INVENTORY_UPDATE);
 }
 ----
 
@@ -59,14 +59,30 @@ IMPORTANT: The custom topic class is not a spring bean at all. make sure not to 
 [[topic_name_specification]]
 == Topic Name Specification In StackSaga-Kafka
 
-The topic name is the name of the kafka topic that is used to send the messages to the worker services. it is recommended to use a clear and descriptive name for the topic that reflects the purpose of the execution. for instance, in the place-order example, the topic name for `DO_FETCH_USER_DETAILS` is `do.user.fetch`, the topic name for `DO_INITIALIZE_ORDER` is `do.order.init`, the topic name for `DO_MAKE_PAYMENT` is `do.payment.make`, and the topic name for `DO_INVENTORY_UPDATE` is `do.inventory.update`. and also for compensation topics, it is recommended to use the same topic name as the primary execution topic to indicate that they are related. for instance, in the place-order example, the topic name for `UNDO_INITIALIZE_ORDER` is also `undo.order.init`, the topic name for `UNDO_MAKE_PAYMENT` is also `undo.payment.make`, and the topic name for `UNDO_INVENTORY_UPDATE` is also `undo.inventory.update`.
+The topic name is the name of the Kafka topic that is used to send the command messages to the worker services.
 
-NOTE: The prefix `do.` for the primary execution topics and `undo.` for the compensation topics the must accordingly to StackSaga guidelines. but you can freely mention the topic name without mentioning the prefix as well, because internally the framework will create the topics by adding the prefix as per the topic type. for instance, if you mention the topic name for `DO_FETCH_USER_DETAILS` as `user.fetch`, the framework will create the topic name as `do.user.fetch` internally and you are able to see that real topic in the kafka topic list.
+[[topic_name_best_practice]]
+*Best practice — name a topic after the service and action it targets, not after the saga domain.* +
+A topic maps directly to a worker endpoint (`@SagaEndpoint`), and that endpoint is a *capability of the worker service* — it is not owned by any single saga domain.
+The very same endpoint can be invoked by several different saga domains: for example, a `user-service.fetch-user-details` query might be reused by a place-order saga, a cancel-subscription saga, and others.
+Naming a topic in the form `{service-name}.{action}` (e.g. `user-service.fetch-user-details`, `payment-service.make-payment`) therefore:
+
+* keeps the name *globally unique* — topic names live in one Kafka namespace, so a service-qualified name avoids collisions between endpoints of different services;
+* makes it *self-documenting* which service owns and consumes the topic; and
+* reflects how the endpoint is actually *shared across domains* — the topic name is a global identifier for the capability, while the xref:#topic_key_specification[topic key] stays unique *per domain*.
+
+For compensation topics, use the *same* topic name as the primary topic they reverse, to indicate that they are related.
+For instance, in the place-order example, `UNDO_INITIALIZE_ORDER` uses the same name as `DO_INITIALIZE_ORDER` (`order-service.initialize-order`), `UNDO_MAKE_PAYMENT` reuses `payment-service.make-payment`, and `UNDO_INVENTORY_UPDATE` reuses `inventory-service.update-inventory`.
+
+NOTE: You never write the `saga.do.` / `saga.undo.` prefix yourself — the framework adds it automatically.
+On the *orchestrator* side you provide only the plain suffix in the `AbstractTopic` definition (e.g. `"user-service.fetch-user-details"`), and on the *worker* side you provide the *same* plain suffix in `@SagaEndpoint(topicNameSuffix = "user-service.fetch-user-details")`.
+The framework then prepends `saga.do.` for primary topics and `saga.undo.` for compensation topics based on the topic type — so the suffix `user-service.fetch-user-details` becomes the real Kafka topic `saga.do.user-service.fetch-user-details` (and its compensation counterpart `saga.undo.user-service.fetch-user-details`), which is the topic you will see in the Kafka topic list.
+Both sides must use the *same* suffix so that the orchestrator and the worker resolve to the same real topic.
 
 Rules for topic naming in StackSaga-Kafka:
 
-. Use `.` as the hierarchical segment separator in topic names (e.g., `order.init`, `user-service.get-user`).
-Hyphens (`-`) are permitted *within* a segment (e.g., `user-service`, `make-payment`) but must not be used *as* the segment separator itself.
+. Use `.` as the hierarchical segment separator in topic names (e.g., `order-service.initialize-order`, `user-service.fetch-user-details`).
+Hyphens (`-`) are permitted *within* a segment (e.g., `user-service`, `fetch-user-details`) but must not be used *as* the segment separator itself.
 Underscores (`_`) are not permitted anywhere in the topic name.
 
 [[topic_key_specification]]
@@ -90,38 +106,38 @@ As per the custom topic class that is mentioned above, here is the list of topic
 
 | Fetch User Details
 | `QUERY_DO_ACTION`
-| `user.fetch`
-| `saga.do.user.fetch`
+| `user-service.fetch-user-details`
+| `saga.do.user-service.fetch-user-details`
 
 | Initialize Order
 | `COMMAND_DO_ACTION`
-| `order.init`
-| `saga.do.order.init`
+| `order-service.initialize-order`
+| `saga.do.order-service.initialize-order`
 
 | Make Payment
 | `COMMAND_DO_ACTION`
-| `payment.make`
-| `saga.do.payment.make`
+| `payment-service.make-payment`
+| `saga.do.payment-service.make-payment`
 
 | Inventory Update
 | `COMMAND_DO_ACTION`
-| `inventory.update`
-| `saga.do.inventory.update`
+| `inventory-service.update-inventory`
+| `saga.do.inventory-service.update-inventory`
 
 | Cancel Order
 | `COMMAND_UNDO_ACTION`
-| `order.init`
-| `saga.undo.order.init`
+| `order-service.initialize-order`
+| `saga.undo.order-service.initialize-order`
 
 | Refund Payment
 | `COMMAND_UNDO_ACTION`
-| `payment.make`
-| `saga.undo.payment.make`
+| `payment-service.make-payment`
+| `saga.undo.payment-service.make-payment`
 
 | Release Inventory
 | `COMMAND_UNDO_ACTION`
-| `inventory.update`
-| `saga.undo.inventory.update`
+| `inventory-service.update-inventory`
+| `saga.undo.inventory-service.update-inventory`
 
 |===
 

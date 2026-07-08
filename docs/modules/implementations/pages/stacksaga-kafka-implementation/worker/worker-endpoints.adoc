@@ -307,7 +307,7 @@ Non-reactive command endpoints are the traditional and blocking way of implement
 ----
 @Slf4j
 @SagaEndpoint(
-        topicNameSuffix = "payment.service.make-payment",
+        topicNameSuffix = "payment-service.make-payment",
         listenerScope = WorkerListenerScope.SHARED_GLOBAL,
         groupType = GroupType.SHARE
 )
@@ -376,7 +376,7 @@ NOTE: Immediate retry with `RetryTemplate` is supported for `doProcess()` method
 ----
 @Slf4j
 @SagaEndpoint(
-        topicNameSuffix = "payment.service.make-payment",
+        topicNameSuffix = "payment-service.make-payment",
         listenerScope = WorkerListenerScope.SHARED_GLOBAL,
         groupType = GroupType.SHARE
 )
@@ -517,7 +517,7 @@ After creating the custom `RetryTemplateProvider`, you can configure it into the
 ----
 @Slf4j
 @SagaEndpoint(
-        topicNameSuffix = "payment.service.make-payment",
+        topicNameSuffix = "payment-service.make-payment",
         listenerScope = WorkerListenerScope.SHARED_GLOBAL,
         groupType = GroupType.SHARE,
         primaryExecutionRetryTemplate = "makePaymentRetryTemplateProvider", //<1>
@@ -543,7 +543,7 @@ If you are in a reactive programming environment and want to implement the comma
 ----
 @Slf4j
 @SagaEndpoint( //<2>
-        topicNameSuffix = "payment.service.make-payment",
+        topicNameSuffix = "payment-service.make-payment",
         listenerScope = WorkerListenerScope.SHARED_GLOBAL,
         groupType = GroupType.SHARE
 )
@@ -602,18 +602,21 @@ Spring bean is created with the name provided in this attribute.
 |===
 | Rule | Detail
 
+| Naming convention (best practice)
+| Name the topic `{service-name}.{action}` after the service and action it targets — e.g. `user-service.fetch-user-details` — *not* after the saga domain, since the endpoint is a service capability that other saga domains can reuse. See the full specification linked below.
+
 | Segment separator
-| Use `.` to separate hierarchical segments (e.g., `order.init`, `user-service.get-user`).
+| Use `.` to separate hierarchical segments (e.g., `order-service.initialize-order`, `user-service.fetch-user-details`).
 
 | Hyphens
-| Permitted *within* a segment (e.g., `user-service`, `make-payment`) but not *as* the separator itself.
+| Permitted *within* a segment (e.g., `user-service`, `fetch-user-details`) but not *as* the separator itself.
 
 | Underscores
 | Not permitted anywhere in the topic name.
 
 | Prefix auto-added
-| The framework prepends `saga.do.` for primary topics and `saga.undo.` for compensation topics.
-So `topicNameSuffix = "payment.make"` produces real topic `saga.do.payment.make`.
+| The framework prepends `saga.do.` for primary topics and `saga.undo.` for compensation topics — you provide only the plain suffix, the *same* suffix used in the orchestrator's `AbstractTopic` definition.
+So `topicNameSuffix = "payment-service.make-payment"` produces real topic `saga.do.payment-service.make-payment`.
 
 | Topic key
 | Each topic requires a unique `float` key within the domain.
