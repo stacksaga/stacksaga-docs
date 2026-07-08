@@ -1,4 +1,4 @@
-:description: Deep-dive technical reference for the StackSaga-Kafka Framework — reactive saga orchestration in Spring Boot microservices using Kafka for asynchronous, event-driven distributed transaction management.
+:description: Deep-dive technical reference for the StackSaga-Kafka Framework — asynchronous saga orchestration in Spring Boot microservices using Kafka for event-driven distributed transaction management.
 :keywords: StackSaga-Kafka, saga orchestration, microservices, Java, Spring Boot, Kafka, Kafka 4, KIP-932, share groups, distributed transactions, event sourcing, reactive programming, transaction management, idempotency, fault tolerance, workflow compensation, LRT
 
 = StackSaga-Kafka Framework (Asynchronous)
@@ -19,12 +19,12 @@ Each saga execution is fully persisted — every state transition of the `SagaDo
 * *Asynchronous saga orchestration* — the orchestrator issues commands to worker services via Kafka and advances the saga state only upon receiving the worker's reply, with no blocking thread held during the wait.
 * *Built for Kafka 4 with KIP-932 share groups* — both the orchestrator and the worker can consume either through the classic consumer-group protocol or through the *Kafka 4 share-group protocol (KIP-932)*, a queue-style consumption model whose parallelism is *not capped by the partition count*.
 The protocol is selectable per endpoint and per event manager through the `groupType` attribute, so you can scale saga processing beyond the number of partitions without repartitioning topics.
-* *Forward and backward recovery* — built-in support for compensating transactions: when a saga step fails, the framework invokes `onNextRevert()` on the `SagaEventNavigator` in reverse step order, triggering rollback actions on each previously completed service.
-* *Per-domain reply topology* — outbound command topics are created per worker intent; inbound reply topics are created per saga domain by the framework.
-A system with three saga domains maintains exactly three reply topics, keeping Kafka partition management predictable.
+* *Forward and backward recovery* — built-in support for compensating transactions: when a saga step fails, the framework invokes `onNextRevert()` on the `EventManager` in reverse step order, triggering rollback actions on each previously completed service.
+* *Per-domain reply topology* — outbound command topics are defined per worker action; inbound replies use one reply topic per saga domain.
+A system with three saga domains uses exactly three reply topics, keeping Kafka partition management predictable.
 * *Durable state via event sourcing* — the full `SagaDomainEntity` payload and status (`STARTED → IN_PROGRESS → COMPLETED | FAILED → COMPENSATING → COMPENSATED`) is persisted on every state transition, enabling point-in-time recovery and complete audit trails.
 * *Distributed retry with token ring partitioning* — failed or stalled transactions are retried by the owning orchestrator instance as determined by Murmur3-based token ring partitioning, coordinated through the `stacksaga-ring-coordinator`.
-* *Reactive and imperative support* — the framework's worker-side `KafkaWorkerEndpoints` abstraction supports both reactive (`Mono`/`Flux`) and blocking handler implementations, giving application developers freedom to choose their programming model without affecting saga coordination.
+* *Reactive and imperative support* — the framework's worker-side `@SagaEndpoint` abstraction supports both reactive (`Mono`/`Flux`) and blocking handler implementations, giving application developers freedom to choose their programming model without affecting saga coordination.
 
 == Glossary
 
@@ -128,7 +128,7 @@ The following comparison explains the specific gaps StackSaga-Kafka closes.
 | Kafka provides delivery durability and at-least-once guarantees, but it does not know what to do when the message is consumed and the downstream operation fails. Retry logic, timeouts, and compensation decisions must be built separately.
 
 | *StackSaga-Kafka*
-| The framework implements configurable retry windows, boundary guard thresholds, and automatic compensation invocation. If a worker service returns a failure response, the saga engine immediately begins the reverse traversal of the `SagaEventNavigator`, calling `onNextRevert()` for each completed forward step in reverse order. For transient failures (timeouts, infrastructure errors), the retry subsystem re-invokes the saga from the last unacknowledged step using the Murmur3 token ring scheduler.
+| The framework implements configurable retry windows, boundary guard thresholds, and automatic compensation invocation. If a worker service returns a failure response, the saga engine immediately begins the reverse traversal of the `EventManager`, calling `onNextRevert()` for each completed forward step in reverse order. For transient failures (timeouts, infrastructure errors), the retry subsystem re-invokes the saga from the last unacknowledged step using the Murmur3 token ring scheduler.
 
 | *Advantage*
 | Data consistency is maintained across services even under partial failures, without embedding retry or rollback logic in each service.
@@ -146,7 +146,7 @@ The following comparison explains the specific gaps StackSaga-Kafka closes.
 | Developers must implement state machine logic, idempotency checks, saga step routing, and compensation orchestration in every service that participates in a business transaction.
 
 | *StackSaga-Kafka*
-| The orchestrator-side abstraction (`StackSagaKafkaTemplate`, `SagaEventNavigator`, `SagaDomainEntity`) and the worker-side abstraction (`KafkaWorkerEndpoints`) provide clear contracts for each role. Developers define what the steps *do* and in what order; the framework handles routing, persistence, retrying, and compensation sequencing.
+| The orchestrator-side abstraction (`StackSagaKafkaTemplate`, `EventManager`, `SagaDomainEntity`) and the worker-side abstraction (`@SagaEndpoint`) provide clear contracts for each role. Developers define what the steps *do* and in what order; the framework handles routing, persistence, retrying, and compensation sequencing.
 
 | *Advantage*
 | Reduces boilerplate significantly and confines distributed transaction concerns to a small, testable layer.
@@ -187,11 +187,11 @@ They communicate with each other exclusively through Kafka: the orchestrator sen
 
 It exposes:
 
-* xref:stacksaga-kafka/saga-kafka-template/saga-kafka-template.adoc[`StackSagaKafkaTemplate`] — the entry point for starting a new saga execution or resuming a recovered one.
+* xref:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#stacksaga-kafka-template-usage[`StackSagaKafkaTemplate`] — the entry point for starting a new saga execution or resuming a recovered one.
 Accepts an initialized `SagaDomainEntity` and hands it off to the saga engine.
-* xref:stacksaga-kafka/saga-step-manager/saga-event-navigator.adoc[`SagaEventNavigator`] — defines the ordered steps and compensation steps of a saga.
+* xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#event_manager[`EventManager`] — defines the ordered steps and compensation steps of a saga.
 The engine calls `onNext()` sequentially for forward progress and `onNextRevert()` in reverse order during compensation.
-* xref:stacksaga-kafka/aggregator/aggregator.adoc[`SagaDomainEntity`] — the aggregate root for a saga instance.
+* xref:stacksaga-kafka-implementation/orchestrator/domain-entity.adoc#creating_custom_domain_entity[`SagaDomainEntity`] — the aggregate root for a saga instance.
 Carries the accumulated business payload and the current execution state.
 It is serialized and persisted to the event store on every state transition.
 
@@ -240,14 +240,14 @@ Enables the retry subsystem to re-invoke failed transactions owned by this insta
 The worker dependency provides:
 
 * A Kafka listener infrastructure that subscribes to the topic(s) designated for that service by the framework's topic configuration.
-* xref:stacksaga-kafka/stacksaga-kafka-client/stacksaga-kafka-client-endpoints.adoc[`KafkaWorkerEndpoints`] — the abstraction through which application developers implement the forward processing logic and the compensation logic for each saga step handled by this service.
+* xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#stacksaga_kafka_endpoints[`@SagaEndpoint`] — the abstraction through which application developers implement the forward processing logic and the compensation logic for each saga step handled by this service.
 * Automatic response dispatch — after the endpoint handler completes (successfully or with a failure result), the worker sends the outcome back to the framework via the orchestrator's per-domain reply topic.
 The application developer does not manage this reply flow directly.
 
 Worker services do not interact with the event store or the ring coordinator.
 They are stateless with respect to the saga: they receive a command, execute the relevant business operation, and return a result.
 
-NOTE: A single worker service can handle steps for multiple orchestrator domains (i.e., multiple saga types), each routed to the correct `KafkaWorkerEndpoints` implementation by the framework.
+NOTE: A single worker service can handle steps for multiple orchestrator domains (i.e., multiple saga types), each routed to the correct `@SagaEndpoint` implementation by the framework.
 
 To add the worker dependency, include `stacksaga-kafka-worker-starter` in your worker project as below.
 

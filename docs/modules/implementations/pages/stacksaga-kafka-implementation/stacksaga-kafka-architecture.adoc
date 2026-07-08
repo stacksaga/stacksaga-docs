@@ -23,7 +23,7 @@ Every microservice in a system — `order-service`, `payment-service`, `user-ser
 Adding a StackSaga dependency to one of these services does not replace or restrict what it already does — it overlays an additional role on top.
 For example, if `order-service` adds `stacksaga-kafka-orchestrator`, it keeps doing everything it already did (exposing its own endpoints, calling other internal services, etc.) and *additionally* gains the orchestrator role for driving a specific saga.
 Within the StackSaga ecosystem, that service is now referred to as the *orchestrator service* — but only in the context of that saga.
-The same applies to a worker: `payment-service` keeps functioning as a normal utility service while also picking up saga commands through `KafkaWorkerEndpoints`, earning the *worker service* label.
+The same applies to a worker: `payment-service` keeps functioning as a normal utility service while also picking up saga commands through `@SagaEndpoint`, earning the *worker service* label.
 
 TIP: This is one of the biggest advantages of StackSaga: it can be introduced into any existing microservice with zero disruption.
 There is no need to peel a service out of its domain, stand up a new dedicated orchestration service, or rewrite existing endpoints and business logic to make room for it.
@@ -39,16 +39,16 @@ Every service in the system falls into one (or two, for orchestrator/worker-with
 | Role | How to Identify It
 
 | *Orchestrator service*
-| Any existing service that has been given the additional role of driving a saga's business transaction end-to-end. Identified by the `stacksaga-kafka-orchestrator` dependency (plus `stacksaga-database-support` for event store persistence). Within the saga, it owns the `StackSagaKafkaTemplate`, the `SagaEventNavigator`, and all `onNext()` / `onNextRevert()` step logic — outside the saga, it is unchanged.
+| Any existing service that has been given the additional role of driving a saga's business transaction end-to-end. Identified by the `stacksaga-kafka-orchestrator` dependency (plus `stacksaga-database-support` for event store persistence). Within the saga, it owns the `StackSagaKafkaTemplate`, the `EventManager`, and all `onNext()` / `onNextRevert()` step logic — outside the saga, it is unchanged.
 
 | *Worker service*
-| Any existing service that has been given the additional role of participating in a saga by exchanging command/reply messages with the orchestrator. Identified by the `stacksaga-kafka-worker` dependency and a registered `KafkaWorkerEndpoints` handler. Outside of handling saga commands, it continues to operate as a normal standard utility service.
+| Any existing service that has been given the additional role of participating in a saga by exchanging command/reply messages with the orchestrator. Identified by the `stacksaga-kafka-worker` dependency and a registered `@SagaEndpoint` handler. Outside of handling saga commands, it continues to operate as a normal standard utility service.
 
 | *Standard utility service*
 | The baseline role every service has. A service that has *no* StackSaga dependency and is never invoked by the orchestrator remains purely a standard utility service — its behavior is completely unaffected by StackSaga-Kafka.
 |===
 
-NOTE: A single service is almost always a standard utility service *and* one of the StackSaga roles at the same time — e.g., `payment-service` keeps its normal APIs while also handling saga commands via `KafkaWorkerEndpoints`.
+NOTE: A single service is almost always a standard utility service *and* one of the StackSaga roles at the same time — e.g., `payment-service` keeps its normal APIs while also handling saga commands via `@SagaEndpoint`.
 The orchestrator/worker labels describe a service's *involvement in a given saga*, not a separate deployment unit.
 Only one service per saga acts as the orchestrator.
 
@@ -73,7 +73,7 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-1-minimal-ar
 
 | Orchestrator
 | `stacksaga-kafka-orchestrator`
-| Provides the saga engine, `StackSagaKafkaTemplate`, `SagaEventNavigator`, and the Kafka producer for outbound command topics.
+| Provides the saga engine, `StackSagaKafkaTemplate`, `EventManager`, and the Kafka producer for outbound command topics.
 
 | Orchestrator
 | `stacksaga-database-support`
@@ -81,7 +81,7 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-1-minimal-ar
 
 | Worker
 | `stacksaga-kafka-worker`
-| Provides the Kafka consumer infrastructure and `KafkaWorkerEndpoints` abstraction.
+| Provides the Kafka consumer infrastructure and `@SagaEndpoint` abstraction.
 |===
 
 === Request and Execution Flow
@@ -89,17 +89,17 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-stage-1-minimal-ar
 . An inbound HTTP request (e.g., `POST /order`) reaches the `OrderController` on the orchestrator service.
 . The controller instantiates a `PlaceOrderDomainEntity` — the `SagaDomainEntity` subclass for the order placement saga — populates its initial payload, and calls `StackSagaKafkaTemplate.init(...).startWith(..).execute();`.
 From this point the saga engine takes full control.
-. The engine evaluates the `PlaceOrderEventNavigator` to determine the first step and calls `onNext()` with the current domain entity.
+. The engine evaluates the `PlaceOrderEventManager` to determine the first step and calls `onNext()` with the current domain entity.
 . The `onNext()` implementation produces a command message to the designated outbound Kafka topic for the target service (e.g., the payment service's command topic).
 The message carries the saga step identifier and the serialized domain entity payload.
-. The worker service, which has the `stacksaga-kafka-worker` dependency, consumes the message from its designated topic via the registered `KafkaWorkerEndpoints` handler.
+. The worker service, which has the `stacksaga-kafka-worker` dependency, consumes the message from its designated topic via the registered `@SagaEndpoint` handler.
 It executes the business operation (e.g., charge the payment) and produces a reply message to the *per-domain reply topic* managed by the framework.
-For the `PlaceOrderDomainEntity` domain, this is a single, dedicated reply topic created automatically by the framework.
+For the `PlaceOrderDomainEntity` domain, this is a single, dedicated reply topic for that domain.
 . The orchestrator's internal Kafka consumer reads the reply from the domain reply topic.
 If the step succeeded, the engine updates the domain entity state, persists the new snapshot to the event store, and advances to the next step by calling `onNext()` again.
 . If the worker replies with a failure, the engine transitions the saga to `FAILED`, persists the failure state, and begins compensation by calling `onNextRevert()` on each previously completed step in reverse order.
 Each `onNextRevert()` produces a compensation command to the relevant worker topic.
-Workers handle compensation commands through their dedicated `KafkaWorkerEndpoints` compensation handler and reply via the same domain reply topic.
+Workers handle compensation commands through their dedicated `@SagaEndpoint` compensation handler and reply via the same domain reply topic.
 . Each state transition — step completion, failure, compensation start, compensation completion — is written to the event store via `stacksaga-database-support`.
 
 NOTE: The diagram above shows a single span (`MakePaymentSpan`) for clarity.
