@@ -13,6 +13,42 @@ In high-level, The following duties are done by the `stacksaga-kafka-worker` mod
 . Providing immediate retrying facilities in case of retryable exceptions.
 
 
+[[endpoint-topics]]
+== Endpoint Topics
+
+Every saga endpoint consumes command messages from a Kafka topic that *belongs to the worker service hosting the endpoint*.
+The topic is *defined here, on the worker side*, through the `topicNameSuffix` attribute of `@SagaEndpoint` — this is the authoritative declaration of the endpoint's topic.
+The orchestrator declares the *same* topic name in its `AbstractTopic` class purely to *address* it when routing command messages; the orchestrator publishes to the topic but neither owns nor consumes it.
+
+[[endpoint-topics-naming]]
+=== Naming an endpoint topic
+
+Because a topic is a *capability of the worker service* — and the very same endpoint can be invoked by more than one saga domain — name it after the *service and action it targets*, in the form `{service-name}.{action}` (for example, `user-service.fetch-user-details`, `payment-service.make-payment`), rather than after any single saga domain.
+For example, a `user-service.fetch-user-details` query endpoint might be reused by a place-order saga, a cancel-subscription saga, and others. Service-qualified naming therefore:
+
+* keeps the name *globally unique* — endpoint topics share one Kafka namespace, so a service-qualified name avoids collisions between endpoints of different services;
+* makes it *self-documenting* which service owns and consumes the topic; and
+* lets the same endpoint be *reused across saga domains*, each domain referencing the topic by the same name.
+
+*Naming rules:* use `.` as the hierarchical segment separator; `-` is permitted *within* a segment (e.g. `user-service`, `fetch-user-details`) but not *as* the separator; `_` is not permitted anywhere.
+
+[[endpoint-topics-prefix]]
+=== The `saga.` prefix
+
+An endpoint consumes from one Kafka topic. A `CommandEndpoint` receives both its primary and its compensation commands on that topic and runs `doProcess()` or `undoProcess()` for each accordingly.
+
+The framework prefixes the topic name with `saga.`:
+
+* If your `topicNameSuffix` does *not* already start with `saga.`, the framework prepends it — so `topicNameSuffix = "payment-service.make-payment"` becomes the real Kafka topic `saga.payment-service.make-payment`.
+* If you *do* include the `saga.` prefix yourself (e.g. `topicNameSuffix = "saga.payment-service.make-payment"`), the framework keeps it as-is and does *not* add it again.
+
+Either way the real topic name must be of the form `saga.<name>`, where `<name>` is lowercase and uses `.` or `-` between segments (no uppercase, no underscores).
+
+IMPORTANT: The orchestrator's `AbstractTopic` definition for the same span applies the *identical* `saga.` prefixing rule, so use the *same* topic name on both sides — the orchestrator and the worker must resolve to the exact same real topic.
+See xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_name_specification[the orchestrator-side topic declaration] and xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_key_specification[Topic Key Specification].
+
+NOTE: StackSaga does not create these topics programmatically. Whether a topic is auto-created on first use depends on the broker (`auto.create.topics.enable`); otherwise pre-create it in the Kafka cluster before starting the applications. See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[Endpoint Topic Listener Models].
+
 [[stacksaga_kafka_endpoints]]
 == StackSaga Kafka Endpoints
 
@@ -135,7 +171,7 @@ Non-reactive query endpoints are the traditional and blocking way of implementin
 ----
 //<2>
 @SagaEndpoint(
-        //the real topic name will be saga.do.user-service.get-user
+        //the real topic name will be saga.user-service.get-user
         topicNameSuffix = "user-service.get-user", //<3>
         listenerScope = WorkerListenerScope.SHARED_GLOBAL, //<4>
         groupType = GroupType.SHARE
@@ -184,7 +220,7 @@ NOTE: The example has been simplified to focus on the main points. make sure ref
 
 <1> Create a custom query endpoint class by extending the `QueryEndpoint` class.
 <2> Annotate the custom query endpoint class with `@SagaEndpoint` annotation. it primarily marks the class as a spring bean.
-<3> *topicNameSuffix*: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by concatenating the provided suffix as  `saga.do.user-service.get-user`. the prefix `saga.do` is added by the framework to indicate that this topic is used for the primary execution. this is the topic the `EventManager` will send the command messages to trigger the execution of this endpoint.
+<3> *topicNameSuffix*: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.get-user` becomes the real topic `saga.user-service.get-user`. (If your suffix already starts with `saga.`, the framework keeps it as-is and does not add the prefix again.) this is the topic the `EventManager` sends command messages to, to trigger the execution of this endpoint.
 <4> *listenerScope* and *groupType*: Configure how this endpoint's topic is consumed. +
 *`listenerScope`* selects the listener-container allocation — `WorkerListenerScope.SHARED_GLOBAL` (pool into the single global container, the default choice), `WorkerListenerScope.SHARED_GROUP` (share a container with endpoints of the same `containerId`), or `WorkerListenerScope.ISOLATED` (a dedicated container). +
 *`groupType`* selects the Kafka group protocol — `GroupType.CONSUMER` (classic consumer group) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption not capped by partition count). +
@@ -230,7 +266,7 @@ IMPORTANT: Make sure not to manage the exception related metadata withing your e
 ----
 @Slf4j
 @SagaEndpoint(
-        //the real topic name will be saga.do.user-service.get-user
+        //the real topic name will be saga.user-service.get-user
         topicNameSuffix = "user-service.get-user",
         listenerScope = WorkerListenerScope.SHARED_GLOBAL,
         groupType = GroupType.SHARE
@@ -594,7 +630,8 @@ IMPORTANT: Based on the `RetryableExecutorException` Stacksaga framework provide
 - Description: This attribute is used to provide a unique name for the endpoint. it is optional and can be used for better readability and debugging purposes. if not provided, the framework will use the class name as the default value for the endpoint name.
 Spring bean is created with the name provided in this attribute.
 . `topicNameSuffix`
-- provide the suffix of the topic name for this endpoint. the framework will create the real topic name by concatenating the provided suffix as  `saga.do.user-service.get-user`. the prefix `saga.do` is added by the framework to indicate that this topic is used for the primary execution. this is the topic the `EventManager` will send the command messages to trigger the execution of this endpoint. therefore, it is important to provide the correct topic name suffix that matches the topic name that is used in the `EventManager` to ensure that the messages are sent to the correct topic and consumed by the correct endpoint.
+- provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.get-user` becomes the real topic `saga.user-service.get-user` (if your suffix already starts with `saga.`, it is kept as-is). this is the topic the `EventManager` sends command messages to, to trigger this endpoint. therefore, it is important to provide the correct topic name suffix that matches the topic name that is used in the `EventManager` to ensure that the messages are sent to the correct topic and consumed by the correct endpoint.
+See xref:#endpoint-topics[Endpoint Topics] for the ownership, naming, and prefix details.
 +
 .Quick Reference: Topic Naming Rules
 [cols="1,2",options="header"]
@@ -603,7 +640,7 @@ Spring bean is created with the name provided in this attribute.
 | Rule | Detail
 
 | Naming convention (best practice)
-| Name the topic `{service-name}.{action}` after the service and action it targets — e.g. `user-service.fetch-user-details` — *not* after the saga domain, since the endpoint is a service capability that other saga domains can reuse. See the full specification linked below.
+| Name the topic `{service-name}.{action}` after the service and action it targets — e.g. `user-service.fetch-user-details` — *not* after the saga domain, since the endpoint is a service capability that other saga domains can reuse. See xref:#endpoint-topics-naming[Naming an endpoint topic].
 
 | Segment separator
 | Use `.` to separate hierarchical segments (e.g., `order-service.initialize-order`, `user-service.fetch-user-details`).
@@ -615,12 +652,12 @@ Spring bean is created with the name provided in this attribute.
 | Not permitted anywhere in the topic name.
 
 | Prefix auto-added
-| The framework prepends `saga.do.` for primary topics and `saga.undo.` for compensation topics — you provide only the plain suffix, the *same* suffix used in the orchestrator's `AbstractTopic` definition.
-So `topicNameSuffix = "payment-service.make-payment"` produces real topic `saga.do.payment-service.make-payment`.
+| The framework prepends `saga.` to build the single real topic — but only if the suffix does not already start with `saga.`. You provide the *same* suffix used in the orchestrator's `AbstractTopic`.
+So `topicNameSuffix = "payment-service.make-payment"` produces the real topic `saga.payment-service.make-payment`.
 
 | Topic key
 | Each topic requires a unique `float` key within the domain.
-Positive integers (1, 2, 3…) for primary topics; matching negative values (-1, -2, -3…) for compensation topics.
+Positive integers (1, 2, 3…) for the primary action; matching negative values (-1, -2, -3…) for its compensation.
 Decimal values (e.g., `1.1`) are reserved for the upcoming sub-execution feature — avoid them in the current version.
 
 |===

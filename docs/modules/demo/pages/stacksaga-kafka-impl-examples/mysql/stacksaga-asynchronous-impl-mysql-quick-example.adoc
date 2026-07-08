@@ -538,7 +538,7 @@ public class UserValidationEndpoint extends QueryEndpoint { //<1>
 
 <1> Create the custom `UserValidationEndpoint` by extending from `QueryEndpoint` abstract class.
 <2> Mark the @SagaEndpoint annotation to the class and configure the required properties. +
-* `topicNameSuffix`: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by concatenating the provided suffix as  `saga.do.user-service.validate-user`. the prefix `saga.do` is added by the framework to indicate that this topic is used for the primary execution. this is the topic the `EventManager` will send the command messages to trigger the execution of this endpoint.
+* `topicNameSuffix`: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.validate-user` becomes the real topic `saga.user-service.validate-user` (if your suffix already starts with `saga.`, it is kept as-is). this is the topic the `EventManager` sends command messages to, to trigger the execution of this endpoint.
 * `listenerScope`: the container scope for consuming this endpoint's topic(s). `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container shared by all default endpoints instead of creating a dedicated one.
 * `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932, queue-style consumption); use `GroupType.CONSUMER` for the classic consumer-group protocol.
 <3> Override `doProcess` to implement your user-validation logic.
@@ -636,7 +636,7 @@ public class ReserverOrderEndpoint extends CommandEndpoint { //<1>
 <1> Reserving an order is a state-changing action, so the endpoint extends the `CommandEndpoint` abstract class — which requires both a `doProcess` (forward) and an `undoProcess` (compensation) implementation.
 <2> Mark the class with `@SagaEndpoint` and configure its properties: +
 * `topicNameSuffix`: the suffix of the topic this endpoint listens on.
-The framework prefixes it to build the real topic name — here `order-service.reserve-order` becomes `saga.do.order-service.reserve-order` (the `saga.do.` prefix marks a primary execution).
+The framework prefixes it to build the real topic name — here `order-service.reserve-order` becomes `saga.order-service.reserve-order` (the `saga.` prefix is added only if you don't already include it).
 This is the topic the `EventManager` dispatches the `DO_ORDER_RESERVED` command to.
 * `listenerScope`: the container scope used to consume this endpoint's `do`/`undo` topics. `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container instead of creating a dedicated one.
 * `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932); use `GroupType.CONSUMER` for the classic consumer-group protocol.
