@@ -1,7 +1,19 @@
 :description: stacksaga-kafka-worker listener-container scopes (SHARED_GLOBAL, SHARED_GROUP, ISOLATED), Kafka group protocols (CONSUMER and Kafka 4 share groups / KIP-932), configuration properties, and programmatic bean overrides such as a custom endpoint ConsumerFactory.
 :keywords: stacksaga-kafka-worker, WorkerListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, Kafka 4, concurrency, configuration properties, retry, ConsumerFactory, WorkerSagaPayloadConsumerFactoryProvider, SagaPayloadDeserializer, bean override, programmatic configuration
 
-= Endpoint Listener Models and Configuration
+= Endpoint Listener Configuration
+
+[.lead]
+Every command message the orchestrator sends to a worker reaches your `@SagaEndpoint` through a Spring for Apache Kafka *listener container*. How those containers are allocated and tuned therefore governs the worker's throughput, latency, resource footprint, and fault isolation — which makes it one of the most impactful configuration decisions on the worker side.
+
+By default, all endpoints share a *single* global listener container. This keeps consumer-thread and connection usage low and is the right choice for most services. But because that container's consumer threads are shared, a single high-volume or slow endpoint can monopolise them and delay the messages of unrelated endpoints (head-of-line blocking); conversely, giving every endpoint its own container wastes threads and connections when the traffic does not justify it. The group protocol adds a second dimension: the classic consumer-group protocol caps effective parallelism at the topic's partition count, whereas the Kafka 4 share-group protocol lifts that cap so you can scale on concurrency alone. Tuning the listener containers is about matching each endpoint's *isolation*, *protocol*, and *concurrency* to its actual load — so you neither starve important endpoints nor over-provision resources.
+
+This page walks through those levers, from the highest-level choice down to the finest:
+
+. *Listener-container scopes* (`listenerScope`) — `SHARED_GLOBAL`, `SHARED_GROUP`, and `ISOLATED`: how endpoints are grouped onto containers, and when to choose each. See xref:#topic_model_stacksaga_kafka_worker[].
+. *Group protocol* (`groupType`) — the classic consumer group vs. the Kafka 4 share group, and how each affects parallelism and acknowledgement. See xref:#worker_group_type[].
+. *Configuration properties* — the declarative `stacksaga.kafka.worker.*` settings for the global listener and the immediate-retry behaviour. See xref:#configuration_properties_stacksaga_kafka_worker[].
+. *Programmatic configuration* — replacing the framework's provider beans (such as a custom `ConsumerFactory`) when properties alone are not enough. See xref:#programmatic_configuration_stacksaga_kafka_worker[].
 
 [[topic_model_stacksaga_kafka_worker]]
 
