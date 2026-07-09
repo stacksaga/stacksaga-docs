@@ -73,7 +73,7 @@ Only the orchestrator owns the MySQL *event store*; the workers are stateless wi
 . A client calls `POST /api/v1/order` on the *orchestrator* (`order-service`).
 The controller initialises the `OrderDomainEntity` and hands it to the engine through `StackSagaKafkaTemplate`.
 . The engine asks the `PlaceOrderEventManager` for the first topic (`DO_USER_VALIDATED`) and publishes a *command message* to that worker's Kafka topic.
-. The target *worker* (`user-service`) consumes the command through its `@SagaEndpoint`, runs the business logic, and publishes a *reply* to the framework-managed per-domain reply topic.
+. The target *worker* (`user-service`) consumes the command through its `@SagaEndpoint`, runs the business logic, and publishes a *reply* to the framework-managed per-domain callback topic.
 . The orchestrator consumes the reply and calls `EventManager.onNext(...)` to decide what to do next — route to `DO_ORDER_RESERVED`, then `DO_MAKE_PAYMENT`, and finally `complete()`.
 . Every state transition is persisted to the MySQL *event store*, so an in-flight transaction can always be recovered.
 . If a worker reports a non-retryable failure (or `onNext()` returns an error), the engine switches to compensation and dispatches the `UNDO_*` commands to the relevant workers in reverse order.
@@ -322,8 +322,8 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 * `value` The name of the bean.
 * `listenerScope` The container scope for consuming the callback (reply) topic. Here it is `OrchestratorListenerScope.SHARED_GLOBAL`, so this event manager pools into the single global callback listener container shared by all default event managers instead of getting a dedicated one.
 * `groupType` The Kafka group protocol used by that container. Here it is `GroupType.SHARE` (the Kafka 4 share-group protocol / KIP-932, queue-style consumption); use `GroupType.CONSUMER` for the classic consumer-group protocol.
-* `domainRootTopicSuffix` Suffix for creating the domain-response topic. +
-read more xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_model_stacksaga_kafka_orchestrator[]
+* `domainRootTopicSuffix` Suffix for creating the domain's callback topic. +
+read more xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[]
 
 <3> Override the `registerTopics` method to return the full list of topics this event manager uses (both `DO` and `UNDO`).
 This is where we register our topics with StackSaga, and it is called only once, when the application starts.

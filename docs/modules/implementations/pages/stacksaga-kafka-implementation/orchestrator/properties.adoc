@@ -1,8 +1,133 @@
-:description: Configuration reference for stacksaga-kafka-orchestrator-spring-boot-starter — declarative properties (domain entity scanning, the global callback listener group protocol and concurrency, instance cluster/region/zone) and programmatic bean overrides such as a custom response ConsumerFactory.
-:keywords: StackSaga-Kafka, configuration properties, stacksaga-kafka-orchestrator, domain-entity-scan, global-callback-listener, group-type, share group, KIP-932, concurrency, instance cluster, region, zone, ConsumerFactory, OrchestratorResponsePayloadConsumerFactoryProvider, SagaResponsePayloadDeserializer, bean override, programmatic configuration
+:description: Configuration reference for stacksaga-kafka-orchestrator-spring-boot-starter — the per-domain callback topic and its listener-container models (SHARED_GLOBAL, SHARED_GROUP, ISOLATED) and group protocol, declarative properties, and programmatic bean overrides such as a custom response ConsumerFactory.
+:keywords: StackSaga-Kafka, configuration, stacksaga-kafka-orchestrator, callback topic, callback listener, OrchestratorListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, concurrency, domain-entity-scan, instance cluster, region, zone, ConsumerFactory, OrchestratorResponsePayloadConsumerFactoryProvider, SagaResponsePayloadDeserializer, bean override, programmatic configuration
+
+= Configuration
+
+[.lead]
+Every worker reply flows back to the orchestrator through a per-domain *callback topic*, consumed by a Spring for Apache Kafka *listener container*. How those containers are allocated and tuned — together with the declarative properties and the overridable provider beans — governs the orchestrator's callback throughput, latency, resource footprint, and fault isolation. This page collects everything you configure on the orchestrator side.
+
+By default, every `SHARED_GLOBAL` event manager's callback topic is consumed by a *single* global callback container, which keeps consumer-thread usage low and suits most services. But a high-volume or latency-sensitive saga can be given its own container so it neither suffers nor causes head-of-line blocking, and the group protocol (`groupType`) decides whether parallelism is capped by the partition count. Tuning is about matching each event manager's *isolation*, *protocol*, and *concurrency* to its real load.
+
+This page covers, from the highest-level choice down to the finest:
+
+. *Callback topic and listener models* — the per-domain callback topic, the `listenerScope` container allocation (`SHARED_GLOBAL`, `SHARED_GROUP`, `ISOLATED`), and the `groupType` protocol. See xref:#topic_model_stacksaga_kafka_orchestrator[].
+. *Configuration properties* — the declarative `stacksaga.kafka.orchestrator.*` and `stacksaga.instance.*` settings. See xref:#configuration_properties_for_stacksaga_kafka_orchestrator[].
+. *Programmatic configuration* — replacing the framework's provider beans (such as a custom `ConsumerFactory`) when properties alone are not enough. See xref:#programmatic_configuration_stacksaga_kafka_orchestrator[].
+
+[[topic_model_stacksaga_kafka_orchestrator]]
+== Callback Topic and Listener Models
+
+=== Per-Domain Callback Topic
+
+In `stacksaga-kafka-orchestrator`, a dedicated topic is created for each `EventManager` of the `DomainEntity` to receive the response messages from the Kafka worker endpoints.
+
+The topic name is built as `saga.callback.{scope}.{appName}.{domainRootTopicSuffix}`, where:
+
+* `{scope}` is `global`, `isolated`, or `shared-group`, matching the event manager's `listenerScope` — so event managers on different scopes never collide on the same topic even if they reuse a `domainRootTopicSuffix`.
+* `{appName}` is the application's service name, lowercased with any non-alphanumeric character collapsed to `-`.
+* `{domainRootTopicSuffix}` is appended as-is from the `@SagaEventManager` annotation.
+
+For instance, a `SHARED_GLOBAL` event manager in the `order-service` application with `domainRootTopicSuffix = "place-order"` resolves to the real topic `saga.callback.global.order-service.place-order`; the same suffix on an `ISOLATED` event manager instead resolves to `saga.callback.isolated.order-service.place-order`.
+
+the `domainRootTopicSuffix` is configured in the `@SagaEventManager` annotation of the EventManager as below.
+
+[source,java]
+----
+@SagaEventManager(
+        domainRootTopicSuffix = "place-order"
+)
+----
+
+*Listener Container Scopes*
+
+Even though a dedicated callback topic is created for each `EventManager`, the container that *consumes* those callback topics is allocated according to the `listenerScope` configured in the `@SagaEventManager` annotation. There are three scopes:
+
+. xref:#shared_global_listener_models_for_orchestrator[]
+. xref:#shared_group_listener_models_for_orchestrator[]
+. xref:#isolated_listener_models_for_orchestrator[]
+
+Independently of the scope, each container consumes using the Kafka group protocol chosen with the `groupType` attribute — `GroupType.CONSUMER` (classic consumer group, backed by a `ConcurrentMessageListenerContainer`) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption backed by a `ShareKafkaMessageListenerContainer`, whose parallelism is not capped by the partition count).
+
+IMPORTANT: A single container speaks only one protocol, so every event manager that shares a container — all `SHARED_GLOBAL` managers, or all members of a given `SHARED_GROUP` — must declare the *same* `groupType`. A mismatch fails fast at startup. `GroupType.SHARE` requires a Kafka 4.x broker with share groups enabled.
+
+Let's dive into details of each listener scope.
+
+[[shared_global_listener_models_for_orchestrator]]
+=== SHARED_GLOBAL
+
+If the `@SagaEventManager` is configured with `listenerScope = OrchestratorListenerScope.SHARED_GLOBAL`, the framework binds that event manager's callback topic to a single, global callback listener container shared by *all* `SHARED_GLOBAL` event managers.
+This is the default and the right choice for most sagas: it pools every callback topic into one container instead of spinning up a container per orchestrator, keeping consumer-thread usage low.
+
+Here is the architecture for the shared listener model in `stacksaga-kafka-orchestrator`.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Shared listener container in stacksaga kafka orchestrator,width=800]
+
+* The *group protocol* and *concurrency* of the global container are configured application-wide via `stacksaga.kafka.orchestrator.global-callback-listener.group-type` and `stacksaga.kafka.orchestrator.global-callback-listener.concurrency` (see xref:#configuration_properties_for_stacksaga_kafka_orchestrator[]). The default group protocol is `SHARE`.
+* The consumer group follows the convention `saga-os-{serviceName}-…` where `os` stands for *Orchestration Service*.
+* For `GroupType.CONSUMER`, the listener is configured with `auto.offset.reset=earliest`, so previously published messages can be consumed after a service restart when no committed offset is available. For `GroupType.SHARE`, this property does not apply — share consumers manage offsets at the broker (KIP-932) rather than via the classic per-consumer `auto.offset.reset`, and the framework does not currently configure the share-group equivalent (`share.auto.offset.reset`).
+* Regardless of `groupType`, the container acknowledges/commits a reply record as soon as its listener callback returns — `EventPreparationManager.prepare()` resolves every outcome (successful step advancement, a paused/retryable transaction, or a terminated transaction) internally rather than letting an exception propagate to Kafka, so the callback always returns normally. A retryable failure therefore does not by itself cause Kafka to redeliver the reply. With `GroupType.SHARE` specifically, the container uses Spring's `ShareAckMode.IMPLICIT` and never calls the share-group's `RELEASE`/`REJECT` outcomes — the only capability the framework draws from `GroupType.SHARE` is queue-style concurrency past the partition-count ceiling, not its redelivery semantics.
+* At-Least-Once processing of a saga step is instead guaranteed by the framework's own retry system, independent of whether Kafka ever redelivers the original reply. When a worker reports `RetryableExecutorException`, the orchestrator persists the transaction as paused rather than retrying it inline; a completely separate module — the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Ring Coordinator] — later re-invokes the stalled span on whichever orchestrator instance currently owns that transaction's token sub-range (see that module's documentation for the full retry architecture). Genuine Kafka-level redelivery can still occur in its own right (e.g. a process crash before the listener callback returns), which is why the framework still provides a per-span *idempotency key* on each message. The framework does *not* discard duplicates automatically — guarding against processing the same reply twice, from either cause, must be handled by idempotent handling logic that uses that key.
+
+[[shared_group_listener_models_for_orchestrator]]
+=== SHARED_GROUP
+
+If the `@SagaEventManager` is configured with `listenerScope = OrchestratorListenerScope.SHARED_GROUP`, its callback topic is consumed by a container shared only with *other* event managers that declare the same listener container name.
+This pools a specific subset of event managers into their own container, separate from the global one, when they benefit from dedicated concurrency or should be isolated from the load of unrelated managers.
+
+The container is configured through the `sharedGroupExecutionListener` attribute of `@SagaEventManager`:
+
+[source,java]
+----
+@SagaEventManager(
+        value = "placeOrderEventManager",
+        domainRootTopicSuffix = "place-order",
+        listenerScope = OrchestratorListenerScope.SHARED_GROUP,
+        groupType = GroupType.SHARE,
+        sharedGroupExecutionListener = @SagaEventManagerListener(
+                listenerContainerName = "order-group", // required: the group key other managers repeat to join
+                concurrency = 10,
+                autoStart = true
+        )
+)
+----
+
+* `listenerContainerName` is *required* here — it is the group key that other event managers repeat to share this container. Registration fails if it is left blank.
+* All members must declare the *same* `groupType`.
+* The container's concurrency is the *maximum* concurrency declared across all members of the group, and it auto-starts if *any* member requests auto-start.
+
+[[isolated_listener_models_for_orchestrator]]
+=== ISOLATED
+
+If the `@SagaEventManager` is configured with `listenerScope = OrchestratorListenerScope.ISOLATED`, the framework creates a dedicated callback listener container for that event manager's callback topic, consumed by no other manager.
+Use it for orchestrators with distinct performance or reliability requirements — e.g. a high-throughput or latency-sensitive saga — where sharing a container could cause head-of-line blocking or contention over consumer threads. It provides the best isolation at the cost of higher resource usage.
+
+Here is the architecture for the isolated-listener model in `stacksaga-kafka-orchestrator`.
+
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Isolated listener container in stacksaga kafka orchestrator,width=800]
+
+The dedicated container is configured through the `isolatedExecutionListener` attribute of `@SagaEventManager`:
+
+[source,java]
+----
+@SagaEventManager(
+        value = "placeOrderEventManager",
+        domainRootTopicSuffix = "place-order",
+        listenerScope = OrchestratorListenerScope.ISOLATED,
+        groupType = GroupType.SHARE,
+        isolatedExecutionListener = @SagaEventManagerListener(
+                listenerContainerName = "", // optional: defaults to {beanName}ListenerContainer
+                concurrency = 5,
+                autoStart = true
+        )
+)
+----
+
+* `listenerContainerName` is optional; if left blank, the container is named `{beanName}ListenerContainer`, where `{beanName}` is the event manager's `value`.
+* `concurrency` and `autoStart` come from this `@SagaEventManagerListener`.
+* The consumer group follows the same `saga-os-{serviceName}-…` convention, and the same `auto.offset.reset=earliest` and At-Least-Once semantics as SHARED_GLOBAL.
 
 [[configuration_properties_for_stacksaga_kafka_orchestrator]]
-= Configuration Properties Of `stacksaga-kafka-orchestrator-spring-boot-starter`
+== Configuration Properties Of `stacksaga-kafka-orchestrator-spring-boot-starter`
 
 [cols="5,1,1,3",options="header"]
 [.properties-table.google-anno-skip]
@@ -20,7 +145,7 @@
 | `stacksaga.kafka.orchestrator.global-callback-listener.group-type`
 | `GroupType`
 | `SHARE`
-| The Kafka group protocol used by the global callback listener container that consumes the callback topics of all `SHARED_GLOBAL` event managers. `SHARE` uses the Kafka 4 share-group protocol (KIP-932, queue-style consumption); `CONSUMER` uses the classic consumer-group protocol. xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_model_stacksaga_kafka_orchestrator[See more] about the listener models.
+| The Kafka group protocol used by the global callback listener container that consumes the callback topics of all `SHARED_GLOBAL` event managers. `SHARE` uses the Kafka 4 share-group protocol (KIP-932, queue-style consumption); `CONSUMER` uses the classic consumer-group protocol. xref:#topic_model_stacksaga_kafka_orchestrator[See more] about the listener models.
 
 | `stacksaga.kafka.orchestrator.global-callback-listener.concurrency`
 | `int`
@@ -115,7 +240,7 @@ These are applied on top of whatever you configure, so you neither need to set t
 | `auto.offset.reset=earliest` on the consumer factory.
 
 | `GroupType.SHARE`
-| The share consumer factory is *derived* from the one above with the consumer-group-only keys removed — `partition.assignment.strategy`, `enable.auto.commit`, `auto.commit.interval.ms`, `auto.offset.reset`, and `isolation.level` (share groups do not use them) — and the share acknowledgement mode forced to *implicit* (`ShareAckMode.IMPLICIT`). See xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#shared_global_listener_models_for_orchestrator[the orchestrator listener models] for what these mean.
+| The share consumer factory is *derived* from the one above with the consumer-group-only keys removed — `partition.assignment.strategy`, `enable.auto.commit`, `auto.commit.interval.ms`, `auto.offset.reset`, and `isolation.level` (share groups do not use them) — and the share acknowledgement mode forced to *implicit* (`ShareAckMode.IMPLICIT`). See xref:#shared_global_listener_models_for_orchestrator[the listener models] for what these mean.
 |===
 
 NOTE: The same override idiom applies to the other StackSaga-Kafka provider beans on the orchestrator — the producer factory (`OrchestratorPayloadProducerFactoryProvider`), the `KafkaTemplate` (`OrchestratorKafkaTemplateProvider`), and the saga execution scheduler (`AbstractSchedulerProvider`) — each registered with `@ConditionalOnMissingBean` and replaceable the same way. Dedicated guides for these follow in later sections.
