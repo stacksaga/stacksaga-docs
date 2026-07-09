@@ -1,12 +1,26 @@
-:description: stacksaga-kafka-worker listener-container scopes (SHARED_GLOBAL, SHARED_GROUP, ISOLATED), Kafka group protocols (CONSUMER and Kafka 4 share groups / KIP-932), and configuration properties reference.
-:keywords: stacksaga-kafka-worker, WorkerListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, Kafka 4, concurrency, configuration properties, retry
+:description: stacksaga-kafka-worker listener-container scopes (SHARED_GLOBAL, SHARED_GROUP, ISOLATED), Kafka group protocols (CONSUMER and Kafka 4 share groups / KIP-932), configuration properties, and programmatic bean overrides such as a custom endpoint ConsumerFactory.
+:keywords: stacksaga-kafka-worker, WorkerListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, Kafka 4, concurrency, configuration properties, retry, ConsumerFactory, WorkerSagaPayloadConsumerFactoryProvider, SagaPayloadDeserializer, bean override, programmatic configuration
 
-= Endpoint Listener Models and Configuration
+= Endpoint Listener Configuration
+
+[.lead]
+Every command message the orchestrator sends to a worker reaches your `@SagaEndpoint` through a Spring for Apache Kafka *listener container*. How those containers are allocated and tuned therefore governs the worker's throughput, latency, resource footprint, and fault isolation — which makes it one of the most impactful configuration decisions on the worker side.
+
+By default, all endpoints share a *single* global listener container. This keeps consumer-thread and connection usage low and is the right choice for most services. But because that container's consumer threads are shared, a single high-volume or slow endpoint can monopolise them and delay the messages of unrelated endpoints (head-of-line blocking); conversely, giving every endpoint its own container wastes threads and connections when the traffic does not justify it. The group protocol adds a second dimension: the classic consumer-group protocol caps effective parallelism at the topic's partition count, whereas the Kafka 4 share-group protocol lifts that cap so you can scale on concurrency alone. Tuning the listener containers is about matching each endpoint's *isolation*, *protocol*, and *concurrency* to its actual load — so you neither starve important endpoints nor over-provision resources.
+
+This page walks through those levers, from the highest-level choice down to the finest:
+
+. *Listener-container scopes* (`listenerScope`) — `SHARED_GLOBAL`, `SHARED_GROUP`, and `ISOLATED`: how endpoints are grouped onto containers, and when to choose each. See xref:#topic_model_stacksaga_kafka_worker[].
+. *Group protocol* (`groupType`) — the classic consumer group vs. the Kafka 4 share group, and how each affects parallelism and acknowledgement. See xref:#worker_group_type[].
+. *Configuration properties* — the declarative `stacksaga.kafka.worker.*` settings for the global listener and the immediate-retry behaviour. See xref:#configuration_properties_stacksaga_kafka_worker[].
+. *Programmatic configuration* — replacing the framework's provider beans (such as a custom `ConsumerFactory`) when properties alone are not enough. See xref:#programmatic_configuration_stacksaga_kafka_worker[].
 
 [[topic_model_stacksaga_kafka_worker]]
 
 == Endpoint Topic Listener Models
 
+
+////
 * *Endpoint Topics* +
 The topics that are used to send the command messages to the worker services are called `Endpoint Topics`.
 These are the topics that you register in the `EventManager` by overriding the `registerTopics()` method in `stacksaga-kafka-orchestrator`, and the same topics that are registered via the `@SagaEndpoint` annotation in the `stacksaga-kafka-worker`.
@@ -15,6 +29,23 @@ The endpoint topics must exist in the Kafka cluster before they are consumed.
 StackSaga does not create endpoint topics programmatically; their creation depends on the *broker's* topic-management behavior.
 If the broker is configured to auto-create topics (`auto.create.topics.enable=true`), a topic is created on first use with the broker's default partition and replication settings.
 For production it is recommended to pre-create the topics explicitly so that partitions and replication factors are managed deliberately, rather than relying on broker auto-creation.
+////
+
+
+[TIP]
+.New to Kafka? The terms used on this page in one minute
+[%collapsible]
+====
+This page assumes a few Kafka fundamentals. If any of the terms below are unfamiliar, read this first — the rest of the page relies on them.
+
+Partition:: A topic is split into one or more *partitions*, and Kafka spreads the topic's messages across them. Under the classic protocol, each partition is read by *at most one consumer* in a group, so the number of partitions sets the ceiling on how many consumers can process a topic in parallel.
+Consumer group:: A set of consumers that cooperatively share the work of reading a topic under the classic Kafka protocol. Kafka assigns each partition to a single member of the group; if there are more consumers than partitions, the extra consumers sit idle.
+Share group (KIP-932):: Kafka 4's *queue-style* protocol. Instead of pinning partitions to consumers, the broker hands out individual records to whichever consumer is free — so parallelism is *not* limited by the partition count, and you can scale by simply adding consumers.
+Offset & offset commit:: An *offset* is a per-partition position marking how far a group has consumed. *Committing* an offset durably records that progress, so consumption resumes from there after a restart. `auto.offset.reset=earliest` decides where to start when *no* committed offset exists yet: from the oldest available message (rather than only brand-new ones).
+Listener container:: The Spring for Apache Kafka component that runs the consumer(s) and dispatches each received record to your endpoint method. StackSaga builds and manages these containers for you according to the listener scope you choose.
+Concurrency:: How many consumer threads a listener container runs in parallel. How much this actually buys you depends on the protocol (see share group vs. consumer group above).
+At-Least-Once delivery:: A guarantee that every message is delivered *at least* once. A message is acknowledged only *after* it has been processed, so a crash before the acknowledgement causes the message to be delivered again — which is why your processing must be *idempotent* (safe to run twice).
+====
 
 The framework provides three listener-container *scopes* for consuming messages from the endpoint topics in the worker application, selected per endpoint via the `listenerScope` attribute of the `@SagaEndpoint` annotation:
 
@@ -30,7 +61,7 @@ Independently of the scope, each container consumes using one of two Kafka group
 Every listener container speaks exactly one Kafka group protocol, chosen with the `groupType` attribute of `@SagaEndpoint`:
 
 * `GroupType.CONSUMER` — the classic Kafka *consumer-group* protocol, backed by a Spring `ConcurrentMessageListenerContainer`.
-Effective parallelism is capped by the number of partitions of the consumed topics (a partition is processed by at most one consumer in the group).
+Effective parallelism is capped by the number of partitions of the consumed topics (a partition is processed by at most one consumer in the group, so any consumer threads beyond the partition count stay idle).
 
 * `GroupType.SHARE` — the *Kafka 4 share-group* protocol (KIP-932), backed by a `ShareKafkaMessageListenerContainer`.
 Records are distributed cooperatively at the broker in a queue style, so consumer parallelism is *no longer capped by the partition count* — you can raise `concurrency` beyond the number of partitions to scale processing.
@@ -52,9 +83,9 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-recei
 
 * The *group protocol* and *concurrency* of the global container are configured application-wide through the `stacksaga.kafka.worker.global-endpoint-topic-listener.group-type` and `stacksaga.kafka.worker.global-endpoint-topic-listener.concurrency` properties (see xref:#configuration_properties_stacksaga_kafka_worker[]). The default group protocol is `SHARE`.
 * The global container uses a single shared consumer group derived from the service name (of the form `saga-ws-{serviceName}-…`) where `ws` stands for *worker service*.
-* The listener is configured with `auto.offset.reset=earliest`, so previously published messages can still be consumed after a service restart when no committed offset is available.
-* Message consumption uses *At-Least-Once* delivery semantics, so messages are not lost even during service downtime or unexpected failures.
-* To guarantee At-Least-Once delivery, each message is acknowledged only after it has been successfully processed. With `GroupType.SHARE`, acknowledgement is handled per record at the broker (implicit share acknowledgement); with `GroupType.CONSUMER`, acknowledged offsets are committed periodically. In either case, if a failure occurs after a message has been processed but before its acknowledgement/offset is durably recorded, the message may be delivered again and reprocessed after recovery — the framework's idempotency check discards genuine duplicates.
+* For `GroupType.CONSUMER`, the listener is configured with `auto.offset.reset=earliest`, so previously published messages can still be consumed after a service restart when no committed offset is available. For `GroupType.SHARE`, this property does not apply — share consumers manage offsets at the broker (KIP-932) rather than via the classic per-consumer `auto.offset.reset`, and the framework does not currently configure the share-group equivalent (`share.auto.offset.reset`).
+* Regardless of `groupType`, the container acknowledges/commits a record as soon as its listener callback returns — and that callback is designed to always return normally, whatever `doProcess()`/`undoProcess()` did. `NonRetryableExecutorException`, `RetryableExecutorException`, and `JustRetryableExecutorException` are all caught internally and reported back to the orchestrator over the callback topic rather than left to propagate to Kafka, so a retryable failure does not by itself cause Kafka to redeliver the record. With `GroupType.SHARE` specifically, the container uses Spring's `ShareAckMode.IMPLICIT` and never calls the share-group's `RELEASE`/`REJECT` outcomes — the only capability the framework draws from `GroupType.SHARE` is queue-style concurrency past the partition-count ceiling (see xref:#worker_group_type[]), not its redelivery semantics.
+* At-Least-Once processing of a saga step is instead guaranteed by the framework's own retry system, independent of whether Kafka ever redelivers the original record. `JustRetryableExecutorException` retries immediately and in-process on this same worker (see xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#exception-handling-reference[]). `RetryableExecutorException` instead reports the failure back to the orchestrator, which persists the transaction as paused and later re-invokes the stalled span through a completely separate module — the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Ring Coordinator] — not by Kafka redelivering this record. Genuine Kafka-level redelivery can still occur in its own right (e.g. a process crash before the listener callback returns), which is why the framework still attaches a stable *idempotency key* to every message (exposed on the endpoint's payload). The framework does *not* deduplicate on your behalf — detecting and discarding genuine duplicates, from either cause, is the responsibility of your endpoint logic using that key.
 
 [[shared_group_listener_scope_endpoint_topics]]
 === SHARED_GROUP
@@ -66,7 +97,7 @@ For example, tagging both `UserValidateEndpoint` and `InventoryCheckEndpoint` wi
 * `containerId` is *required* for this scope — it is the group key that other endpoints repeat to join the same container.
 * All endpoints in the group must declare the *same* `groupType` (validated at startup).
 * The container's concurrency is the *maximum* `concurrency` declared across all endpoints in the group, so raising the concurrency of one member raises it for the whole group.
-* Offset/acknowledgement, delivery semantics, and `auto.offset.reset=earliest` behave the same as xref:#shared_global_listener_scope_endpoint_topics[SHARED_GLOBAL].
+* Offset handling, acknowledgement, and delivery semantics follow the same per-`groupType` rules described for xref:#shared_global_listener_scope_endpoint_topics[SHARED_GLOBAL], applied according to the `groupType` this container resolves to: for `GroupType.CONSUMER` the listener uses `auto.offset.reset=earliest`, whereas `GroupType.SHARE` does not use that property (share consumers manage offsets at the broker, KIP-932); in both cases the container acknowledges/commits a record as soon as its listener callback returns (with `ShareAckMode.IMPLICIT` for `GroupType.SHARE`, and without ever using the share-group `RELEASE`/`REJECT` outcomes), and At-Least-Once processing of a saga step is guaranteed by the framework's own retry system rather than by Kafka redelivery.
 
 [[isolated_listener_scope_endpoint_topics]]
 === ISOLATED
@@ -80,7 +111,7 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-rec
 
 * The dedicated container is named `{beanName}ListenerContainer`, where `{beanName}` is the endpoint's bean name.
 * Its `groupType` and `concurrency` come from the endpoint's own `@SagaEndpoint` attributes.
-* Offset/acknowledgement, delivery semantics, and `auto.offset.reset=earliest` behave the same as xref:#shared_global_listener_scope_endpoint_topics[SHARED_GLOBAL].
+* Offset handling, acknowledgement, and delivery semantics follow the same per-`groupType` rules described for xref:#shared_global_listener_scope_endpoint_topics[SHARED_GLOBAL], applied according to the `groupType` this container resolves to: for `GroupType.CONSUMER` the listener uses `auto.offset.reset=earliest`, whereas `GroupType.SHARE` does not use that property (share consumers manage offsets at the broker, KIP-932); in both cases the container acknowledges/commits a record as soon as its listener callback returns (with `ShareAckMode.IMPLICIT` for `GroupType.SHARE`, and without ever using the share-group `RELEASE`/`REJECT` outcomes), and At-Least-Once processing of a saga step is guaranteed by the framework's own retry system rather than by Kafka redelivery.
 
 NOTE: When `groupType = GroupType.CONSUMER`, the effective parallelism of any scope is still bounded by the partition count of the consumed topics. Choose `groupType = GroupType.SHARE` when you need to scale processing beyond the number of partitions.
 
@@ -152,3 +183,79 @@ NOTE: When `groupType = GroupType.CONSUMER`, the effective parallelism of any sc
 |===
 
 NOTE: These `retry.*` properties tune the *immediate, in-process* retries of non-reactive endpoints (the Spring `RetryTemplate` behind `JustRetryableExecutorException`). The *deferred, scheduled* retries triggered by `RetryableExecutorException` are configured separately through `stacksaga-database-support`.
+
+[[programmatic_configuration_stacksaga_kafka_worker]]
+== Programmatic Configuration (Bean Overrides)
+
+The properties above cover declarative tuning.
+Beyond them, several StackSaga-Kafka infrastructure components on the worker are exposed as *overridable Spring beans* for advanced, in-code customization.
+Each component ships with a framework-provided default that is registered with `@ConditionalOnMissingBean`, so simply declaring your own bean of the same provider type *replaces* the default — no property flag is required.
+
+This section documents these customization points. The first is the *endpoint consumer factory*.
+
+[[custom_endpoint_consumer_factory]]
+=== Custom Endpoint `ConsumerFactory`
+
+The worker consumes the orchestrator's command messages from its endpoint topics through a `ConsumerFactory<String, SagaPayload>` supplied by a `WorkerSagaPayloadConsumerFactoryProvider` bean.
+By default the framework builds this factory from your existing Spring Boot Kafka configuration (`spring.kafka.*`, via `KafkaProperties.buildConsumerProperties()`) and then plugs in the two deserializers StackSaga requires — a `StringDeserializer` for the key and a `SagaPayloadDeserializer` for the value.
+
+To supply your own factory — for example to tune fetch sizes, security settings, or client properties that are not exposed through `spring.kafka.*` — extend the abstract `WorkerSagaPayloadConsumerFactoryProvider`, implement `consumerFactory()`, and register it as a bean:
+
+[source,java]
+----
+@Component
+public class CustomEndpointConsumerFactoryProvider extends WorkerSagaPayloadConsumerFactoryProvider {
+
+    private final KafkaProperties kafkaProperties;
+    private final SagaPayloadDeserializer sagaPayloadDeserializer; //<1>
+
+    public CustomEndpointConsumerFactoryProvider(
+            KafkaProperties kafkaProperties,
+            SagaPayloadDeserializer sagaPayloadDeserializer) {
+        this.kafkaProperties = kafkaProperties;
+        this.sagaPayloadDeserializer = sagaPayloadDeserializer;
+    }
+
+    @Override
+    protected ConsumerFactory<String, SagaPayload> consumerFactory() {
+        Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties()); //<2>
+        //<3> your custom tuning:
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 250);
+        props.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, 5 * 1024 * 1024);
+        return new DefaultKafkaConsumerFactory<>(
+                props,
+                new StringDeserializer(),      //<4>
+                sagaPayloadDeserializer        //<5>
+        );
+    }
+}
+----
+
+<1> Inject the framework's `SagaPayloadDeserializer` bean rather than constructing your own — it is already registered as a `@Component` (bean name `clientSagaPayloadDeserializer`) and wired with the correct `JsonMapper`.
+<2> Starting from `KafkaProperties.buildConsumerProperties()` is optional but recommended, so your `spring.kafka.consumer.*` settings still apply. You may instead start from an empty map and set every property explicitly.
+<3> Apply whatever custom consumer tuning you need.
+<4> The key deserializer *must* be a `StringDeserializer` — the message key is the transaction id, sent as a string.
+<5> The value deserializer *must* be the `SagaPayloadDeserializer` — besides reconstructing the command payload it uses the message headers to populate the idempotency key, transaction id, and saga event type that the endpoint relies on, so a different deserializer will break endpoint processing.
+
+[IMPORTANT]
+====
+Registering your own `WorkerSagaPayloadConsumerFactoryProvider` bean replaces the framework default *entirely* (it is `@ConditionalOnMissingBean`).
+You must therefore keep the two required deserializers exactly as shown — a different key or value deserializer will break command deserialization.
+====
+
+Even when you supply a custom factory, the framework still *enforces a few settings internally* so the required consumption invariants hold.
+These are applied on top of whatever you configure, so you neither need to set them yourself nor can override them:
+
+[cols="1,3",options="header"]
+[.google-anno-skip]
+|===
+| When the container's `groupType` is… | The framework forces…
+
+| `GroupType.CONSUMER`
+| `auto.offset.reset=earliest` on the consumer factory.
+
+| `GroupType.SHARE`
+| The share consumer factory is *derived* from the one above with the consumer-group-only keys removed — `partition.assignment.strategy`, `enable.auto.commit`, `auto.commit.interval.ms`, `auto.offset.reset`, and `isolation.level` (share groups do not use them) — and the share acknowledgement mode forced to *implicit* (`ShareAckMode.IMPLICIT`). See xref:#shared_global_listener_scope_endpoint_topics[the listener models] for what these mean.
+|===
+
+NOTE: The same override idiom applies to the other StackSaga-Kafka provider beans on the worker — the response producer factory (`WorkerSagaResponsePayloadProducerFactoryProvider`) and the `KafkaTemplate` (`WorkerKafkaTemplateProvider`). The non-reactive execution schedulers and retry templates are customised the same way and are already covered in xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#configure_custom_scheduler_for_non_reactive_endpoints[Schedulers for Non-Reactive Endpoints] and xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#configure_retry_template_for_non_reactive_endpoints[Configure `RetryTemplate` for Non-Reactive Endpoints].

@@ -93,22 +93,22 @@ From this point the saga engine takes full control.
 . The `onNext()` implementation produces a command message to the designated outbound Kafka topic for the target service (e.g., the payment service's command topic).
 The message carries the saga step identifier and the serialized domain entity payload.
 . The worker service, which has the `stacksaga-kafka-worker` dependency, consumes the message from its designated topic via the registered `@SagaEndpoint` handler.
-It executes the business operation (e.g., charge the payment) and produces a reply message to the *per-domain reply topic* managed by the framework.
-For the `PlaceOrderDomainEntity` domain, this is a single, dedicated reply topic for that domain.
-. The orchestrator's internal Kafka consumer reads the reply from the domain reply topic.
+It executes the business operation (e.g., charge the payment) and produces a reply message to the *per-domain callback topic* managed by the framework.
+For the `PlaceOrderDomainEntity` domain, this is a single, dedicated callback topic for that domain.
+. The orchestrator's internal Kafka consumer reads the reply from the domain callback topic.
 If the step succeeded, the engine updates the domain entity state, persists the new snapshot to the event store, and advances to the next step by calling `onNext()` again.
 . If the worker replies with a failure, the engine transitions the saga to `FAILED`, persists the failure state, and begins compensation by calling `onNextRevert()` on each previously completed step in reverse order.
 Each `onNextRevert()` produces a compensation command to the relevant worker topic.
-Workers handle compensation commands through their dedicated `@SagaEndpoint` compensation handler and reply via the same domain reply topic.
+Workers handle compensation commands through their dedicated `@SagaEndpoint` compensation handler and reply via the same domain callback topic.
 . Each state transition — step completion, failure, compensation start, compensation completion — is written to the event store via `stacksaga-database-support`.
 
 NOTE: The diagram above shows a single span (`MakePaymentSpan`) for clarity.
 In practice, a saga can traverse any number of spans across different worker services, each with its own command topic.
-All replies — regardless of which worker sent them — flow back to the single per-domain reply topic.
-The reply topic consumer is configured with `auto.offset.reset=earliest` and at-least-once delivery semantics.
-This is safe because the framework's built-in idempotency check (via the per-span idempotency key) detects any duplicate re-delivery that may occur after a consumer rebalance or an offset commit delay, and discards the duplicate without re-executing the saga step.
+All replies — regardless of which worker sent them — flow back to the single per-domain callback topic.
+The callback topic consumer is configured with `auto.offset.reset=earliest` for `GroupType.CONSUMER` (`GroupType.SHARE` does not use this property — see xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#shared_global_listener_models_for_orchestrator[the orchestrator listener models]). At-least-once processing of a saga step is provided by the framework's own retry system rather than by Kafka redelivery — see xref:#stacksaga-kafka-architecture-2nd-stage[Stage 2 below].
+The framework supplies a per-span idempotency key with every message so that a duplicate re-delivery — which may occur after a consumer rebalance or an offset commit delay — can be recognised and made safe by idempotent handling, rather than re-executing the saga step. The framework does not discard duplicates automatically; using the idempotency key to keep processing idempotent is the developer's responsibility.
 
-NOTE: The reply topics (on the orchestrator) and the command topics (on the workers) are consumed through Spring for Apache Kafka listener containers. Each container can use either the classic Kafka *consumer-group* protocol or the *Kafka 4 share-group* protocol (KIP-932) — a queue-style model whose parallelism is not capped by the partition count — selectable per event manager and per endpoint via the `groupType` attribute. See xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_model_stacksaga_kafka_orchestrator[the orchestrator listener models] and xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[the worker listener models].
+NOTE: The callback topics (on the orchestrator) and the command topics (on the workers) are consumed through Spring for Apache Kafka listener containers. Each container can use either the classic Kafka *consumer-group* protocol or the *Kafka 4 share-group* protocol (KIP-932) — a queue-style model whose parallelism is not capped by the partition count — selectable per event manager and per endpoint via the `groupType` attribute. See xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[the orchestrator listener models] and xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[the worker listener models].
 
 [[stacksaga-kafka-architecture-2nd-stage]]
 == Stage 2 — Retry-Ready Setup
