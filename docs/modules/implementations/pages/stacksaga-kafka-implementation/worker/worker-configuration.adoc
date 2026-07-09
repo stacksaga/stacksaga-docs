@@ -16,6 +16,21 @@ StackSaga does not create endpoint topics programmatically; their creation depen
 If the broker is configured to auto-create topics (`auto.create.topics.enable=true`), a topic is created on first use with the broker's default partition and replication settings.
 For production it is recommended to pre-create the topics explicitly so that partitions and replication factors are managed deliberately, rather than relying on broker auto-creation.
 
+[TIP]
+.New to Kafka? The terms used on this page in one minute
+[%collapsible]
+====
+This page assumes a few Kafka fundamentals. If any of the terms below are unfamiliar, read this first — the rest of the page relies on them.
+
+Partition:: A topic is split into one or more *partitions*, and Kafka spreads the topic's messages across them. Under the classic protocol, each partition is read by *at most one consumer* in a group, so the number of partitions sets the ceiling on how many consumers can process a topic in parallel.
+Consumer group:: A set of consumers that cooperatively share the work of reading a topic under the classic Kafka protocol. Kafka assigns each partition to a single member of the group; if there are more consumers than partitions, the extra consumers sit idle.
+Share group (KIP-932):: Kafka 4's *queue-style* protocol. Instead of pinning partitions to consumers, the broker hands out individual records to whichever consumer is free — so parallelism is *not* limited by the partition count, and you can scale by simply adding consumers.
+Offset & offset commit:: An *offset* is a per-partition position marking how far a group has consumed. *Committing* an offset durably records that progress, so consumption resumes from there after a restart. `auto.offset.reset=earliest` decides where to start when *no* committed offset exists yet: from the oldest available message (rather than only brand-new ones).
+Listener container:: The Spring for Apache Kafka component that runs the consumer(s) and dispatches each received record to your endpoint method. StackSaga builds and manages these containers for you according to the listener scope you choose.
+Concurrency:: How many consumer threads a listener container runs in parallel. How much this actually buys you depends on the protocol (see share group vs. consumer group above).
+At-Least-Once delivery:: A guarantee that every message is delivered *at least* once. A message is acknowledged only *after* it has been processed, so a crash before the acknowledgement causes the message to be delivered again — which is why your processing must be *idempotent* (safe to run twice).
+====
+
 The framework provides three listener-container *scopes* for consuming messages from the endpoint topics in the worker application, selected per endpoint via the `listenerScope` attribute of the `@SagaEndpoint` annotation:
 
 . xref:#shared_global_listener_scope_endpoint_topics[]
@@ -30,7 +45,7 @@ Independently of the scope, each container consumes using one of two Kafka group
 Every listener container speaks exactly one Kafka group protocol, chosen with the `groupType` attribute of `@SagaEndpoint`:
 
 * `GroupType.CONSUMER` — the classic Kafka *consumer-group* protocol, backed by a Spring `ConcurrentMessageListenerContainer`.
-Effective parallelism is capped by the number of partitions of the consumed topics (a partition is processed by at most one consumer in the group).
+Effective parallelism is capped by the number of partitions of the consumed topics (a partition is processed by at most one consumer in the group, so any consumer threads beyond the partition count stay idle).
 
 * `GroupType.SHARE` — the *Kafka 4 share-group* protocol (KIP-932), backed by a `ShareKafkaMessageListenerContainer`.
 Records are distributed cooperatively at the broker in a queue style, so consumer parallelism is *no longer capped by the partition count* — you can raise `concurrency` beyond the number of partitions to scale processing.
@@ -54,7 +69,7 @@ image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-recei
 * The global container uses a single shared consumer group derived from the service name (of the form `saga-ws-{serviceName}-…`) where `ws` stands for *worker service*.
 * The listener is configured with `auto.offset.reset=earliest`, so previously published messages can still be consumed after a service restart when no committed offset is available.
 * Message consumption uses *At-Least-Once* delivery semantics, so messages are not lost even during service downtime or unexpected failures.
-* To guarantee At-Least-Once delivery, each message is acknowledged only after it has been successfully processed. With `GroupType.SHARE`, acknowledgement is handled per record at the broker (implicit share acknowledgement); with `GroupType.CONSUMER`, acknowledged offsets are committed periodically. In either case, if a failure occurs after a message has been processed but before its acknowledgement/offset is durably recorded, the message may be delivered again and reprocessed after recovery — the framework's idempotency check discards genuine duplicates.
+* To guarantee At-Least-Once delivery, each message is acknowledged only after it has been successfully processed. With `GroupType.SHARE`, acknowledgement is handled per record at the broker (implicit share acknowledgement); with `GroupType.CONSUMER`, acknowledged offsets are committed periodically. In either case, if a failure occurs after a message has been processed but before its acknowledgement/offset is durably recorded, the message may be delivered again and reprocessed after recovery. The framework attaches a stable *idempotency key* to every message (exposed on the endpoint's payload) so that a redelivery can be recognised, but it does *not* deduplicate on your behalf — detecting and discarding genuine duplicates is the responsibility of your endpoint logic using that key.
 
 [[shared_group_listener_scope_endpoint_topics]]
 === SHARED_GROUP

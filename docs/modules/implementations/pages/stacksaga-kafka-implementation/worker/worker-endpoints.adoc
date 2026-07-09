@@ -223,8 +223,8 @@ NOTE: The example has been simplified to focus on the main points. make sure ref
 <3> *topicNameSuffix*: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.get-user` becomes the real topic `saga.user-service.get-user`. (If your suffix already starts with `saga.`, the framework keeps it as-is and does not add the prefix again.) this is the topic the `EventManager` sends command messages to, to trigger the execution of this endpoint.
 <4> *listenerScope* and *groupType*: Configure how this endpoint's topic is consumed. +
 *`listenerScope`* selects the listener-container allocation — `WorkerListenerScope.SHARED_GLOBAL` (pool into the single global container, the default choice), `WorkerListenerScope.SHARED_GROUP` (share a container with endpoints of the same `containerId`), or `WorkerListenerScope.ISOLATED` (a dedicated container). +
-*`groupType`* selects the Kafka group protocol — `GroupType.CONSUMER` (classic consumer group) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption not capped by partition count). +
-See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[].
+*`groupType`* selects the Kafka group protocol — `GroupType.CONSUMER` (classic consumer group) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption not capped by partition count); see xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[]. +
+See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[] for the listener scopes.
 
 <5> Override the `doProcess()` method to implement the business logic for executing the query. this method is invoked by the framework when a message is received in the respective topic. you can use the provided `ConsumerRecord` to access the message key, payload, and other metadata withing the method scope.
 
@@ -673,15 +673,17 @@ listenerScope tuning is one of the most important configurations and should be c
 `GroupType.CONSUMER` uses the classic consumer-group protocol (a `ConcurrentMessageListenerContainer`); `GroupType.SHARE` uses the Kafka 4 share-group protocol (KIP-932, a `ShareKafkaMessageListenerContainer`), whose parallelism is not capped by the partition count.
 Every endpoint sharing a container (all `SHARED_GLOBAL` endpoints, or all members of a `SHARED_GROUP`) must declare the *same* `groupType`; a mismatch fails fast at startup.
 `GroupType.SHARE` requires a Kafka 4.x broker with share groups enabled.
+See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[].
 
 . `containerId`
 - Only used when `listenerScope = WorkerListenerScope.SHARED_GROUP`.
 It is the group key that binds endpoints together into a single shared container — endpoints declaring the same `containerId` share one container. Ignored for the other scopes.
+See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#shared_group_listener_scope_endpoint_topics[].
 
 . `concurrency`
 - The concurrency level of the endpoint's listener container (default `1`).
 For an `ISOLATED` endpoint it sets that dedicated container's concurrency. For a `SHARED_GROUP` endpoint the container adopts the *maximum* `concurrency` declared across all members of the group. (For `SHARED_GLOBAL`, the global container's concurrency comes from the `stacksaga.kafka.worker.global-endpoint-topic-listener.concurrency` property instead.)
-With `GroupType.CONSUMER`, effective parallelism is still bounded by the partition count; with `GroupType.SHARE` it is not.
+With `GroupType.CONSUMER`, effective parallelism is still bounded by the partition count; with `GroupType.SHARE` it is not — see xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[].
 
 . `primaryExecutionRetryTemplate`
 - The *Spring bean name* (a `String`) of the `AbstractRetryTemplateProvider` used for immediate, in-process retries of the primary execution (`doProcess()`) of non-reactive `CommandEndpoint` and `QueryEndpoint`.
