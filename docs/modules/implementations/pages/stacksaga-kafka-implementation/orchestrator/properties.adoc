@@ -1,5 +1,5 @@
-:description: Configuration properties reference for stacksaga-kafka-orchestrator-spring-boot-starter — domain entity scanning, the global callback listener group protocol (consumer group or Kafka 4 share group) and concurrency, and instance cluster/region/zone settings.
-:keywords: StackSaga-Kafka, configuration properties, stacksaga-kafka-orchestrator, domain-entity-scan, global-callback-listener, group-type, share group, KIP-932, concurrency, instance cluster, region, zone
+:description: Configuration reference for stacksaga-kafka-orchestrator-spring-boot-starter — declarative properties (domain entity scanning, the global callback listener group protocol and concurrency, instance cluster/region/zone) and programmatic bean overrides such as a custom response ConsumerFactory.
+:keywords: StackSaga-Kafka, configuration properties, stacksaga-kafka-orchestrator, domain-entity-scan, global-callback-listener, group-type, share group, KIP-932, concurrency, instance cluster, region, zone, ConsumerFactory, OrchestratorResponsePayloadConsumerFactoryProvider, SagaResponsePayloadDeserializer, bean override, programmatic configuration
 
 [[configuration_properties_for_stacksaga_kafka_orchestrator]]
 = Configuration Properties Of `stacksaga-kafka-orchestrator-spring-boot-starter`
@@ -43,3 +43,79 @@
 |The zone this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
 
 |===
+
+[[programmatic_configuration_stacksaga_kafka_orchestrator]]
+== Programmatic Configuration (Bean Overrides)
+
+The properties above cover declarative tuning.
+Beyond them, several StackSaga-Kafka infrastructure components are exposed as *overridable Spring beans* for advanced, in-code customization.
+Each component ships with a framework-provided default that is registered with `@ConditionalOnMissingBean`, so simply declaring your own bean of the same provider type *replaces* the default — no property flag is required.
+
+This section documents these customization points. The first is the *response consumer factory*.
+
+[[custom_response_consumer_factory]]
+=== Custom Response `ConsumerFactory`
+
+The orchestrator consumes the workers' reply messages through a `ConsumerFactory<String, SagaResponsePayload>` supplied by an `OrchestratorResponsePayloadConsumerFactoryProvider` bean.
+By default the framework builds this factory from your existing Spring Boot Kafka configuration (`spring.kafka.*`, via `KafkaProperties.buildConsumerProperties()`) and then plugs in the two deserializers StackSaga requires — a `StringDeserializer` for the key and a `SagaResponsePayloadDeserializer` for the value.
+
+To supply your own factory — for example to tune fetch sizes, security settings, or client properties that are not exposed through `spring.kafka.*` — extend the abstract `OrchestratorResponsePayloadConsumerFactoryProvider`, implement `consumerFactory()`, and register it as a bean:
+
+[source,java]
+----
+@Component
+public class CustomResponseConsumerFactoryProvider extends OrchestratorResponsePayloadConsumerFactoryProvider {
+
+    private final KafkaProperties kafkaProperties;
+    private final SagaResponsePayloadDeserializer sagaResponsePayloadDeserializer; //<1>
+
+    public CustomResponseConsumerFactoryProvider(
+            KafkaProperties kafkaProperties,
+            SagaResponsePayloadDeserializer sagaResponsePayloadDeserializer) {
+        this.kafkaProperties = kafkaProperties;
+        this.sagaResponsePayloadDeserializer = sagaResponsePayloadDeserializer;
+    }
+
+    @Override
+    protected ConsumerFactory<String, SagaResponsePayload> consumerFactory() {
+        Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties()); //<2>
+        //<3> your custom tuning:
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 250);
+        props.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, 5 * 1024 * 1024);
+        return new DefaultKafkaConsumerFactory<>(
+                props,
+                new StringDeserializer(),            //<4>
+                sagaResponsePayloadDeserializer      //<5>
+        );
+    }
+}
+----
+
+<1> Inject the framework's `SagaResponsePayloadDeserializer` bean rather than constructing your own — it is already registered as a `@Component` and wired with the correct `JsonMapper`.
+<2> Starting from `KafkaProperties.buildConsumerProperties()` is optional but recommended, so your `spring.kafka.consumer.*` settings still apply. You may instead start from an empty map and set every property explicitly.
+<3> Apply whatever custom consumer tuning you need.
+<4> The key deserializer *must* be a `StringDeserializer` — the message key is the transaction id, sent as a string.
+<5> The value deserializer *must* be the `SagaResponsePayloadDeserializer` — StackSaga's reply payloads are typed via a message header and can only be reconstructed by this deserializer.
+
+[IMPORTANT]
+====
+Registering your own `OrchestratorResponsePayloadConsumerFactoryProvider` bean replaces the framework default *entirely* (it is `@ConditionalOnMissingBean`).
+You must therefore keep the two required deserializers exactly as shown — a different key or value deserializer will break reply deserialization.
+====
+
+Even when you supply a custom factory, the framework still *enforces a few settings internally* so the required consumption invariants hold.
+These are applied on top of whatever you configure, so you neither need to set them yourself nor can override them:
+
+[cols="1,3",options="header"]
+[.google-anno-skip]
+|===
+| When the container's `groupType` is… | The framework forces…
+
+| `GroupType.CONSUMER`
+| `auto.offset.reset=earliest` on the consumer factory.
+
+| `GroupType.SHARE`
+| The share consumer factory is *derived* from the one above with the consumer-group-only keys removed — `partition.assignment.strategy`, `enable.auto.commit`, `auto.commit.interval.ms`, `auto.offset.reset`, and `isolation.level` (share groups do not use them) — and the share acknowledgement mode forced to *implicit* (`ShareAckMode.IMPLICIT`). See xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#shared_global_listener_models_for_orchestrator[the orchestrator listener models] for what these mean.
+|===
+
+NOTE: The same override idiom applies to the other StackSaga-Kafka provider beans on the orchestrator — the producer factory (`OrchestratorPayloadProducerFactoryProvider`), the `KafkaTemplate` (`OrchestratorKafkaTemplateProvider`), and the saga execution scheduler (`AbstractSchedulerProvider`) — each registered with `@ConditionalOnMissingBean` and replaceable the same way. Dedicated guides for these follow in later sections.

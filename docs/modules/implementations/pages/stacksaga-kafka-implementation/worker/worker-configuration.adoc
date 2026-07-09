@@ -1,5 +1,5 @@
-:description: stacksaga-kafka-worker listener-container scopes (SHARED_GLOBAL, SHARED_GROUP, ISOLATED), Kafka group protocols (CONSUMER and Kafka 4 share groups / KIP-932), and configuration properties reference.
-:keywords: stacksaga-kafka-worker, WorkerListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, Kafka 4, concurrency, configuration properties, retry
+:description: stacksaga-kafka-worker listener-container scopes (SHARED_GLOBAL, SHARED_GROUP, ISOLATED), Kafka group protocols (CONSUMER and Kafka 4 share groups / KIP-932), configuration properties, and programmatic bean overrides such as a custom endpoint ConsumerFactory.
+:keywords: stacksaga-kafka-worker, WorkerListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, Kafka 4, concurrency, configuration properties, retry, ConsumerFactory, WorkerSagaPayloadConsumerFactoryProvider, SagaPayloadDeserializer, bean override, programmatic configuration
 
 = Endpoint Listener Models and Configuration
 
@@ -167,3 +167,79 @@ NOTE: When `groupType = GroupType.CONSUMER`, the effective parallelism of any sc
 |===
 
 NOTE: These `retry.*` properties tune the *immediate, in-process* retries of non-reactive endpoints (the Spring `RetryTemplate` behind `JustRetryableExecutorException`). The *deferred, scheduled* retries triggered by `RetryableExecutorException` are configured separately through `stacksaga-database-support`.
+
+[[programmatic_configuration_stacksaga_kafka_worker]]
+== Programmatic Configuration (Bean Overrides)
+
+The properties above cover declarative tuning.
+Beyond them, several StackSaga-Kafka infrastructure components on the worker are exposed as *overridable Spring beans* for advanced, in-code customization.
+Each component ships with a framework-provided default that is registered with `@ConditionalOnMissingBean`, so simply declaring your own bean of the same provider type *replaces* the default — no property flag is required.
+
+This section documents these customization points. The first is the *endpoint consumer factory*.
+
+[[custom_endpoint_consumer_factory]]
+=== Custom Endpoint `ConsumerFactory`
+
+The worker consumes the orchestrator's command messages from its endpoint topics through a `ConsumerFactory<String, SagaPayload>` supplied by a `WorkerSagaPayloadConsumerFactoryProvider` bean.
+By default the framework builds this factory from your existing Spring Boot Kafka configuration (`spring.kafka.*`, via `KafkaProperties.buildConsumerProperties()`) and then plugs in the two deserializers StackSaga requires — a `StringDeserializer` for the key and a `SagaPayloadDeserializer` for the value.
+
+To supply your own factory — for example to tune fetch sizes, security settings, or client properties that are not exposed through `spring.kafka.*` — extend the abstract `WorkerSagaPayloadConsumerFactoryProvider`, implement `consumerFactory()`, and register it as a bean:
+
+[source,java]
+----
+@Component
+public class CustomEndpointConsumerFactoryProvider extends WorkerSagaPayloadConsumerFactoryProvider {
+
+    private final KafkaProperties kafkaProperties;
+    private final SagaPayloadDeserializer sagaPayloadDeserializer; //<1>
+
+    public CustomEndpointConsumerFactoryProvider(
+            KafkaProperties kafkaProperties,
+            SagaPayloadDeserializer sagaPayloadDeserializer) {
+        this.kafkaProperties = kafkaProperties;
+        this.sagaPayloadDeserializer = sagaPayloadDeserializer;
+    }
+
+    @Override
+    protected ConsumerFactory<String, SagaPayload> consumerFactory() {
+        Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties()); //<2>
+        //<3> your custom tuning:
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 250);
+        props.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, 5 * 1024 * 1024);
+        return new DefaultKafkaConsumerFactory<>(
+                props,
+                new StringDeserializer(),      //<4>
+                sagaPayloadDeserializer        //<5>
+        );
+    }
+}
+----
+
+<1> Inject the framework's `SagaPayloadDeserializer` bean rather than constructing your own — it is already registered as a `@Component` (bean name `clientSagaPayloadDeserializer`) and wired with the correct `JsonMapper`.
+<2> Starting from `KafkaProperties.buildConsumerProperties()` is optional but recommended, so your `spring.kafka.consumer.*` settings still apply. You may instead start from an empty map and set every property explicitly.
+<3> Apply whatever custom consumer tuning you need.
+<4> The key deserializer *must* be a `StringDeserializer` — the message key is the transaction id, sent as a string.
+<5> The value deserializer *must* be the `SagaPayloadDeserializer` — besides reconstructing the command payload it uses the message headers to populate the idempotency key, transaction id, and saga event type that the endpoint relies on, so a different deserializer will break endpoint processing.
+
+[IMPORTANT]
+====
+Registering your own `WorkerSagaPayloadConsumerFactoryProvider` bean replaces the framework default *entirely* (it is `@ConditionalOnMissingBean`).
+You must therefore keep the two required deserializers exactly as shown — a different key or value deserializer will break command deserialization.
+====
+
+Even when you supply a custom factory, the framework still *enforces a few settings internally* so the required consumption invariants hold.
+These are applied on top of whatever you configure, so you neither need to set them yourself nor can override them:
+
+[cols="1,3",options="header"]
+[.google-anno-skip]
+|===
+| When the container's `groupType` is… | The framework forces…
+
+| `GroupType.CONSUMER`
+| `auto.offset.reset=earliest` on the consumer factory.
+
+| `GroupType.SHARE`
+| The share consumer factory is *derived* from the one above with the consumer-group-only keys removed — `partition.assignment.strategy`, `enable.auto.commit`, `auto.commit.interval.ms`, `auto.offset.reset`, and `isolation.level` (share groups do not use them) — and the share acknowledgement mode forced to *implicit* (`ShareAckMode.IMPLICIT`). See xref:#shared_global_listener_scope_endpoint_topics[the listener models] for what these mean.
+|===
+
+NOTE: The same override idiom applies to the other StackSaga-Kafka provider beans on the worker — the response producer factory (`WorkerSagaResponsePayloadProducerFactoryProvider`) and the `KafkaTemplate` (`WorkerKafkaTemplateProvider`). The non-reactive execution schedulers and retry templates are customised the same way and are already covered in xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#configure_custom_scheduler_for_non_reactive_endpoints[Schedulers for Non-Reactive Endpoints] and xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#configure_retry_template_for_non_reactive_endpoints[Configure `RetryTemplate` for Non-Reactive Endpoints].
