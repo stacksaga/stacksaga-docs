@@ -21,20 +21,20 @@ This page covers, from the highest-level choice down to the finest:
 
 In `stacksaga-kafka-orchestrator`, a dedicated topic is created for each `EventManager` of the `DomainEntity` to receive the response messages from the Kafka worker endpoints.
 
-The topic name is built as `saga.callback.{scope}.{appName}.{domainRootTopicSuffix}`, where:
+The topic name is built as `saga.callback.{scope}.{appName}.{domainCallbackTopicSuffix}`, where:
 
-* `{scope}` is `global`, `isolated`, or `shared-group`, matching the event manager's `listenerScope` — so event managers on different scopes never collide on the same topic even if they reuse a `domainRootTopicSuffix`.
+* `{scope}` is `global`, `isolated`, or `shared-group`, matching the event manager's `listenerScope` — so event managers on different scopes never collide on the same topic even if they reuse a `domainCallbackTopicSuffix`.
 * `{appName}` is the application's service name, lowercased with any non-alphanumeric character collapsed to `-`.
-* `{domainRootTopicSuffix}` is appended as-is from the `@SagaEventManager` annotation.
+* `{domainCallbackTopicSuffix}` is appended as-is from the `@SagaEventManager` annotation.
 
-For instance, a `SHARED_GLOBAL` event manager in the `order-service` application with `domainRootTopicSuffix = "place-order"` resolves to the real topic `saga.callback.global.order-service.place-order`; the same suffix on an `ISOLATED` event manager instead resolves to `saga.callback.isolated.order-service.place-order`.
+For instance, a `SHARED_GLOBAL` event manager in the `order-service` application with `domainCallbackTopicSuffix = "place-order"` resolves to the real topic `saga.callback.global.order-service.place-order`; the same suffix on an `ISOLATED` event manager instead resolves to `saga.callback.isolated.order-service.place-order`.
 
-the `domainRootTopicSuffix` is configured in the `@SagaEventManager` annotation of the EventManager as below.
+the `domainCallbackTopicSuffix` is configured in the `@SagaEventManager` annotation of the EventManager as below.
 
 [source,java]
 ----
 @SagaEventManager(
-        domainRootTopicSuffix = "place-order"
+        domainCallbackTopicSuffix = "place-order"
 )
 ----
 
@@ -80,7 +80,7 @@ The container is configured through the `sharedGroupExecutionListener` attribute
 ----
 @SagaEventManager(
         value = "placeOrderEventManager",
-        domainRootTopicSuffix = "place-order",
+        domainCallbackTopicSuffix = "place-order",
         listenerScope = OrchestratorListenerScope.SHARED_GROUP,
         groupType = GroupType.SHARE,
         sharedGroupExecutionListener = @SagaEventManagerListener(
@@ -111,7 +111,7 @@ The dedicated container is configured through the `isolatedExecutionListener` at
 ----
 @SagaEventManager(
         value = "placeOrderEventManager",
-        domainRootTopicSuffix = "place-order",
+        domainCallbackTopicSuffix = "place-order",
         listenerScope = OrchestratorListenerScope.ISOLATED,
         groupType = GroupType.SHARE,
         isolatedExecutionListener = @SagaEventManagerListener(
