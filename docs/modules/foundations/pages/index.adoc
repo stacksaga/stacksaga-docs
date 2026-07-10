@@ -1,14 +1,16 @@
-:keywords: stacksaga, stacksaga doc, stacksaga framework, stacksaga introduction, spring boot microservices
-:description: Stacksaga Introduction To Microservice
+:keywords: stacksaga, stacksaga doc, stacksaga framework, stacksaga introduction, spring boot microservices, distributed transactions, saga pattern
+:description: An introduction to microservice architecture, distributed transactions, and the challenges the StackSaga framework is built to solve.
 
-= Introduction To Microservice.
+= Introduction to Microservices
+
+This page lays the architectural groundwork before diving into the framework itself.
+It covers what a microservice architecture is, why splitting a database per service introduces distributed-transaction problems, and why those problems demand a pattern like Saga — which StackSaga implements for Spring Boot applications.
 
 == Microservice Architecture
 
-Before dive in to the framework, let's have the basic idea of microservice architecture.
-A microservice' architecture consists of a collection of small, autonomous services.
-Each service is self-contained and should implement a single business capability within a bounded context.
-A bounded context is a natural division within a business and provides an explicit boundary within which a domain model exists.
+A microservice architecture structures an application as a collection of small, autonomous services, each independently deployable and owned by a single team.
+Every service is self-contained and implements a single business capability within a *bounded context* — a natural division within the business domain that defines an explicit boundary around a domain model, its data, and its behavior.
+Services communicate over lightweight, technology-agnostic protocols (typically HTTP/REST, gRPC, or asynchronous messaging), rather than sharing code or a database at the process level.
 
 image:stacksaga-diagram-Microservice-architecture-style.drawio.svg[alt="stacksaga diagram  microservice architecture style"]
 
@@ -17,38 +19,35 @@ https://spring.io/microservices[Read more through spring microservices.]
 === Key characteristics of microservices
 
 [arabic]
-. *Modularity*: Each microservice is a self-contained unit that can be developed, deployed, and scaled independently.
-This modularity allows for easier development and maintenance of complex systems.
-. *Scalability*: Since each service is independent, it can be scaled horizontally or vertically based on its specific requirements.
-This allows for better resource utilization and improved performance.
-. *Resilience*: Microservices are designed to be fault-tolerant and resilient.
-If one service fails, it does not necessarily affect the entire application, as other services can continue to function independently.
-. *Flexibility*: Microservices allow for flexibility in technology choices.
-Each service can be developed using the most suitable programming language, framework, or database for its requirements.
-. *Decentralized Data Management*: Instead of a single centralized database, each microservice can have its own database or data store.
-This allows for better isolation of data and reduces the risk of data corruption or loss.
-. *Continuous Deployment*: Microservices enable continuous deployment and delivery practices, as each service can be deployed independently without affecting others.
-This allows for faster release cycles and quicker time-to-market.
+. *Modularity*: Each microservice is a self-contained unit that can be developed, tested, deployed, and scaled independently of the rest of the system.
+This decoupling reduces the blast radius of change and makes complex systems easier to reason about and maintain.
+. *Scalability*: Because services are independent, each can be scaled horizontally (more instances) or vertically (more resources) according to its own load profile, rather than scaling the entire monolith uniformly.
+. *Resilience*: Microservices are designed for fault isolation. A failure in one service degrades or removes only the capability it owns, rather than bringing down the entire application, provided failures are contained with patterns such as timeouts, retries, and circuit breakers.
+. *Polyglot Flexibility*: Each service can adopt the programming language, framework, or persistence technology best suited to its own workload, rather than being constrained by a single stack-wide decision.
+. *Decentralized Data Management*: Rather than a single shared database, each microservice owns its own database or data store. This enforces data encapsulation and isolates one service's schema evolution and failures from the others.
+. *Continuous Deployment*: Because each service has an independent build and deployment pipeline, teams can ship changes to one service without coordinating a release across the entire system, enabling faster and lower-risk delivery.
 
 == Database Per Service Pattern
 
-One of the benefits of microservice architecture is that it lets us choose the technology stack per service.
-For instance, we can decide to use a relational database for service A and NoSQL database for service B. This model lets the services manage domain data independently on a data store that best suites its data types and schema.
-Further, it also lets the service scale its datastore on-demand and insulates it from the failures of other services.
-However, at times a transaction can span across multiple services, and ensuring data consistency across the service database is a challenge.
+The database-per-service pattern is what makes the decentralized data management characteristic above possible in practice.
+It lets each service select the persistence technology that best fits its own data shape and access patterns — for example, a relational database for an `order-service` with strongly relational data, and a document or key-value store for a `catalog-service` with flexible, read-heavy data.
+This isolation also means a service can scale or migrate its datastore independently, without being affected by, or affecting, the failure modes of other services' databases.
+
+The trade-off is consistency: once each service owns its own database, there is no longer a single ACID transaction boundary that spans the whole business operation.
+Any workflow that touches more than one service's data now has to coordinate consistency *across* database boundaries instead of relying on one.
 
 image:stacksaga-diagram-Microservice-architecture-style-database-per-service.drawio.svg[alt="stacksaga diagram  microservice architecture style database per service"]
 
-== Migration to microservices architecture
+== Migration to Microservices Architecture
 
 image:stacksaga-diagram-monolithic-architecture-vs-microservices-architecture.drawio.svg[alt="stacksaga diagram monolithic architecture vs microservices architecture"]
 
-The above diagram shows how to migrate the stem from monolithic architecture to microservices' architecture.
+The diagram above illustrates how a system's data and responsibilities are decomposed when migrating from a single monolithic database and codebase to independently owned services, each with its own data store.
 
 == Distributed Transactions
 
-In a microservices architecture, a distributed transaction is a business process that spans multiple microservices, each typically managing its own database or data store.
-Unlike monolithic applications, which rely on single-database ACID (Atomicity, Consistency, Isolation, Durability) transactions, microservices must coordinate data consistency across service boundaries.
+In a microservices architecture, a *distributed transaction* is a business process that spans multiple microservices, each typically managing its own database or data store.
+Unlike monolithic applications, which rely on a single-database ACID (Atomicity, Consistency, Isolation, Durability) transaction, microservices must coordinate data consistency across service boundaries — without the benefit of a shared transaction manager or a two-phase commit across independently owned datastores.
 
 Consider an e-commerce application implemented using microservices.
 The order placement workflow may involve the following services:
@@ -61,34 +60,60 @@ The order placement workflow may involve the following services:
 * inventory-service
 ** Updates inventory levels
 
-Although the overall operation is a single business transaction (place-order), it is decomposed into several distributed, service-local transactions (atomic transactions).
-Each microservice executes its own local transaction to fulfill its part of the workflow.
+Although the overall operation is a single business transaction (`place-order`), it is decomposed into several distributed, service-local transactions (*atomic transactions*).
+Each microservice executes its own local transaction — typically its own local ACID transaction against its own database — to fulfill its part of the workflow.
 
 image:stacksaga-diagram-distributed-transaction.svg[alt="distributed transaction"]
 
-To ensure end-to-end consistency, all atomic transactions across the involved microservices must succeed.
-If any microservice fails to complete its local transaction, all previously committed operations must be compensated or rolled back to maintain data integrity.
+For the overall business transaction to be considered successful, every atomic transaction across the involved microservices must succeed.
+If any microservice fails to complete its local transaction, all previously committed operations must be *compensated*, i.e. rolled back through explicit, semantically reversing actions, to keep the system in a consistent state.
 
-For example, if the *make-payment* atomic transaction fails, compensating actions must be triggered in the other services to revert their changes, ensuring the system remains in a consistent state.
-As per the example, if the *make-payment* atomic transaction (transaction-4) is failed, all other successfully executed transactions should be rolled back to ensure data integrity.
+For example, in the diagram above, if the *make-payment* atomic transaction (transaction-4) fails, compensating actions must be triggered against `order-service` and `inventory-service` to revert the effects of transactions 1–3, ensuring the overall workflow does not leave the system with an order that was never actually paid for.
 
-== Challenges of Distributed Transaction
+== Challenges of Distributed Transactions
 
-Distributed transactions in a microservice architecture pose two key challenges.
-The first one is maintaining ACID.
+Distributed transactions in a microservice architecture pose two key challenges: maintaining ACID guarantees across service boundaries, and managing transaction isolation between concurrent operations.
 
 * *Atomicity across services* (maintaining ACID)
 +
-To ensure the correctness of a transaction, it must be an atomic, consistent, isolated, and durable (ACID).
-The atomicity ensures that all or none of the steps of a transaction should complete.
-Consistency takes data from one valid state to another valid state.
-Isolation guarantees that concurrent transactions should produce the same result that sequentially transactions would have produced.
-Lastly, durability means that committed transactions remain committed irrespective of any type of system failure.
-In a distributed transaction scenario, as the transaction spans several services, it always remains a key concern to ensure ACID.
+To ensure the correctness of a transaction, it must be Atomic, Consistent, Isolated, and Durable (ACID).
+*Atomicity* ensures that all or none of the steps of a transaction complete.
+*Consistency* takes data from one valid state to another valid state.
+*Isolation* guarantees that concurrent transactions produce the same result that strictly sequential execution would have produced.
+*Durability* means that once a transaction commits, it remains committed regardless of subsequent system failures.
+A single-database transaction gets all four guarantees from the database engine for free.
+Once a transaction spans several services and databases, there is no single engine enforcing them anymore — atomicity in particular has to be reconstructed manually, which is exactly the problem the Saga pattern exists to solve.
 
-* *Managing the transaction isolation level.*
+* *Managing the transaction isolation level*
 +
-It specifies the amount of data that is visible in a transaction when the other services access the same data simultaneously.
-In other words, if one object in one of the microservices is persisted in the database while another request reads the data, should the service return the old or new data?
+Isolation level specifies how much of an in-flight change is visible to other transactions reading the same data concurrently.
+In a distributed transaction, this becomes: if one service has persisted a change as part of a still-in-progress saga, and another request reads that same data before the saga completes (or compensates), should it see the old value or the new, possibly-to-be-reverted, value?
+Without a shared transaction manager, this has to be addressed explicitly at the application level, for example, through anti-dirty-reads strategies or intent-marking with the framework.
 
-In the next section, let's see what are the solutions that can be used to overcome this challenge.
+=== Why Not Just Use a Distributed Transaction Coordinator?
+
+The obvious instinct is to reach for a distributed transaction coordinator, e.g. two-phase commit (2PC) via XA, and get ACID back across services the same way a single database gives it to you.
+In practice this rarely works for microservices: a 2PC coordinator holds locks on every participating resource until *all* participants have voted to commit, so one slow or unreachable service blocks and holds locks in every other service.
+It also assumes every participant speaks the same transaction protocol, which breaks down the moment services use heterogeneous datastores (SQL, NoSQL, message brokers) — one of the very reasons microservices adopted database-per-service in the first place.
+
+[[cap_theorem]]
+== CAP Theorem
+
+The CAP theorem states that a distributed data system can only guarantee two of the following three properties at once:
+
+* *Consistency (C)*: every read receives the most recent write or an error — all nodes see the same data at the same time.
+* *Availability (A)*: every request receives a (non-error) response, without the guarantee that it contains the most recent write.
+* *Partition Tolerance (P)*: the system continues to operate despite an arbitrary number of messages being dropped or delayed by the network between nodes.
+
+Because network partitions are a fact of life in any distributed system, partition tolerance is not really optional — a microservice architecture is a distributed system whether or not you choose *P*.
+That leaves a real choice only between *C* and *A* when a partition occurs: block/fail requests until the system is provably consistent (*CP*), or keep serving requests and let data converge afterward (*AP*).
+
+A 2PC-style distributed transaction coordinator is fundamentally a *CP* choice: it favors strong consistency by blocking (and holding locks) rather than responding when a participant is unreachable.
+That is precisely why it degrades availability so badly under microservice-scale network conditions, where partitions and slow participants are routine rather than exceptional.
+
+The Saga pattern makes the opposite trade-off. It is an *AP*-oriented design: each local transaction commits and becomes visible immediately, availability is preserved, and consistency across services is achieved *eventually*, through ordered steps and compensating transactions rather than a blocking coordinator.
+In other words, Saga does not avoid the CAP trade-off — it deliberately picks the side of it that fits how microservices actually fail and scale.
+
+In the next section, let's look at the Saga design pattern in detail and see how it turns this AP trade-off into a concrete, implementable solution.
+
+xref:introduction-to-saga-design-pattern.adoc[Continue to the Saga Design Pattern &#8594;]

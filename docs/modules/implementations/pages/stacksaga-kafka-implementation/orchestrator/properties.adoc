@@ -58,6 +58,12 @@ Independently of the scope, each container consumes using the Kafka group protoc
 IMPORTANT: A single container speaks only one protocol, so every event manager that shares a container — all `SHARED_GLOBAL` managers, or all members of a given `SHARED_GROUP` — must declare the *same* `groupType`.
 A mismatch fails fast at startup. `GroupType.SHARE` requires a Kafka 4.x broker with share groups enabled.
 
+[[orchestrator_auto_start]]
+Whether a container starts automatically on application startup is controlled by the `autoStart` attribute of `SagaEventManagerListener` (used via `isolatedExecutionListener`/`sharedGroupExecutionListener`; `boolean`, default `true`).
+
+IMPORTANT: A single container has only one lifecycle, so every event manager sharing one — all members of a given `SHARED_GROUP` — must declare the *same* `autoStart`.
+A mismatch fails fast at startup with a `ValidationException`. This restriction does not apply to `SHARED_GLOBAL`, whose auto-start behaviour is instead controlled application-wide by `stacksaga.kafka.orchestrator.global-callback-listener.auto-start` (see xref:#configuration_properties_for_stacksaga_kafka_orchestrator[]).
+
 Let's dive into details of each listener scope.
 
 [[shared_global_listener_models_for_orchestrator]]
@@ -108,8 +114,9 @@ The container is configured through the `sharedGroupExecutionListener` attribute
 
 * `listenerContainerName` is *required* here — it is the group key that other event managers repeat to share this container.
 Registration fails if it is left blank.
-* All members must declare the *same* `groupType`.
-* The container's concurrency is the *maximum* concurrency declared across all members of the group, and it auto-starts if *any* member requests auto-start.
+* All members must declare the *same* `groupType` (validated at startup).
+* All members must declare the *same* `autoStart` (validated at startup) — a shared container has a single lifecycle, so a mismatch fails fast with a `ValidationException`.
+* The container's concurrency is the *maximum* concurrency declared across all members of the group.
 
 [[isolated_listener_models_for_orchestrator]]
 === ISOLATED
@@ -168,6 +175,11 @@ The dedicated container is configured through the `isolatedExecutionListener` at
 | `int`
 | `20`
 | The concurrency level of the global callback listener container. With `group-type: SHARE`, this can be set to any desired value because share groups are not limited by the partition count. With `group-type: CONSUMER`, it should not exceed the total number of partitions of the callback topics bound to the global container.
+
+| `stacksaga.kafka.orchestrator.global-callback-listener.auto-start`
+| `boolean`
+| `true`
+| Whether the global callback listener container that consumes the callback topics of all `SHARED_GLOBAL` event managers starts automatically on application startup. See xref:#orchestrator_auto_start[].
 
 |`stacksaga.instance.cluster`
 |`String`
