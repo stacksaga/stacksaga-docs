@@ -325,6 +325,8 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 * `domainCallbackTopicSuffix` Suffix for creating the domain's callback topic. +
 read more xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[]
 
+NOTE: Not shown here since `SHARED_GLOBAL` doesn't need it, but `SHARED_GROUP`/`ISOLATED` event managers also configure `autoStart` (whether the container starts automatically on application startup, default `true`) via the `sharedGroupExecutionListener`/`isolatedExecutionListener` attributes — see xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc#orchestrator_auto_start[].
+
 <3> Override the `registerTopics` method to return the full list of topics this event manager uses (both `DO` and `UNDO`).
 This is where we register our topics with StackSaga, and it is called only once, when the application starts.
 <4> Override the `onNext` method to define the business logic of the event manager. this method is invoked by the framework after each primary-execution topic(span/atomic execution) is completed successfully until the end of the transaction (if it is not failed with `NonRetryableExecutorException`). and this is where we should navigate the engine to execute next topic after each one as shown above. you can use the given parameters to make the navigation decision.
@@ -541,6 +543,7 @@ public class UserValidationEndpoint extends QueryEndpoint { //<1>
 * `topicNameSuffix`: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.validate-user` becomes the real topic `saga.user-service.validate-user` (if your suffix already starts with `saga.`, it is kept as-is). this is the topic the `EventManager` sends command messages to, to trigger the execution of this endpoint.
 * `listenerScope`: the container scope for consuming this endpoint's topic(s). `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container shared by all default endpoints instead of creating a dedicated one.
 * `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932, queue-style consumption); use `GroupType.CONSUMER` for the classic consumer-group protocol.
+* `autoStart`: not shown here since it defaults to `true`; controls whether this endpoint's listener container starts automatically on application startup. Every `@SagaEndpoint` sharing a `SHARED_GROUP` `containerId` must declare the *same* `autoStart`, or startup fails with a `ValidationException` — see xref:implementations:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_auto_start[].
 <3> Override `doProcess` to implement your user-validation logic.
 The `consumerRecord` carries everything about the transaction — the current domain-entity state, transaction id, idempotency key, and xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[much more].
 
@@ -640,6 +643,7 @@ The framework prefixes it to build the real topic name — here `order-service.r
 This is the topic the `EventManager` dispatches the `DO_ORDER_RESERVED` command to.
 * `listenerScope`: the container scope used to consume this endpoint's `do`/`undo` topics. `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container instead of creating a dedicated one.
 * `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932); use `GroupType.CONSUMER` for the classic consumer-group protocol.
+* `autoStart`: not shown here since it defaults to `true`; controls whether this endpoint's listener container starts automatically on application startup — see xref:implementations:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_auto_start[].
 <3> Override `doProcess` to implement the forward reserve-order logic.
 The `consumerRecord` carries everything about the transaction — the current domain-entity state, transaction id, idempotency key, and xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[much more].
 <4> Override `undoProcess` to implement the *compensation* logic that releases the reservation.
