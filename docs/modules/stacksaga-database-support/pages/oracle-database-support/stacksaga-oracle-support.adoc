@@ -1,0 +1,59 @@
+:impl_name: oracle
+:title: Stacksaga Oracle Reactive Support
+:description: Learn how to integrate Stacksaga with Oracle Database using the reactive support module. Step-by-step guide for schema setup, connection configuration, and transaction retry in distributed systems.
+:doctitle: Stacksaga Oracle Reactive Support
+:revnumber: 1.0.0
+:revdate: {localdate}
+:keywords: Stacksaga, Oracle, Oracle Database, Reactive Support, Database Integration, Event Store, Transaction Retry, Distributed Systems, Java, Orchestrator, Schema Creation, Connection Configuration, R2DBC, High Throughput, Idempotency, Saga design pattern, Spring Boot, Spring WebFlux, Spring Saga
+:robots: index,follow
+
+= Stacksaga Oracle Reactive Support
+
+== Overview
+
+`stacksaga-oracle-reactive-support` is the *Oracle reactive (non-blocking)* implementation of the xref:stacksaga-database-support:overview/database-support-overview.adoc[].
+It provides all the necessary facilities for accessing an Oracle Database as the event-store for the Stacksaga engine, and also provides the endpoints for accessing the event-store to see the tracing details from the xref:trace-window:stacksaga-trace-window.adoc[].
+
+image::stacksaga-database-support:stacksaga-diagram-stacksaga-components-database-support.svg[]
+
+NOTE: read xref:stacksaga-database-support:overview/database-support-overview.adoc[] to have a better understanding of the database support modules like the responsibilities, architecture etc.
+
+[[adding-oracle-support]]
+=== Adding `stacksaga-oracle-reactive-support` as a dependency
+
+Here is the way that you can add the library into your existing orchestrator application as a dependency.
+
+.Adding `stacksaga-oracle-reactive-support` as a dependency
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-oracle-reactive-support</artifactId>
+</dependency>
+----
+
+IMPORTANT: It is recommended to http://initializer.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+
+NOTE: The Oracle R2DBC driver (`com.oracle.database.r2dbc:oracle-r2dbc`) is pulled in transitively by `stacksaga-oracle-reactive-support`, verified against Oracle Database 18c, 19c, 21c and 23c.
+
+include::../sql-database-support/stacksaga-sql-configuration-properties.adoc[]
+
+[[schema-creation]]
+== Schema creation
+
+Unlike some other stores, Oracle schema objects for the event-store are *not* created through a migration tool such as Liquibase or Flyway. The Oracle module ships its own idempotent `schema.sql` script, which is executed automatically against the configured connection at application startup.
+
+Every statement in the script is wrapped so it is safe to run against a database where the objects already exist — re-running it (for example, on every application restart) is a no-op if the schema is already up to date, and requires no manual migration step or version tracking table.
+
+TIP: For the full data-type mapping decisions, the schema-idempotency mechanism, and other Oracle-specific implementation notes, see the `README.adoc` inside the `stacksaga-oracle-reactive-support-impl` module of the https://github.com/stacksaga[StackSaga] source repository.

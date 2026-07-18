@@ -1,0 +1,59 @@
+:impl_name: postgresql
+:title: Stacksaga PostgreSQL Reactive Support
+:description: Learn how to integrate Stacksaga with PostgreSQL using the reactive support module. Step-by-step guide for schema setup, connection configuration, and transaction retry in distributed systems.
+:doctitle: Stacksaga PostgreSQL Reactive Support
+:revnumber: 1.0.0
+:revdate: {localdate}
+:keywords: Stacksaga, PostgreSQL, Postgres, Reactive Support, Database Integration, Event Store, Transaction Retry, Distributed Systems, Java, Orchestrator, Schema Creation, Connection Configuration, R2DBC, High Throughput, Idempotency, Saga design pattern, Spring Boot, Spring WebFlux, Spring Saga
+:robots: index,follow
+
+= Stacksaga Postgresql Reactive Support
+
+== Overview
+
+`stacksaga-pg-reactive-support` is the *PostgreSQL reactive (non-blocking)* implementation of the xref:stacksaga-database-support:overview/database-support-overview.adoc[].
+it provides all the necessary facilities for accessing a PostgreSQL database as the event-store for the Stacksaga engine, and also provides the endpoints for accessing the event-store to see the tracing details from the xref:trace-window:stacksaga-trace-window.adoc[].
+
+NOTE: The Maven module and artifact names use the `pg` short form (`stacksaga-pg-reactive-support`) rather than `postgresql`, even though this page and the database itself are referred to as PostgreSQL throughout.
+
+image::stacksaga-database-support:stacksaga-diagram-stacksaga-components-database-support.svg[]
+
+NOTE: read xref:stacksaga-database-support:overview/database-support-overview.adoc[] to have a better understanding of the database support modules like the responsibilities, architecture etc.
+
+[[adding-postgresql-support]]
+=== Adding `stacksaga-pg-reactive-support` as a dependency
+
+Here is the way that you can add the library into your existing orchestrator application as a dependency.
+
+.Adding `stacksaga-pg-reactive-support` as a dependency
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-pg-reactive-support</artifactId>
+</dependency>
+----
+
+IMPORTANT: It is recommended to http://initializer.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+
+NOTE: The PostgreSQL R2DBC driver (`org.postgresql:r2dbc-postgresql`) is pulled in transitively by `stacksaga-pg-reactive-support`, verified against PostgreSQL 12 and later, and integration-tested against PostgreSQL 16.
+
+include::../sql-database-support/stacksaga-sql-configuration-properties.adoc[]
+
+[[schema-creation]]
+== Schema creation
+
+Like the other SQL implementations, PostgreSQL schema objects for the event-store are *not* created through a migration tool such as Liquibase or Flyway. The PostgreSQL module ships its own idempotent `schema.sql` script, which is executed automatically against the configured connection at application startup.
+
+Tables and indexes are created with `CREATE TABLE/INDEX IF NOT EXISTS`, so re-running them is a no-op if the objects already exist. PostgreSQL's native enum types have no `IF NOT EXISTS` form, so each `CREATE TYPE ... AS ENUM` statement is instead wrapped in a guarded `DO $$ ... $$` block that first checks `pg_type` for an existing type of the same name before creating it. Together this makes the whole script safe to run on every application restart, with no manual migration step or version tracking table required.

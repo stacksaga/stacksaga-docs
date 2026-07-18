@@ -1,0 +1,46 @@
+[[sql-configuration-properties]]
+== Configuration Properties
+
+The connection, connection-pool, and transaction retry/restore/streaming properties below are bound by a dialect-neutral configuration class shared across every `stacksaga-*-reactive-support` SQL module — xref:mysql-database-support/stacksaga-mysql-support.adoc[MySQL], xref:oracle-database-support/stacksaga-oracle-support.adoc[Oracle], xref:postgresql-database-support/stacksaga-postgresql-support.adoc[PostgreSQL], and any other SQL dialect added in the future. This is why the property prefix below is `stacksaga.datasource.*` rather than being named after any single database, and why transaction tuning is bound under `stacksaga.mysql.transaction.*` even when the module in use is not MySQL — the retry engine itself lives in a vendor-neutral runtime module and is not duplicated per dialect.
+
+Setting either of these prefixes configures the behaviour for whichever SQL database support module you have added.
+
+[.scrollable-div]
+--
+
+[cols="1,1,1,<1"]
+[.properties-table.google-anno-skip]
+|===
+|Property Name|Default Value|Type|Description
+
+|`stacksaga.datasource.enabled`|`true`|`boolean`| Enable or disable the starter entirely. Defaults to true so it activates automatically when added.
+
+4+|*The following `stacksaga.datasource.r2dbc.*` properties configure the R2DBC connection used by the reactive event-store (read/write operations against the event store).*
+
+|`stacksaga.datasource.r2dbc.url`|`-`|`String`| The R2DBC connection URL used by the event-store, e.g. `r2dbc:mysql://host:3306/database` or `r2dbc:oracle://host:1521/service_name`. If set, takes precedence over the individual host/port/database settings.
+|`stacksaga.datasource.r2dbc.host`|`localhost`|`String`| The database server host for the reactive event-store connection.
+|`stacksaga.datasource.r2dbc.port`|`3306`|`int`| The database server port for the reactive event-store connection. Override this for non-MySQL dialects (e.g. `1521` for Oracle's listener), or supply `stacksaga.datasource.r2dbc.url` instead.
+|`stacksaga.datasource.r2dbc.database`|`-`|`String`| The database/service name used by the event-store via R2DBC.
+|`stacksaga.datasource.r2dbc.username`|`-`|`String`| The username for the event-store's R2DBC connection.
+|`stacksaga.datasource.r2dbc.password`|`-`|`String`| The password for the event-store's R2DBC connection.
+|`stacksaga.datasource.r2dbc.connect-timeout`|`10s`|`Duration`| The maximum time to wait while establishing an event-store connection to the database server.
+|`stacksaga.datasource.r2dbc.options`|`-`|`Map<String,String>`| Additional R2DBC driver-specific connection options for the event-store, as key-value pairs.
+|`stacksaga.datasource.r2dbc.pool.initial-size`|`5`|`int`| The number of connections to create in the event-store's connection pool on startup.
+|`stacksaga.datasource.r2dbc.pool.max-size`|`20`|`int`| The maximum number of connections allowed in the event-store's connection pool.
+|`stacksaga.datasource.r2dbc.pool.max-idle-time`|`30m`|`Duration`| The maximum time a connection may remain idle in the event-store's pool before being closed.
+|`stacksaga.datasource.r2dbc.pool.max-life-time`|`1h`|`Duration`| The maximum lifetime of a connection in the event-store's pool before it is closed and replaced.
+|`stacksaga.datasource.r2dbc.pool.max-acquire-time`|`10s`|`Duration`| The maximum time to wait when acquiring a connection from the event-store's pool before failing.
+|`stacksaga.datasource.r2dbc.pool.validation-query`|`SELECT 1`|`String`| The query used to validate an event-store connection before it is handed out from the pool.
+
+4+|*The following `stacksaga.mysql.transaction.*` properties control transaction retry, crash-restore, and recovery-stream tuning for the event-store, regardless of which SQL database is used.*
+
+|`stacksaga.mysql.transaction.lifetime`|`24h`|`Duration`| How long a transaction stays live. After this period it is no longer exposed for retry even if it is still in a processing state.
+|`stacksaga.mysql.transaction.retry.delay`|`1m`|`Duration`| How long a transaction is kept waiting before it is next exposed for retrying, to avoid retrying a transaction too frequently in a short period of time.
+|`stacksaga.mysql.transaction.restore.delay`|`5h`|`Duration`| How long a transaction may go without being updated before it is considered crashed (e.g. due to an application crash) and is restored and exposed for retrying.
+|`stacksaga.mysql.transaction.stream.batch-size`|`100`|`int`| How many transactions are fetched from the database at once into the in-memory buffer (Reactor `limitRate` high tide).
+|`stacksaga.mysql.transaction.stream.refill-threshold`|`75`|`int`| The buffered-transaction count at which the next database fetch is triggered to refill the buffer (Reactor `limitRate` low tide). Should always be less than `stream.batch-size` — a common rule of thumb is 75% of it.
+|`stacksaga.mysql.transaction.stream.concurrency`|`8`|`int`| How many transactions are processed simultaneously in the recovery pipeline (Reactor `flatMap` concurrency). Should stay within 50-70% of the recovery connection pool size to avoid connection starvation.
+|`stacksaga.mysql.transaction.stream.pre-fetch`|`4`|`int`| How many transactions are pre-fetched and buffered before processing begins (Reactor `flatMap` prefetch).
+|===
+
+--
