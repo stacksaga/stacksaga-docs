@@ -11,6 +11,15 @@ It replaces synchronous inter-service calls with Kafka as the messaging backbone
 Unlike a simple choreography approach where each service publishes and reacts to domain events independently, StackSaga-Kafka follows a *centralized orchestration* model: a single orchestrator service owns the full saga lifecycle, emits commands to target worker services via dedicated Kafka topics, and collects responses through a framework-managed per-domain callback topic.
 This separation gives you the scalability and decoupling of Kafka while retaining the deterministic control flow and auditability of the saga orchestration pattern.
 
+[NOTE]
+.Announcement — Kafka Share Group support (KIP-932)
+====
+StackSaga now supports *Kafka 4 Queues with Share Groups (KIP-932)* end to end, for both the orchestrator and worker sides of the framework.
+Share groups let multiple consumer instances cooperatively read from the same topic with per-record acknowledgment, so saga processing throughput is no longer capped by the topic's partition count.
+
+Enable it per endpoint or per event manager with the `groupType` attribute — no repartitioning or topic redesign required.
+====
+
 The framework is built on top of Spring Boot and integrates with StackSaga's core engine for event sourcing, state management, retry scheduling, and cluster coordination.
 Each saga execution is fully persisted — every state transition of the `SagaDomainEntity` (the saga's aggregate root and payload carrier) is written to the event store through `stacksaga-database-support` — so that any in-progress transaction can be recovered, retried, or inspected at any point in time.
 
