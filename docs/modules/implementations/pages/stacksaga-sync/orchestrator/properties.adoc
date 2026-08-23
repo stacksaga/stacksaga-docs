@@ -1,5 +1,5 @@
-:description: Configuration properties reference for stacksaga-spring-boot-starter — domain entity scanning and instance cluster/region/zone settings for the synchronous StackSaga orchestrator.
-:keywords: StackSaga, configuration properties, stacksaga-spring-boot-starter, domain-entity-scan, instance cluster, region, zone, synchronous orchestrator
+:description: Configuration properties reference for stacksaga-spring-boot-starter — domain entity scanning, scheduler tuning, and instance cluster/region/zone settings for the synchronous StackSaga orchestrator.
+:keywords: StackSaga, configuration properties, stacksaga-spring-boot-starter, domain-entity-scan, instance cluster, region, zone, synchronous orchestrator, AbstractSchedulerProvider, executionScheduler, blockingExecutionScheduler, scheduler, parallelism, thread-cap, TransactionEventListener, ReactiveTransactionEventListener
 
 = Configuration Properties Of `stacksaga-spring-boot-starter`
 
@@ -15,6 +15,36 @@
 | `[]`
 | `String[]`
 | A comma-separated list of package names to scan for `@SagaDomainEntity` annotated classes. for instance, `com.example.domain,com.example.anotherdomain`.
+
+| `stacksaga.scheduler.execution.parallelism`
+| `Runtime.getRuntime().availableProcessors()`
+| `int`
+| The number of worker threads backing the framework's shared, non-blocking `executionScheduler` — the parallel `reactor.core.scheduler.Scheduler` (created as `Schedulers.newParallel("saga-exe", parallelism)`) that drives ongoing reactive/saga processing, and that a `ReactiveTransactionEventListener#onStateChanged` implementation runs on. See xref:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[ReactiveTransactionEventListener].
+
+| `stacksaga.scheduler.blocking-execution.thread-cap`
+| `Runtime.getRuntime().availableProcessors() * 10`
+| `int`
+| The maximum number of threads the `blockingExecutionScheduler` — a bounded-elastic `reactor.core.scheduler.Scheduler` dedicated to invoking blocking, non-reactive user code such as `TransactionEventListener#onStateChanged` — may create. See xref:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[TransactionEventListener].
+
+| `stacksaga.scheduler.blocking-execution.queued-task-cap`
+| `100000`
+| `int`
+| The maximum number of tasks the `blockingExecutionScheduler` may queue once every thread up to `thread-cap` is busy, before further submissions are rejected.
+
+| `stacksaga.scheduler.blocking-execution.ttl-seconds`
+| `60`
+| `int`
+| The idle time-to-live, in seconds, before an unused `blockingExecutionScheduler` worker thread is reclaimed.
+
+| `stacksaga.scheduler.blocking-execution.daemon`
+| `false`
+| `boolean`
+| Whether `blockingExecutionScheduler` worker threads are created as daemon threads. Left `false` by default so the JVM does not exit while a listener invocation is still in flight.
+
+| `stacksaga.scheduler.graceful-shutdown-timeout-seconds`
+| `30`
+| `int`
+| How long, in seconds, shutdown gives each scheduler's in-flight/queued tasks to finish before forcing an immediate disposal. Applies to both `executionScheduler` and `blockingExecutionScheduler`.
 
 |`stacksaga.instance.cluster`
 |-
