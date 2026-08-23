@@ -1,5 +1,5 @@
 :description: Configuration reference for stacksaga-kafka-orchestrator-spring-boot-starter — the per-domain callback topic and its listener-container models (SHARED_GLOBAL, SHARED_GROUP, ISOLATED) and group protocol, declarative properties, and programmatic bean overrides such as a custom response ConsumerFactory.
-:keywords: StackSaga-Kafka, configuration, stacksaga-kafka-orchestrator, callback topic, callback listener, OrchestratorListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, concurrency, domain-entity-scan, instance cluster, region, zone, ConsumerFactory, OrchestratorResponsePayloadConsumerFactoryProvider, SagaResponsePayloadDeserializer, bean override, programmatic configuration
+:keywords: StackSaga-Kafka, configuration, stacksaga-kafka-orchestrator, callback topic, callback listener, OrchestratorListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, concurrency, domain-entity-scan, instance cluster, region, zone, ConsumerFactory, OrchestratorResponsePayloadConsumerFactoryProvider, SagaResponsePayloadDeserializer, bean override, programmatic configuration, AbstractSchedulerProvider, executionScheduler, blockingExecutionScheduler, scheduler, parallelism, thread-cap, KafkaTransactionEventListener, ReactiveKafkaTransactionEventListener
 
 = Configuration
 
@@ -180,6 +180,36 @@ The dedicated container is configured through the `isolatedExecutionListener` at
 | `boolean`
 | `true`
 | Whether the global callback listener container that consumes the callback topics of all `SHARED_GLOBAL` event managers starts automatically on application startup. See xref:#orchestrator_auto_start[].
+
+| `stacksaga.kafka.orchestrator.scheduler.execution.parallelism`
+| `int`
+| `Runtime.getRuntime().availableProcessors()`
+| The number of worker threads backing the framework's shared, non-blocking `executionScheduler` — the parallel `reactor.core.scheduler.Scheduler` (created as `Schedulers.newParallel("saga-exe", parallelism)`) that drives ongoing reactive/saga processing, such as new-transaction dispatch and transaction-state lookups, and that a `ReactiveKafkaTransactionEventListener#onStateChanged` implementation runs on. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#event_listener_for_stage_change_events[Transaction State Change Listeners].
+
+| `stacksaga.kafka.orchestrator.scheduler.blocking-execution.thread-cap`
+| `int`
+| `Runtime.getRuntime().availableProcessors() * 10`
+| The maximum number of threads the `blockingExecutionScheduler` — a bounded-elastic `reactor.core.scheduler.Scheduler` dedicated to invoking blocking, non-reactive user code such as `KafkaTransactionEventListener#onStateChanged` — may create.
+
+| `stacksaga.kafka.orchestrator.scheduler.blocking-execution.queued-task-cap`
+| `int`
+| `100000`
+| The maximum number of tasks the `blockingExecutionScheduler` may queue once every thread up to `thread-cap` is busy, before further submissions are rejected.
+
+| `stacksaga.kafka.orchestrator.scheduler.blocking-execution.ttl-seconds`
+| `int`
+| `60`
+| The idle time-to-live, in seconds, before an unused `blockingExecutionScheduler` worker thread is reclaimed.
+
+| `stacksaga.kafka.orchestrator.scheduler.blocking-execution.daemon`
+| `boolean`
+| `false`
+| Whether `blockingExecutionScheduler` worker threads are created as daemon threads. Left `false` by default so the JVM does not exit while a listener invocation is still in flight.
+
+| `stacksaga.kafka.orchestrator.scheduler.graceful-shutdown-timeout-seconds`
+| `int`
+| `30`
+| How long, in seconds, shutdown gives each scheduler's in-flight/queued tasks to finish before forcing an immediate disposal. Applies to both `executionScheduler` and `blockingExecutionScheduler`.
 
 |`stacksaga.instance.cluster`
 |`String`
