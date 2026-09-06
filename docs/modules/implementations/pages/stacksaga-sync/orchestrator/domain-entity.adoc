@@ -1,8 +1,11 @@
-:description: Domain Entity and Event Sourcing specifications for stacksaga-kafka-orchestrator — creating custom DomainEntity classes, key generation, idempotency, and mapper customization.
+:description: Domain Entity and Event Sourcing specifications for stacksaga-orchestrator — creating custom DomainEntity classes, key generation, idempotency, and mapper customization.
 :keywords: StackSaga, DomainEntity, SagaDomainEntity, event sourcing, key generation, idempotency, saga domain identifier
+:domain-entity-scan-prop: stacksaga.domain-entity-scan
+:template-class: SagaTemplate
 
 = Domain Entity and Event Sourcing
 
+// tag::what-is-domain-entity-event-sourcing[]
 == What is Domain Entity Event Sourcing?
 
 The *Domain-Entity* object serves as the central data container for the entire transaction lifecycle.
@@ -21,7 +24,9 @@ This approach is known as domain-entity event sourcing.
 . Transaction Traceability via Dashboard
 - By storing every change to the domain-entity, the system enables detailed debugging and auditing.
 Administrators can inspect the domain-entity's state before and after each execution runs, making it easy to trace the transaction's evolution step by step through the Trace-Window dashboard.
+// end::what-is-domain-entity-event-sourcing[]
 
+// tag::domain-entity-as-saga-domain-identifier[]
 == Domain Entity as the Saga Domain Identifier
 
 Even though the domain-entity is used as the data bucket for the entire transaction primarily, it also serves another important purpose in the framework. it is used as the domain identifier for the transaction. that means, the domain-entity class is used to identify the transaction and also to identify the executors that are responsible for executing the transaction. that means The domain-entity class acts as the generic identifier for the transaction. for instance, if you have a transaction related to order processing, you can create a domain-entity class named `OrderDomainEntity` and use it as the identifier for that transaction. and also it may have any number of business domains (use cases,) and then you can create different domain-entity classes for each business domain. this approach provides a clear and consistent way to organize and manage transactions based on their domain context.
@@ -29,8 +34,10 @@ Even though the domain-entity is used as the data bucket for the entire transact
 NOTE: Each distinct LRT (Long-Running Transaction) in your system requires its own `DomainEntity` subclass.
 The framework uses the *class type itself* — not any field value — as the discriminator to identify the saga domain.
 For example, if you have two LRTs such as `PlaceOrder` and `CancelSubscription`, you must create `OrderDomainEntity` and `CancelSubscriptionDomainEntity` as two separate classes.
-Beyond identification, the `DomainEntity` class also acts as the generic type anchor that binds all related framework components together for that saga domain — *`StackSagaKafkaTemplate<OrderDomainEntity,?>`*, *`AbstractEventManager<OrderDomainEntity,?>`*, and *`TransactionEventListener<OrderDomainEntity>`* all reference the same class to ensure type safety and correct routing across the entire domain.
+Beyond identification, the `DomainEntity` class also acts as the generic type anchor that binds all related framework components together for that saga domain — *`{template-class}<OrderDomainEntity,?>`*, *`AbstractEventManager<OrderDomainEntity,?>`*, and *`TransactionEventListener<OrderDomainEntity>`* all reference the same class to ensure type safety and correct routing across the entire domain.
+// end::domain-entity-as-saga-domain-identifier[]
 
+// tag::how-domain-entity-is-used[]
 == How the Domain-Entity is Used in the Saga Execution?
 
 According to the xref:foundations:introduction-to-saga-design-pattern.adoc[Place-order example], the entire process has a set of sub executions like:
@@ -52,22 +59,26 @@ For instance,
 Here is How the domain-entity changes while the transaction on each executor as per the place-order example,
 
 image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="stacksaga diagram domain-entity state"]
+// end::how-domain-entity-is-used[]
 
+// tag::domain-entity-lifecycle[]
 == Domain Entity Lifecycle
 
-- The Saga Domain-Entity object is created by you as the developer, yor are supposed to create the custom domain-domain-entity object before starting the transaction.
+- The Saga Domain-Entity object is created by you as the developer, you are supposed to create the custom domain-domain-entity object before starting the transaction.
 you can create the object by adding the initial data that is required for the transaction.
 for instance, if you are going to start a transaction related to order processing, you can create an `OrderDomainEntity` object and add the initial data such as username, total amount, items that the customer bought, etc.
-and it is passed to the saga orchestration engine as an argument when you start the transaction by accessing the saga orchestration engine via the `StackSagaKafkaTemplate.init(...).startWith(..).execute();` method.
+and it is passed to the saga orchestration engine as an argument when you start the transaction by accessing the saga orchestration engine via the `{template-class}.init(...).startWith(..).execute();` method.
 and the initial state of the domain-entity is saved in the event-store as the starting point of the transaction. that means, the first version of the domain-entity is created and stored in the event-store at the moment.
 - After that giving the control to the saga orchestration engine, the domain-entity is updated continuously from time to time by the executors as needed. that means, after executing each execution, the domain-entity is updated by the executor by adding any data that is required for the upcoming executions. for instance, after fetching the user's details, the user's details are stored in the domain-entity object to be used in upcoming executions. and also after making the payment, the reference ID that is returned from the payment-service is stored in the domain-entity object to be used in upcoming executions. and each time when the domain-entity is updated. if there is no any pivot execution,(failure point) and if the LRT is done as expected, the Domain-Entity object end the lifecycle by reaching the `COMPLETED` state. but if there is a pivot execution (failure point), the Domain-Entity object end the lifecycle by reaching the `FAILED` state.
 
 NOTE: In the compensating executions, it can not be used the domain-entity object to update the data. because the domain-entity is used only for the primary executions in Stacksaga. the revert Revert-Hint-Store can be used for compensation executions to store any metadata that is required for the compensating executions.
+// end::domain-entity-lifecycle[]
 
+// tag::creating-custom-domain-entity[]
 [[creating_custom_domain_entity]]
 == Creating Custom Domain-Entity
 
-To create a custom domain-entity, you need to create a class that extends the `SagaDomainEntity` class provided by the framework. and you can add any fields that are required for your transaction in that class. for instance, if you are going to create a domain-entity for order processing, you can create an `OrderDomainEntity` class and add fields such as username, total amount, items that the customer bought, etc. and also you can add any other fields that are required for your transaction. and then you can use this custom domain-entity class when starting the transaction by passing an instance of it to the `StackSagaKafkaTemplate.init(...).startWith(..).execute();` method.
+To create a custom domain-entity, you need to create a class that extends the `SagaDomainEntity` class provided by the framework. and you can add any fields that are required for your transaction in that class. for instance, if you are going to create a domain-entity for order processing, you can create an `OrderDomainEntity` class and add fields such as username, total amount, items that the customer bought, etc. and also you can add any other fields that are required for your transaction. and then you can use this custom domain-entity class when starting the transaction by passing an instance of it to the `{template-class}.init(...).startWith(..).execute();` method.
 
 [source,java]
 ----
@@ -145,9 +156,13 @@ if the custom domain-entity needs complex objects, you can create inner static c
 IMPORTANT: Due to the fact that the framework identifies the custom domain-entity by its name that provided via the `@SagaDomainEntity` annotation, you area able to change the class name and package of the custom domain-entity class without affecting the framework in case of any refactoring or any other reason. but the name that provided in the `@SagaDomainEntity` annotation should be the same as before to avoid any disruption in the framework. and also it can not be created two different custom domain-entity classes with the same name.
 
 IMPORTANT: In StackSaga, The custom domain-entity is not a spring bean at all.
-Therefore, it is not necessary to have inside the spring beans' *component scan* area. instead, it can be anywhere in your project, and you can provide the package to the stacksaga framework via `stacksaga.domain-entity-scan` property.
+Therefore, it is not necessary to have inside the spring beans' *component scan* area. instead, it can be anywhere in your project, and you can provide the package to the stacksaga framework via `{domain-entity-scan-prop}` property.
+// end::creating-custom-domain-entity[]
 
+// tag::further-configurations[]
 [[further_configurations]]
+== Further Configurations
+
 Furthermore, you can provide some additional configurations for the custom domain-entity by using the attributes of the `@SagaDomainEntity` annotation.
 
 . xref:#custom_mapper_provider_for_domain_entity[]
@@ -197,40 +212,68 @@ IMPORTANT: `provide()` method is invoked only once at the initialization phase o
 [[custom_key_generator_provider_for_domain_entity]]
 === Custom Key Generator Provider for Domain-Entity
 
-Key generator is responsible for generating the unique identifier for each transaction instance. by default, stacksaga uses `DefaultDomainEntityKeyGenerator` as the key generator for all domain-entities. but if you want to customize the key generator for your target domain-entity, you can create and provide a custom key generator for the target Domain-Entity as a custom implementation of `AbstractDomainEntityKeyGeneratorProvider`. it can be created any number of custom key generator providers for different domain-entities as needed.
+The key generator is responsible for generating the transaction key prefix and the idempotency keys for each span.
+By default, StackSaga uses `DefaultDomainEntityKeyGenerator` as the key generator for all domain-entities.
+If you want to customize key generation for a specific domain-entity, you can create a custom implementation by extending `AbstractDomainEntityKeyGenerator`.
+You can create separate custom key generator providers for different domain-entities as needed.
 
-`AbstractDomainEntityKeyGenerator` provide two `default` methods. ech has default implementation, but you can override them to provide your custom logic for generating the keys. those methods are,
+`AbstractDomainEntityKeyGenerator` provides two methods with default implementations that you can override:
 
-- xref:#generateTransactionKey[`generateTransactionKey`] - generates a unique identifier for a new saga transaction.
+- xref:#generateTransactionKey[`generateTransactionKey`] - generates the transaction key prefix used by `SagaUUID`.
 - xref:#generateIdempotencyKey[`generateIdempotencyKey`] - generates an idempotency key for each span of the transaction.
 
 [[generateTransactionKey]]
 === Transaction Key Generation
 
-Every saga transaction requires a globally unique identifier To supply a custom key generator for an Aggregator.
-implement the `AggregatorKeyGenerator` interface.
-Its `generateKey` method provides rich context you can leverage to construct a deterministic or randomized identifier: `serviceName`, `serviceVersion`, `instanceId`, `region`, `zone`,`executionMode`, and the `sagaAggregator` metadata.
+Every saga transaction requires a globally unique identifier represented by `SagaUUID`.
+A `SagaUUID` consists of two parts separated by a hyphen:
 
-Providing a custom KeyGen is optional.
-StackSaga ships with a production-ready default (`DefaultKeyGen.class`).
-A custom generator can still be valuable to:
+* `<prefix>-<UUIDv7>`
 
-- align identifiers with your sharding/partitioning strategy,
-- improve index locality or read/write patterns,
-- embed minimal routing or observability hints,
-- satisfy organization-specific compliance or traceability rules.
+1. **Prefix**: Generated by `generateTransactionKey(...)` in `AbstractDomainEntityKeyGenerator`.
+2. **Suffix**: A time-based unique UUID generated automatically by the framework using the https://github.com/cowtowncoder/java-uuid-generator[java-uuid-generator] library.
 
-The default generator produces time-ordered, high-entropy identifiers using this shape:
+Because the framework automatically appends a high-entropy, time-based UUID suffix, uniqueness across transactions and distributed nodes is guaranteed.
+The prefix serves as a concise, human-readable qualifier for observability, tracing, and domain segmentation.
 
-* `<serviceInitials>-<epochMillis>-<nanoId>`
+[TIP]
+====
+*Why UUIDv7 for Transaction Identifiers?*
 
-For example, with a service named `order-service`, default IDs might look like:
+UUIDv7 embeds a high-precision epoch timestamp in its leading 48 bits, producing chronologically monotonic identifiers.
+This design provides critical architectural advantages for event sourcing and transactional storage:
 
-* `OS-1713809175237-021575259417101`
-* `OS-1713809468378-117401549843120`
-* `OS-1713809493499-012220401009440`
+* *Database Partition Pruning*: In SQL and distributed event-store implementations configured with time-range partitioning, the embedded timestamp can be extracted directly from the transaction ID to route queries straight to the relevant partition, eliminating expensive multi-partition scans.
+* *Index Locality & Write Throughput*: Unlike random UUIDv4 values that cause frequent B-Tree page splits and random I/O, sequentially ordered UUIDv7 keys append naturally to database indexes, maintaining page density and maximizing write throughput.
+* *Chronological Traceability*: Transactions are naturally sorted by creation time directly from their identifiers, simplifying time-window queries, log correlation, and audit reconciliation.
+====
 
-NOTE: https://github.com/aventrix/jnanoid[jnanoid] is used to generate the random NanoID segment, providing excellent entropy and collision resistance.
+==== Default Behavior (first4)
+
+Providing a custom key generator is optional.
+If you do not provide a custom key generator, StackSaga uses `DefaultDomainEntityKeyGenerator`.
+By default, it extracts the **first 4 characters (`first4`)** of the domain-entity name defined in the `@SagaDomainEntity(name = "...")` annotation and converts them to **lowercase**.
+
+For example, with `@SagaDomainEntity(name = "OrderDomainEntity")`, the first 4 characters (`"Orde"`) are converted to lowercase (`"orde"`), resulting in transaction IDs like:
+
+* `orde-0195655a-350f-786d-96eb-63c1dfc6e9ba`
+* `orde-0195655a-4e20-7a1b-80c2-1249fae53412`
+
+==== Prefix Constraints & Lowercase Formatting
+
+When customizing the prefix via `generateTransactionKey(...)`:
+
+* **Lowercase Requirement**: Developers should provide the prefix string in **lowercase**. If not provided in lowercase, the framework automatically converts it to lowercase internally.
+* **Allowed Characters**: Alphanumeric characters and hyphens only (`[a-zA-Z0-9-]`).
+* **Disallowed**: Spaces, whitespace, and special characters (such as `_`, `:`, `#`, `@`, `.`, `/`, `%`) are strictly prohibited and will cause the framework to reject the transaction ID.
+
+A custom prefix can be used to:
+
+- incorporate service name or domain namespace,
+- embed region or cluster identifiers for multi-region routing and log filtering,
+- satisfy organizational compliance or observability conventions.
+
+TIP: To see how to supply a custom prefix in code, see the xref:#custom_key_generator_example[Custom Key Generator Example] below.
 
 [[generateIdempotencyKey]]
 === Generating Idempotency Keys for Saga Spans
@@ -244,11 +287,12 @@ IMPORTANT: The `UnSafeIdempotentInput` is not recommended to be used for generat
 
 The default implementation of the `generateIdempotencyKey` method produces a fixed-length hash by concatenating the `transactionId`, `currentExecutor`, and `executionMode` from the `SafeIdempotentInput` and then applying the provided `hashGenerator` to create a compact, consistent, and collision-resistant idempotency key.
 
-=== Custom Idempotency Key Generation
+[[custom_key_generator_example]]
+=== Custom Key Generator Example
 
-Here is an example of how to override the `generateIdempotencyKey` method to provide custom logic for generating idempotency keys and how it can be configured to the custom `DomainEntity` class.
+Here is an example of how to override `generateTransactionKey` and `generateIdempotencyKey` to provide custom logic and configure it in your custom `DomainEntity` class.
 
-NOTE: Due to the fact that the `AggregatorKeyGenerator`'s all methods are `default` methods, no need to implement all methods. you can implement only the required methods as needed.
+NOTE: Because `AbstractDomainEntityKeyGenerator` provides default implementations for all methods, you only need to override the specific methods you want to customize.
 
 [source,java]
 ----
@@ -256,14 +300,10 @@ NOTE: Due to the fact that the `AggregatorKeyGenerator`'s all methods are `defau
 public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenerator { //<2>
 
     @Override //<3>
-    // this method is called when each transaction is initialized
+    // This method is called when each transaction is initialized to supply the prefix
     public String generateTransactionKey(String serviceName, String applicationVersion, String instanceId, String region, String zone, SagaDomainEntity sagaDomainEntity) {
-
-        StringBuilder regionKey = new StringBuilder();
-        for (char c : region.toCharArray()) {
-            regionKey.append((int) c);
-        }
-        return String.format("%s-%s-%s", serviceName , regionKey , UUID.randomUUID());
+        // Custom prefix should be lowercase (alphanumeric and hyphens only)
+        return String.format("%s-%s", serviceName.toLowerCase(), region.toLowerCase());
     }
 
     @Override //<4>
@@ -294,17 +334,19 @@ public class OrderDomainEntity extends DomainEntity {
 
 <1> *@Component*: Mark your custom key generator implementation as a Spring bean.
 <2> Extend the custom class by `AbstractDomainEntityKeyGenerator`.
-<3> Override the `generateTransactionKey` method and create your custom key for the transaction. +
-#the method is called when each transaction is initialized.#
+<3> Override the `generateTransactionKey` method to create your custom prefix for the transaction ID (`SagaUUID`). Developers should provide the prefix in lowercase; if uppercase characters are provided, the framework converts them to lowercase internally. +
+#The method is called when each transaction is initialized.#
 <4> Override the `generateIdempotencyKey` method and create your custom idempotency key for each span. +
-#the method is called when before each span execution is invoked.#
-<5> provide your custom class as `keyGen` of the `@SagaDomainEntity` in your DomainEntity class.
+#The method is called before each span execution is invoked.#
+<5> Provide your custom class as `keyGen` of `@SagaDomainEntity` in your DomainEntity class.
 
 IMPORTANT: it is highly recommended to use the provided `hashGenerator` to produce a fixed-length hash of a composite string for generating the idempotency key, rather than returning a raw concatenation of input values. this approach ensures that the idempotency key is compact, consistent in length, and has a low risk of collisions, even when the input values are long or contain variable content.
 
 WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
 The framework may invoke it concurrently.
+// end::further-configurations[]
 
+// tag::domain-entity-versioning[]
 [[domain_entity_versioning]]
 == Domain-Entity Versioning
 
@@ -319,4 +361,5 @@ and also it is important to maintain the backward compatibility of the Domain-En
 ////
 todo: add about versioning.
 ////
+// end::domain-entity-versioning[]
 
