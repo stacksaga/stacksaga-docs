@@ -12,7 +12,7 @@ Unlike a choreography approach where each service reacts to events independently
 This gives you the deterministic control flow and auditability of the saga orchestration pattern while letting every participating service keep its existing synchronous API untouched.
 
 The framework is built on top of Spring Boot and integrates with StackSaga's core engine for event sourcing, state management, retry scheduling, and cluster coordination.
-Each saga execution is fully persisted — every state transition of the `SagaDomainEntity` (the saga's aggregate root and payload carrier, also referred to as the *Aggregator*) is written to the event store through `stacksaga-database-support` — so that any in-progress transaction can be recovered, retried, or inspected at any point in time.
+Each saga execution is fully persisted — every state transition of the `SagaDomainEntity` (the saga's aggregate root and payload carrier) is written to the event store through `stacksaga-database-support` — so that any in-progress transaction can be recovered, retried, or inspected at any point in time.
 
 NOTE: Even though the engine runs reactively under the hood, it is fully compatible with both *reactive* and *non-reactive* (imperative) Spring environments.
 You choose your programming model with the `SagaTemplate` (blocking) or `ReactiveSagaTemplate` (reactive) entry point; the saga coordination behaves identically either way.
@@ -42,7 +42,7 @@ Familiarising yourself with them before reading the technical sections will sign
 LRTs require durable state management, distributed coordination, and compensation support for partial failures.
 
 | *Saga Domain*
-| A specific type of LRT identified by its `DomainEntity` (Aggregator) subclass.
+| A specific type of LRT identified by its `DomainEntity` subclass.
 All saga instances of the same type (e.g., every `PlaceOrder` transaction) belong to the same saga domain.
 The class type itself — not any field value — is the discriminator used to identify the domain.
 
@@ -55,11 +55,11 @@ A saga is composed of one or more sequential spans in the primary flow, each wit
 | The internal engine component responsible for driving a saga forward: invoking each executor, navigating to the next step, persisting state transitions, and triggering compensation when needed.
 `SagaTemplate` / `ReactiveSagaTemplate` is the developer-facing entry point to the SEC.
 
-| *Domain Entity (Aggregator)*
+| *Domain Entity*
 | The aggregate root for a single saga instance.
 Carries the full accumulated business payload and current execution state throughout the saga lifecycle.
 Every state transition is persisted as a snapshot to the event store.
-The framework uses the terms *Domain Entity* (`SagaDomainEntity`) and *Aggregator* interchangeably across components.
+The framework uses the terms *Domain Entity* (`SagaDomainEntity`) as the core model representing the saga's domain state.
 
 | *Executor*
 | The orchestrator-side handler that executes the business logic for a single saga step.
@@ -189,8 +189,8 @@ The participating *utility services* are invoked through their existing synchron
 It provides the saga engine (SEC) and the developer-facing abstractions below.
 
 * xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[`SagaTemplate` / `ReactiveSagaTemplate`] — the entry point for starting a new saga execution or resuming a recovered one.
-Accepts an initialized Aggregator (`SagaDomainEntity`) and the first executor, then hands control to the saga engine.
-* xref:stacksaga-sync/orchestrator/domain-entity.adoc[`SagaDomainEntity` (Aggregator)] — the aggregate root for a saga instance.
+Accepts an initialized `SagaDomainEntity` and the first executor, then hands control to the saga engine.
+* xref:stacksaga-sync/orchestrator/domain-entity.adoc[`SagaDomainEntity`] — the aggregate root for a saga instance.
 Carries the accumulated business payload and the current execution state, and is serialized and persisted to the event store on every state transition.
 * xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Executors] — `CommandExecutor`, `QueryExecutor`, and Sub Executors that encapsulate each atomic step.
 Each executor invokes the target utility service through its synchronous endpoint, navigates forward with `stepManager.next(...)`, and (for command executors) defines its compensation in `doRevert()`.

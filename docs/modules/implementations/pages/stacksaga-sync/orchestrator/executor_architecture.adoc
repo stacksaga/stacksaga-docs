@@ -63,25 +63,25 @@ In *Command executor* has two methods for making the primary execution and makin
 ----
 @SagaExecutor(executeFor = "order-service", value = "initializeOrderExecutor") //<1>
 @AllArgsConstructor
-public class InitializeOrderExecutor implements CommandExecutor<PlaceOrderAggregator> { //<2>
+public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntity> { //<2>
 
     private final OrderService orderService;
 
     @Override //<3>
-    public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            PlaceOrderAggregator currentAggregator,
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            OrderDomainEntity currentDomainEntity,
+            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
             String idempotencyKey
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
         try {
             //<4>
             String orderId = this.orderService.initializeOrder(
-                    currentAggregator.getUsername(),
-                    currentAggregator.getProductItems(),
-                    currentAggregator.getTotalAmount()
+                    currentDomainEntity.getUsername(),
+                    currentDomainEntity.getProductItems(),
+                    currentDomainEntity.getTotalAmount()
             );
-            currentAggregator.setOrderId(orderId);
+            currentDomainEntity.setOrderId(orderId);
             return stepManager.next(RserveItemsExecutor.class, () -> "ORDER_INITIALIZED");//<5>
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<6>
@@ -103,13 +103,13 @@ public class InitializeOrderExecutor implements CommandExecutor<PlaceOrderAggreg
     @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<11>
     public SagaExecutionEventName doRevert(
             NonRetryableExecutorException processException,
-            PlaceOrderAggregator finalAggregatorState,
+            OrderDomainEntity finalDomainEntityState,
             RevertHintStore revertHintStore,
             String idempotencyKey
     ) throws RetryableExecutorException {
         try {
             //<8>
-            this.orderService.cancelOrder(finalAggregatorState.getOrderId());
+            this.orderService.cancelOrder(finalDomainEntityState.getOrderId());
             return () -> "ORDER_CANCELLED";
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<9>
@@ -127,10 +127,10 @@ public class InitializeOrderExecutor implements CommandExecutor<PlaceOrderAggreg
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `CommandExecutor` interface to make it as a command executor.
 <3> The `doProcess` method is overridden to implement the primary execution logic. +
-it passes the current state of the aggregator, +
+it passes the current state of the domain-entity, +
 a utility for managing the process steps, +
 and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
-<4> The primary execution logic is implemented inside the `doProcess` method. here you can update the aggregator as needed and access data from the aggregator. it contains all the changes that were made by the previous executors so far.
+<4> The primary execution logic is implemented inside the `doProcess` method. here you can update the domain-entity as needed and access data from the domain-entity. it contains all the changes that were made by the previous executors so far.
 <5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next` method. +
 it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
 There is another method called `stepManager.complete` that can be used to complete the entire transaction successfully after executing the current executor.
@@ -150,7 +150,7 @@ if you throw your own exception without wrapping to the `NonRetryableExecutorExc
 
 <8> The `doRevert` method is overridden to implement the compensating execution logic. +
 it passes the exception that caused the compensation, +
-the final state of the aggregator before compensation, +
+the final state of the domain-entity before compensation, +
 the `RevertHintStore` for storing any metadata needed for compensation. +
 and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
 <9> Catch the resource unavailability exception that can be retried to notify to the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
@@ -175,20 +175,20 @@ NOTE: Only highlighted parts are described from the above example.
 ----
 @SagaExecutor(executeFor = "order-service", value = "initializeOrderExecutor")
 @AllArgsConstructor
-public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<PlaceOrderAggregator> { //<1>
+public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<OrderDomainEntity> { //<1>
 
     @Override //<2>
     @NonNull
-    public Mono<ProcessStepManager<PlaceOrderAggregator>> doProcess(
-            PlaceOrderAggregator currentAggregator,
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+    public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
+            OrderDomainEntity currentDomainEntity,
+            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
             String idempotencyKey
     ) {
         //<3>
         return this.orderService
-                .createOrder(currentAggregator.getUserData(), currentAggregator.getOrderDetails())
+                .createOrder(currentDomainEntity.getUserData(), currentDomainEntity.getOrderDetails())
                 .map(orderId -> {
-                    currentAggregator.setOrderId(orderId);
+                    currentDomainEntity.setOrderId(orderId);
                     return stepManager.next(ReactiveRserveItemsExecutor.class, () -> "ORDER_INITIALIZED");
                 })
                 .onErrorResume(throwable -> {
@@ -206,10 +206,10 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
 
     @Override //<4>
     @NonNull
-    public Mono<SagaExecutionEventName> doRevert(NonRetryableExecutorException processException, PlaceOrderAggregator finalAggregatorState, RevertHintStore revertHintStore, String idempotencyKey) {
+    public Mono<SagaExecutionEventName> doRevert(NonRetryableExecutorException processException, OrderDomainEntity finalDomainEntityState, RevertHintStore revertHintStore, String idempotencyKey) {
         //<5>
         return this.orderService
-                .cancelOrder(finalAggregatorState.getOrderId())
+                .cancelOrder(finalDomainEntityState.getOrderId())
                 .thenReturn((SagaExecutionEventName) () -> "ORDER_INITIALIZATION_REVERTED")
                 .onErrorResume(throwable -> {
                     if (throwable instanceof ResourceUnavailableException) {
@@ -224,7 +224,7 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
 }
 ----
 
-<1> The executor implements the `ReactiveCommandExecutor<PlaceOrderAggregator>` interface to make it as a reactive command executor. the generic type should be the aggregator class that you want to use in the executor.
+<1> The executor implements the `ReactiveCommandExecutor<OrderDomainEntity>` interface to make it as a reactive command executor. the generic type should be the domain-entity class that you want to use in the executor.
 <2> The `doProcess` method is overridden to implement the primary execution logic in a reactive way.
 <3> The primary execution logic is implemented inside the `doProcess` method by using reactive pipeline.
 +
@@ -255,21 +255,21 @@ because it doesn't make any change to the user-service's database. it's a read-o
 ----
 @SagaExecutor(executeFor = "user-service", value = "chekUserDetailsExecutor") //<1>
 @AllArgsConstructor
-public class ChekUserDetailsExecutor implements QueryExecutor<PlaceOrderAggregator> { //<2>
+public class ChekUserDetailsExecutor implements QueryExecutor<OrderDomainEntity> { //<2>
 
     private final UserService userService;
 
     @Override //<3>
-    public ProcessStepManager<PlaceOrderAggregator> doProcess(
-            PlaceOrderAggregator currentAggregator,
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            OrderDomainEntity currentDomainEntity,
+            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
             String idempotencyKey
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
         try {
             //<4>
-            UserDetailDto userDetail = this.userService.getUserDetails(currentAggregator.getUsername());
-            currentAggregator.setUserDetail(userDetail);
+            UserDetailDto userDetail = this.userService.getUserDetails(currentDomainEntity.getUsername());
+            currentDomainEntity.setUserDetail(userDetail);
 
             return stepManager.next(InitializeOrderExecutor.class, () -> "FETCHED_USER_DETAILS"); //<5>
         } catch (FeignException.ServiceUnavailable unavailableException) {
@@ -292,10 +292,10 @@ public class ChekUserDetailsExecutor implements QueryExecutor<PlaceOrderAggregat
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `QueryExecutor` interface to make it as a query executor.
 <3> The `doProcess` method is overridden to implement the primary execution logic. +
-it passes the current state of the aggregator, +
+it passes the current state of the domain-entity, +
 a utility for managing the process steps, +
 and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
-<4> The primary execution logic is implemented inside the `doProcess` method. here you can update the aggregator as needed and access data from the aggregator. it contains all the changes that were made by the previous executors so far.
+<4> The primary execution logic is implemented inside the `doProcess` method. here you can update the domain-entity as needed and access data from the domain-entity. it contains all the changes that were made by the previous executors so far.
 <5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next` method. +
 it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
 There is another method called `stepManager.complete` that can be used to complete the entire transaction successfully after executing the current executor.
@@ -320,24 +320,24 @@ if you throw your own exception without wrapping to the `NonRetryableExecutorExc
 ----
 @SagaExecutor(executeFor = "user-service", value = "reactiveChekUserDetailsExecutor")
 @AllArgsConstructor
-public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<PlaceOrderAggregator> { //<1>
+public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<OrderDomainEntity> { //<1>
 
     private final UserService userService;
 
     @Override //<2>
-    public Mono<ProcessStepManager<PlaceOrderAggregator>> doProcess(
-            PlaceOrderAggregator currentAggregator,
-            ProcessStepManagerUtil<PlaceOrderAggregator> stepManager,
+    public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
+            OrderDomainEntity currentDomainEntity,
+            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
             String idempotencyKey
     ) {
         //<3>
         return this
                 .userService
-                .getUserDetails(currentAggregator.getUsername())
+                .getUserDetails(currentDomainEntity.getUsername())
                 .map(userData -> {
-                    currentAggregator.setTel(userData.getPhoneNumber());
-                    currentAggregator.setEmail(userData.getEmail());
-                    currentAggregator.setAddress(userData.getEmail());
+                    currentDomainEntity.setTel(userData.getPhoneNumber());
+                    currentDomainEntity.setEmail(userData.getEmail());
+                    currentDomainEntity.setAddress(userData.getEmail());
                     return stepManager.next(ReactiveInitializeOrderExecutor.class, () -> "FETCHED_USER_DETAILS");
                 })
                 .onErrorResume(throwable -> {
@@ -354,7 +354,7 @@ public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<Pl
 }
 ----
 
-<1> The executor implements the `ReactiveQueryExecutor<PlaceOrderAggregator>` interface to make it as a reactive query executor. the generic type should be the aggregator class that you want to use in the executor.
+<1> The executor implements the `ReactiveQueryExecutor<OrderDomainEntity>` interface to make it as a reactive query executor. the generic type should be the domain-entity class that you want to use in the executor.
 <2> The `doProcess` method is overridden to implement the primary execution logic in a reactive way.
 <3> The primary execution logic is implemented inside the `doProcess` method by using reactive pipeline.
 +
@@ -404,14 +404,14 @@ image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.dra
 [source,java]
 ----
 @SagaExecutor(executeFor = "order-service", value = "orderInitializeSubBeforeExecutor") //<1>
-public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<PlaceOrderAggregator, InitializeOrderExecutor> { //<2>
+public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<OrderDomainEntity, InitializeOrderExecutor> { //<2>
 
     @Override //<3>
-    public RevertBeforeStepManager<PlaceOrderAggregator, InitializeOrderExecutor> doProcess(
-            PlaceOrderAggregator finalAggregatorState,
+    public RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
+            OrderDomainEntity finalDomainEntityState,
             NonRetryableExecutorException nonRetryableExecutorException,
             RevertHintStore revertHintStore,
-            RevertBeforeStepManagerUtil<PlaceOrderAggregator, InitializeOrderExecutor> stepManager,
+            RevertBeforeStepManagerUtil<OrderDomainEntity, InitializeOrderExecutor> stepManager,
             String idempotencyKey)
     throws RetryableExecutorException {
         //implement the sub-before-execution logic as the same way as the command executor's doRevert method.
@@ -422,7 +422,7 @@ public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<Pl
 
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `RevertBeforeExecutor<A, C>` interface to make it as a sub-before-executor. +
-it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed before its main compensating execution as the second generic parameter.
+it should provide the domain-entity class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed before its main compensating execution as the second generic parameter.
 <3> The `doProcess` method is overridden to implement the sub-before-execution logic as the #same way as the command executor's doRevert method#.
 <4> if the execution is done successfully, The next sub-before-executor is navigated to the main(parent) `doRevert` method by using the `stepManager.complete` method. +
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
@@ -434,17 +434,17 @@ If you have more than one sub-before-executor, you can navigate to the next sub-
 ----
 @SagaExecutor(executeFor = "order-service", value = "reactiveRevertBeforeExecutor") //<1>
 @RequiredArgsConstructor
-public class ReactiveOrderInitializeSubBeforeExecutor implements ReactiveRevertBeforeExecutor<PlaceOrderAggregator, ReactiveInitializeOrderExecutor> { //<2>
+public class ReactiveOrderInitializeSubBeforeExecutor implements ReactiveRevertBeforeExecutor<OrderDomainEntity, ReactiveInitializeOrderExecutor> { //<2>
 
     private final ReactiveOrderService reactiveOrderService;
 
     @Override //<3>
     @NonNull
-    public Mono<RevertBeforeStepManager<PlaceOrderAggregator, ReactiveInitializeOrderExecutor>> doProcess(
-            PlaceOrderAggregator aggregator,
+    public Mono<RevertBeforeStepManager<OrderDomainEntity, ReactiveInitializeOrderExecutor>> doProcess(
+            OrderDomainEntity domainEntity,
             NonRetryableExecutorException processException,
             RevertHintStore revertHintStore,
-            RevertBeforeStepManagerUtil<PlaceOrderAggregator, ReactiveInitializeOrderExecutor> stepManager,
+            RevertBeforeStepManagerUtil<OrderDomainEntity, ReactiveInitializeOrderExecutor> stepManager,
             String idempotencyKey
     ) {
         //<4>
@@ -467,7 +467,7 @@ public class ReactiveOrderInitializeSubBeforeExecutor implements ReactiveRevertB
 
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `ReactiveRevertBeforeExecutor<A, C>` interface to make it as a reactive sub-before-executor.
-Generic `A` is the aggregator class that is used in the entire transaction and generic `C` is the command executor class that should be executed before its main compensating execution.
+Generic `A` is the domain-entity class that is used in the entire transaction and generic `C` is the command executor class that should be executed before its main compensating execution.
 <3> The `doProcess` method is overridden to implement the sub-before-execution logic in a reactive way.
 <4> The sub-before-execution logic is implemented inside the `doProcess` method by using reactive pipeline.
 +
@@ -485,14 +485,14 @@ you can pass another sub-before-executor class that you want to navigate and als
 [source,java]
 ----
 @SagaExecutor(executeFor = "order-service", value = "orderInitializeSubAfterExecutor") //<1>
-public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<PlaceOrderAggregator, InitializeOrderExecutor> { //<2>
+public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<OrderDomainEntity, InitializeOrderExecutor> { //<2>
 
     @Override //<3>
-    public RevertAfterStepManager<PlaceOrderAggregator, InitializeOrderExecutor> doProcess(
-            PlaceOrderAggregator finalAggregatorState,
+    public RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
+            OrderDomainEntity finalDomainEntityState,
             NonRetryableExecutorException processException,
             RevertHintStore revertHintStore,
-            RevertAfterStepManagerUtil<PlaceOrderAggregator, InitializeOrderExecutor> stepManager,
+            RevertAfterStepManagerUtil<OrderDomainEntity, InitializeOrderExecutor> stepManager,
             String idempotencyKey
     ) throws RetryableExecutorException {
         return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_REVERTED"); //<4>
@@ -502,7 +502,7 @@ public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<Plac
 
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `RevertAfterExecutor<A, C>` interface to make it as a sub-after-executor. +
-it should provide the aggregator class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed after its main compensating execution as the second generic parameter.
+it should provide the domain-entity class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed after its main compensating execution as the second generic parameter.
 <3> The `doProcess` method is overridden to implement the sub-after-execution logic as the #same way as the command executor's doRevert method#.
 <4> if the execution is done successfully, The next sub-after-executor is navigated by using the `stepManager.complete` method. +
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-after-executor. +
@@ -513,17 +513,17 @@ If you have more than one sub-after-executor, you can navigate to the next sub-a
 [source,java]
 ----
 @SagaExecutor(executeFor = "order-service", value = "reactiveOrderInitializeSubAfterExecutor") //<1>
-public class ReactiveOrderInitializeSubAfterExecutor implements ReactiveRevertAfterExecutor<PlaceOrderAggregator, ReactiveInitializeOrderExecutor> { //<2>
+public class ReactiveOrderInitializeSubAfterExecutor implements ReactiveRevertAfterExecutor<OrderDomainEntity, ReactiveInitializeOrderExecutor> { //<2>
 
     private final ReactiveOrderService reactiveOrderService;
 
     @Override
     @NonNull //<3>
-    public Mono<RevertAfterStepManager<PlaceOrderAggregator, ReactiveInitializeOrderExecutor>> doProcess(
-            PlaceOrderAggregator finalAggregatorState,
+    public Mono<RevertAfterStepManager<OrderDomainEntity, ReactiveInitializeOrderExecutor>> doProcess(
+            OrderDomainEntity finalDomainEntityState,
             NonRetryableExecutorException processException,
             RevertHintStore revertHintStore,
-            RevertAfterStepManagerUtil<PlaceOrderAggregator, ReactiveInitializeOrderExecutor> stepManager,
+            RevertAfterStepManagerUtil<OrderDomainEntity, ReactiveInitializeOrderExecutor> stepManager,
             String idempotencyKey
     ) {
         //<4>
@@ -545,7 +545,7 @@ public class ReactiveOrderInitializeSubAfterExecutor implements ReactiveRevertAf
 
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `ReactiveRevertAfterExecutor<A, C>` interface to make it as a reactive sub-before-executor.
-Generic `A` is the aggregator class that is used in the entire transaction and generic `C` is the command executor class that should be executed before its main compensating execution.
+Generic `A` is the domain-entity class that is used in the entire transaction and generic `C` is the command executor class that should be executed before its main compensating execution.
 <3> The `doProcess` method is overridden to implement the sub-after-execution logic in a reactive way.
 <4> The sub-after-execution logic is implemented inside the `doProcess` method by using reactive pipeline.
 +
@@ -690,7 +690,7 @@ You know already there are two types of atomic executions in Stacksaga called co
 The query executions can sometimes be used together in the same executor based on the use case. +
 
 Using multiple read-only atomic operations inside the same executor can reduce the event sourcing overhead.
-Because you know that after each executor, the new state of the aggregator is stored as a new event in the database by the Saga engine.
+Because you know that after each executor, the new state of the domain-entity is stored as a new event in the database by the Saga engine.
 For instance, if you implement 3 read-only atomic transactions in the same executor, you can reduce the event sourcing overhead by 2.
 Because if we added those 3 executions to the 3 executors, 3 times the event store is updated after each execution. +
 
