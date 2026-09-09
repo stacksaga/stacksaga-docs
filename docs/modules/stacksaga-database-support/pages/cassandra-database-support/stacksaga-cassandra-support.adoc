@@ -83,16 +83,18 @@ Saving the transaction data approach is quite different from the SQL support imp
 
 // The main purpose of using the Cassandra database is to handle high throughput.
 
-All the transactions are saved in 4 tables in the Cassandra database.
-. `es_transaction` table . `es_transaction_tryout` table.
-. `transaction_recovery_retention` tables.
-.. `es_{service_name}_{region_name}_transaction_recovery_retention_1` table.
-.. `es_{service_name}_{region_name}_transaction_recovery_retention_2` table.
-.. `es_{service_name}_{region_name}_transaction_recovery_retention_3` table.
-. `es_transaction_retry_retention` tables.
-.. `es_{service_name}_{region_name}_transaction_retry_retention_1` table.
-.. `es_{service_name}_{region_name}_transaction_retry_retention_2` table.
-.. `es_{service_name}_{region_name}_transaction_retry_retention_3` table.
+All the transactions are saved in 5 tables in the Cassandra database:
+. `es_transaction` table
+. `es_transaction_tryout` table
+. xref:#write-protection[`es_execution_markers` table (write protection and duplicate detection)]
+. `transaction_recovery_retention` tables
+.. `es_{service_name}_{region_name}_transaction_recovery_retention_1` table
+.. `es_{service_name}_{region_name}_transaction_recovery_retention_2` table
+.. `es_{service_name}_{region_name}_transaction_recovery_retention_3` table
+. `es_transaction_retry_retention` tables
+.. `es_{service_name}_{region_name}_transaction_retry_retention_1` table
+.. `es_{service_name}_{region_name}_transaction_retry_retention_2` table
+.. `es_{service_name}_{region_name}_transaction_retry_retention_3` table
 
 === es_transaction table
 
@@ -118,6 +120,10 @@ image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-es-transa
 
 As you can see in the above diagram, the tryout data is saved in the same node that the transaction has been saved.
 If the `tx-8dKz7LpJ2Q` transaction metadata is saved in the `Node-1` node, the `tx-8dKz7LpJ2Q` transaction tryout data is also saved in the `Node-1` node.
+
+=== es_execution_markers table
+
+`es_execution_markers` is the table used by StackSaga's Cassandra reactive event store to track individual executed records/spans and enforce write protection. For complete details on how this table prevents duplicate execution in Kafka event streaming and guards against concurrent race conditions, see xref:#write-protection[Write Protection & Duplicate Prevention].
 
 [[transaction_recovery_retention]]
 === transaction_recovery_retention tables.
@@ -350,6 +356,225 @@ And the transactions that are ahead of the boundary go to the schedule after the
 include::image$cassandra/window-visualizer.html[]
 ++++
 
+[[write-protection]]
+== Write Protection & Duplicate Prevention (Kafka Event Sourcing)
+
+When using Cassandra reactive support with event-driven streaming (such as Apache Kafka), guarding against duplicate execution and concurrent race conditions is essential.
+
+=== Why Execution Markers are Needed (Kafka At-Least-Once Delivery)
+
+StackSaga's Kafka implementation uses **at-least-once delivery semantics**. Because of this, duplicate event deliveries are naturally expected in distributed environments, for example:
+* Consumer group rebalances when pods scale up or down.
+* Consumer node restarts or crashes before offset commits are acknowledged.
+* Network timeouts and automated message retries.
+
+To ensure **idempotency**, StackSaga saves an **execution marker** in the `es_execution_markers` table in Cassandra. Before or during processing, the framework inspects this table so that already-processed events are detected and not executed again.
+
+=== Database Safety vs. Event Listener Side Effects (The Real Issue with Races)
+
+Technically, a concurrent race condition does not corrupt the Cassandra database itself because Cassandra write queries are idempotent. Writing the same event-store record twice will not break the database state.
+
+However, the real issue is what happens **after** the database write:
+
+IMPORTANT: StackSaga publishes state-changed events to registered event listeners **after** successfully updating the event store: +
+* `org.stacksaga.api.listener.KafkaTransactionEventListener` / `org.stacksaga.api.listener.ReactiveKafkaTransactionEventListener` (for Kafka event streams) +
+* `org.stacksaga.api.listener.TransactionEventListener` / `org.stacksaga.api.listener.ReactiveTransactionEventListener` (for transaction lifecycle events)
+
+If a concurrent race condition causes the same record to be inserted multiple times, these state-changed listeners **will also be invoked that same number of times**.
+
+If the listener triggers external side effects — such as sending a confirmation email or SMS notification to a customer, calling a third-party payment gateway, or dispatching an external API call — the customer would receive duplicate notifications unless the developer explicitly built custom idempotency into their listener code.
+
+=== Choosing Between Consistency Modes & Overhead Trade-offs
+
+StackSaga provides two write-protection modes to balance strictness and throughput:
+
+==== 1. STRICT Mode
+* **When to use:** Recommended when you must prevent duplicate listener calls (such as customer-facing notifications or non-idempotent third-party APIs) and you do not want to build custom idempotency logic into every listener.
+* **How it works:**
+1. **LWT Lease Acquisition:** Before running the execution, a worker acquires an exclusive temporary lock in Cassandra using Lightweight Transactions (LWT: `INSERT INTO es_execution_markers ... IF NOT EXISTS USING TTL <leaseDuration>`).
+2. **Active Lease Wait:** If another worker is already processing the same record (marker exists with `TTL > 0`), the second worker waits for the remaining TTL duration and retries.
+3. **Permanent Marker Commitment:** When the first worker successfully commits its batch, it writes a permanent marker (`TTL = 0`). When concurrent workers retry, they see `TTL = 0` and terminate cleanly with `OptimisticLockConflictException`.
+4. **Automatic Crash Recovery:** If the first worker crashes mid-flight, the temporary lease expires automatically when its TTL finishes, permitting another worker to retry and safely complete the saga step without deadlocks.
+
+.STRICT Mode Execution Flow
+[plantuml,target=stacksaga-cassandra-write-protection-flow,format=svg]
+----
+@startuml stacksaga-cassandra-write-protection-flow
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam conditionStyle InsideDiamond
+skinparam shadowing false
+
+skinparam activity {
+  BackgroundColor #EEF4FF
+  BorderColor #4A6FA5
+  FontColor #1A1A2E
+}
+
+skinparam diamond {
+  BackgroundColor #FFF9E6
+  BorderColor #E0A800
+  FontColor #1A1A2E
+}
+
+skinparam arrow {
+  Color #4A6FA5
+  FontColor #1A1A2E
+}
+
+start
+
+:Receive Kafka event for saga step;
+
+repeat
+  :Attempt to acquire temporary lease in Cassandra
+  (LWT: INSERT INTO es_execution_markers ... IF NOT EXISTS USING TTL <leaseDuration>);
+
+  if (Lease acquired?\n([applied] == true)) then (YES)
+    :Execute saga step business logic;
+    repeat
+      :Persist event data + permanent ExecutionMarker
+      (Batch write to event store with TTL = 0);
+    backward:Retry write;
+    repeat while (Batch write\nsuccessful?) is (NO) not (YES)
+    :Dispatch state-changed events to listeners;
+    stop
+
+  else (NO)
+    :Query existing ExecutionMarker
+    and inspect remaining TTL;
+
+    if (Is lease active?\n(TTL > 0)) then (YES)
+      :Wait for remaining lease duration
+      (Exponential backoff retry);
+    else (NO)
+      :Marker finalized (TTL = 0)
+      Duplicate delivery safely skipped;
+      stop
+    endif
+  endif
+
+repeat while (Retry lease acquisition?) is (YES) not (NO)
+stop
+
+@enduml
+----
+
+.STRICT Mode Lifecycle Breakdown
+* **Claim the Lease (`INSERT ... IF NOT EXISTS USING TTL`):** Before executing business logic, the worker attempts an atomic conditional insert with a temporary lease TTL (`default-lease-duration` or domain override). If another node crashes mid-flight, this lease automatically expires after the TTL window, preventing permanent distributed deadlocks without manual intervention.
+* **Evaluate Acquisition (`[applied] == true`):**
+** *Lease Won (`applied == true`):* The worker exclusively owns the step. It executes the saga step and persists the event store batch along with a permanent execution marker (`TTL = 0`). Once persisted, registered transaction event listeners are safely dispatched.
+** *Collision Detected (`applied == false`):* A marker already exists. The worker queries the record to check whether processing is still active or already completed.
+* **Collision Inspection & Safe Deduplication:**
+** *Lease Active (`TTL > 0`):* Another worker is currently executing the step, or a crashed worker's lease has not expired yet. The waiting worker backs off for the remaining lease duration and retries.
+** *Permanently Finalized (`TTL == 0`):* The step was already completed by another worker. The current message is a duplicate Kafka delivery and is safely discarded without re-executing logic or triggering duplicate listener events.
+
+==== 2. RELAXED_WITH_DEDUP Mode
+* **When to use:** Recommended when duplicate listener calls are harmless (e.g. idempotent downstream consumers, cache invalidations, simple loggers), OR when you already handle idempotency inside your listener logic.
+* **How it works:** Before running, the framework checks if a completed execution marker exists (`checkExists`). If found, it skips execution. This avoids Cassandra LWT locks, maximizing throughput, but does not prevent the rare race condition where two workers execute at the exact same millisecond.
+
+.RELAXED_WITH_DEDUP Mode Execution Flow
+[plantuml,target=stacksaga-cassandra-write-protection-relaxed-flow,format=svg]
+----
+@startuml stacksaga-cassandra-write-protection-relaxed-flow
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam conditionStyle InsideDiamond
+skinparam shadowing false
+
+skinparam activity {
+  BackgroundColor #EEF4FF
+  BorderColor #4A6FA5
+  FontColor #1A1A2E
+}
+
+skinparam diamond {
+  BackgroundColor #FFF9E6
+  BorderColor #E0A800
+  FontColor #1A1A2E
+}
+
+skinparam arrow {
+  Color #4A6FA5
+  FontColor #1A1A2E
+}
+
+start
+
+:Receive Kafka event for saga step;
+
+:Check if ExecutionMarker exists in Cassandra
+(Fast read: SELECT FROM es_execution_markers);
+
+if (Marker already exists?) then (YES)
+  :Duplicate delivery detected
+  (throw SpanAlreadyExecutedException);
+  :Skip execution safely without side effects;
+  stop
+
+else (NO)
+  :Execute saga step business logic;
+
+  repeat
+    :Persist event data + permanent ExecutionMarker
+    (Atomic logged batch write with TTL = 0);
+  backward:Retry batch write;
+  repeat while (Batch write\nsuccessful?) is (NO) not (YES)
+
+  :Dispatch state-changed events to listeners;
+  stop
+
+endif
+
+@enduml
+----
+
+.RELAXED_WITH_DEDUP Mode Lifecycle Breakdown
+* **Fast Duplicate Check (`checkExists`):** Before executing the step, the worker performs a lightweight read against `es_execution_markers` in Cassandra using standard read consistency (`LOCAL_QUORUM`). This query does not trigger Cassandra Paxos consensus (LWT), completely avoiding coordination round-trips.
+* **Evaluate Existence:**
+** *Marker Exists (`YES`):* A previous execution has already processed this record. The framework recognizes this as a duplicate Kafka event redelivery, aborts further processing with `SpanAlreadyExecutedException`, and safely terminates without re-running business logic or triggering duplicate listener notifications.
+** *Marker Does Not Exist (`NO`):* The worker proceeds to execute the saga step's business logic.
+* **Atomic Batch Persistence & Listener Dispatch:** Upon business logic completion, the worker writes the saga event store state changes and the permanent `ExecutionMarker` (`TTL = 0`) together in an atomic logged batch. After the batch write successfully completes, registered transaction event listeners are dispatched.
+
+[TIP]
+====
+*Overhead Comparison:* Managing idempotency manually in application code (such as using Redis distributed locks or custom database tables) incurs roughly the same overhead as having the framework do it, and the framework's Cassandra LWT lease mechanism is built-in and highly optimized.
+
+However, if duplicate listener invocations do not matter for your business use case, choosing `RELAXED_WITH_DEDUP` eliminates the LWT coordination overhead completely and delivers maximum write throughput.
+====
+
+=== Domain-Level Configuration
+
+Write protection can be configured globally and fine-tuned per domain entity. Because different saga workflows have distinct consistency and performance requirements, you can maintain both the **consistency mode** and the **lease TTL duration** differently for each saga based on its domain.
+
+For example:
+* **Critical Sagas** (such as `order-saga` or `payment-saga`) that trigger external side effects like payments or customer notifications can be configured with `STRICT` mode and an appropriate lease duration (e.g., `10s` or `5s`) to completely prevent duplicate executions.
+* **High-Throughput Sagas** (such as `notification-saga` or internal auditing) where operations are naturally idempotent can use `RELAXED_WITH_DEDUP` to bypass LWT locking overhead and maximize write throughput.
+
+The domain key configured under `domains` corresponds to the domain entity name defined by `@SagaDomainEntity#name()` (matched case-insensitively). Any domain that is not explicitly overridden will automatically inherit the global default values (`default-mode` and `default-lease-duration`).
+
+.Example `application.yml`
+[source,yaml]
+----
+stacksaga:
+  cassandra:
+    write-protection:
+      default-mode: RELAXED_WITH_DEDUP      # Fallback mode for all sagas
+      default-lease-duration: 5s            # Default LWT lease TTL for STRICT mode
+      domains:
+        order-saga:
+          mode: STRICT                      # Strict mutual exclusion for order saga
+          lease-duration: 10s               # Custom lease TTL override
+        payment-saga:
+          mode: STRICT                      # Strict mode using default 5s lease
+        notification-saga:
+          mode: RELAXED_WITH_DEDUP          # High-throughput mode for notifications
+----
+
 == Configuring Properties
 
 [cols="1,1,1,<1"]
@@ -359,6 +584,14 @@ include::image$cassandra/window-visualizer.html[]
 |`stacksaga.cassandra.read-consistency-level`|`LOCAL_QUORUM`|`SagaSupportConsistencyLevel`[QUORUM,LOCAL_QUORUM]|Consistency level for read operations. Default is `LOCAL_QUORUM`, which provides a good balance between consistency. The consistency level that provided via `stacksaga-cassandra.conf` will override this value internally by the framework. Stacksaga only supports `QUORUM` and `LOCAL_QUORUM` consistency levels for read.
 |`stacksaga.cassandra.write-consistency-level`|`LOCAL_QUORUM`|`SagaSupportConsistencyLevel`[QUORUM,LOCAL_QUORUM]|Consistency level for write operations. Default is `LOCAL_QUORUM`, which provides a good balance between consistency and availability. The consistency level that provided via `stacksaga-cassandra.conf` will override this value internally by the framework. Stacksaga only supports `QUORUM` and `LOCAL_QUORUM` consistency levels for write.
 |`stacksaga.cassandra.config`|`classpath:stacksaga-cassandra.conf`|`Resource`|Location of the configuration file to use. See https://docs.datastax.com/en/developer/java-driver/4.17/manual/core/configuration/index.html[configuration options] for more details about how to provide the .conf file and the available configuration options in the .conf file.
+
+4+|
+*Write Protection Properties:* The following properties configure duplicate protection, LWT lease TTL durations, and per-saga consistency modes under `stacksaga.cassandra.write-protection.*`.
+
+|`stacksaga.cassandra.write-protection.default-mode`|`RELAXED_WITH_DEDUP`|`ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]|Default write-protection mode applied to sagas that do not specify a per-domain override. `RELAXED_WITH_DEDUP` provides fast duplicate detection without LWT locks. `STRICT` uses Cassandra LWT for linearizable mutual exclusion.
+|`stacksaga.cassandra.write-protection.default-lease-duration`|`5s`|`Duration`|Default temporary marker lease duration for `STRICT` mode. Specifies how long an in-flight worker holds an exclusive lock in Cassandra before expiring via TTL, and the retry backoff duration for racing workers.
+|`stacksaga.cassandra.write-protection.domains.<domain-name>.mode`|`null`|`ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]|Optional per-domain consistency mode override, keyed by `@SagaDomainEntity#name()` (case-insensitive).
+|`stacksaga.cassandra.write-protection.domains.<domain-name>.lease-duration`|`null`|`Duration`|Optional per-domain lease duration override for `STRICT` mode. If null, falls back to `default-lease-duration`.
 
 4+|
 *Transaction Properties:* The following properties configure transaction lifetime, retry/restore scheduling, and the in-memory streaming buffer used by the recovery pipeline.
