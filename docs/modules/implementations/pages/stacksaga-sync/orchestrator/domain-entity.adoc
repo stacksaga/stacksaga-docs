@@ -8,82 +8,215 @@
 // tag::what-is-domain-entity-event-sourcing[]
 == What is Domain Entity Event Sourcing?
 
-The *Domain-Entity* object serves as the central data container for the entire transaction lifecycle.
-It acts as a shared data bucket, allowing on each spans to access and update transaction-related data as the process progresses.
+The *Domain-Entity* object serves as the central data container throughout the entire lifecycle of a distributed transaction.
+It functions as a shared, strongly typed data bucket, enabling each executor (span) in the saga workflow to consume existing transactional data and contribute newly produced state as the business process moves forward.
 
-The Domain-Entity's state is updated at each significant event, and every version of this state is persisted.
-Initially, the Domain-Entity's state is saved as the transaction's starting state in the event-store.
-After each executor completes, the updated Domain-Entity state's snapshot is again saved, tagged with the atomic execution's name (Span).
+Rather than mutating a single record in place without history, StackSaga employs *Domain-Entity Event Sourcing*.
+Every significant atomic transition generates a new, immutable snapshot of the Domain-Entity state, which is immediately committed to the Event Store:
 
-This approach is known as domain-entity event sourcing.
+. **Baseline State**: Upon transaction initiation, the initial state of the Domain-Entity is persisted as the baseline version with status `STARTED`.
+. **Step Snapshots**: As each atomic executor completes its operation, a point-in-time snapshot of the updated Domain-Entity is persisted, stamped with the unique span identifier and execution metadata.
 
-*Domain-Entity event sourcing provides two main benefits:*
+*Domain-Entity event sourcing provides two core architectural capabilities:*
 
-. Transaction Re-Invoke (Retrying and Restoring)
-- If an atomic execution fails due to a transient issue (such as a temporary resource unavailability), the system can retry the operation. or if the transaction is stopped due to a critical failure, it can be restored and re-invoked after the issue is resolved. when the retry is begun, the transaction should be started where the transaction was stopped previously. to start the transaction from the same point, it has to be restored the same data that was used when the transaction was stopped.
-. Transaction Traceability via Dashboard
-- By storing every change to the domain-entity, the system enables detailed debugging and auditing.
-Administrators can inspect the domain-entity's state before and after each execution runs, making it easy to trace the transaction's evolution step by step through the Trace-Window dashboard.
+. *Transaction Re-Invoke & Automatic Recovery (Retrying and Restoring)*
+- If an atomic execution fails due to a transient issue (such as temporary network latency or service unavailability), the saga engine can safely retry the operation. If a transaction halts due to a system crash or node restart, it can be seamlessly restored and re-invoked from the exact point of interruption. Because historical state is preserved at every milestone, the engine restores the precise Domain-Entity snapshot that existed when the failure occurred, eliminating data corruption and partial-state inconsistencies.
+
+. *Full Transaction Observability & Auditability via Dashboard*
+- Storing every discrete state transition provides complete chronological traceability. System administrators and developers can inspect the Domain-Entity state before and after each atomic execution runs, making it straightforward to audit the evolution of a transaction, diagnose edge-case anomalies, and inspect payload mutations through the Trace-Window dashboard.
 // end::what-is-domain-entity-event-sourcing[]
 
 // tag::domain-entity-as-saga-domain-identifier[]
 == Domain Entity as the Saga Domain Identifier
 
-Even though the domain-entity is used as the data bucket for the entire transaction primarily, it also serves another important purpose in the framework. it is used as the domain identifier for the transaction. that means, the domain-entity class is used to identify the transaction and also to identify the executors that are responsible for executing the transaction. that means The domain-entity class acts as the generic identifier for the transaction. for instance, if you have a transaction related to order processing, you can create a domain-entity class named `OrderDomainEntity` and use it as the identifier for that transaction. and also it may have any number of business domains (use cases,) and then you can create different domain-entity classes for each business domain. this approach provides a clear and consistent way to organize and manage transactions based on their domain context.
+In addition to serving as the transactional data carrier, the `DomainEntity` class fulfills a fundamental architectural role in the StackSaga framework: it serves as the **Saga Domain Identifier**.
 
-NOTE: Each distinct LRT (Long-Running Transaction) in your system requires its own `DomainEntity` subclass.
-The framework uses the *class type itself* — not any field value — as the discriminator to identify the saga domain.
-For example, if you have two LRTs such as `PlaceOrder` and `CancelSubscription`, you must create `OrderDomainEntity` and `CancelSubscriptionDomainEntity` as two separate classes.
-Beyond identification, the `DomainEntity` class also acts as the generic type anchor that binds all related framework components together for that saga domain — *`{template-class}<OrderDomainEntity,?>`*, *`AbstractEventManager<OrderDomainEntity,?>`*, and *`TransactionEventListener<OrderDomainEntity>`* all reference the same class to ensure type safety and correct routing across the entire domain.
+The framework uses the `DomainEntity` class type to distinguish business domains and bind together all executors responsible for handling that specific workflow. In other words, the Domain-Entity class acts as the strongly typed anchor for the entire saga:
+
+* For example, in an e-commerce platform, an order fulfillment process uses `OrderDomainEntity` as its domain identifier, while a customer subscription process uses `SubscriptionDomainEntity`.
+* Each business domain defines its own dedicated `DomainEntity` subclass containing fields relevant to that business context.
+
+[NOTE]
+====
+Each distinct Long-Running Transaction (LRT) requires its own dedicated `DomainEntity` subclass.
+StackSaga uses the **class type itself**—not an arbitrary runtime string or field value—as the discriminator to identify the saga domain.
+For instance, `PlaceOrder` and `CancelSubscription` workflows must be implemented as separate classes: `OrderDomainEntity` and `CancelSubscriptionDomainEntity`.
+
+Beyond transaction identification, the `DomainEntity` class acts as the generic type anchor that unifies all related framework components for that saga domain:
+
+* `{template-class}<OrderDomainEntity, ?>`
+* `AbstractEventManager<OrderDomainEntity, ?>`
+* `TransactionEventListener<OrderDomainEntity>`
+* `CommandExecutor<OrderDomainEntity>` / `QueryExecutor<OrderDomainEntity>`
+
+This design guarantees compile-time type safety, structured routing, and clean domain isolation across the entire application.
+====
 // end::domain-entity-as-saga-domain-identifier[]
 
-// tag::how-domain-entity-is-used[]
-== How the Domain-Entity is Used in the Saga Execution?
-
-According to the xref:foundations:introduction-to-saga-design-pattern.adoc[Place-order example], the entire process has a set of sub executions like:
-
-. Fetching user's details. (query execution)
-. Initialize order. (command execution)
-. Reserve the items. (command execution)
-. Make the Payment (command execution)
-
-While executing those atomic processes, you have to store some data regarding each execution.
-For instance,
-
-* At the initially, order request related data should be stored in the domain-entity to be used in upcoming executions such as username, total amount, items that the customer bought, etc.
-* After that, the user's data is fetched from the user-service by using the username that has been stored in the domain-entity object. and again, the user's details are stored in the domain-entity object to be used in upcoming executions.
-* That stored user's data will be used for *Initialize order*.
-* Next, to reserve the items, the order ID that is generated from the *Initialize order* execution is used.
-* Finally, To make the payment, order ID and the total amount, username that are stored in the domain-entity object are used. and also again, the domain-entity is updated by storing the reference ID that is returned from the payment-service.
-
-Here is How the domain-entity changes while the transaction on each executor as per the place-order example,
-
-image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="stacksaga diagram domain-entity state"]
-// end::how-domain-entity-is-used[]
-
 // tag::domain-entity-lifecycle[]
-== Domain Entity Lifecycle
+== Domain Entity Lifecycle & State Progression in Saga Execution
 
-- The Saga Domain-Entity object is created by you as the developer, you are supposed to create the custom domain-domain-entity object before starting the transaction.
-you can create the object by adding the initial data that is required for the transaction.
-for instance, if you are going to start a transaction related to order processing, you can create an `OrderDomainEntity` object and add the initial data such as username, total amount, items that the customer bought, etc.
-and it is passed to the saga orchestration engine as an argument when you start the transaction by accessing the saga orchestration engine via the `{template-class}.init(...).startWith(..).execute();` method.
-and the initial state of the domain-entity is saved in the event-store as the starting point of the transaction. that means, the first version of the domain-entity is created and stored in the event-store at the moment.
-- After that giving the control to the saga orchestration engine, the domain-entity is updated continuously from time to time by the executors as needed. that means, after executing each execution, the domain-entity is updated by the executor by adding any data that is required for the upcoming executions. for instance, after fetching the user's details, the user's details are stored in the domain-entity object to be used in upcoming executions. and also after making the payment, the reference ID that is returned from the payment-service is stored in the domain-entity object to be used in upcoming executions. and each time when the domain-entity is updated. if there is no any pivot execution,(failure point) and if the LRT is done as expected, the Domain-Entity object end the lifecycle by reaching the `COMPLETED` state. but if there is a pivot execution (failure point), the Domain-Entity object end the lifecycle by reaching the `FAILED` state.
+Throughout a saga transaction, the `DomainEntity` traverses three distinct lifecycle phases:
 
-NOTE: In the compensating executions, it can not be used the domain-entity object to update the data. because the domain-entity is used only for the primary executions in Stacksaga. the revert Revert-Hint-Store can be used for compensation executions to store any metadata that is required for the compensating executions.
+. *Phase 1: State Creation & Initialization (`STARTED`)*
+. *Phase 2: Progressive Evolution & Forward Mutation (`IN_PROGRESS`)*
+. *Phase 3: Lifecycle Termination (`COMPLETED` or `FAILED`)*
+
+Understanding how data is populated, consumed, mutated, and finalized across these phases is essential for designing reliable, idempotent saga workflows.
+
+=== Phase 1: State Creation & Initialization
+
+The lifecycle begins with the client application before the transaction is handed to the saga orchestration engine:
+
+. **Custom Instance Creation**: The developer instantiates the custom `DomainEntity` subclass (for example, `OrderDomainEntity`) and populates it with the initial request payload received from the customer or upstream service (e.g., `user_id`, `amount`, `items`).
+. **Initial Field State**: Only the initial request attributes are populated at this point. All downstream attributes (such as `delivery_details`, `order_id`, and `payment_id`) remain `null`.
+. **Saga Handoff**: The entity is passed to the orchestrator via the template initiation method:
++
+[source,java,subs="attributes+"]
+----
+sagaTemplate.init(orderDomainEntity)
+    .startWith(UserDetailExecutor.class)
+    ...
+    .execute();
+----
+. **Baseline Event Persistence**: Before invoking the first executor, the orchestration engine serializes the entity and commits the initial snapshot (Version 0) to the Event Store, tagging the transaction with status `STARTED`.
+
+=== Phase 2: Progressive Evolution & Forward Mutation
+
+Once the saga engine assumes execution control, it coordinates the sequential execution of atomic spans (`QueryExecutor` and `CommandExecutor`):
+
+* **Selective State Consumption (Read Flow)**:
++
+Each executor does not need the entire dataset; it queries only the specific properties it requires from the current Domain-Entity snapshot. For instance:
++
+- `UserDetailExecutor` reads `user_id` to query customer shipping details.
+- `OrderInitializeExecutor` reads `user_id` and `amount` to register the order.
+- `MakePaymentExecutor` reads `order_id` and `amount` to process the payment.
+
+* **Forward State Mutation (`doProcess()`)**:
++
+When an executor completes its external invocation, it enriches the Domain-Entity using setter methods (e.g., `domainEntity.setDeliveryDetails(...)`, `domainEntity.setOrderId(...)`).
+Upon return from `doProcess()`, the framework automatically serializes the mutated Domain-Entity and writes an immutable snapshot to the Event Store, stamped with the unique span identifier and marked with status `IN_PROGRESS`.
+
+* **State Preservation in Non-Mutating Spans**:
++
+IMPORTANT: **Not every executor needs to add new properties to the Domain-Entity.** For example, `ReserveItemsExecutor` reads `items` and `order_id` to reserve stock in an external warehouse service. Even though it performs a critical transactional command, it does not add new fields to the domain entity. In this step, existing fields remain **preserved**, and the engine persists a milestone snapshot confirming successful execution of that atomic span.
+
+* **Compensation Immutability Rule (`doRevert()`)**:
++
+[IMPORTANT]
+====
+During compensating executions (`doRevert()`), the Domain-Entity is **strictly read-only**.
+Compensations must never alter the Domain-Entity state, ensuring that the historical audit record of what actually occurred remains immutable.
+Any metadata required for compensation (such as authorization tokens or transient cancellation IDs) is managed independently through the **Revert-Hint-Store**.
+====
+
+=== Phase 3: Lifecycle Termination
+
+The saga lifecycle terminates in one of two deterministic states:
+
+. **Successful Completion (`COMPLETED`)**:
+- When all executors in the workflow successfully return `stepManager.next(...)` without encountering a pivot exception (unrecoverable failure), the saga workflow reaches its terminal node.
+- The engine transitions the transaction to status `COMPLETED`, and the final, fully enriched Domain-Entity snapshot is sealed in the Event Store as the permanent record of the completed business transaction.
+
+. **Pivot Failure & Backward Compensation (`FAILED`)**:
+- If an atomic execution encounters a non-retryable error (a pivot execution failure), forward progression immediately halts.
+- The saga engine initiates backward rollback, executing `doRevert()` on all previously completed command executors in reverse order.
+- Once all compensations are finalized, the transaction terminates with status `FAILED`. The Domain-Entity retains its last valid forward state prior to the failure, providing developers and operators with exact forensic data in the Trace-Window dashboard.
+
+=== Visualizing State Progression: The Place-Order Architecture
+
+The following architectural diagram illustrates the complete step-by-step lifecycle and state progression of `OrderDomainEntity` during a place-order transaction:
+
+image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="StackSaga Domain-Entity State Transition Architecture",width=100%]
+
+=== Understanding the Diagram Layout
+
+The diagram is organized into three architectural columns across the execution timeline:
+
+. *Left Column (Saga Executors)*: Displays the atomic execution units (`QueryExecutor` and `CommandExecutor`), detailing the specific method invocations (`doProcess()` vs `doRevert()`) and external service interactions.
+. *Center Spine (Execution Timeline & Data Flow)*: Illustrates the chronological flow from initiation (`INIT`) through steps `01` to `04` down to terminal completion (`END`).
+  - *Blue Dashed Connectors (`Reads from State`)*: Depict an executor reading specific input properties from the previous snapshot.
+  - *Green Solid Connectors (`Updates State`)*: Depict state updates flowing from `doProcess()` to produce a new persisted milestone in the Event Store.
+. *Right Column (OrderDomainEntity Snapshots)*: Displays the point-in-time state of the Domain-Entity committed to the Event Store after each step:
+  - *Mint Green Rows (`✓ initial` / `✓ updated`)*: Highlight newly initialized or mutated properties.
+  - *Gray Rows (`preserved`)*: Highlight previously captured properties that remain intact and accessible.
+  - *White Rows (`null`)*: Indicate uninitialized properties awaiting downstream execution.
+
+=== Step-by-Step State Evolution Matrix
+
+[cols="1,2,2,3",options="header"]
+|===
+| Step | Executor & Type | State Read (Input) | State Mutation & Lifecycle Event
+
+| *INIT*
+| *Client Controller*
+| Order request payload from client.
+| Creates `OrderDomainEntity` with initial fields (`user_id = "mafei"`, `amount = 100.0`, `items = [...]`). Downstream fields are `null`. Snapshot persisted to Event Store with status `STARTED`.
+
+| *01*
+| *UserDetailExecutor* +
+(`QueryExecutor`)
+| Reads `user_id` from Domain-Entity.
+| Queries external `User-Service` to fetch shipping address. Mutates `delivery_details = "No344 New York."`. Snapshot persisted with status `IN_PROGRESS`. (As a query executor, read-only lookup requires no `doRevert()`).
+
+| *02*
+| *OrderInitializeExecutor* +
+(`CommandExecutor`)
+| Reads `user_id` and `amount` from Domain-Entity.
+| Calls `Order-Service` to record an order entry. Mutates `order_id = "1245"`. Implements `doRevert()` to void the order if downstream steps fail later. Snapshot persisted with status `IN_PROGRESS`.
+
+| *03*
+| *ReserveItemsExecutor* +
+(`CommandExecutor`)
+| Reads `items` and `order_id` from Domain-Entity.
+| Calls `Stock-Service` to place an inventory hold. *Notice:* No new fields are added; existing fields are preserved (`reserved`). Implements `doRevert()` to release inventory hold on rollback. Snapshot persisted to record span milestone.
+
+| *04*
+| *MakePaymentExecutor* +
+(`CommandExecutor`)
+| Reads `order_id` and `amount` from Domain-Entity.
+| Calls `Payment-Service` to charge the customer. Mutates `payment_id = "tx01343743131083017"`. Implements `doRevert()` to issue refund if needed. Snapshot persisted with all required properties fully populated.
+
+| *END*
+| *Saga Engine*
+| Final transaction validation.
+| All executors completed successfully without pivot exceptions. Transaction reaches `COMPLETED` state; final Domain-Entity state is sealed in the Event Store.
+|===
+
+=== Key Architectural Takeaways
+
+* *Decoupled Microservice Architecture*: Microservices never communicate directly with each other to pass context. The `DomainEntity` acts as the single source of truth and shared data carrier across the entire distributed workflow.
+* *Monotonic State Accumulation*: The Domain-Entity accumulates state progressively—each executor enriches the shared bucket with the output of its execution so subsequent executors can consume it.
+* *State Preservation vs. Modification*: An executor is not required to mutate the Domain-Entity. It can execute business logic and succeed while keeping existing state preserved.
+* *Event Sourcing & Re-Invoke Guarantees*: Because each step's snapshot is committed to the Event Store, the engine can restore the exact historical state to retry a failed operation or compensate previous steps without data corruption.
+* *Strict Mutation Boundary*: State modifications are strictly confined to `doProcess()`. Compensating executions (`doRevert()`) remain read-only, with rollback metadata isolated in the Revert-Hint-Store.
 // end::domain-entity-lifecycle[]
+
+// tag::how-domain-entity-is-used[]
+// (Consolidated into tag::domain-entity-lifecycle[] - retained for backward-compatibility)
+// end::how-domain-entity-is-used[]
 
 // tag::creating-custom-domain-entity[]
 [[creating_custom_domain_entity]]
-== Creating Custom Domain-Entity
+== Creating a Custom Domain-Entity
 
-To create a custom domain-entity, you need to create a class that extends the `SagaDomainEntity` class provided by the framework. and you can add any fields that are required for your transaction in that class. for instance, if you are going to create a domain-entity for order processing, you can create an `OrderDomainEntity` class and add fields such as username, total amount, items that the customer bought, etc. and also you can add any other fields that are required for your transaction. and then you can use this custom domain-entity class when starting the transaction by passing an instance of it to the `{template-class}.init(...).startWith(..).execute();` method.
+To define a custom Domain-Entity, create a class that extends the `DomainEntity` base class provided by the framework and annotate it with `@SagaDomainEntity`.
+
+You can declare any fields required to maintain state across the saga workflow (such as `username`, `totalAmount`, `productItems`, etc.). When starting a transaction, pass an initialized instance of this custom class to `{template-class}.init(...).startWith(...).execute()`.
 
 [source,java]
 ----
-
 import java.util.List;
+import java.util.Map;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import org.stacksaga.DomainEntity;
+import org.stacksaga.MissingPropertyCollector;
+import org.stacksaga.annotation.SagaDomainEntity;
+import org.stacksaga.annotation.SagaDomainEntityVersion;
 
 @Getter
 @Setter
@@ -93,19 +226,26 @@ import java.util.List;
         name = "OrderDomainEntity"
 )
 public class OrderDomainEntity extends DomainEntity { //<2>
+
     //<4>
     @JsonProperty("username")
     private String username;
+
     @JsonProperty("order_id")
     private String orderId;
+
     @JsonProperty("total_amount")
     private double totalAmount;
+
     @JsonProperty("payment_reference_id")
     private String paymentReferenceId;
+
     @JsonProperty("user_validation_data")
     private UserValidationData userValidationData;
+
     @JsonProperty("product_items")
     private List<ProductItem> productItems;
+
     @JsonProperty("metadata")
     private Map<String, String> metadata;
 
@@ -121,8 +261,10 @@ public class OrderDomainEntity extends DomainEntity { //<2>
     public static class ProductItem extends MissingPropertyCollector {
         @JsonProperty("product_id")
         private String productId;
+
         @JsonProperty("quantity")
         private int quantity;
+
         @JsonProperty("price")
         private double price;
     }
@@ -140,23 +282,26 @@ public class OrderDomainEntity extends DomainEntity { //<2>
 }
 ----
 
-<1> The custom domain-entity class should be annotated with `@SagaDomainEntity`. +
-*name*: The name of the domain-entity. this is used for identification of the DomainEntity by the name. +
-*version*: version will be used for the identification of the DomainEntity versioning. it is helpful for the *event-upper-casting* and *event-down-casting*. `@SagaDomainEntityVersion` annotation help you to provide the version of the domain-entity. +
-xref:#further_configurations[see further customizations]
-<2> The custom domain-entity class should be extended from the `DomainEntity` class.
-It provides the shep of DomainEntity in the framework.
-<3> Create the default constructor of the custom domain-entity class. and inside the constructor, call the super method by passing the same class of the custom domain-entity. +
-Due to framework initiates the object, it's not recommended to have another constructor with parameters and it's pointless +
-<4> The custom domain-entity class can have any number of attributes that you want to store. it is recommended to use `@JsonProperty` annotation for each attribute to avoid any serialization disruptions. +
-here you can see some attributes that are used in the place order example. +
-if the custom domain-entity needs complex objects, you can create inner static classes or separate classes for that purpose. and those classes should be implemented by `org.stacksaga.MissingPropertyCollector`. `MissingPropertyCollector` do a most important job role to collect any missing properties(only there are missing properties by mistaken ) while deserializing the DomainEntity object from the event-store.
-<5> Sample inner static classes that are used in the DomainEntity.
+<1> `@SagaDomainEntity`: Configures the domain entity metadata:
+* **`name`**: The unique identifier for the domain entity within the framework. Used to bind transactions and executors.
+* **`version`**: The schema version declared via `@SagaDomainEntityVersion`. Essential for domain-entity up-casting and down-casting across rolling deployments. +
+xref:#further_configurations[See further configurations for custom mappers and key generators.]
+<2> **Inheritance**: The custom class must extend `DomainEntity` to inherit core saga identification and lifecycle capabilities.
+<3> **Constructor**: A protected no-argument constructor that calls `super(OrderDomainEntity.class)`. Because the framework instantiates domain entities dynamically during deserialization and state restoration, parameterized constructors should not be declared.
+<4> **Field Mapping**: Declare attributes required to carry transaction state. Using `@JsonProperty` annotations is strongly recommended to guarantee deterministic JSON serialization and avoid naming discrepancies during schema evolution.
+<5> **Nested Types & Missing Property Collection**: For complex nested objects, declare static inner classes (or separate classes) extending `org.stacksaga.MissingPropertyCollector`. The `MissingPropertyCollector` base class automatically captures unrecognized properties during deserialization, ensuring seamless backward and forward compatibility during schema upgrades.
 
-IMPORTANT: Due to the fact that the framework identifies the custom domain-entity by its name that provided via the `@SagaDomainEntity` annotation, you area able to change the class name and package of the custom domain-entity class without affecting the framework in case of any refactoring or any other reason. but the name that provided in the `@SagaDomainEntity` annotation should be the same as before to avoid any disruption in the framework. and also it can not be created two different custom domain-entity classes with the same name.
+[IMPORTANT]
+====
+**Refactoring Safety**: The framework identifies the domain entity using the logical `name` attribute declared in `@SagaDomainEntity(name = "...")`, rather than the Java class name or package. You can safely refactor, rename, or relocate the Java class without disrupting active transactions or historical event-store records, provided the `@SagaDomainEntity` `name` remains identical.
+Two different custom domain-entity classes cannot declare the same `name`.
+====
 
-IMPORTANT: In StackSaga, The custom domain-entity is not a spring bean at all.
-Therefore, it is not necessary to have inside the spring beans' *component scan* area. instead, it can be anywhere in your project, and you can provide the package to the stacksaga framework via `{domain-entity-scan-prop}` property.
+[IMPORTANT]
+====
+**Spring Bean Notice**: In StackSaga, custom domain entities are lightweight state carriers—they are **not** Spring beans.
+They do not need to be within the application's component scan package. Instead, register the package containing your domain entities using the `{domain-entity-scan-prop}` configuration property.
+====
 // end::creating-custom-domain-entity[]
 
 // tag::further-configurations[]
@@ -278,14 +423,19 @@ TIP: To see how to supply a custom prefix in code, see the xref:#custom_key_gene
 [[generateIdempotencyKey]]
 === Generating Idempotency Keys for Saga Spans
 
-NOTE: If you are new to term of idempotent, refer xref:foundations:idempotency.adoc[] first.
+NOTE: If you are new to the concept of idempotency, refer to xref:foundations:idempotency.adoc[] first.
 
-Each span of a saga transaction, (i.e., each execution invocation) requires an `idempotency key` to ensure safe retries.
-The `generateIdempotencyKey` method provides all the necessary context to create a robust idempotency key that uniquely identifies the execution attempt. the context is provided by categorizing into two main input objects: `SafeIdempotentInput` and `UnSafeIdempotentInput` based on the safety of their content for logging and debugging purposes.
+Each span in a saga transaction (i.e., each atomic execution attempt) requires an idempotency key to ensure safe, duplicate-proof retries.
+The `generateIdempotencyKey` method receives runtime execution context divided into two input objects: `SafeIdempotentInput` and `UnSafeIdempotentInput`.
 
-IMPORTANT: The `UnSafeIdempotentInput` is not recommended to be used for generating the idempotency at all, because might not be the same withing the transaction lifecycle, and it can be cased by uniqueness of the idempotent key. the `UnSafeIdempotentInput` can be used for logging and debugging purposes only, but not for generating the idempotency key. instead, it is highly recommended to use the `SafeIdempotentInput` for generating the idempotency key because it provides a consistent and reliable.
+[IMPORTANT]
+====
+Do not use properties from `UnSafeIdempotentInput` to construct idempotency keys. Values within `UnSafeIdempotentInput` may vary across retry attempts or cluster nodes, which can produce non-deterministic keys and break retry safety. `UnSafeIdempotentInput` is intended strictly for diagnostic logging and debugging.
 
-The default implementation of the `generateIdempotencyKey` method produces a fixed-length hash by concatenating the `transactionId`, `currentExecutor`, and `executionMode` from the `SafeIdempotentInput` and then applying the provided `hashGenerator` to create a compact, consistent, and collision-resistant idempotency key.
+Always derive idempotency keys exclusively from `SafeIdempotentInput`, which provides deterministic, stable attributes guaranteed to remain consistent across retries throughout the transaction lifecycle.
+====
+
+The framework's default implementation produces a fixed-length MD5 hash by concatenating the `transactionId`, `currentExecutor`, and `executionMode` from `SafeIdempotentInput` and hashing the composite string via the provided `HashGenerator`. This ensures compact, collision-resistant idempotency keys.
 
 [[custom_key_generator_example]]
 === Custom Key Generator Example
