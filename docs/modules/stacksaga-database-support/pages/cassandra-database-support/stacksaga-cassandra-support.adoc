@@ -17,6 +17,18 @@ It provides all the necessary facilities for accessing the Cassandra database fo
 It is used in the orchestrator service alongside any StackSaga orchestrator starter.
 See xref:implementations:engine-overview.adoc[] for the full list of available implementations and their respective starters.
 
+[IMPORTANT]
+====
+*Retry Ordering Guarantee (No Strict FIFO in Cassandra):* +
+Unlike SQL implementations where retrying is processed strictly in chronological First-In, First-Out (FIFO) order (`ORDER BY paused_time ASC`), the Cassandra event-store implementation fetches transactions by **token order (`token(transaction_id)`)**, not by insertion or paused timestamp.
+
+Consequently, **Cassandra does not guarantee strict chronological retry ordering** within the same schedule window. If your business domain strictly requires exact FIFO retry ordering, Cassandra is not recommended as the event-store.
+
+*Architectural Recommendation for Strict FIFO Requirements:* +
+As a general best practice, StackSaga recommends using the same database technology for both your primary domain data and the event-store to eliminate the operational overhead of running multiple database engines. However, if your system uses Cassandra as its primary database *and* has a strict requirement for exact FIFO retry ordering, StackSaga recommends using an **SQL database implementation** (such as PostgreSQL or MySQL) specifically for the event-store. In this architecture, your high-throughput domain operations execute against Cassandra, while StackSaga manages its event store and retry queue in SQL to guarantee strict FIFO ordering.
+See xref:#retry-ordering-guarantee[Retry & Recovery Ordering Guarantee: Token Order vs. Strict FIFO] for technical details.
+====
+
 == Adding cassandra-support to your orchestrator application
 
 Adding cassandra-support to your orchestrator application consists of 3 simple steps.
@@ -195,6 +207,40 @@ The orchestrator node died unexpectedly mid-execution.
 
 Both table sets use the same three-table rotation mechanism, but with very different time windows -- typically hours for recovery and minutes for retry.
 
+[[bulk-filtering-not-possible]]
+==== Why Bulk Filtering is Not Possible in Cassandra
+
+* *Partition-Based Distribution* +
+Cassandra shards data across multiple nodes using the transaction ID as the partition key.
+Because rows are distributed across the entire cluster, querying transactions based on a field (such as status or timestamp) without knowing the exact partition key requires contacting multiple nodes, making global status queries inefficient and impractical at scale.
+* *No Centralized Indexing for Status-Based Queries* +
+In a relational database, finding pending transactions is as simple as running `WHERE status = 'PENDING'`.
+In Cassandra, secondary indexes on low-cardinality columns (like status) cause severe performance degradation across cluster nodes.
+Consequently, status-based bulk filtering directly on the main transaction table is not feasible.
+
+==== The Alternative: Dedicated Rotating Tables as Status Queues
+
+Because Cassandra cannot filter transactions by status in-place, StackSaga adopts an architectural solution where *table membership itself represents the transaction's state*:
+
+* *Presence in `es_irt_*`* = The transaction paused due to a transient error and needs retry.
+* *Presence in `es_rt_*`* = The transaction was initialized and has not yet completed. If it remains in the table past the retention window, it is considered crashed or missing and needs recovery.
+* *State Transition via Deletion:* Once a transaction is picked up and referred for execution by a Retry-Node, its row is immediately deleted from the table. Deletion acts as the status update.
+
+==== Why Are There Three Tables per Category?
+
+Both recovery (`es_rt_*`) and retry (`es_irt_*`) use a rotating set of **three tables** (`_1`, `_2`, and `_3`):
+
+* Each table is assigned to a specific scheduled time slot in a round-robin rotation.
+* Dividing the retention period across three tables allows the system to drain and process batches on a predictable schedule without requiring expensive time-range scans across Cassandra partitions.
+
+==== Why Tables Are Generated per Service, Region, and Virtual Cluster
+
+Generated tables (`es_rt_*` and `es_irt_*`) carry a hash suffix derived from the service name, region, and virtual cluster:
+
+* *Regional and Cluster Isolation:* Retry-Nodes only access tables matching their own service, region, and virtual cluster. A Retry-Node in `us-east-1` never touches data originating from `us-west-1`, even in a globally shared Cassandra cluster.
+* *Independent Scaling:* Virtual clusters can scale up or down independently and deploy dedicated Retry Ring Coordinators without cross-cluster interference.
+* *Clean Partition Scopes:* Schema scripts generate distinct table sets for each cluster, keeping individual tables compact and manageable.
+
 ==== How Retry-Nodes Process These Tables (Token Range-Based Batch Fetching)
 
 [NOTE]
@@ -364,22 +410,72 @@ Token range `1–1000` and token range `1001–2000` can never produce the same 
 This means multiple Retry-Nodes can fetch from the same table concurrently without coordination, locks, or conflicts -- a major architectural advantage of this design over SQL-based implementations.
 ====
 
+[[retry-ordering-guarantee]]
+==== Retry & Recovery Ordering Guarantee: Token Order vs. Strict FIFO
+
+When designing a distributed transaction retry strategy, understanding how the database driver orders retrieved batches is critical.
+
+===== How SQL Implementations Achieve Strict FIFO Ordering
+In relational database implementations (such as PostgreSQL, MySQL, or Oracle), identifying transactions to retry or recover is executed via indexed queries with explicit sorting:
+
+[source,sql]
+----
+SELECT * FROM saga_retry_queue
+WHERE status = 'PAUSED'
+ORDER BY paused_time ASC
+LIMIT 100;
+----
+
+Because the SQL database sorts by timestamp, transactions are retried in strict **First-In, First-Out (FIFO)** order: a transaction that paused at `00:02:10` is guaranteed to be retried before a transaction that paused at `00:02:40`.
+
+===== How Cassandra Processes Batches: Murmur3 Token Order
+In Cassandra, rows are partitioned across cluster nodes using a hashing function (by default, `Murmur3Partitioner`).
+As explained in the batch retrieval steps above, Retry-Nodes do not query by timestamp; they query by the Murmur3 token hash of the transaction ID:
+
+[source,sql]
+----
+SELECT * FROM es_irt_1_{hash}
+WHERE token(transaction_id) >= :start_token AND token(transaction_id) <= :end_token
+LIMIT 100;
+----
+
+Cassandra returns matching rows ordered by the numerical value of `token(transaction_id)`, **not by the timestamp when the transaction was paused or created**.
+
+.Example: Out-of-Chronological-Order Retry Execution
+Consider two transactions that encountered transient errors within the same schedule window (both saved into `es_irt_1_{hash}`):
+
+* `tx-1`: Paused at `00:02:10` -> `token(tx-1) = 850`
+* `tx-2`: Paused at `00:02:40` -> `token(tx-2) = 150`
+
+When the Retry-Node queries token range `[1, 1000]`:
+
+. Because `token(tx-2)` (`150`) is smaller than `token(tx-1)` (`850`), Cassandra returns `tx-2` **before** `tx-1`.
+. As a result, `tx-2` is fetched and retried **before** `tx-1`, even though `tx-1` failed 30 seconds earlier.
+
+[NOTE]
+====
+This reordering occurs **only within the same scheduled time window** (i.e. transactions co-located in the same table slot).
+Transactions assigned to different table slots (for example, `es_irt_1` at 00:00 vs. `es_irt_2` at 00:02) are strictly processed in their respective schedule windows.
+====
+
+===== Architectural Guidance: When to Pair Cassandra with an SQL Event Store
+In the vast majority of microservice architectures, transient errors (such as network blips or temporary resource limits) resolve within seconds or minutes, making minor non-FIFO execution variations within a 1-to-2 minute window completely acceptable.
+
+However, if your business domain contains strict sequential requirements (for example, financial order books or sequential inventory allocation where `tx-1` must strictly precede `tx-2` under all circumstances):
+
+* *Default Rule:* StackSaga strongly recommends keeping the event-store technology aligned with the system's primary database to avoid the operational overhead of managing multiple database engines.
+* *The FIFO Exception:* If your application uses Cassandra as its primary database but strictly requires exact FIFO retry ordering, deploy StackSaga with an **SQL database support module** (e.g., PostgreSQL or MySQL) for the event-store.
+This hybrid pattern provides the best of both worlds: Cassandra delivers massive write throughput for your primary domain operations, while the SQL event-store guarantees strict chronological FIFO ordering for saga retries and recovery.
+
 [[transaction_retry_retention]]
 === es_irt_* tables (Immediate Retry Retention)
 
-In StackSaga, asynchronous xref:architecture:transaction-retrying.adoc[transaction retrying] is an essential feature that ensures transactions are retried when they fail due to resource unavailability.
-When a transaction's execution fails with a Resource Unavailability problem, it is stored in one of the `es_irt_*` tables and waits to be picked up by the next available xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Node].
+In StackSaga, asynchronous xref:architecture:transaction-retrying.adoc[transaction retrying] is an essential feature that ensures transactions are retried when they fail due to transient errors (such as resource unavailability or temporary network timeouts).
 
-Unlike SQL databases, Cassandra does not support centralized indexing for bulk filtering.
-This makes it impossible to scan transactions by their states.
-More details on this limitation can be found xref:#bulk-filtering-not-possible[here].
+When a transaction fails with a retryable error, it is stored in one of the active `es_irt_*` tables.
+At the next scheduled time window, a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Node] fetches it by token range, re-invokes it, and deletes the row immediately using the token range batch processing flow described above.
 
-To overcome this, *transaction retrying* follows the same *table-switching mechanism* used for xref:#transaction_recovery_retention[transaction recovery] and the same *token range-based batch fetch-and-delete* approach described in xref:#_how_retry_nodes_process_these_tables_token_range_based_batch_fetching[How Retry-Nodes Process These Tables].
-
-When a transaction is stopped due to resource unavailability, it is stored in one of the `es_irt_*` tables.
-At the next scheduled time window, a Retry-Node fetches it by token range, re-invokes it, and deletes the row immediately.
-
-TIP: The key difference between *immediate retry retention* (`es_irt_*`) and *transaction recovery retention* (`es_rt_*`) is the time window: retry retention uses a much shorter delay (minutes) compared to recovery retention (hours), since paused transactions are expected to be retried quickly once the resource becomes available again.
+TIP: The key difference between *immediate retry retention* (`es_irt_*`) and *transaction recovery retention* (`es_rt_*`) is the time window: retry retention uses a much shorter delay (minutes) compared to recovery retention (hours), since paused transactions are expected to be retried quickly once the downstream resource becomes available again.
 
 ==== `es_irt_*` table selection formula
 
@@ -441,85 +537,13 @@ To protect it from premature retry, it skips `00:04:00` and is placed into the t
 [[transaction_recovery_retention]]
 === es_rt_* tables (Transaction Recovery Retention)
 
-Unlike relational databases, transactions in Cassandra cannot be identified based on a field like status due to the way data is distributed across multiple nodes using a partition key.
-This distribution prevents bulk filtering of transactions directly from the transaction table.
+While `es_irt_*` tables track transactions paused due to transient errors, the `es_rt_*` tables track **crashed or missing transactions** -- scenarios where an orchestrator node died unexpectedly mid-execution (e.g., node crash, hardware failure, or unhandled network partition).
 
-[[bulk-filtering-not-possible]]
-====  Why Bulk Filtering is Not Possible In Cassandra?
+When a transaction is initialized, its data is stored in one of the active `es_rt_*` tables.
+If the transaction completes its full saga journey successfully, its row is deleted from the table.
+However, if a transaction fails to complete due to an unexpected crash, its row persists in the `es_rt_*` table, making it a candidate for recovery.
 
-* *Partition-Based Distribution* +
-Cassandra shards data across multiple nodes, making global queries on large datasets inefficient.
-* *No Centralized Indexing for Status-Based Queries* +
-Since transactions are stored based on partition keys, retrieving missing transactions requires querying multiple partitions, which is not feasible for large-scale systems.
-
-==== Alternative Mechanism to Identify Missing Transactions
-
-Since transactions cannot be filtered in bulk due to Cassandra's partition-based distribution, an alternative mechanism is required to track missing transactions effectively.
-
-. Use separate recovery tables
-* Instead of relying on status-based filtering, transactions that require tracking are stored in separate recovery tables.
-* These tables act as a centralized reference for identifying transactions that may not have completed.
-
-. Time-Based Retention Mechanism
-* Each transaction is retained for a specific time window after being added to the recovery table.
-* If a transaction fails to complete within this configured time frame, it is considered missing and will be exposed for re-invocation.
-
-. Retry-Node-Based Recovery
-* xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Nodes] -- orchestrator instances with the Ring-Coordinator Connector enabled -- receive a token range from the Retry Ring Coordinator and use it to fetch from the `es_rt_*` tables, re-invoking any transactions they find.
-
-As described above, when a transaction is initialized its data is stored in one of the `es_rt_*` tables.
-If the transaction completes successfully, its data is removed from the table upon completion.
-However, if a transaction does not reach completion, its data remains in the `es_rt_*` table, making it a candidate for recovery.
-
-====
-
-*Why Are There Three `es_rt_*` Tables?*
-
-The reason for using *three tables* is to allocate one table for *each scheduled recovery time*.
-This ensures that transactions are efficiently managed and recovered based on a predefined schedule.
-
-*Scheduled Time and Table Allocation* +
-
-If the *recovery retention time* is *480 minutes*, the system schedules recovery at:
-
-1. *00:00* -> `es_rt_1_{hash}`
-2. *08:00* -> `es_rt_2_{hash}`
-3. *16:00* -> `es_rt_3_{hash}`
-
-Each table stores transactions that fall within its respective time frame.
-Because Cassandra has no feature for scanning data within a specific time frame, this approach allows transactions to be collected efficiently.
-
-*Why Are Tables Created Per Region and Cluster?* +
-
-In a *multi-region / multi-cluster deployment*, each Retry-Node is stamped with its region and cluster, and only fetches rows belonging to its own region and cluster.
-This means Retry-Nodes in `us-east-1` never touch data originating from `us-west-1`, even if both share the same physical Cassandra cluster.
-
-For example, if a service is deployed across two regions (`us-east-1` and `us-west-1`), each with a single cluster, the number of generated table sets doubles -- resulting in six tables:
-
-*Tables for `us-east-1` region (cluster: `us-east-1`)*
-
-* `es_rt_1_{hash-east}` (00:00)
-* `es_rt_2_{hash-east}` (08:00)
-* `es_rt_3_{hash-east}` (16:00)
-
-*Tables for `us-west-1` region (cluster: `us-west-1`)*
-
-* `es_rt_1_{hash-west}` (00:00)
-* `es_rt_2_{hash-west}` (08:00)
-* `es_rt_3_{hash-west}` (16:00)
-
-*Key Benefits of This Approach* +
-
-* *Efficient Recovery Processing* +
-Instead of scanning a massive dataset, transactions are categorized based on scheduled recovery times.
-* *Regional and Cluster Isolation* +
-Retry-Nodes only fetch rows that match their own region and cluster, reducing cross-region data access even in a globally shared Cassandra cluster.
-* *Scalability* +
-The system can scale to handle multiple regions and virtual clusters independently without affecting transaction recovery in other locations.
-
-====
-
-====  Identifying Missing Transactions
+==== Identifying Missing Transactions
 
 Consider a scenario where 1,000 transactions are executed within a specified time period across multiple nodes.
 Ideally, all transactions that complete their journey are deleted from the `es_rt_*` table.
