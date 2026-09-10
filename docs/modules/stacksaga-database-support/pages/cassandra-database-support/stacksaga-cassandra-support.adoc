@@ -22,10 +22,13 @@ See xref:implementations:engine-overview.adoc[] for the full list of available i
 *Retry Ordering Guarantee (No Strict FIFO in Cassandra):* +
 Unlike SQL implementations where retrying is processed strictly in chronological First-In, First-Out (FIFO) order (`ORDER BY paused_time ASC`), the Cassandra event-store implementation fetches transactions by **token order (`token(transaction_id)`)**, not by insertion or paused timestamp.
 
-Consequently, **Cassandra does not guarantee strict chronological retry ordering** within the same schedule window. If your business domain strictly requires exact FIFO retry ordering, Cassandra is not recommended as the event-store.
+Consequently, **Cassandra does not guarantee strict chronological retry ordering** within the same schedule window.
+If your business domain strictly requires exact FIFO retry ordering, Cassandra is not recommended as the event-store.
 
 *Architectural Recommendation for Strict FIFO Requirements:* +
-As a general best practice, StackSaga recommends using the same database technology for both your primary domain data and the event-store to eliminate the operational overhead of running multiple database engines. However, if your system uses Cassandra as its primary database *and* has a strict requirement for exact FIFO retry ordering, StackSaga recommends using **one of the SQL database implementations** specifically for the event-store. In this architecture, your high-throughput domain operations execute against Cassandra, while StackSaga manages its event store and retry queue in SQL to guarantee strict FIFO ordering.
+As a general best practice, StackSaga recommends using the same database technology for both your primary domain data and the event-store to eliminate the operational overhead of running multiple database engines.
+However, if your system uses Cassandra as its primary database *and* has a strict requirement for exact FIFO retry ordering, StackSaga recommends using **one of the SQL database implementations** specifically for the event-store.
+In this architecture, your high-throughput domain operations execute against Cassandra, while StackSaga manages its event store and retry queue in SQL to guarantee strict FIFO ordering.
 See xref:#retry-ordering-guarantee[Retry & Recovery Ordering Guarantee: Token Order vs. Strict FIFO] for technical details.
 ====
 
@@ -223,8 +226,10 @@ Consequently, status-based bulk filtering directly on the main transaction table
 Because Cassandra cannot filter transactions by status in-place, StackSaga adopts an architectural solution where *table membership itself represents the transaction's state*:
 
 * *Presence in `es_irt_*`* = The transaction paused due to a transient error and needs retry.
-* *Presence in `es_rt_*`* = The transaction was initialized and has not yet completed. If it remains in the table past the retention window, it is considered crashed or missing and needs recovery.
-* *State Transition via Deletion:* Once a transaction is picked up and referred for execution by a Retry-Node, its row is immediately deleted from the table. Deletion acts as the status update.
+* *Presence in `es_rt_*`* = The transaction was initialized and has not yet completed.
+If it remains in the table past the retention window, it is considered crashed or missing and needs recovery.
+* *State Transition via Deletion:* Once a transaction is picked up and referred for execution by a Retry-Node, its row is immediately deleted from the table.
+Deletion acts as the status update.
 
 ==== Why Are There Three Tables per Category?
 
@@ -237,7 +242,8 @@ Both recovery (`es_rt_*`) and retry (`es_irt_*`) use a rotating set of **three t
 
 Generated tables (`es_rt_*` and `es_irt_*`) carry a hash suffix derived from the service name, region, and virtual cluster:
 
-* *Regional and Cluster Isolation:* Retry-Nodes only access tables matching their own service, region, and virtual cluster. A Retry-Node in `us-east-1` never touches data originating from `us-west-1`, even in a globally shared Cassandra cluster.
+* *Regional and Cluster Isolation:* Retry-Nodes only access tables matching their own service, region, and virtual cluster.
+A Retry-Node in `us-east-1` never touches data originating from `us-west-1`, even in a globally shared Cassandra cluster.
 * *Independent Scaling:* Virtual clusters can scale up or down independently and deploy dedicated Retry Ring Coordinators without cross-cluster interference.
 * *Clean Partition Scopes:* Schema scripts generate distinct table sets for each cluster, keeping individual tables compact and manageable.
 
@@ -258,7 +264,8 @@ The actual fetching and re-invocation is done by *Retry-Nodes* -- orchestrator i
 The xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator] (Master + Slave) is *not* responsible for touching the database.
 Its only role is to assign each Retry-Node a *token range* -- a unique, non-overlapping slice of the Cassandra token ring -- so that no two Retry-Nodes ever fetch the same rows simultaneously.
 
-NOTE: The way Ring-Coordinator instances and Retry-Nodes are deployed together depends on the scale and virtual cluster configuration of your system. See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[Ring-Coordinator Deployment Topologies] for the available deployment options -- from an embedded single-instance setup to fully clustered multi-virtual-cluster deployments.
+NOTE: The way Ring-Coordinator instances and Retry-Nodes are deployed together depends on the scale and virtual cluster configuration of your system.
+See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[Ring-Coordinator Deployment Topologies] for the available deployment options -- from an embedded single-instance setup to fully clustered multi-virtual-cluster deployments.
 
 Here is how a Retry-Node processes a table (the same flow applies to both `es_rt_*` and `es_irt_*`):
 
@@ -416,6 +423,7 @@ This means multiple Retry-Nodes can fetch from the same table concurrently witho
 When designing a distributed transaction retry strategy, understanding how the database driver orders retrieved batches is critical.
 
 ===== How SQL Implementations Achieve Strict FIFO Ordering
+
 In SQL implementations, identifying transactions to retry or recover is executed via indexed queries with explicit sorting:
 
 [source,sql]
@@ -429,6 +437,7 @@ LIMIT 100;
 Because the SQL database sorts by timestamp, transactions are retried in strict **First-In, First-Out (FIFO)** order: a transaction that paused at `00:02:10` is guaranteed to be retried before a transaction that paused at `00:02:40`.
 
 ===== How Cassandra Processes Batches: Murmur3 Token Order
+
 In Cassandra, rows are partitioned across cluster nodes using a hashing function (by default, `Murmur3Partitioner`).
 As explained in the batch retrieval steps above, Retry-Nodes do not query by timestamp; they query by the Murmur3 token hash of the transaction ID:
 
@@ -459,6 +468,7 @@ Transactions assigned to different table slots (for example, `es_irt_1` at 00:00
 ====
 
 ===== Architectural Guidance: When to Pair Cassandra with an SQL Event Store
+
 In the vast majority of microservice architectures, transient errors (such as network blips or temporary resource limits) resolve within seconds or minutes, making minor non-FIFO execution variations within a 1-to-2 minute window completely acceptable.
 
 However, if your business domain contains strict sequential requirements (for example, financial order books or sequential inventory allocation where `tx-1` must strictly precede `tx-2` under all circumstances):
@@ -530,7 +540,8 @@ To protect it from premature retry, it skips `00:04:00` and is placed into the t
 | T6 | 00:03:58 | 2 sec (< 1 min) | Second half (After `00:03:00`) | `es_irt_1_{hash}` (Runs at 00:06:00) | 2 min 02 sec
 |===
 
-*Why Wait Time Fluctuates Between 1 and 3 Minutes:* +
+*Why Wait Time Fluctuates Between 1 and 3 Minutes:*
+
 * *Minimum wait (1 minute):* A transaction stopping exactly at the midpoint (`00:03:00`) waits 1 minute until execution at `00:04:00`.
 * *Maximum wait (nearly 3 minutes):* A transaction stopping just after the midpoint (`00:03:01`) waits 59 seconds until `00:04:00`, plus the full 2-minute cycle until `00:06:00` (total 2 minutes 59 seconds).
 
@@ -599,7 +610,8 @@ To give it adequate time to complete naturally, it skips the 16:00 schedule and 
 | T6 | 15:59 | 1 minute (< 4h) | Second half (After `12:00`) | `es_rt_1_{hash}` (Runs at 00:00:00) | 8 hours 01 min
 |===
 
-*Why Grace Period Fluctuates Between 4 and 12 Hours:* +
+*Why Grace Period Fluctuates Between 4 and 12 Hours:*
+
 * *Minimum grace period (4 hours):* A transaction initialized exactly at the midpoint (`12:00:00`) is checked at `16:00:00` (4 hours elapsed).
 * *Maximum grace period (nearly 12 hours):* A transaction initialized just after the midpoint (`12:00:01`) waits 3 hours 59 minutes until `16:00`, plus the full 8-hour cycle until `00:00` (total 11 hours 59 minutes).
 
@@ -631,24 +643,32 @@ When using Cassandra reactive support with event-driven streaming (such as Apach
 
 === Why Execution Markers are Needed
 
-StackSaga's Kafka implementation uses *at-least-once delivery semantics*. Because of this, duplicate event deliveries are naturally expected in distributed environments, +
+StackSaga's Kafka implementation uses *at-least-once delivery semantics*.
+Because of this, duplicate event deliveries are naturally expected in distributed environments, +
 for example:
 
 * Consumer group rebalances when pods scale up or down.
 * Consumer node restarts or crashes before offset commits are acknowledged.
 * Network timeouts and automated message retries.
 
-To ensure *idempotency*, StackSaga saves an *execution marker* in the `es_execution_markers` table in Cassandra. Before or during processing, the framework inspects this table so that already-processed events are detected and not executed again.
+To ensure *idempotency*, StackSaga saves an *execution marker* in the `es_execution_markers` table in Cassandra.
+Before or during processing, the framework inspects this table so that already-processed events are detected and not executed again.
 
 === Database Safety vs. Event Listener Side Effects (The Real Issue with Races)
 
-Technically, a concurrent race condition does not corrupt the Cassandra database itself because Cassandra write queries are idempotent. Writing the same event-store record twice will not break the database state.
+Technically, a concurrent race condition does not corrupt the Cassandra database itself because Cassandra write queries are idempotent.
+Writing the same event-store record twice will not break the database state.
 
 However, the real issue is what happens *after* the database write:
 
-IMPORTANT: StackSaga publishes state-changed events to registered event listeners *after* successfully updating the event store: +
-* `org.stacksaga.api.listener.KafkaTransactionEventListener` / `org.stacksaga.api.listener.ReactiveKafkaTransactionEventListener` (for Kafka event streams) +
-* `org.stacksaga.api.listener.TransactionEventListener` / `org.stacksaga.api.listener.ReactiveTransactionEventListener` (for transaction lifecycle events)
+[IMPORTANT]
+====
+StackSaga publishes state-changed events to registered event listeners *after* successfully updating the event store:
+
+* `org.stacksaga.api.listener.KafkaTransactionEventListener`
+* `org.stacksaga.api.listener.ReactiveKafkaTransactionEventListener` (for Kafka event streams)
+
+====
 
 If a concurrent race condition causes the same record to be inserted multiple times, these state-changed listeners *will also be invoked that same number of times*.
 
@@ -659,14 +679,17 @@ If the listener triggers external side effects -- such as sending a confirmation
 StackSaga provides two write-protection modes to balance strictness and throughput:
 
 ==== 1. STRICT Mode
+
 * *When to use:* Recommended when you must prevent duplicate listener calls (such as customer-facing notifications or non-idempotent third-party APIs) and you do not want to build custom idempotency logic into every listener.
 * *How it works:*
 1. *LWT Lease Acquisition:* Before running the execution, a worker acquires an exclusive temporary lock in Cassandra using Lightweight Transactions (LWT: `INSERT INTO es_execution_markers ... IF NOT EXISTS USING TTL <leaseDuration>`).
 2. *Active Lease Wait:* If another worker is already processing the same record (marker exists with `TTL > 0`), the second worker waits for the remaining TTL duration and retries.
-3. *Permanent Marker Commitment:* When the first worker successfully commits its batch, it writes a permanent marker (`TTL = 0`). When concurrent workers retry, they see `TTL = 0` and terminate cleanly with `OptimisticLockConflictException`.
+3. *Permanent Marker Commitment:* When the first worker successfully commits its batch, it writes a permanent marker (`TTL = 0`).
+When concurrent workers retry, they see `TTL = 0` and terminate cleanly with `OptimisticLockConflictException`.
 4. *Automatic Crash Recovery:* If the first worker crashes mid-flight, the temporary lease expires automatically when its TTL finishes, permitting another worker to retry and safely complete the saga step without deadlocks.
 
 .STRICT Mode Execution Flow
+
 [plantuml,target=stacksaga-cassandra-write-protection-flow,format=svg]
 ----
 @startuml stacksaga-cassandra-write-protection-flow
@@ -733,17 +756,26 @@ stop
 ----
 
 .STRICT Mode Lifecycle Breakdown
-* *Claim the Lease (`INSERT ... IF NOT EXISTS USING TTL`):* Before executing business logic, the worker attempts an atomic conditional insert with a temporary lease TTL (`default-lease-duration` or domain override). If another node crashes mid-flight, this lease automatically expires after the TTL window, preventing permanent distributed deadlocks without manual intervention.
+* *Claim the Lease (`INSERT ... IF NOT EXISTS USING TTL`):* Before executing business logic, the worker attempts an atomic conditional insert with a temporary lease TTL (`default-lease-duration` or domain override).
+If another node crashes mid-flight, this lease automatically expires after the TTL window, preventing permanent distributed deadlocks without manual intervention.
 * *Evaluate Acquisition (`[applied] == true`):*
-** *Lease Won (`applied == true`):* The worker exclusively owns the step. It executes the saga step and persists the event store batch along with a permanent execution marker (`TTL = 0`). Once persisted, registered transaction event listeners are safely dispatched.
-** *Collision Detected (`applied == false`):* A marker already exists. The worker queries the record to check whether processing is still active or already completed.
+** *Lease Won (`applied == true`):* The worker exclusively owns the step.
+It executes the saga step and persists the event store batch along with a permanent execution marker (`TTL = 0`).
+Once persisted, registered transaction event listeners are safely dispatched.
+** *Collision Detected (`applied == false`):* A marker already exists.
+The worker queries the record to check whether processing is still active or already completed.
 * *Collision Inspection & Safe Deduplication:*
-** *Lease Active (`TTL > 0`):* Another worker is currently executing the step, or a crashed worker's lease has not expired yet. The waiting worker backs off for the remaining lease duration and retries.
-** *Permanently Finalized (`TTL == 0`):* The step was already completed by another worker. The current message is a duplicate Kafka delivery and is safely discarded without re-executing logic or triggering duplicate listener events.
+** *Lease Active (`TTL > 0`):* Another worker is currently executing the step, or a crashed worker's lease has not expired yet.
+The waiting worker backs off for the remaining lease duration and retries.
+** *Permanently Finalized (`TTL == 0`):* The step was already completed by another worker.
+The current message is a duplicate Kafka delivery and is safely discarded without re-executing logic or triggering duplicate listener events.
 
 ==== 2. RELAXED_WITH_DEDUP Mode
+
 * *When to use:* Recommended when duplicate listener calls are harmless (e.g. idempotent downstream consumers, cache invalidations, simple loggers), OR when you already handle idempotency inside your listener logic.
-* *How it works:* Before running, the framework checks if a completed execution marker exists (`checkExists`). If found, it skips execution. This avoids Cassandra LWT locks, maximizing throughput, but does not prevent the rare race condition where two workers execute at the exact same millisecond.
+* *How it works:* Before running, the framework checks if a completed execution marker exists (`checkExists`).
+If found, it skips execution.
+This avoids Cassandra LWT locks, maximizing throughput, but does not prevent the rare race condition where two workers execute at the exact same millisecond.
 
 .RELAXED_WITH_DEDUP Mode Execution Flow
 [plantuml,target=stacksaga-cassandra-write-protection-relaxed-flow,format=svg]
@@ -804,11 +836,14 @@ endif
 ----
 
 .RELAXED_WITH_DEDUP Mode Lifecycle Breakdown
-* *Fast Duplicate Check (`checkExists`):* Before executing the step, the worker performs a lightweight read against `es_execution_markers` in Cassandra using standard read consistency (`LOCAL_QUORUM`). This query does not trigger Cassandra Paxos consensus (LWT), completely avoiding coordination round-trips.
+* *Fast Duplicate Check (`checkExists`):* Before executing the step, the worker performs a lightweight read against `es_execution_markers` in Cassandra using standard read consistency (`LOCAL_QUORUM`).
+This query does not trigger Cassandra Paxos consensus (LWT), completely avoiding coordination round-trips.
 * *Evaluate Existence:*
-** *Marker Exists (`YES`):* A previous execution has already processed this record. The framework recognizes this as a duplicate Kafka event redelivery, aborts further processing with `SpanAlreadyExecutedException`, and safely terminates without re-running business logic or triggering duplicate listener notifications.
+** *Marker Exists (`YES`):* A previous execution has already processed this record.
+The framework recognizes this as a duplicate Kafka event redelivery, aborts further processing with `SpanAlreadyExecutedException`, and safely terminates without re-running business logic or triggering duplicate listener notifications.
 ** *Marker Does Not Exist (`NO`):* The worker proceeds to execute the saga step's business logic.
-* *Atomic Batch Persistence & Listener Dispatch:* Upon business logic completion, the worker writes the saga event store state changes and the permanent `ExecutionMarker` (`TTL = 0`) together in an atomic logged batch. After the batch write successfully completes, registered transaction event listeners are dispatched.
+* *Atomic Batch Persistence & Listener Dispatch:* Upon business logic completion, the worker writes the saga event store state changes and the permanent `ExecutionMarker` (`TTL = 0`) together in an atomic logged batch.
+After the batch write successfully completes, registered transaction event listeners are dispatched.
 
 [TIP]
 ====
@@ -819,13 +854,16 @@ However, if duplicate listener invocations do not matter for your business use c
 
 === Domain-Level Configuration
 
-Write protection can be configured globally and fine-tuned per domain entity. Because different saga workflows have distinct consistency and performance requirements, you can maintain both the *consistency mode* and the *lease TTL duration* differently for each saga based on its domain.
+Write protection can be configured globally and fine-tuned per domain entity.
+Because different saga workflows have distinct consistency and performance requirements, you can maintain both the *consistency mode* and the *lease TTL duration* differently for each saga based on its domain.
 
 For example:
+
 * *Critical Sagas* (such as `order-saga` or `payment-saga`) that trigger external side effects like payments or customer notifications can be configured with `STRICT` mode and an appropriate lease duration (e.g., `10s` or `5s`) to completely prevent duplicate executions.
 * *High-Throughput Sagas* (such as `notification-saga` or internal auditing) where operations are naturally idempotent can use `RELAXED_WITH_DEDUP` to bypass LWT locking overhead and maximize write throughput.
 
-The domain key configured under `domains` corresponds to the domain entity name defined by `@SagaDomainEntity#name()` (matched case-insensitively). Any domain that is not explicitly overridden will automatically inherit the global default values (`default-mode` and `default-lease-duration`).
+The domain key configured under `domains` corresponds to the domain entity name defined by `@SagaDomainEntity#name()` (matched case-insensitively).
+Any domain that is not explicitly overridden will automatically inherit the global default values (`default-mode` and `default-lease-duration`).
 
 .Example `application.yml`
 [source,yaml]
