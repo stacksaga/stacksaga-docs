@@ -576,7 +576,7 @@ When recovery retention is configured as 8 hours, 3 schedulers run in round-robi
 . *2nd schedule at 08:00* -> `es_rt_2_{hash}`
 . *3rd schedule at 16:00* -> `es_rt_3_{hash}`
 
-==== The Challenge: Preventing False Positives for Healthy In-Flight Transactions
+==== The Challenge: Preventing Premature Recovery for In-Flight Transactions
 
 Imagine a transaction is initialized at `15:59:00`.
 The next recovery scheduler triggers at `16:00:00` -- just *1 minute later*.
@@ -614,21 +614,6 @@ To give it adequate time to complete naturally, it skips the 16:00 schedule and 
 
 * *Minimum grace period (4 hours):* A transaction initialized exactly at the midpoint (`12:00:00`) is checked at `16:00:00` (4 hours elapsed).
 * *Maximum grace period (nearly 12 hours):* A transaction initialized just after the midpoint (`12:00:01`) waits 3 hours 59 minutes until `16:00`, plus the full 8-hour cycle until `00:00` (total 11 hours 59 minutes).
-
-==== Handling False Positives in Transaction Recovery & the Role of Idempotency
-
-While transactions that remain in the `es_rt_*` table are generally considered missing, this is not always the case.
-
-Scenario: Transactions Delayed but Not Missing::
-Consider a situation where a transaction is still in the queue, waiting for execution because the *respective orchestrator service is too busy*.
-In this case:
-
-1. The system mistakenly *assumes the transaction is missing* since it has not been removed from the `es_rt_*` table within the expected time frame.
-2. As a result, the system *triggers a recovery process*, re-invoking the transaction.
-3. This can lead to the transaction (or certain *atomic executions*) being *executed multiple times*, causing unintended duplicate operations.
-
-IMPORTANT: This is one of the possible ways transactions can be executed multiple times.
-To prevent these kinds of unintended duplicate executions, *xref:architecture:idempotency.adoc[idempotency]* should be implemented at the atomic execution level of the transaction.
 
 '''
 
