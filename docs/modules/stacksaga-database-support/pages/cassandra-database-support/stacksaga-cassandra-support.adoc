@@ -25,7 +25,7 @@ Unlike SQL implementations where retrying is processed strictly in chronological
 Consequently, **Cassandra does not guarantee strict chronological retry ordering** within the same schedule window. If your business domain strictly requires exact FIFO retry ordering, Cassandra is not recommended as the event-store.
 
 *Architectural Recommendation for Strict FIFO Requirements:* +
-As a general best practice, StackSaga recommends using the same database technology for both your primary domain data and the event-store to eliminate the operational overhead of running multiple database engines. However, if your system uses Cassandra as its primary database *and* has a strict requirement for exact FIFO retry ordering, StackSaga recommends using an **SQL database implementation** (such as PostgreSQL or MySQL) specifically for the event-store. In this architecture, your high-throughput domain operations execute against Cassandra, while StackSaga manages its event store and retry queue in SQL to guarantee strict FIFO ordering.
+As a general best practice, StackSaga recommends using the same database technology for both your primary domain data and the event-store to eliminate the operational overhead of running multiple database engines. However, if your system uses Cassandra as its primary database *and* has a strict requirement for exact FIFO retry ordering, StackSaga recommends using **one of the SQL database implementations** specifically for the event-store. In this architecture, your high-throughput domain operations execute against Cassandra, while StackSaga manages its event store and retry queue in SQL to guarantee strict FIFO ordering.
 See xref:#retry-ordering-guarantee[Retry & Recovery Ordering Guarantee: Token Order vs. Strict FIFO] for technical details.
 ====
 
@@ -416,7 +416,7 @@ This means multiple Retry-Nodes can fetch from the same table concurrently witho
 When designing a distributed transaction retry strategy, understanding how the database driver orders retrieved batches is critical.
 
 ===== How SQL Implementations Achieve Strict FIFO Ordering
-In relational database implementations (such as PostgreSQL, MySQL, or Oracle), identifying transactions to retry or recover is executed via indexed queries with explicit sorting:
+In SQL implementations, identifying transactions to retry or recover is executed via indexed queries with explicit sorting:
 
 [source,sql]
 ----
@@ -464,7 +464,7 @@ In the vast majority of microservice architectures, transient errors (such as ne
 However, if your business domain contains strict sequential requirements (for example, financial order books or sequential inventory allocation where `tx-1` must strictly precede `tx-2` under all circumstances):
 
 * *Default Rule:* StackSaga strongly recommends keeping the event-store technology aligned with the system's primary database to avoid the operational overhead of managing multiple database engines.
-* *The FIFO Exception:* If your application uses Cassandra as its primary database but strictly requires exact FIFO retry ordering, deploy StackSaga with an **SQL database support module** (e.g., PostgreSQL or MySQL) for the event-store.
+* *The FIFO Exception:* If your application uses Cassandra as its primary database but strictly requires exact FIFO retry ordering, deploy StackSaga with **one of the SQL database support modules** for the event-store.
 This hybrid pattern provides the best of both worlds: Cassandra delivers massive write throughput for your primary domain operations, while the SQL event-store guarantees strict chronological FIFO ordering for saga retries and recovery.
 
 [[transaction_retry_retention]]
