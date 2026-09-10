@@ -216,14 +216,15 @@ NOTE: The way Ring-Coordinator instances and Retry-Nodes are deployed together d
 
 Here is how a Retry-Node processes a table (the same flow applies to both `es_rt_*` and `es_irt_*`):
 
-. *Receive a token range* +
-The Retry Ring Coordinator pushes the Retry-Node its assigned token range (e.g. token `1` to `1000`) for the current time window.
+. *Receive a token range from the coordinator* +
+The Retry Ring Coordinator pushes the Retry-Node its assigned token range (e.g., token `1` to `1000`) for the current time window.
+The Ring Coordinator itself never connects to the Cassandra database; it only manages and assigns token ranges across active Retry-Nodes.
 
 . *Determine the target table* +
-Based on the configured schedule, the Retry-Node knows which table slot is currently active (e.g. `es_irt_1_{hash}` at 00:00, `es_irt_2_{hash}` at 00:02, etc.).
+Based on the configured schedule, the Retry-Node identifies which table slot is currently active (e.g., `es_irt_1_{hash}` at 00:00, `es_irt_2_{hash}` at 00:02, etc.).
 
-. *Fetch a batch by token range* +
-The Retry-Node queries the target table for rows whose Cassandra token falls within its assigned range:
+. *Fetch a batch by token range (without specifying partition keys)* +
+Because we need to fetch a batch and do not know in advance which transaction IDs are in the table, we query using Cassandra's `token()` function across our assigned range rather than filtering on specific partition keys or statuses:
 +
 [source,sql]
 ----
@@ -232,20 +233,128 @@ WHERE token(transaction_id) >= 1 AND token(transaction_id) <= 1000
 LIMIT 100;  -- controlled by stacksaga.cassandra.transaction.stream.batch-size
 ----
 +
-Cassandra's internal broker resolves which physical nodes hold data for that token range and fetches *only from those nodes* -- no full cluster scan, no contact with unrelated nodes.
-If the token range spans data on 10 different nodes, Cassandra collects from those 10 nodes transparently.
-The Retry-Node receives at most `batch-size` rows.
+*Targeted Node Retrieval (No Full Cluster Scan):* Cassandra's broker knows exactly which physical nodes hold partitions within token range `[1, 1000]`.
+If the data within that range spans across 10 nodes in the cluster, the broker routes requests strictly to those 10 nodes and aggregates the results -- it never queries all nodes in the cluster.
+The Retry-Node receives up to `batch-size` (e.g., 100) records.
 
 . *Re-invoke the transactions* +
-Each fetched transaction is re-invoked from the last successfully completed span.
+Each fetched transaction is immediately referred for execution, starting from the last successfully recorded span.
 
-. *Delete the rows immediately* +
-After handing each transaction off for re-invocation, its row is *deleted* from the table.
-This is critical: because Cassandra cannot update a "status" field, deletion is the only way to mark that a row has been processed.
-If a row were not deleted, it would be picked up again in the next batch fetch.
+. *Delete the rows immediately after referral* +
+Once a transaction is handed over for re-invocation, its row is deleted from the table:
++
+[source,sql]
+----
+DELETE FROM es_irt_1_{hash} WHERE transaction_id = :transaction_id;
+----
++
+*Why immediate deletion is mandatory:* In Cassandra, tables do not support in-place status mutation without incurring heavy secondary indexing penalties.
+Instead, *table membership itself represents status*.
+Deleting the row immediately upon batch retrieval marks it as processed and prevents that same transaction from being exposed again in the subsequent batch fetch.
 
-. *Repeat until the time window expires* +
-The Retry-Node continues fetching batches until the table is drained within its token range, then waits for the next scheduled window.
+. *Continuous long-polling with configured delay* +
+Even if a batch query returns empty (no records found), the Retry-Node does not stop.
+It maintains a continuous long-polling loop with a small configured delay throughout the active time window, ensuring that any new transactions arriving in the table partition are picked up promptly.
+Once the time window expires, the Retry-Node advances to the next scheduled table slot.
+
+.Retry-Node Token-Range Batch Processing Flow
+[plantuml,target=stacksaga-cassandra-retry-node-processing-flow,format=svg]
+----
+@startuml stacksaga-cassandra-retry-node-processing-flow
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam roundcorner 6
+
+skinparam participant {
+  BackgroundColor #EEF4FF
+  BorderColor #4A6FA5
+  FontColor #1A1A2E
+}
+
+skinparam database {
+  BackgroundColor #E8F5E9
+  BorderColor #2E7D32
+  FontColor #1A1A2E
+}
+
+skinparam collections {
+  BackgroundColor #FFF3E0
+  BorderColor #E65100
+  FontColor #1A1A2E
+}
+
+skinparam sequence {
+  ArrowColor #4A6FA5
+  LifeLineBorderColor #4A6FA5
+  LifeLineBackgroundColor #EEF4FF
+  GroupBackgroundColor #F7FAFC
+  GroupBorderColor #B0BEC5
+  DividerBackgroundColor #ECEFF1
+  DividerBorderColor #90A4AE
+}
+
+autonumber "<b>[00]</b>"
+
+participant "Retry-Node\n(Orchestrator)" as RetryNode
+database "Cassandra Coordinator\n(Broker)" as Broker
+collections "Target Cassandra Nodes\n(Owning Token Range)" as StorageNodes
+participant "Saga Execution\nEngine" as Engine
+
+note over RetryNode
+  Retry-Node operates using its assigned token range
+  (e.g., [1, 1000]) for the current time slot.
+end note
+
+== 1. Batch Retrieval by Token Range (No Partition Key Needed) ==
+RetryNode -> RetryNode : Determine active schedule table\n(e.g., es_irt_1_{hash} or es_rt_1_{hash})
+
+loop while active time window is open (Continuous Long-Polling)
+  RetryNode -> Broker : SELECT * FROM es_irt_1_{hash}\nWHERE token(transaction_id) >= 1 AND token(transaction_id) <= 1000\nLIMIT 100 (batch-size)
+  activate Broker
+  
+  Broker -> StorageNodes : Query ONLY storage nodes\nowning tokens in [1, 1000]
+  activate StorageNodes
+  note over Broker, StorageNodes
+    NO full-cluster scan!
+    Cassandra broker queries strictly the specific
+    storage nodes owning that token range.
+  end note
+  StorageNodes --> Broker : Return matched partition rows
+  deactivate StorageNodes
+  
+  Broker --> RetryNode : Return batch (up to 100 transactions)
+  deactivate Broker
+  
+  alt Batch contains transactions
+    loop for each transaction in batch
+      == 2. Re-invocation & Immediate Deletion ==
+      RetryNode -> Engine : Re-invoke transaction from\nlast successfully completed span
+      activate Engine
+      Engine --> RetryNode : Execution triggered
+      deactivate Engine
+      
+      RetryNode -> Broker : DELETE FROM es_irt_1_{hash}\nWHERE transaction_id = :tx_id
+      activate Broker
+      Broker -> StorageNodes : Delete row immediately
+      activate StorageNodes
+      StorageNodes --> Broker : Acknowledged
+      deactivate StorageNodes
+      Broker --> RetryNode : Deletion confirmed
+      deactivate Broker
+      note right of RetryNode
+        Immediate deletion acts as status transition;
+        prevents re-fetching in the next batch!
+      end note
+    end
+  else Batch is empty
+    RetryNode -> RetryNode : Wait small configured delay\n(long-polling continues until time window expires)
+  end
+end
+@enduml
+----
 
 [TIP]
 ====
@@ -276,40 +385,58 @@ TIP: The key difference between *immediate retry retention* (`es_irt_*`) and *tr
 
 image::stacksaga-database-support:cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-retry.svg[]
 
-Just imagine if you configure the *Transaction retry retention time* to be 2 minutes.
-The *Transaction retry retention time* will be within the range of 1 minute to 3 minutes.
+Suppose you configure the *Transaction retry retention time* to be **2 minutes**.
+The actual time a transaction waits before being retried will naturally oscillate between **1 minute and 3 minutes**.
 
-*How does that happen?*
+*Why does this oscillation happen?*
 
-If the *Transaction retry retention time* has been configured as 2 minutes, 3 schedulers are triggered in round-robin fashion -- up to 30 times within a day -- for collecting and re-invoking the temporarily stopped transactions as shown in the diagram.
+When the retry delay is set to 2 minutes, 3 scheduled rotation slots run in round-robin fashion throughout the day:
 
-. 1st schedule at: 00:00 (`es_irt_1_{hash}`)
-. 2nd schedule at: 00:02 (`es_irt_2_{hash}`)
-. 3rd schedule at: 00:04 (`es_irt_3_{hash}`)
-. 4th schedule at: 00:06 (`es_irt_1_{hash}`)
-. 5th schedule at: 00:08 (`es_irt_2_{hash}`)
+. *00:00* -> `es_irt_1_{hash}`
+. *00:02* -> `es_irt_2_{hash}`
+. *00:04* -> `es_irt_3_{hash}`
+. *00:06* -> `es_irt_1_{hash}`
+. *00:08* -> `es_irt_2_{hash}`
 . and so on...
 
-To determine whether a transaction has had sufficient time to remain without being retried, the system uses the middle time of the configured duration as the boundary point.
-This boundary helps classify transactions into different retry schedules.
+==== The Challenge: Preventing Premature Retries
 
-*Transaction Placement Logic*
+Imagine a transaction encounters a transient error and pauses at `00:03:58`.
+The next scheduled batch runs at `00:04:00` -- just *2 seconds later*.
+If we placed that transaction into `es_irt_3_{hash}` (the `00:04:00` table), it would be retried after only 2 seconds!
+Retrying immediately would defeat the purpose of the 2-minute cooldown and risk overwhelming an already struggling downstream service.
+Every transaction must be guaranteed a fair minimum cooldown period (at least half of the configured delay).
 
-. Transactions Behind the Boundary (Back of the Boundary)
-* These transactions have already passed the boundary point.
-* They are scheduled for the next upcoming retry schedule.
-. Transactions Ahead of the Boundary
-* These transactions were stopped after the boundary point.
-* They are scheduled for the retry schedule after the next upcoming schedule, to allow more time before retry.
+==== The Solution: The Midpoint Boundary Rule
 
-[cols="^1,^1,^1,^1,^1",options="header"]
+To solve this, StackSaga divides each 2-minute scheduling interval in half using the **midpoint as a boundary point**:
+
+* For the active interval between `00:02:00` and `00:04:00`, the configured duration is 2 minutes, making **`00:03:00` the midpoint boundary**.
+
+*Transaction Placement Rule:*
+
+. *First Half (Before Midpoint -- `00:02:00` to `00:03:00`):* +
+The transaction paused early enough in the interval.
+By the time the next schedule (`00:04:00`) runs, it will have waited at least 1 minute (the minimum threshold).
+Therefore, it is placed in the table for the **immediate next schedule (`es_irt_3_{hash}` at 00:04:00)**.
+
+. *Second Half (After Midpoint -- `00:03:00` to `00:04:00`):* +
+The transaction paused too close to the `00:04:00` schedule (less than 1 minute remaining).
+To protect it from premature retry, it skips `00:04:00` and is placed into the table for the **schedule after next (`es_irt_1_{hash}` at 00:06:00)**.
+
+.Example Scenario: Transactions Pausing Between 00:02:00 and 00:04:00
+[cols="^1,^1,^1,^1,^1,^1",options="header"]
 [.google-anno-skip]
 |===
-| Transaction | Stopped Time | Duration                 | Position Relative to  Boundary | Retry Schedule
-| T4         | 00:02:50      | 1 minute and 10 seconds  | Back of the boundary         | Next upcoming schedule
-| T5         | 00:03:08      | 52 seconds               | Ahead of the boundary        | Schedule after the next
-| T6         | 00:03:58      | 2 seconds                | Ahead of the boundary        | Schedule after the next
+| Transaction | Stopped Time | Time Remaining until 00:04:00 | Position in Interval | Assigned Table & Schedule | Total Actual Wait Time
+| T4 | 00:02:50 | 1 min 10 sec (>= 1 min) | First half (Before `00:03:00`) | `es_irt_3_{hash}` (Runs at 00:04:00) | 1 min 10 sec
+| T5 | 00:03:08 | 52 sec (< 1 min) | Second half (After `00:03:00`) | `es_irt_1_{hash}` (Runs at 00:06:00) | 2 min 52 sec
+| T6 | 00:03:58 | 2 sec (< 1 min) | Second half (After `00:03:00`) | `es_irt_1_{hash}` (Runs at 00:06:00) | 2 min 02 sec
 |===
+
+*Why Wait Time Fluctuates Between 1 and 3 Minutes:* +
+* *Minimum wait (1 minute):* A transaction stopping exactly at the midpoint (`00:03:00`) waits 1 minute until execution at `00:04:00`.
+* *Maximum wait (nearly 3 minutes):* A transaction stopping just after the midpoint (`00:03:01`) waits 59 seconds until `00:04:00`, plus the full 2-minute cycle until `00:06:00` (total 2 minutes 59 seconds).
 
 [[transaction_recovery_retention]]
 === es_rt_* tables (Transaction Recovery Retention)
@@ -401,42 +528,56 @@ When the scheduled time window arrives, a Retry-Node fetches that row (along wit
 
 ==== `es_rt_*` table selection formula
 
-As mentioned above, there are 3 `es_rt_*` tables for temporarily storing transactions.
-In the Cassandra implementation, the *Transaction recovery retention time* is not a fixed value like in other database implementations -- it oscillates within a range.
-
 image::stacksaga-database-support:cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-recovery.svg[]
 
-Just imagine if you configure the *Transaction recovery retention time* to be 8 hours.
-The *Transaction recovery retention time* will be within the range of 4 hours to 12 hours.
+Suppose you configure the *Transaction recovery retention time* to be **8 hours** (480 minutes).
+The actual time a transaction is allowed to run before being considered missing will naturally oscillate between **4 hours and 12 hours**.
 
-*How does that happen?*
+*Why does this oscillation happen?*
 
-If the *Transaction recovery retention time* has been configured as 8 hours (480 minutes), 3 schedulers are triggered in round-robin fashion for collecting and re-invoking missing transactions as shown in the diagram.
+When recovery retention is configured as 8 hours, 3 schedulers run in round-robin fashion throughout the day:
 
-. 1st schedule at: 00:00
-. 2nd schedule at: 08:00
-. 3rd schedule at: 16:00
+. *1st schedule at 00:00* -> `es_rt_1_{hash}`
+. *2nd schedule at 08:00* -> `es_rt_2_{hash}`
+. *3rd schedule at 16:00* -> `es_rt_3_{hash}`
 
-To determine whether a transaction has had sufficient time to complete its journey, the system uses the middle time of the configured duration as the boundary point.
-This boundary helps classify transactions into different recovery schedules.
+==== The Challenge: Preventing False Positives for Healthy In-Flight Transactions
 
-*Transaction Placement Logic*
+Imagine a transaction is initialized at `15:59:00`.
+The next recovery scheduler triggers at `16:00:00` -- just *1 minute later*.
+If we placed that transaction into `es_rt_3_{hash}` (the `16:00:00` table), the recovery scheduler would find it still in the table at 16:00, assume it crashed, and trigger a duplicate recovery attempt -- even though the transaction is perfectly healthy and only started 1 minute ago!
+Every transaction must be granted at least half of the configured retention window (4 hours) as a minimum completion buffer before it can be flagged as missing.
 
-. Transactions Behind the Boundary (Back of the Boundary)
-* These transactions have already passed the boundary point.
-* They are scheduled for the next upcoming recovery schedule.
-. Transactions Ahead of the Boundary
-* These transactions were initialized after the boundary point.
-* They are scheduled for the recovery schedule after the next upcoming schedule, to allow more time for completion.
+==== The Solution: The Midpoint Boundary Rule
 
-[cols="^1,^1,^1,^1,^1",options="header"]
+To prevent false alarms, StackSaga divides each 8-hour scheduling window in half using the **midpoint as a boundary point**:
+
+* For the active interval between `08:00:00` and `16:00:00`, the configured duration is 8 hours, making **`12:00:00` the midpoint boundary**.
+
+*Transaction Placement Rule:*
+
+. *First Half (Before Midpoint -- `08:00:00` to `12:00:00`):* +
+The transaction was initialized early in the window.
+By the time the next recovery schedule (`16:00:00`) arrives, the transaction will have been running for at least 4 hours (the minimum threshold).
+Therefore, it is placed into the table for the **immediate next schedule (`es_rt_3_{hash}` at 16:00:00)**.
+
+. *Second Half (After Midpoint -- `12:00:00` to `16:00:00`):* +
+The transaction was initialized after the midpoint (less than 4 hours before the 16:00 schedule).
+To give it adequate time to complete naturally, it skips the 16:00 schedule and is placed into the table for the **schedule after next (`es_rt_1_{hash}` at 00:00:00)**.
+
+.Example Scenario: Transactions Initialized Between 08:00:00 and 16:00:00
+[cols="^1,^1,^1,^1,^1,^1",options="header"]
 [.google-anno-skip]
 |===
-| Transaction | Initialization Time | Duration  | Position Relative to Boundary | Recovery Schedule
-| T4         | 11:30               | 4 hours 30 minutes                | Back of the boundary         | Next upcoming schedule
-| T5         | 12:30               | 3 hours 30 minutes                 | Ahead of the boundary        | Schedule after the next
-| T6         | 15:59               | 1 minute                   | Ahead of the boundary        | Schedule after the next
+| Transaction | Initialization Time | Time Remaining until 16:00:00 | Position in Interval | Assigned Table & Schedule | Total Grace Period Before Recovery
+| T4 | 11:30 | 4 hours 30 min (>= 4h) | First half (Before `12:00`) | `es_rt_3_{hash}` (Runs at 16:00:00) | 4 hours 30 min
+| T5 | 12:30 | 3 hours 30 min (< 4h) | Second half (After `12:00`) | `es_rt_1_{hash}` (Runs at 00:00:00) | 11 hours 30 min
+| T6 | 15:59 | 1 minute (< 4h) | Second half (After `12:00`) | `es_rt_1_{hash}` (Runs at 00:00:00) | 8 hours 01 min
 |===
+
+*Why Grace Period Fluctuates Between 4 and 12 Hours:* +
+* *Minimum grace period (4 hours):* A transaction initialized exactly at the midpoint (`12:00:00`) is checked at `16:00:00` (4 hours elapsed).
+* *Maximum grace period (nearly 12 hours):* A transaction initialized just after the midpoint (`12:00:01`) waits 3 hours 59 minutes until `16:00`, plus the full 8-hour cycle until `00:00` (total 11 hours 59 minutes).
 
 ==== Handling False Positives in Transaction Recovery & the Role of Idempotency
 
