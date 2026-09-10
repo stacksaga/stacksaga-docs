@@ -75,7 +75,7 @@ However, for large-scale deployments you can create *multiple virtual clusters w
 Each virtual cluster gets its own independent set of generated tables (`es_rt_*` and `es_irt_*`) and its own dedicated xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Retry Ring Coordinator] deployment.
 This lets you split the retry subsystem into isolated streams -- if one virtual cluster's coordinator fails, the others continue operating normally.
 
-See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Clusters] for the full architecture and deployment topologies.
+See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Clusters] for the full conceptual explanation and xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[Ring-Coordinator Deployment Topologies] to understand how the Ring-Coordinator and Retry-Nodes are deployed in practice across single and multiple virtual clusters.
 
 *How does this affect table names?* +
 The generated tables are named using a hash suffix derived from the combination of service name, region, and cluster.
@@ -176,24 +176,140 @@ To track transactions that need attention, StackSaga uses two separate sets of g
 [cols="1,2,2",options="header"]
 [.google-anno-skip]
 |===
-| Problem | Table Set | When a record is added / removed
-
-| *Transaction crashed / went missing* +
-The orchestrator node died unexpectedly mid-execution.
-| `es_rt_1_{hash}` / `es_rt_2_{hash}` / `es_rt_3_{hash}` +
-(recovery retention)
-| *Added* when the transaction is *initialized*. +
-*Removed* only when it *completes successfully*.
+| Problem | Table Set | When a record is added / deleted
 
 | *Transaction paused due to transient error* +
 A downstream resource was temporarily unavailable.
 | `es_irt_1_{hash}` / `es_irt_2_{hash}` / `es_irt_3_{hash}` +
 (immediate retry retention)
 | *Added* only when the transaction *stops* due to a retryable error. +
-*Removed* when it is picked up for retry.
+*Deleted* immediately after it is fetched by a Retry-Node for re-invocation.
+
+| *Transaction crashed / went missing* +
+The orchestrator node died unexpectedly mid-execution.
+| `es_rt_1_{hash}` / `es_rt_2_{hash}` / `es_rt_3_{hash}` +
+(recovery retention)
+| *Added* when the transaction is *initialized*. +
+*Deleted* only when it *completes successfully*.
 |===
 
 Both table sets use the same three-table rotation mechanism, but with very different time windows -- typically hours for recovery and minutes for retry.
+
+==== How Retry-Nodes Process These Tables (Token Range-Based Batch Fetching)
+
+[NOTE]
+====
+*Why the table itself acts as the status indicator* +
+In a SQL database you can simply filter `WHERE status = 'PENDING'` to find work.
+In Cassandra, that is not possible without an expensive full cluster scan, because data is sharded by partition key across nodes.
+StackSaga's solution is elegant: *the presence of a row in the table IS the status*.
+If a row exists in `es_rt_*`, that transaction needs recovery.
+If a row exists in `es_irt_*`, that transaction needs retry.
+No status field is needed -- membership in the table is the signal.
+====
+
+The actual fetching and re-invocation is done by *Retry-Nodes* -- orchestrator instances that have the xref:retry-ring-coordinator:ring-coordinator-connector.adoc[Ring-Coordinator Connector] added and enabled.
+The xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator] (Master + Slave) is *not* responsible for touching the database.
+Its only role is to assign each Retry-Node a *token range* -- a unique, non-overlapping slice of the Cassandra token ring -- so that no two Retry-Nodes ever fetch the same rows simultaneously.
+
+NOTE: The way Ring-Coordinator instances and Retry-Nodes are deployed together depends on the scale and virtual cluster configuration of your system. See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[Ring-Coordinator Deployment Topologies] for the available deployment options -- from an embedded single-instance setup to fully clustered multi-virtual-cluster deployments.
+
+Here is how a Retry-Node processes a table (the same flow applies to both `es_rt_*` and `es_irt_*`):
+
+. *Receive a token range* +
+The Retry Ring Coordinator pushes the Retry-Node its assigned token range (e.g. token `1` to `1000`) for the current time window.
+
+. *Determine the target table* +
+Based on the configured schedule, the Retry-Node knows which table slot is currently active (e.g. `es_irt_1_{hash}` at 00:00, `es_irt_2_{hash}` at 00:02, etc.).
+
+. *Fetch a batch by token range* +
+The Retry-Node queries the target table for rows whose Cassandra token falls within its assigned range:
++
+[source,sql]
+----
+SELECT * FROM es_irt_1_{hash}
+WHERE token(transaction_id) >= 1 AND token(transaction_id) <= 1000
+LIMIT 100;  -- controlled by stacksaga.cassandra.transaction.stream.batch-size
+----
++
+Cassandra's internal broker resolves which physical nodes hold data for that token range and fetches *only from those nodes* -- no full cluster scan, no contact with unrelated nodes.
+If the token range spans data on 10 different nodes, Cassandra collects from those 10 nodes transparently.
+The Retry-Node receives at most `batch-size` rows.
+
+. *Re-invoke the transactions* +
+Each fetched transaction is re-invoked from the last successfully completed span.
+
+. *Delete the rows immediately* +
+After handing each transaction off for re-invocation, its row is *deleted* from the table.
+This is critical: because Cassandra cannot update a "status" field, deletion is the only way to mark that a row has been processed.
+If a row were not deleted, it would be picked up again in the next batch fetch.
+
+. *Repeat until the time window expires* +
+The Retry-Node continues fetching batches until the table is drained within its token range, then waits for the next scheduled window.
+
+[TIP]
+====
+*Why is this safe with multiple Retry-Nodes running in parallel?* +
+Each Retry-Node holds a *non-overlapping token range*.
+Token range `1–1000` and token range `1001–2000` can never produce the same rows.
+This means multiple Retry-Nodes can fetch from the same table concurrently without coordination, locks, or conflicts -- a major architectural advantage of this design over SQL-based implementations.
+====
+
+[[transaction_retry_retention]]
+=== es_irt_* tables (Immediate Retry Retention)
+
+In StackSaga, asynchronous xref:architecture:transaction-retrying.adoc[transaction retrying] is an essential feature that ensures transactions are retried when they fail due to resource unavailability.
+When a transaction's execution fails with a Resource Unavailability problem, it is stored in one of the `es_irt_*` tables and waits to be picked up by the next available xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Node].
+
+Unlike SQL databases, Cassandra does not support centralized indexing for bulk filtering.
+This makes it impossible to scan transactions by their states.
+More details on this limitation can be found xref:#bulk-filtering-not-possible[here].
+
+To overcome this, *transaction retrying* follows the same *table-switching mechanism* used for xref:#transaction_recovery_retention[transaction recovery] and the same *token range-based batch fetch-and-delete* approach described in xref:#_how_retry_nodes_process_these_tables_token_range_based_batch_fetching[How Retry-Nodes Process These Tables].
+
+When a transaction is stopped due to resource unavailability, it is stored in one of the `es_irt_*` tables.
+At the next scheduled time window, a Retry-Node fetches it by token range, re-invokes it, and deletes the row immediately.
+
+TIP: The key difference between *immediate retry retention* (`es_irt_*`) and *transaction recovery retention* (`es_rt_*`) is the time window: retry retention uses a much shorter delay (minutes) compared to recovery retention (hours), since paused transactions are expected to be retried quickly once the resource becomes available again.
+
+==== `es_irt_*` table selection formula
+
+image::stacksaga-database-support:cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-retry.svg[]
+
+Just imagine if you configure the *Transaction retry retention time* to be 2 minutes.
+The *Transaction retry retention time* will be within the range of 1 minute to 3 minutes.
+
+*How does that happen?*
+
+If the *Transaction retry retention time* has been configured as 2 minutes, 3 schedulers are triggered in round-robin fashion -- up to 30 times within a day -- for collecting and re-invoking the temporarily stopped transactions as shown in the diagram.
+
+. 1st schedule at: 00:00 (`es_irt_1_{hash}`)
+. 2nd schedule at: 00:02 (`es_irt_2_{hash}`)
+. 3rd schedule at: 00:04 (`es_irt_3_{hash}`)
+. 4th schedule at: 00:06 (`es_irt_1_{hash}`)
+. 5th schedule at: 00:08 (`es_irt_2_{hash}`)
+. and so on...
+
+To determine whether a transaction has had sufficient time to remain without being retried, the system uses the middle time of the configured duration as the boundary point.
+This boundary helps classify transactions into different retry schedules.
+
+*Transaction Placement Logic*
+
+. Transactions Behind the Boundary (Back of the Boundary)
+* These transactions have already passed the boundary point.
+* They are scheduled for the next upcoming retry schedule.
+. Transactions Ahead of the Boundary
+* These transactions were stopped after the boundary point.
+* They are scheduled for the retry schedule after the next upcoming schedule, to allow more time before retry.
+
+[cols="^1,^1,^1,^1,^1",options="header"]
+[.google-anno-skip]
+|===
+| Transaction | Stopped Time | Duration                 | Position Relative to  Boundary | Retry Schedule
+| T4         | 00:02:50      | 1 minute and 10 seconds  | Back of the boundary         | Next upcoming schedule
+| T5         | 00:03:08      | 52 seconds               | Ahead of the boundary        | Schedule after the next
+| T6         | 00:03:58      | 2 seconds                | Ahead of the boundary        | Schedule after the next
+|===
 
 [[transaction_recovery_retention]]
 === es_rt_* tables (Transaction Recovery Retention)
@@ -221,8 +337,8 @@ Since transactions cannot be filtered in bulk due to Cassandra's partition-based
 * Each transaction is retained for a specific time window after being added to the recovery table.
 * If a transaction fails to complete within this configured time frame, it is considered missing and will be exposed for re-invocation.
 
-. Retry Ring Coordinator-Based Recovery
-* The xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator] collects pending transactions from the `es_rt_*` tables and distributes them to the available orchestrator instances for re-invocation.
+. Retry-Node-Based Recovery
+* xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Nodes] -- orchestrator instances with the Ring-Coordinator Connector enabled -- receive a token range from the Retry Ring Coordinator and use it to fetch from the `es_rt_*` tables, re-invoking any transactions they find.
 
 As described above, when a transaction is initialized its data is stored in one of the `es_rt_*` tables.
 If the transaction completes successfully, its data is removed from the table upon completion.
@@ -248,7 +364,8 @@ Because Cassandra has no feature for scanning data within a specific time frame,
 
 *Why Are Tables Created Per Region and Cluster?* +
 
-In a *multi-region / multi-cluster deployment*, each Retry Ring Coordinator operates within a specific region and cluster and only accesses data within its assigned scope.
+In a *multi-region / multi-cluster deployment*, each Retry-Node is stamped with its region and cluster, and only fetches rows belonging to its own region and cluster.
+This means Retry-Nodes in `us-east-1` never touch data originating from `us-west-1`, even if both share the same physical Cassandra cluster.
 
 For example, if a service is deployed across two regions (`us-east-1` and `us-west-1`), each with a single cluster, the number of generated table sets doubles -- resulting in six tables:
 
@@ -269,7 +386,7 @@ For example, if a service is deployed across two regions (`us-east-1` and `us-we
 * *Efficient Recovery Processing* +
 Instead of scanning a massive dataset, transactions are categorized based on scheduled recovery times.
 * *Regional and Cluster Isolation* +
-Retry Ring Coordinators in a specific region and cluster only access data within their scope, reducing unnecessary cross-region queries.
+Retry-Nodes only fetch rows that match their own region and cluster, reducing cross-region data access even in a globally shared Cassandra cluster.
 * *Scalability* +
 The system can scale to handle multiple regions and virtual clusters independently without affecting transaction recovery in other locations.
 
@@ -278,10 +395,9 @@ The system can scale to handle multiple regions and virtual clusters independent
 ====  Identifying Missing Transactions
 
 Consider a scenario where 1,000 transactions are executed within a specified time period across multiple nodes.
-Ideally, all transactions that complete their journey are removed from the `es_rt_*` table.
-However, if even one transaction fails to complete, it persists in the table.
-That transaction is then exposed to the Retry Ring Coordinator after the configured time period, which collects it from the respective `es_rt_*` table and distributes it among the available orchestrator instances for re-invocation.
-This can happen due to various reasons such as system failures, network issues, or unexpected interruptions.
+Ideally, all transactions that complete their journey are deleted from the `es_rt_*` table.
+However, if even one transaction fails to complete -- due to a node crash, power failure, or unexpected interruption -- its row persists in the table.
+When the scheduled time window arrives, a Retry-Node fetches that row (along with any others in its token range) from the respective `es_rt_*` table, re-invokes the transaction from the last successfully completed span, and then deletes the row so it is not picked up again.
 
 ==== `es_rt_*` table selection formula
 
@@ -336,62 +452,6 @@ In this case:
 
 IMPORTANT: This is one of the possible ways transactions can be executed multiple times.
 To prevent these kinds of unintended duplicate executions, *xref:architecture:idempotency.adoc[idempotency]* should be implemented at the atomic execution level of the transaction.
-
-[[transaction_retry_retention]]
-=== es_irt_* tables (Immediate Retry Retention)
-
-In StackSaga, asynchronous xref:architecture:transaction-retrying.adoc[transaction retrying] is an essential feature that ensures transactions are retried when they fail due to resource unavailability.
-When a transaction's execution fails with a Resource Unavailability problem, the transaction is retried asynchronously by the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator] by collecting them from the event store.
-Unlike SQL databases, Cassandra does not support centralized indexing for bulk filtering.
-This makes it impossible to scan transactions by their states.
-More details on this limitation can be found xref:#bulk-filtering-not-possible[here].
-
-To overcome this,
-*transaction retrying* follows the same *table-switching mechanism* used for xref:#transaction_recovery_retention[transaction recovery].
-
-When a transaction is stopped due to resource unavailability, it is stored in one of the `es_irt_*` tables.
-It will be exposed for the upcoming retry schedule by the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator].
-
-TIP: The key difference between *transaction recovery retention* (`es_rt_*`) and *immediate retry retention* (`es_irt_*`) is the time window: retry retention uses a much shorter delay (minutes) compared to recovery retention (hours), since paused transactions are expected to be retried quickly once the resource becomes available again.
-
-==== `es_irt_*` table selection formula
-
-image::stacksaga-database-support:cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-retry.svg[]
-
-Just imagine if you configure the *Transaction retry retention time* to be 2 minutes.
-The *Transaction retry retention time* will be within the range of 1 minute to 3 minutes.
-
-*How does that happen?*
-
-If the *Transaction retry retention time* has been configured as 2 minutes, 3 schedulers are triggered in round-robin fashion -- up to 30 times within a day -- for collecting and re-invoking the temporarily stopped transactions as shown in the diagram.
-
-. 1st schedule at: 00:00 (`es_irt_1_{hash}`)
-. 2nd schedule at: 00:02 (`es_irt_2_{hash}`)
-. 3rd schedule at: 00:04 (`es_irt_3_{hash}`)
-. 4th schedule at: 00:06 (`es_irt_1_{hash}`)
-. 5th schedule at: 00:08 (`es_irt_2_{hash}`)
-. and so on...
-
-To determine whether a transaction has had sufficient time to remain without being retried, the system uses the middle time of the configured duration as the boundary point.
-This boundary helps classify transactions into different retry schedules.
-
-*Transaction Placement Logic*
-
-. Transactions Behind the Boundary (Back of the Boundary)
-* These transactions have already passed the boundary point.
-* They are scheduled for the next upcoming retry schedule.
-. Transactions Ahead of the Boundary
-* These transactions were stopped after the boundary point.
-* They are scheduled for the retry schedule after the next upcoming schedule, to allow more time before retry.
-
-[cols="^1,^1,^1,^1,^1",options="header"]
-[.google-anno-skip]
-|===
-| Transaction | Stopped Time | Duration                 | Position Relative to  Boundary | Retry Schedule
-| T4         | 00:02:50      | 1 minute and 10 seconds  | Back of the boundary         | Next upcoming schedule
-| T5         | 00:03:08      | 52 seconds               | Ahead of the boundary        | Schedule after the next
-| T6         | 00:03:58      | 2 seconds                | Ahead of the boundary        | Schedule after the next
-|===
 
 '''
 
