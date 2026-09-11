@@ -302,6 +302,94 @@ Two different custom domain-entity classes cannot declare the same `name`.
 **Spring Bean Notice**: In StackSaga, custom domain entities are lightweight state carriers—they are **not** Spring beans.
 They do not need to be within the application's component scan package. Instead, register the package containing your domain entities using the `{domain-entity-scan-prop}` configuration property.
 ====
+
+[[securing_sensitive_data]]
+=== Securing Sensitive Data & Trace-Window Protection (Data Masking)
+
+Because the `DomainEntity` represents the complete state of a transaction, it is serialized and committed to the Event Store at every atomic span snapshot.
+These serialized snapshots are retrieved and displayed directly on the **Trace-Window dashboard** (`/execution/binary`) for forensic analysis, debugging, and observability.
+
+When transactions process sensitive business data—such as passwords, authentication tokens, API keys, credit card numbers, or Personally Identifiable Information (PII)—developers must ensure that sensitive values are protected and not exposed in plain text within the Event Store or on the Trace-Window dashboard.
+
+Since the `DomainEntity` is a standard Java object serialized via Jackson, you can leverage Jackson annotations and custom getter/setter encapsulation to secure sensitive properties:
+
+==== 1. Masking Sensitive Fields with Jackson Annotations (`@JsonIgnore`)
+
+If a field is only needed at runtime in memory and should **never** be persisted to the Event Store or shown in the Trace-Window:
+
+* Annotate the getter method or field with `@JsonIgnore`.
+* Jackson will exclude this property from the serialized JSON payload.
+
+[source,java]
+----
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+public class OrderDomainEntity extends DomainEntity {
+
+    @JsonProperty("card_last_four")
+    private String cardLastFour;
+
+    // Ephemeral in-memory CVV: Never serialized or persisted to the Event Store
+    @JsonIgnore
+    private String cvv;
+
+    // ...
+}
+----
+
+==== 2. Encrypted / Obfuscated Storage with Plain-Text Business Accessors
+
+When sensitive data **must** be retained across saga spans (so subsequent executors can use it), store the data in an encrypted, hashed, or encoded form in the persisted property, while providing a `@JsonIgnore`-annotated helper method for your executors to decrypt or decode the actual value in memory:
+
+[source,java]
+----
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.stacksaga.annotation.SagaDomainEntity;
+import org.stacksaga.annotation.SagaDomainEntityVersion;
+import org.stacksaga.DomainEntity;
+
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity"
+)
+public class OrderDomainEntity extends DomainEntity {
+
+    // Serialized & stored in Event Store (safe for Trace-Window dashboard)
+    @JsonProperty("token")
+    private String encodedToken;
+
+    public OrderDomainEntity() {
+        super(OrderDomainEntity.class);
+    }
+
+    /**
+     * Business methods / executors call this method to retrieve the real decrypted data.
+     * Annotated with @JsonIgnore so Jackson does not serialize it into the Event Store or Trace-Window.
+     */
+    @JsonIgnore
+    public String getTokenAsString() {
+        return decodeOrDecrypt(this.encodedToken);
+    }
+
+    public String getEncodedToken() {
+        return this.encodedToken;
+    }
+
+    public void setEncodedToken(String encodedToken) {
+        this.encodedToken = encodedToken;
+    }
+}
+----
+
+[TIP]
+====
+**Trace-Window Security Best Practice**:
+By storing only masked or encrypted values (e.g., `encodedToken`, `maskedPan`) in `@JsonProperty` fields and exposing decrypted values solely through `@JsonIgnore` accessor methods:
+* The transaction state remains fully persistent and recoverable across nodes and retries.
+* The Trace-Window dashboard safely renders non-sensitive or masked payloads to developers and auditors without leaking confidential customer credentials or PII.
+====
 // end::creating-custom-domain-entity[]
 
 // tag::further-configurations[]
