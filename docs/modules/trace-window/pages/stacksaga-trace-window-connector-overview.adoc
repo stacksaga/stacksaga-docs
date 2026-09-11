@@ -1,41 +1,48 @@
-= Stacksaga Trace-Window Connector
+= StackSaga TraceWindow Connector Overview
 
 == Overview
 
-Stacksaga Trace-Window Connector is the tool that allows you to connect your orchestrator service with Trace-Window by exposing the necessary APIs and data formats as endpoints.
+The *StackSaga TraceWindow Connector* is the embedded library that enables your orchestrator microservices to securely communicate with the xref:stacksaga-trace-window.adoc[StackSaga TraceWindow] console.
 
-== Features
+It exposes the internal `/stacksaga/*` REST management endpoints, enforces dual-token security policies, supports optional secondary port and TLS isolation, and extracts execution logs from your local transaction event stores.
 
-* Exposes APIs for Trace-Window to fetch trace data from the orchestrator service from any xref:stacksaga-database-support:overview/database-support-overview.adoc[supported databases] implementations.
+'''
 
-* It supports both `Spring MVC` and `Spring WebFlux` based orchestrator services, allowing for flexibility in the choice of web framework.
+== Key Capabilities
 
-* Provide the authentication and authorization mechanisms to ensure secure access to the trace data for the production environment and authentication free access for the development environment.
+* **Universal Event-Store Access:** Exposes standardized internal endpoints for TraceWindow to fetch saga transaction traces from any xref:stacksaga-database-support:overview/database-support-overview.adoc[supported database implementation].
+* **Dual Stack Support:** Provides specialized, native connectors for both **Spring MVC** (Servlet stack) and **Spring WebFlux** (reactive stack).
+* **Dual Security Operating Modes:** Supports tokenless access for local development (`secure-api=false`) and dual-token validation with xref:stacksaga-trace-window.adoc#manage_operators[StackSaga Central RBAC] for production (`secure-api=true`).
+* **Port & SSL Isolation:** Allows running trace endpoints on a dedicated secondary port with custom TLS certificates via Spring Boot SSL bundles.
+* **Topological Agility:** Supports both xref:stacksaga-trace-window.adoc#direct_mode[Direct Mode] (`{host:port}/{api-path}`) and xref:stacksaga-trace-window.adoc#gateway_mode[Gateway Mode] (`{host:port}/{service-name}/{api-path}`) with automated CORS handling.
+
+'''
 
 == Adding the Connector Dependency
 
-To use the Trace-Window feature, first add the matching connector dependency to your project's `pom.xml`. Stacksaga ships one such dependency per web stack; add the one that matches your orchestrator service's technology:
+To integrate TraceWindow with your orchestrator service, add the dependency matching your web stack to your `pom.xml`:
 
-* xref:#connector-servlet[`stacksaga-trace-window-connector-servlet`] — for orchestrator services built with `Spring MVC` (Servlet stack).
-* xref:#connector-webflux[`stacksaga-trace-window-connector-webflux`] — for orchestrator services built with `Spring WebFlux` (reactive stack).
+* xref:#connector-servlet[`stacksaga-trace-window-connector-servlet`] — for services built with **Spring MVC** (Servlet stack).
+* xref:#connector-webflux[`stacksaga-trace-window-connector-webflux`] — for services built with **Spring WebFlux** (reactive stack).
 
-Both dependencies pull in `stacksaga-trace-window-connector-api` transitively, so that shared module never needs to be declared or configured directly — declaring the servlet or webflux dependency is all that's required on the dependency side. The dependency alone doesn't switch the feature on, though: it must also be enabled via the `stacksaga.trace-window.enable-api` property, described in <<Configuration Properties>>.
+[NOTE]
+====
+Both dependencies automatically pull in `stacksaga-trace-window-connector-api` transitively. You only need to declare one connector dependency based on your chosen web runtime.
+====
 
 [#connector-servlet]
-== `stacksaga-trace-window-connector-servlet` for Spring MVC Orchestrator Services
+=== `stacksaga-trace-window-connector-servlet` (Spring MVC)
 
-To enable Trace-Window for a Spring MVC based orchestrator service, add the `stacksaga-trace-window-connector-servlet` dependency to your project. This is what exposes the required APIs and data formats for Trace-Window to fetch trace data from your orchestrator service.
-
-Here is an example of how to add the `stacksaga-trace-window-connector-servlet` dependency to your project
+For standard Spring Boot Web (Tomcat/Jetty/Undertow) applications:
 
 [source,xml]
 ----
 <dependencyManagement>
     <dependencies>
-        <dependency> <!--Only for stacksaga dependencies version management-->
+        <dependency>
             <groupId>org.stacksaga</groupId>
             <artifactId>stacksaga-bom</artifactId>
-            <version1.0.0-SNAPSHOT</version>
+            <version>1.0.0-SNAPSHOT</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
@@ -43,30 +50,27 @@ Here is an example of how to add the `stacksaga-trace-window-connector-servlet` 
 </dependencyManagement>
 
 <dependencies>
-    <dependency> //<1>
+    <!-- StackSaga TraceWindow Connector for Spring MVC -->
+    <dependency>
         <groupId>org.stacksaga</groupId>
         <artifactId>stacksaga-trace-window-connector-servlet</artifactId>
     </dependency>
 </dependencies>
 ----
 
-<1> Add the `stacksaga-trace-window-connector-servlet` dependency to enable Trace-Window for Spring MVC. This is the only Trace-Window connector dependency you need to declare — `stacksaga-trace-window-connector-api` comes along transitively.
-
 [#connector-webflux]
-== `stacksaga-trace-window-connector-webflux` for Spring WebFlux Orchestrator Services
+=== `stacksaga-trace-window-connector-webflux` (Spring WebFlux)
 
-To enable Trace-Window for a Spring WebFlux based orchestrator service, add the `stacksaga-trace-window-connector-webflux` dependency to your project. This is what exposes the required APIs and data formats for Trace-Window to fetch trace data from your orchestrator service.
-
-Here is an example of how to add the `stacksaga-trace-window-connector-webflux` dependency to your project.
+For reactive, non-blocking orchestrator services running on Netty:
 
 [source,xml]
 ----
 <dependencyManagement>
     <dependencies>
-        <dependency> <!--Only for stacksaga dependencies version management-->
+        <dependency>
             <groupId>org.stacksaga</groupId>
             <artifactId>stacksaga-bom</artifactId>
-            <version1.0.0-SNAPSHOT</version>
+            <version>1.0.0-SNAPSHOT</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
@@ -74,18 +78,19 @@ Here is an example of how to add the `stacksaga-trace-window-connector-webflux` 
 </dependencyManagement>
 
 <dependencies>
-    <dependency> //<1>
+    <!-- StackSaga TraceWindow Connector for Spring WebFlux -->
+    <dependency>
         <groupId>org.stacksaga</groupId>
         <artifactId>stacksaga-trace-window-connector-webflux</artifactId>
     </dependency>
 </dependencies>
 ----
 
-<1> Add the `stacksaga-trace-window-connector-webflux` dependency to enable Trace-Window for Spring WebFlux. This is the only Trace-Window connector dependency you need to declare — `stacksaga-trace-window-connector-api` comes along transitively.
+'''
 
-== Configuration Properties
+== Configuration Properties Reference
 
-All properties are prefixed with `stacksaga.trace-window`.
+All connector properties are bound from the `stacksaga.trace-window` configuration prefix.
 
 [cols="3,1,1,4",options="header"]
 [.properties-table.google-anno-skip]
@@ -98,43 +103,46 @@ All properties are prefixed with `stacksaga.trace-window`.
 | `stacksaga.trace-window.enable-api`
 | `boolean`
 | `false`
-| Enables the local `/stacksaga` API so that the Trace Window UI can connect to this service. Must be set to `true` for any of the other properties to have effect. When `false` the connector registers no filters or routes.
+| Master switch that exposes the local `/stacksaga/*` endpoints. Must be set to `true` for the connector to register filters and endpoints. When `false`, no endpoints are activated.
 
 | `stacksaga.trace-window.secure-api`
 | `boolean`
 | `true`
-| Protects every `/stacksaga/*` request with token-based authentication. When `true` (the default) the `access-token` property must also be provided. Set to `false` only in development or testing environments where unauthenticated CORS access is acceptable.
+| When `true` (default), incoming requests must carry a valid token matching `access-token`. In production, this validates against StackSaga Central. Set to `false` for local offline testing.
 
 | `stacksaga.trace-window.access-token`
 | `String`
 | _(none)_
-| The access token used to validate incoming `/stacksaga` requests. Required when both `enable-api` and `secure-api` are `true`. Generate this value from the StackSaga Trace Window UI and paste it here.
+| The Service Access Token used to authenticate requests. Required when both `enable-api` and `secure-api` are `true`. Generated via xref:stacksaga-trace-window.adoc#generate_service_token[TraceWindow Project Settings].
 
 | `stacksaga.trace-window.connector-port`
 | `int`
 | `0` _(disabled)_
-| The port on which the `/stacksaga` connector port endpoints are exclusively exposed. When set, a secondary server connector is started on this port and any `/stacksaga` request arriving on the main application port is rejected with `403 Forbidden`. Leave unset (or `0`) to serve `/stacksaga` on the main application port. +
-
-*Servlet:* adds an extra Tomcat connector sharing the same thread pool — no extra threads are pre-allocated. +
-*WebFlux:* starts a separate Netty server with a minimal event loop — see `connector-event-loop-threads` below.
-
-| `stacksaga.trace-window.connector-event-loop-threads`
-| `int`
-| `1`
-| _(WebFlux only)_ Number of Netty event-loop threads allocated to the secondary admin server started on `connector-port`. The default of `1` is intentionally minimal — Netty's default would allocate `CPU × 2` threads per server instance, which is wasteful for a rarely-accessed connector port. Raise this value only if the connector port receives sustained concurrent traffic. Must be at least `1`. Has no effect in the Servlet variant.
+| Optional dedicated port for `/stacksaga/*` endpoints. When set, a secondary connector is started on this port, and trace requests arriving on the main port receive `403 Forbidden`. Leave unset (`0`) to serve on the main application port.
 
 | `stacksaga.trace-window.connector-ssl-bundle`
 | `String`
 | _(none)_
-| The name of a Spring Boot SSL bundle (declared under `spring.ssl.bundle.*`) to use for HTTPS on the connector port. Only takes effect when `connector-port` is also set. The main application port's SSL configuration is completely independent and is not affected. Leave unset to run the connector port over plain HTTP.
+| The name of a Spring Boot SSL bundle (under `spring.ssl.bundle.*`) to enable HTTPS on `connector-port`. Only takes effect when `connector-port` is configured.
+
+| `stacksaga.trace-window.connector-event-loop-threads`
+| `int`
+| `1`
+| *(WebFlux only)* Number of Netty event-loop threads allocated to the secondary server started on `connector-port`. Minimal default to save resources on admin ports.
 |===
 
-NOTE: When `enable-api=true` and `secure-api=true`, startup validation enforces that `access-token` is present.
-The application will fail to start if the token is missing.
+[IMPORTANT]
+====
+Startup validation enforces that when `enable-api=true` and `secure-api=true`, `stacksaga.trace-window.access-token` must be provided. The application will fail fast at startup if the token is missing.
+====
+
+'''
 
 == Configuration Examples
 
-=== Minimal — API enabled with No authentication (Development / testing only)
+=== 1. Local Development Mode (Security Disabled)
+
+Ideal for rapid local development on `http://localhost:8080` without generating tokens or logging into GitHub:
 
 [source,yaml]
 ----
@@ -144,32 +152,50 @@ stacksaga:
     secure-api: false
 ----
 
-=== Dedicated connector port (HTTP) and token authentication
+=== 2. Standard Production Mode (Main Port)
 
-* The `/stacksaga` endpoints are only reachable on port `8787`.
-Requests to `/stacksaga` on the main port receive `403 Forbidden`.
-* Create access token. read more xref:stacksaga-trace-window.adoc#user_management[User management]
+Uses dual-token security on the default microservice port:
 
 [source,yaml]
 ----
 stacksaga:
   trace-window:
     enable-api: true
-    connector-port: 8787
-    access-token: "your-token-generated-from-trace-window-ui"
+    secure-api: true
+    access-token: ${STACKSAGA_ACCESS_TOKEN}
 ----
 
-=== Dedicated connector port with HTTPS (SSL bundle)
+=== 3. Dedicated Admin Connector Port (HTTP)
 
-Define the SSL bundle under `spring.ssl.bundle.*` and reference it by name.
+Exposes the `/stacksaga/*` trace endpoints exclusively on port `8787`. Calls to `/stacksaga/*` on the main application port will be rejected with `403 Forbidden`:
 
 [source,yaml]
 ----
+server:
+  port: 8080
+
+stacksaga:
+  trace-window:
+    enable-api: true
+    secure-api: true
+    access-token: ${STACKSAGA_ACCESS_TOKEN}
+    connector-port: 8787
+----
+
+=== 4. Dedicated Connector Port with HTTPS (SSL Bundle)
+
+Binds the secondary connector port `8787` to an independent SSL certificate declared via Spring Boot 3 SSL Bundles:
+
+[source,yaml]
+----
+server:
+  port: 8443
+
 spring:
   ssl:
     bundle:
       jks:
-        my-admin-cert:
+        trace-connector-cert:
           keystore:
             location: classpath:admin-keystore.p12
             password: changeit
@@ -178,40 +204,208 @@ spring:
 stacksaga:
   trace-window:
     enable-api: true
-    access-token: "your-token-generated-from-trace-window-ui"
+    secure-api: true
+    access-token: ${STACKSAGA_ACCESS_TOKEN}
     connector-port: 8787
-    connector-ssl-bundle: my-admin-cert
+    connector-ssl-bundle: trace-connector-cert
 ----
 
-TIP: The main application port (e.g. `server.port=8443`) and the connector port can use *different* certificates.
-Each connector/server owns its SSL settings independently.
+[TIP]
+====
+The main application server port (e.g. `8443`) and the connector port (`8787`) can use completely different SSL certificates and keystores.
+====
 
-=== Dedicated connector port with custom thread count (WebFlux only)
+=== 5. Custom Netty Threads (WebFlux Only)
 
-Increase the event-loop thread count when the connector port is expected to handle sustained concurrent traffic.
+For reactive services expecting high-frequency automated dashboard polling:
 
 [source,yaml]
 ----
 stacksaga:
   trace-window:
     enable-api: true
-    access-token: "your-token-generated-from-trace-window-ui"
+    secure-api: true
+    access-token: ${STACKSAGA_ACCESS_TOKEN}
     connector-port: 8787
     connector-event-loop-threads: 2
 ----
 
-NOTE: The `connector-event-loop-threads` property is only meaningful for the WebFlux variant.
-It has no effect in the Servlet variant.
+'''
 
-=== Development / testing — no authentication (CORS only)
+[[gateway-routing-examples]]
+== Gateway Routing Examples
+
+In xref:stacksaga-trace-window.adoc#gateway_mode[Gateway Mode], your API Gateway or reverse proxy intercepts incoming requests targeted at `{host:port}/{service-name}/{api-path}`, strips the service prefix, and forwards the call to the target internal microservice instance.
+
+Here are concrete production routing configurations:
+
+=== Spring Cloud Gateway
+
+Configure route matching and path prefix stripping:
 
 [source,yaml]
+.gateway-application.yml
 ----
-stacksaga:
-  trace-window:
-    enable-api: true
-    secure-api: false
+spring:
+  cloud:
+    gateway:
+      routes:
+        # Route for Order Service TraceWindow Connector
+        - id: order-service-trace-window
+          uri: lb://ORDER-SERVICE
+          predicates:
+            - Path=/order-service/stacksaga/**
+          filters:
+            # Strips the /order-service prefix before forwarding to the microservice
+            - StripPrefix=1
+
+        # Route for Payment Service TraceWindow Connector
+        - id: payment-service-trace-window
+          uri: lb://PAYMENT-SERVICE
+          predicates:
+            - Path=/payment-service/stacksaga/**
+          filters:
+            - StripPrefix=1
+
+      # Enable CORS for the TraceWindow web console
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOrigins: "https://trace.stacksaga.org"
+            allowedMethods:
+              - GET
+              - POST
+              - OPTIONS
+            allowedHeaders:
+              - Authorization
+              - Content-Type
 ----
 
-WARNING: With `secure-api=false` the `/stacksaga` endpoints are accessible without any token.
-Do not use this setting in production.
+=== Nginx Reverse Proxy
+
+Strip the service identifier prefix using a regex rewrite rule and pass through the authorization headers:
+
+[source,nginx]
+.nginx.conf
+----
+http {
+    # Upstream definition for your microservices
+    upstream order_service_upstream {
+        server order-service-internal.local:8081;
+    }
+
+    upstream payment_service_upstream {
+        server payment-service-internal.local:8082;
+    }
+
+    server {
+        listen 443 ssl;
+        server_name api.mycompany.com;
+
+        # SSL configuration...
+
+        # Order Service TraceWindow Route
+        # Rewrites /order-service/stacksaga/* -> /stacksaga/*
+        location ~ ^/order-service/(stacksaga/.*)$ {
+            proxy_pass http://order_service_upstream/$1$is_args$args;
+
+            # Forward client and host headers
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # Ensure Authorization header (Bearer User_Token) is preserved
+            proxy_pass_header Authorization;
+
+            # TraceWindow CORS headers
+            add_header 'Access-Control-Allow-Origin' 'https://trace.stacksaga.org' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type' always;
+
+            # Handle pre-flight OPTIONS requests
+            if ($request_method = 'OPTIONS') {
+                add_header 'Access-Control-Allow-Origin' 'https://trace.stacksaga.org' always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type' always;
+                add_header 'Access-Control-Max-Age' 1728000;
+                add_header 'Content-Type' 'text/plain charset=UTF-8';
+                add_header 'Content-Length' 0;
+                return 204;
+            }
+        }
+
+        # Payment Service TraceWindow Route
+        location ~ ^/payment-service/(stacksaga/.*)$ {
+            proxy_pass http://payment_service_upstream/$1$is_args$args;
+            proxy_set_header Host $host;
+            proxy_pass_header Authorization;
+        }
+    }
+}
+----
+
+=== Kubernetes Ingress (ingress-nginx)
+
+When deploying on Kubernetes with the **ingress-nginx** controller, use path rewriting annotations:
+
+[source,yaml]
+.order-service-trace-ingress.yaml
+----
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: order-service-trace-ingress
+  namespace: stacksaga-apps
+  annotations:
+    # Rewrite /order-service/stacksaga/(.*) to /stacksaga/$1
+    nginx.ingress.kubernetes.io/rewrite-target: /stacksaga/$1
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://trace.stacksaga.org"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Authorization, Content-Type"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: api.mycompany.com
+      http:
+        paths:
+          - path: /order-service/stacksaga/(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: order-service
+                port:
+                  number: 8081
+----
+
+'''
+
+== Connector Endpoints Reference
+
+When `stacksaga.trace-window.enable-api=true`, the connector automatically registers and serves the following REST endpoints:
+
+[cols="1,2,4", options="header"]
+|===
+| HTTP Method | Path Pattern | Purpose & Description
+
+| `GET`
+| `/stacksaga/api/v1/welcome`
+| **Handshake & Health Probe:** Called by TraceWindow to verify service reachability, inspect service instance ID, validate tokens, and confirm project read permissions.
+
+| `GET`
+| `/stacksaga/api/v1/transaction`
+| **Transaction Trace Query:** Retrieves comprehensive saga trace data for a given `transactionId`, including step execution nodes, execution state, timestamps, and error diagnostics.
+|===
+
+=== Request Headers
+
+* `Authorization: Bearer <User_JWT_Token>`: Supplied by the TraceWindow web console to identify the active operator.
+* `X-Timezone: <Timezone_Offset>`: (e.g., `+08:00`) Passed by TraceWindow to format all returned timestamps according to the operator's local timezone.
+
+'''
+
+== Next Steps
+
+* To learn how to create projects, generate service tokens, and connect via the Web UI, see the xref:stacksaga-trace-window.adoc[StackSaga TraceWindow User Guide].
+* For visual architecture diagrams of Direct Mode vs Gateway Mode, see xref:stacksaga-trace-window.adoc#connection_topologies[Connection Topologies].
