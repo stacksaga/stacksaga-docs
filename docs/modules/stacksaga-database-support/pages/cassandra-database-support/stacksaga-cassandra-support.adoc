@@ -109,7 +109,67 @@ xref:cassandra-database-support/cassandra-schema-generator.adoc[-> Open the Cass
 [[connection-configuration]]
 == Configuring Cassandra connection
 
-// todo: provide the cassandra connection configuration ways.
+To connect your orchestrator application to the Cassandra cluster, `stacksaga-cassandra-reactive-support` utilizes the standard Datastax Java Driver (version 4.x) configuration format.
+
+=== 1. Providing `stacksaga-cassandra.conf`
+
+Create a file named `stacksaga-cassandra.conf` in your orchestrator project's `src/main/resources` directory.
+This file defines cluster contact points, local datacenter, keyspace, authentication credentials, and driver execution policies.
+
+.Example `src/main/resources/stacksaga-cassandra.conf`
+[source,hocon]
+----
+datastax-java-driver {
+  basic {
+    # Cassandra cluster contact points (host:port)
+    contact-points = ["127.0.0.1:9042"]
+    
+    # Target keyspace where StackSaga tables are created
+    session-keyspace = "stacksaga_event_store"
+
+    load-balancing-policy {
+      # Local datacenter name matching your Cassandra cluster topology
+      local-datacenter = "datacenter1"
+    }
+
+    # Request timeout for reactive driver execution
+    request.timeout = 10 seconds
+  }
+
+  advanced.auth-provider {
+    # Plain text credentials for cluster authentication
+    class = PlainTextAuthProvider
+    username = "cassandra"
+    password = "cassandra"
+  }
+
+  advanced.timestamp-generator {
+    # Use server-side timestamps to align with cluster time
+    class = ServerSideTimestampGenerator
+  }
+}
+----
+
+NOTE: If you need to place `stacksaga-cassandra.conf` in a custom path or external location, you can point to it in your `application.yml` via the `stacksaga.cassandra.config` property (e.g., `stacksaga.cassandra.config: file:/etc/stacksaga/cassandra.conf`).
+
+=== 2. Creating the Keyspace
+
+Before running the schema script generated in Step-2, ensure that the target keyspace exists in your Cassandra cluster.
+For production deployments, always use `NetworkTopologyStrategy` configured with your physical datacenter name and appropriate replication factor:
+
+.Example Keyspace Creation Script
+[source,sql]
+----
+-- Production multi-datacenter keyspace
+CREATE KEYSPACE IF NOT EXISTS stacksaga_event_store
+WITH replication = {
+  'class': 'NetworkTopologyStrategy',
+  'datacenter1': 3
+}
+AND durable_writes = true;
+----
+
+NOTE: For local development or isolated testing, you can use `'class': 'SimpleStrategy', 'replication_factor': 1`.
 
 
 == How Transaction Data Is Stored in Cassandra
