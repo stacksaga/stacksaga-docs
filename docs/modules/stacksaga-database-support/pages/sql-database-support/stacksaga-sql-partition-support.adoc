@@ -1,0 +1,408 @@
+:title: StackSaga SQL Database Partition Support
+:description: Learn how StackSaga SQL Partition Support automatically maintains range partitions for event-store tables across multiple databases and vendors (MySQL & PostgreSQL) from a single centralized runner.
+:doctitle: StackSaga SQL Database Partition Support
+:revnumber: 1.0.0
+:revdate: {localdate}
+:keywords: Stacksaga, Database Partitioning, SQL, MySQL, PostgreSQL, R2DBC, Event Store, Table Partitioning, Spring Boot Starter, High Throughput, Range Partition, Unpooled Connections
+:robots: index,follow
+
+= StackSaga SQL Database Partition Support
+
+== Overview
+
+In high-throughput distributed systems using the Saga design pattern, the event-store tables—primarily `es_transaction` and `es_transaction_execution_tryout`—experience heavy sequential insert volumes as every transaction state and tryout execution is recorded.
+
+To maintain optimal read/write query performance, rapid indexing, and predictable disk usage over time, these tables are partitioned by range (e.g. daily intervals based on `created_at`).
+
+`stacksaga-sql-partition-support` is a lightweight, non-blocking Spring Boot Starter designed to **automate the creation and maintenance of future partitions** across all SQL-based event-store databases in your ecosystem.
+
+=== Architectural Design: Centralized Partition Runner
+
+In a microservice architecture, each service embeds its respective database reactive starter (`stacksaga-mysql-reactive-support` or `stacksaga-pg-reactive-support`) to execute saga transactions.
+
+[IMPORTANT]
+====
+*Only One Central Instance Needed*: +
+Unlike the runtime database support modules which run inside every microservice instance, **`stacksaga-sql-partition-support` should be deployed as only one single instance** (or a scheduled standalone utility job) for your entire system.
+====
+
+Why is a single centralized runner the recommended architecture?
+
+1. **Avoids Multi-Instance DDL Conflicts & Lock Contention**:
+If every replica or pod of every microservice attempted to execute `ALTER TABLE ... REORGANIZE PARTITION` or schema DDLs at application startup or on a cron trigger, database servers would suffer from metadata lock contention, connection spikes, and deadlocks.
+2. **Strict Runtime Privilege Boundaries**:
+Application microservices should run with minimal database privileges (DML only: `SELECT`, `INSERT`, `UPDATE`, `DELETE`). They do not need DDL or schema alteration rights. With a centralized runner, only this single runner is granted the necessary `ALTER` / `CREATE` privileges.
+3. **Multi-Database & Multi-Vendor Consolidation**:
+Even if different microservices in your architecture use different databases (e.g., Order Service uses MySQL, Payment Service uses PostgreSQL, Inventory Service uses another MySQL database), you **do not** need separate partition runners for each. A single `stacksaga-sql-partition-support` instance can configure **multiple datasources** across **multiple database engines** and process them concurrently.
+
+image::stacksaga-database-support:stacksaga-diagram-sql-partition-architecture.drawio.svg[StackSaga SQL Partition Architecture]
+
+==== Single Point of Failure (SPOF) Consideration: Why It Is Not An Issue
+
+A common architectural question is: _"Does having only one partition runner instance for the entire system introduce a single point of failure?"_
+
+The answer is **no**. In practice, this design is resilient and poses no risk to your production workloads:
+
+* **Configurable Pre-Creation Buffer (`unit` + `ahead-count`)**:
+When the runner triggers, it does not merely create a partition for the immediate day. Through `ahead-count` and `unit` (`DAYS`, `WEEK`, `MONTH`, `YEAR`), it pre-allocates partitions for multiple upcoming intervals in advance.
+For example, configuring `unit: DAYS` with `ahead-count: 7` or `unit: MONTH` with `ahead-count: 2` guarantees that valid partitions already exist days or months ahead in your databases.
+* **Completely Decoupled Runtime Transactions**:
+Runtime microservices (`order-service`, `payment-service`, etc.) insert saga events directly into the database. They do *not* communicate with or depend on the partition runner during transaction execution.
+* **Resilience to Runner Downtime**:
+Even if the single partition runner instance goes offline, encounters an infrastructure crash, or is undergoing extended maintenance for multiple days, your microservices continue writing events without interruption because future partition tables are already present in the database.
+* **Automatic Catch-Up Upon Restart**:
+As soon as the partition runner restarts or triggers next, it queries the database, detects any missing future intervals, and idempotently provisions them.
+
+== Key Features
+
+* **Startup & Cron Execution**:
+Partitions are checked and pre-created immediately on application startup (`run-on-startup=true`) and periodically on a configurable schedule (`cron`, defaulting to `0 0 12 * * *` — 12:00 PM noon every day).
+* **Multi-Datasource & Concurrency**:
+Configures any number of datasources under `stacksaga.partitioning.sql.datasources.*`. All configured datasources are processed concurrently using Project Reactor's non-blocking `Flux.flatMap(concurrency = 4)`.
+* **Unpooled On-Demand Connections**:
+Because partition maintenance runs only on startup and once a day via cron, holding permanent idle connection pools in memory is unnecessary. The starter creates a direct, unpooled R2DBC connection on-demand, executes the partition DDLs, and closes the connection immediately.
+* **Dialect Auto-Detection (MySQL & PostgreSQL)**:
+The database type is automatically recognized from the R2DBC URL and connection metadata:
+** **MySQL**: Dynamically reorganizes range partitions using the `p_max` catch-all boundary:
+[source,sql]
+----
+ALTER TABLE es_transaction REORGANIZE PARTITION p_max INTO (
+    PARTITION p2026_09_13 VALUES LESS THAN ('2026-09-14 00:00:00'),
+    PARTITION p_max VALUES LESS THAN (MAXVALUE)
+);
+----
+** **PostgreSQL**: Creates declarative child partitions:
+[source,sql]
+----
+CREATE TABLE IF NOT EXISTS es_transaction_p2026_09_13 PARTITION OF es_transaction
+    FOR VALUES FROM ('2026-09-13 00:00:00') TO ('2026-09-14 00:00:00');
+----
+* **Pre-Flight Validation**:
+Validates database connectivity (`validate-on-startup=true`) and inspects user privileges (`validate-privileges=true`) at startup using `SHOW GRANTS` (MySQL) or `has_schema_privilege` (PostgreSQL), providing early warnings if the database user lacks permission.
+* **Pre-Creation (`ahead-count`)**:
+Configurable per datasource. Setting `ahead-count: 2` pre-creates partitions for today plus the next 2 days ahead, preventing data rejection when midnight arrives.
+
+[[adding-dependency]]
+== Adding as a Dependency
+
+Add `stacksaga-sql-partition-support` to your standalone partition runner service:
+
+[source,xml]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency> <!--Only for stacksaga dependencies version management-->
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-sql-partition-support</artifactId>
+    </dependency>
+    <!-- Add reactive R2DBC drivers matching your configured databases -->
+    <dependency>
+        <groupId>io.asyncer</groupId>
+        <artifactId>r2dbc-mysql</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>r2dbc-postgresql</artifactId>
+    </dependency>
+</dependencies>
+----
+
+== Configuration Reference
+
+=== Application Properties Example
+
+[source,properties]
+----
+# Enable/disable starter (default: true)
+stacksaga.partitioning.sql.enabled=true
+
+# Validate database connectivity at startup (default: true)
+stacksaga.partitioning.sql.validate-on-startup=true
+
+# Validate user partition creation privileges at startup (default: true)
+stacksaga.partitioning.sql.validate-privileges=true
+
+# Run partition creation at application startup (default: true)
+stacksaga.partitioning.sql.run-on-startup=true
+
+# Scheduled cron (default: 12:00 PM noon every day)
+stacksaga.partitioning.sql.cron=0 0 12 * * *
+
+# Concurrency limit across datasources (default: 4)
+stacksaga.partitioning.sql.concurrency=4
+
+# Timeout for opening an R2DBC connection (default: 10s)
+stacksaga.partitioning.sql.connect-timeout=10s
+
+# --- Datasource 1: Order Service Database (MySQL) - Daily partitions ---
+stacksaga.partitioning.sql.datasources.orderdb.url=r2dbc:mysql://localhost:3306/order_db
+stacksaga.partitioning.sql.datasources.orderdb.username=partition_admin
+stacksaga.partitioning.sql.datasources.orderdb.password=secret
+stacksaga.partitioning.sql.datasources.orderdb.unit=DAYS
+stacksaga.partitioning.sql.datasources.orderdb.ahead-count=2
+
+# --- Datasource 2: Payment Service Database (PostgreSQL) - Weekly partitions ---
+stacksaga.partitioning.sql.datasources.paymentdb.url=r2dbc:postgresql://localhost:5432/payment_db
+stacksaga.partitioning.sql.datasources.paymentdb.username=partition_admin
+stacksaga.partitioning.sql.datasources.paymentdb.password=secret
+stacksaga.partitioning.sql.datasources.paymentdb.unit=WEEK
+stacksaga.partitioning.sql.datasources.paymentdb.ahead-count=3
+
+# --- Datasource 3: Inventory Service Database (MySQL) - Monthly partitions ---
+stacksaga.partitioning.sql.datasources.inventorydb.url=r2dbc:mysql://localhost:3306/inventory_db
+stacksaga.partitioning.sql.datasources.inventorydb.username=partition_admin
+stacksaga.partitioning.sql.datasources.inventorydb.password=secret
+stacksaga.partitioning.sql.datasources.inventorydb.unit=MONTH
+stacksaga.partitioning.sql.datasources.inventorydb.ahead-count=1
+----
+
+=== Properties Reference Table
+
+[.scrollable-div]
+--
+[cols="3,2,2,5",options="header"]
+[.properties-table.google-anno-skip]
+|===
+|Property Name|Default{nbsp}Value|Type|Description
+
+|`stacksaga.partitioning.sql.enabled`
+|`true`
+|`boolean`
+|Enables or disables the partition support starter.
+
+|`stacksaga.partitioning.sql.validate-on-startup`
+|`true`
+|`boolean`
+|Whether to test database connectivity at application startup.
+
+|`stacksaga.partitioning.sql.validate-privileges`
+|`true`
+|`boolean`
+|Whether to verify that the database user possesses `ALTER` / `CREATE` privileges on startup.
+
+|`stacksaga.partitioning.sql.run-on-startup`
+|`true`
+|`boolean`
+|Whether to execute partition creation immediately when the application starts up.
+
+|`stacksaga.partitioning.sql.exit-on-completion`
+|`false`
+|`boolean`
+|Whether to automatically terminate the application after startup partition creation completes (designed for Kubernetes CronJobs). Exits with code `0` if all datasources succeed, or `1` if any fail.
+
+|`stacksaga.partitioning.sql.cron`
+|`0{nbsp}0{nbsp}12{nbsp}*{nbsp}*{nbsp}*`
+|`String`
+|Spring cron expression for scheduled execution (defaults to 12:00 PM noon every day). Set to `none` or `-` to disable internal scheduling when driven by external schedulers (e.g. Kubernetes CronJob).
+
+|`stacksaga.partitioning.sql.concurrency`
+|`4`
+|`int`
+|Maximum number of datasources processed simultaneously in parallel.
+
+|`stacksaga.partitioning.sql.connect-timeout`
+|`10s`
+|`Duration`
+|Timeout for establishing an on-demand R2DBC connection.
+
+|`stacksaga.partitioning.sql.datasources.<name>.url`
+|`-`
+|`String`
+|R2DBC connection URL (e.g. `r2dbc:mysql://host:3306/db` or `r2dbc:postgresql://host:5432/db`).
+
+|`stacksaga.partitioning.sql.datasources.<name>.username`
+|`-`
+|`String`
+|Database username with partition alteration privileges.
+
+|`stacksaga.partitioning.sql.datasources.<name>.password`
+|`-`
+|`String`
+|Database password.
+
+|`stacksaga.partitioning.sql.datasources.<name>.unit`
+|`DAYS`
+|`PartitionUnit`
+|Partition time interval unit: `DAYS`, `WEEK`, `MONTH`, or `YEAR`.
+
+|`stacksaga.partitioning.sql.datasources.<name>.ahead-count`
+|`1`
+|`int`
+|Number of intervals (days, weeks, months, or years) into the future to pre-create partitions for.
+
+|`stacksaga.partitioning.sql.datasources.<name>.type`
+|`-`
+|`DatabaseType`
+|Explicit database type override (`MYSQL` or `POSTGRESQL`). If omitted, auto-detected from URL or metadata.
+|===
+--
+
+== Deployment Strategies
+
+Because partition maintenance takes only a few seconds to verify and create tables, you can choose between two deployment strategies depending on your operational platform:
+
+=== Strategy A: Persistent Daemon (Traditional VM / Long-Running Container)
+
+In a traditional VM or standard Docker container environment:
+
+* The application runs 24/7 as a background daemon.
+* On startup, it performs connectivity checks, verifies user permissions (`validate-on-startup=true`), and pre-creates partitions (`run-on-startup=true`).
+* After the startup run finishes, it sleeps idle in the background until the next scheduled trigger determined by `stacksaga.partitioning.sql.cron` (e.g. `0 0 12 * * *`).
+
+=== Strategy B: Ephemeral Scheduled Job (Kubernetes CronJob)
+
+In container orchestration environments such as **Kubernetes (k8s)**, maintaining a pod running continuously 24/7 can be inefficient, because after creating the partitions in a few seconds, the application simply sits idle doing nothing until the next scheduled day.
+
+To optimize cluster resource utilization, you can deploy the partition runner as a **Kubernetes `CronJob`** (or container task on AWS ECS / GCP Cloud Run Jobs):
+
+* **How It Operates**:
+1. Kubernetes triggers the CronJob pod at the desired schedule (e.g. daily at 12:00 PM).
+2. The pod starts up, Spring Boot initializes, and with `run-on-startup=true`, it immediately validates all datasources and creates upcoming partitions across all databases concurrently.
+3. The internal Spring cron scheduler is disabled by setting `stacksaga.partitioning.sql.cron=none` (or `-`).
+4. Enabling `stacksaga.partitioning.sql.exit-on-completion=true` commands the runner to automatically terminate the Spring Boot application and JVM once partition creation finishes:
+   * If all datasources succeed -> exits cleanly with code `0` (`Completed`).
+   * If any datasource fails -> exits with code `1` (`Error`/`Failed`), which causes Kubernetes to alert or retry according to your `restartPolicy`.
+5. Kubernetes releases all pod memory and CPU resources until the next scheduled interval.
+
+*Example Kubernetes CronJob Manifest*:
+
+[source,yaml]
+----
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stacksaga-partition-runner
+  namespace: stacksaga
+spec:
+  schedule: "0 12 * * *"  # Trigger daily at 12:00 PM noon
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: partition-runner
+              image: your-docker-registry.internal/stacksaga/stacksaga-partition-runner:1.0.0
+              env:
+                # Execute partition creation immediately upon pod start
+                - name: STACKSAGA_PARTITIONING_SQL_RUN_ON_STARTUP
+                  value: "true"
+                # Validate connectivity and permissions at startup
+                - name: STACKSAGA_PARTITIONING_SQL_VALIDATE_ON_STARTUP
+                  value: "true"
+                - name: STACKSAGA_PARTITIONING_SQL_VALIDATE_PRIVILEGES
+                  value: "true"
+                # Disable the internal background cron since Kubernetes manages the schedule
+                - name: STACKSAGA_PARTITIONING_SQL_CRON
+                  value: "none"
+                # Automatically exit with code 0 (or 1 on error) when finished
+                - name: STACKSAGA_PARTITIONING_SQL_EXIT_ON_COMPLETION
+                  value: "true"
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+----
+
+== Monitoring & Observability
+
+`stacksaga-sql-partition-support` provides observability hooks to monitor partition execution results, record metrics, and trigger alerts on failures.
+
+=== PartitionExecutionCompletedEvent
+
+Whenever partition creation runs (both on application startup and on cron triggers), the runner automatically publishes a Spring `PartitionExecutionCompletedEvent`.
+
+This event provides detailed execution telemetry:
+
+[.scrollable-div]
+--
+[cols="1,1,<2"]
+|===
+|Method|Return Type|Description
+
+|`isAllSuccessful()`
+|`boolean`
+|Returns `true` if all configured datasources were partitioned without any error.
+
+|`getTotalDatasources()`
+|`int`
+|Total count of datasources evaluated during the execution.
+
+|`getSuccessCount()`
+|`int`
+|Number of datasources successfully partitioned.
+
+|`getFailureCount()`
+|`int`
+|Number of datasources that failed.
+
+|`getDuration()`
+|`Duration`
+|Total elapsed execution time.
+
+|`getReports()`
+|`Map<String, DatasourceReport>`
+|Per-datasource detailed reports containing table names, partition counts, and error causes (if any).
+|===
+--
+
+=== Example: Listening for Partition Events & Alerting
+
+Developers can register a Spring `@EventListener` to capture partition metrics, push alerts to Slack or PagerDuty, or export data to Prometheus:
+
+[source,java]
+----
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.event.EventListener;
+import org.springframework.stereotype.Component;
+import org.stacksaga.partition.event.PartitionExecutionCompletedEvent;
+
+@Component
+@Slf4j
+public class PartitionMonitoringListener {
+
+    @EventListener
+    public void onPartitionCompleted(PartitionExecutionCompletedEvent event) {
+        if (!event.isAllSuccessful()) {
+            log.error("ALERT: Partition creation failed for {}/{} datasources in {} ms!",
+                    event.getFailureCount(), event.getTotalDatasources(), event.getDuration().toMillis());
+
+            event.getReports().forEach((dsName, report) -> {
+                if (!report.isSuccess()) {
+                    log.error("Datasource '{}' failed: {}", dsName, report.getErrorMessage(), report.getError());
+                    // Example: send alert to Slack, Discord, PagerDuty, or Email
+                    // alertService.sendAlert("Partition failure on datasource: " + dsName);
+                }
+            });
+        } else {
+            log.info("SUCCESS: All {} datasources partitioned successfully in {} ms.",
+                    event.getTotalDatasources(), event.getDuration().toMillis());
+        }
+    }
+}
+----
+
+== Related Documentation
+
+* xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[StackSaga MySQL Reactive Support]
+* xref:stacksaga-database-support:postgresql-database-support/stacksaga-postgresql-support.adoc[StackSaga PostgreSQL Reactive Support]
+* xref:stacksaga-database-support:overview/database-support-overview.adoc[Database Support Overview]
+
+
