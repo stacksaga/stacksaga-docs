@@ -1,0 +1,53 @@
+[[schema-management]]
+== Schema Management & Version Verification
+
+Unlike traditional applications that bundle runtime migration frameworks (such as Liquibase or Flyway) to alter database structures on application startup, StackSaga enforces a clear separation of privileges between database administration and runtime execution:
+
+[IMPORTANT]
+====
+*Application Runtime Privilege Boundary*:
+The application user connecting via R2DBC requires only **data access permissions (SELECT, INSERT, UPDATE, DELETE)** on the event-store tables. The application does **not** execute DDL or modify database objects at startup.
+====
+
+A DBA or CI/CD deployment pipeline executes the provided `schema.sql` ahead of application deployment using an account with DDL privileges.
+
+=== Pre-Flight Schema Version Verification
+
+To prevent runtime errors, missing-column failures, or silent inconsistencies caused by an uninitialized or mismatched database, the StackSaga starter performs an automated, non-blocking pre-flight schema verification on startup:
+
+1. After singleton beans are instantiated and the connection pool warmup completes, StackSaga queries the `stacksaga_schema_version` table.
+2. It verifies that the exact required schema version (e.g. `1.0.0`) has been recorded.
+3. If the table is missing or the required version row is absent, the application refuses to start and fails fast with a `SchemaVersionMismatchException` providing actionable resolution steps.
+
+=== Obtaining the Schema Script
+
+Developers and database administrators have multiple ways to access the DDL script:
+
+* *From the Dependency JAR*:
++
+The canonical DDL script is packaged inside the library at:
++
+[source,text,subs="attributes+"]
+----
+db/stacksaga/{db_path}/schema.sql
+----
+
+* *Programmatically (for Local Dev, Tests & Testcontainers)*:
++
+In integration tests (such as Testcontainers setup), migration runners, or custom initialization scripts, you can retrieve the raw DDL script directly as a `String`:
++
+[source,java,subs="attributes+"]
+----
+String ddl = {autoconfig_class}.getSchemaScript();
+----
+
+* *1-Click IDE Execution*:
++
+To quickly view or copy the script, locate `{autoconfig_class}` in your IDE (IntelliJ IDEA, Eclipse, VS Code) and run its `main()` method. It prints the full DDL script directly to the console so you can paste it into your database management tool (such as DBeaver, Workbench, pgAdmin, or CLI).
+
+=== Cumulative and Idempotent Upgrades
+
+Every release of `schema.sql` is **cumulative** and **idempotent**:
+
+* *New Installations*: Running `schema.sql` creates all required tables, indexes, and constraints, and stamps the version into `stacksaga_schema_version`.
+* *Upgrades on Existing Databases*: Re-running `schema.sql` is safe and non-destructive — existing data and tables are preserved, new schema objects are applied safely, and the new version row is recorded.
