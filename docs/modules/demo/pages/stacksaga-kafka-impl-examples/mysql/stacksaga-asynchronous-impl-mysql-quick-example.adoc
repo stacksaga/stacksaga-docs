@@ -56,11 +56,11 @@ The orchestrator/worker labels describe a service's *involvement in this saga*, 
 
 | `user-service`
 | *Worker*
-| `stacksaga-kafka-worker-starter`
+| `stacksaga-kafka-worker-spring-boot-starter`
 
 | `payment-service`
 | *Worker*
-| `stacksaga-kafka-worker-starter`
+| `stacksaga-kafka-worker-spring-boot-starter`
 |===
 
 NOTE: `order-service` plays two roles at once — it *drives* the saga (orchestrator) and also *executes* the _Reserve Order_ span (worker).
@@ -351,9 +351,9 @@ In this quick example we keep the handler minimal and use it only to receive tra
 ----
 @Slf4j
 @Component//<1>
-public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {//<2>
+public class PlaceOrderHandler implements KafkaTransactionEventListener<OrderDomainEntity> {//<2>
     @Override//<3>
-    public void onStateChanged(TransactionState<OrderDomainEntity> transactionState) {
+    public void onStateChanged(TransactionState<OrderDomainEntity, AsyncExecutionEvent> transactionState) {
         log.info("onStateChanged : {}", transactionState.getCurrentStatus());
     }
 }
@@ -361,8 +361,8 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 
 <1> Annotate the class with `@Component` to make it a Spring bean, so that it can be automatically detected and registered by the Spring container.
 
-<2> The `PlaceOrderHandler` class implements the `TransactionEventListener` interface, which lets it react to the transaction events the StackSaga engine emits during the flow. xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[read more] +
-NOTE: The listener comes in a blocking and a non-blocking flavour — use `TransactionEventListener` in a servlet (MVC) application and `ReactiveTransactionEventListener` in a reactive (WebFlux) application.
+<2> The `PlaceOrderHandler` class implements the `KafkaTransactionEventListener` interface, which lets it react to the transaction events the StackSaga engine emits during the flow. xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[read more] +
+NOTE: The listener comes in a blocking and a non-blocking flavour — use `KafkaTransactionEventListener` in a servlet (MVC) application and `ReactiveKafkaTransactionEventListener` in a reactive (WebFlux) application.
 See xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[Transaction State Change Listeners] for both.
 
 <3> The `onStateChanged` method is overridden to handle the transaction state changes. it receives the current state of the transaction as a parameter, which includes information such as the current status of the transaction, the execution history, the current domain entity state, and the timestamps. in this example, we simply log the current status of the transaction whenever it changes. you can implement any logic you need in this method based on your use case, such as sending notifications to users about the transaction status changes or updating other systems based on the transaction events.
@@ -502,7 +502,7 @@ Add the following dependencies to your user-service.
 </dependencyManagement>
 <dependency>
     <groupId>org.stacksaga</groupId>
-    <artifactId>stacksaga-kafka-worker-starter</artifactId>
+    <artifactId>stacksaga-kafka-worker-spring-boot-starter</artifactId>
 </dependency>
 ----
 
@@ -685,7 +685,7 @@ Add the following dependencies to your payment-service.
 </dependencyManagement>
 <dependency>
     <groupId>org.stacksaga</groupId>
-    <artifactId>stacksaga-kafka-worker-starter</artifactId>
+    <artifactId>stacksaga-kafka-worker-spring-boot-starter</artifactId>
 </dependency>
 ----
 

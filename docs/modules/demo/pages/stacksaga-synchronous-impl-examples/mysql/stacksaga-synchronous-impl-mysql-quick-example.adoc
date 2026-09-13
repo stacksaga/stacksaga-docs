@@ -299,7 +299,7 @@ public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
             throw new RuntimeException(e);
         }
         //<4>
-        //simulate payment failure randomly to test the retry mechanism
+        //simulate payment failure randomly to test the compensation mechanism
         if (new Random().nextBoolean()) {
             throw NonRetryableExecutorException
                     .buildWith(new RuntimeException("insufficient balance"), () -> "MAKE_PAYMENT_FAILED")
@@ -327,9 +327,9 @@ public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
 <2> The `MakePaymentExecutor` class implements the `CommandExecutor` interface, which is used for executors that perform *state-changing* operations on the domain entity. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[read more]
 
 <3> The `doProcess` method is the main entry point for executing the primary logic of the executor.
-It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. this is where you would implement the logic to process the payment, such as calling an external payment service. in this example, we simulate a payment failure for randomly to test the retry mechanism of the StackSaga engine. if the payment processing fails, we throw a `NonRetryableExecutorException` with an event name indicating that the payment failed. if the payment processing succeeds, we call `stepManager.complete` to indicate that the transaction flow is complete, with an event name indicating that the payment was made. if the payment processing fails, the StackSaga engine will automatically trigger compensation by calling the `doRevert` method of the previous executors in reverse order, starting with the `ReserveOrderExecutor` to revert the order reservation. +
+It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. this is where you would implement the logic to process the payment, such as calling an external payment service. in this example, we simulate a payment failure randomly to test the compensation mechanism of the StackSaga engine. if the payment processing fails, we throw a `NonRetryableExecutorException` with an event name indicating that the payment failed. if the payment processing succeeds, we call `stepManager.complete` to indicate that the transaction flow is complete, with an event name indicating that the payment was made. if the payment processing fails, the StackSaga engine will automatically trigger compensation by calling the `doRevert` method of the previous executors in reverse order, starting with the `ReserveOrderExecutor` to revert the order reservation. +
 +
-TIP: `RetryableExecutorException` is not simulated in stage.
+TIP: `RetryableExecutorException` is not simulated in this stage.
 RetryableExecutorException is used in next stage with retry-subsystem.
 
 <4> The lambda function provides the event-name indicating that the payment was made or failed.
@@ -348,7 +348,7 @@ Handler is responsible for handling the transaction and receiving the transactio
 @Component//<1>
 public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {//<2>
     @Override//<3>
-    public void onStateChanged(TransactionState<OrderDomainEntity> transactionState) {
+    public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) {
         log.info("onStateChanged : {}", transactionState.getCurrentStatus());
     }
 }
@@ -459,14 +459,14 @@ stacksaga.mysql.jdbc.username=${MYSQL_USER:root}
 stacksaga.mysql.jdbc.password=${MYSQL_PASSWORD:password}
 ----
 
-<1> The `stacksaga.instance` properties are used to configure the instance information for the StackSaga engine, such as the cluster, region, and zone. these properties are used is used to identify the transactions for retry and re-storing purposes mainly in distributed environments. in this example, we are using a local cluster, region, and zone for demonstration purposes.
+<1> The `stacksaga.instance` properties are used to configure the instance information for the StackSaga engine, such as the cluster, region, and zone. these properties are used to identify the transactions for retry and re-storing purposes mainly in distributed environments. in this example, we are using a local cluster, region, and zone for demonstration purposes.
 
 <2> The `stacksaga.domain-entity-scan` property is used to specify the package where the domain entity classes are located. the StackSaga engine will scan this package to find the domain entity classes and register them for use in the transaction flow. it can be provided as a comma-separated list of packages if you have multiple packages containing domain entity classes.
 
 <3> The `stacksaga.mysql.r2dbc` properties are used to configure the R2DBC connection for the StackSaga engine to connect to the MySQL database as the event-store. you need to provide the URL, database name, username, and password for the MySQL connection. the event-store should be a separate database schema dedicated for storing the transaction events and data, it should not be the same database schema used by your application for its regular data storage to avoid any potential conflicts and to have better separation of concerns.
 
 <4> The `stacksaga.mysql.jdbc` properties are used to configure the JDBC connection.
-JDBC connection is used by internally Liquibase to database migration and schema creation.
+JDBC connection is used internally by Liquibase for database migration and schema creation.
 
 [[running-application]]
 === Running the Application and Testing the Transaction Flow
@@ -516,9 +516,9 @@ Stage-1 covered the happy path and compensation. In the real world, though, you 
 
 Retrying is coordinated by a dedicated subsystem. There are two main steps to enable it:
 
-. Create the xref:stacksaga:retry-ring-coordinator:ring-coordinator.adoc[Ring Coordinator Application] by using the `stacksaga-ring-coordinator-spring-boot-starter` as a separate application that will run alongside your orchestrator application, and it will be responsible for coordinating the token ranges withing the available orchestrator instances in the cluster.
+. Create the xref:stacksaga:retry-ring-coordinator:ring-coordinator.adoc[Ring Coordinator Application] by using the `stacksaga-ring-coordinator-spring-boot-starter` as a separate application that will run alongside your orchestrator application, and it will be responsible for coordinating the token ranges within the available orchestrator instances in the cluster.
 
-. Adding the xref:stacksaga:retry-ring-coordinator:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] dependency to your orchestrator application to enable the integration with the Ring Coordinator, which is responsible for receiving the relevant token range that has been allocated for the instance by the Ring Coordinator(Slave).
+. Adding the xref:stacksaga:retry-ring-coordinator:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] dependency to your orchestrator application to enable the integration with the Ring Coordinator, which is responsible for receiving the relevant token range that has been allocated for the instance by the Ring Coordinator (Slave).
 
 === Creating the Ring Coordinator Application (Master & Slave Hybrid)
 
@@ -570,7 +570,7 @@ stacksaga.coordinator.slave.target-master.host=localhost
 <2> The `stacksaga.coordinator.target-services` property is used to specify the target services that the Ring Coordinator will manage. in this example, we are specifying the `order-service` as the target service. the `stacksaga.coordinator.instance-type` property is used to specify the instance type for the Ring Coordinator application, which can be either `master`, `slave` both due to sample small size cluster. in a real-world scenario, you would typically have one master instance and multiple slave instances for better scalability and fault tolerance.
 
 <3> The `stacksaga.instance` properties are used to configure the instance information for the Ring Coordinator application. the *cluster* and the *region* should be the same as the ones configured in the orchestrator application to ensure that they are in the same cluster and region for proper coordination.
-<4> Due to the instance acts as s slave as well, it needs to connect to the master instance to receive the token range information, so you need to provide the connection details of the master instance using the `stacksaga.coordinator.slave.target-master` properties.
+<4> Due to the instance acting as a slave as well, it needs to connect to the master instance to receive the token range information, so you need to provide the connection details of the master instance using the `stacksaga.coordinator.slave.target-master` properties.
 
 === Adding `stacksaga-ring-coordinator-connector` in existing orchestrator
 
@@ -599,7 +599,7 @@ stacksaga.coordinator.connector.master.requester.port=4455
 retry delay property comes with the database support module. the retry mechanism can have some different configurations based on the database support you are using, so it is recommended to check the documentation of the database support module you are using for more details about the available retry configurations.
 <2> The `stacksaga.coordinator.connector.enabled` property is used to enable the Ring Coordinator Connector in the orchestrator application. you need to set it to `true` to turn the standard Orchestrator service into a `Retry Node` that can receive the token range information from the Ring Coordinator and handle the retrying of transactions accordingly.
 
-<3> Host and the port properties for connecting to the master instance. after connection is established, master will suggest an available slave node (at this time only one we have,) and internally it connect with the slave node and subscribe to the token range information.
+<3> Host and the port properties for connecting to the master instance. after connection is established, master will suggest an available slave node (at this time only one we have,) and internally it connects with the slave node and subscribe to the token range information.
 
 === Simulating retry scenario
 
@@ -675,7 +675,7 @@ To enable the integration with the trace window, you need to add the following d
 ----
 <dependency>
     <groupId>org.stacksaga</groupId>
-    <artifactId>stacksaga-trace-window-connector-api</artifactId>
+    <artifactId>stacksaga-trace-window-connector-servlet</artifactId>
 </dependency>
 ----
 
