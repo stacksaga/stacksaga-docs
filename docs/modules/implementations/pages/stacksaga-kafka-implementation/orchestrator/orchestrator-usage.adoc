@@ -1,5 +1,5 @@
 :description: StackSagaKafkaTemplate usage, Transaction State Change Listeners, Recommended Handler Pattern, and orchestrator configuration properties for stacksaga-kafka-orchestrator.
-:keywords: StackSagaKafkaTemplate, TransactionEventListener, ReactiveTransactionEventListener, saga handler, orchestrator configuration
+:keywords: StackSagaKafkaTemplate, KafkaTransactionEventListener, ReactiveKafkaTransactionEventListener, saga handler, orchestrator configuration
 :page-priority: 0.7
 
 = StackSagaKafkaTemplate and Event-Listener
@@ -148,13 +148,13 @@ so if you want to keep listening to the transaction status changes and perform a
 
 It also can be implemented based on the environment.
 
-. `TransactionEventListener` for non-reactive environment.
-. `ReactiveTransactionEventListener` for reactive environment.
+. `KafkaTransactionEventListener` for non-reactive environment.
+. `ReactiveKafkaTransactionEventListener` for reactive environment.
 
 If you want to get notified about the transaction status changes, there are two ways are available in the framework.
 
 . Using `StackSagaKafkaTemplate.getCurrentState`
-. Using `TransactionEventListener` or `ReactiveTransactionEventListener`.
+. Using `KafkaTransactionEventListener` or `ReactiveKafkaTransactionEventListener`.
 
 IMPORTANT: using `StackSagaKafkaTemplate.getCurrentState` method to get the current state of the transaction by providing the transactionId approach is not efficient because when you call this method, the engine fetches the current state of the transaction from the event-store.
 but if you are using the listeners, you will be notified about the transaction status changes after each execution in the transaction flow without the need to call any method to get the current state of the transaction because the current state of the transaction is being passed to the callback method of those listeners realtime.
@@ -165,21 +165,21 @@ The use cases are different for both approaches, so you can choose the one that 
 IMPORTANT: While you are using the `onChange` method of the listeners, be aware that the method is invoked after each execution in the transaction flow, so make sure to perform only the required action in that method and avoid doing any heavy processing in that method because it can be caused to delay the entire transaction flow.
 if you want to do some heavy processing based on the transaction status changes, it is recommended make a deep copy of the `TransactionState` object and then perform the heavy processing with a separate thread by letting the saga thread to continue the execution without being unnecessarily delayed. or you can use the `StackSagaKafkaTemplate.getCurrentState` method to get the current state of the transaction and then perform the heavy processing based on that.
 
-=== TransactionEventListener
+=== KafkaTransactionEventListener
 
-You can implement the `TransactionEventListener` interface to listen to the transaction events in a non-reactive environment as below.
+You can implement the `KafkaTransactionEventListener` interface (from package `org.stacksaga.api.listener`) to listen to the transaction events in a non-reactive environment as below.
 
 [source,java]
 ----
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
+public class PlaceOrderHandler implements KafkaTransactionEventListener<OrderDomainEntity> {
     @Override
-    public void onStateChanged(TransactionState<OrderDomainEntity> state) {
+    public void onStateChanged(TransactionState<OrderDomainEntity, AsyncExecutionEvent> state) {
         TransactionCompleteStatus currentStatus = state.getCurrentStatus();
         log.info("Current status of transaction: {}", currentStatus);
-        NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();
+        NavigableMap<Integer, AsyncExecutionEvent> executionHistory = state.getExecutionHistory();
         log.info("Execution history of transaction: {}", executionHistory);
         OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
         log.info("Current domain entity state: {}", currentDomainEntity);
@@ -189,24 +189,24 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 }
 ----
 
-=== ReactiveTransactionEventListener
+=== ReactiveKafkaTransactionEventListener
 
-You can implement the `ReactiveTransactionEventListener` interface to listen to the transaction events in reactive environment as below.
+You can implement the `ReactiveKafkaTransactionEventListener` interface (from package `org.stacksaga.api.listener`) to listen to the transaction events in a reactive environment as below.
 
 [source,java]
 ----
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {
+public class ReactivePlaceOrderHandler implements ReactiveKafkaTransactionEventListener<OrderDomainEntity> {
     @Override
-    public Mono<Void> onStateChanged(TransactionState<OrderDomainEntity> transactionState) {
+    public Mono<Void> onStateChanged(TransactionState<OrderDomainEntity, AsyncExecutionEvent> transactionState) {
         return Mono
                 .just(transactionState)
                 .doOnNext(state -> {
                     TransactionCompleteStatus currentStatus = state.getCurrentStatus();
                     log.info("Current status of transaction: {}", currentStatus);
-                    NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();
+                    NavigableMap<Integer, AsyncExecutionEvent> executionHistory = state.getExecutionHistory();
                     log.info("Execution history of transaction: {}", executionHistory);
                     OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
                     log.info("Current domain entity state: {}", currentDomainEntity);
@@ -233,7 +233,7 @@ The below code snippet is showing the recommended architecture for the Handler.
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
+public class PlaceOrderHandler implements KafkaTransactionEventListener<OrderDomainEntity> {
 
     private StackSagaKafkaTemplate<OrderDomainEntity, PlaceOrderTopic> stackSagaKafkaTemplate;
 
@@ -254,7 +254,7 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 
     }
     @Override
-    public void onStateChanged(TransactionState<OrderDomainEntity> transactionState) { //<3>
+    public void onStateChanged(TransactionState<OrderDomainEntity, AsyncExecutionEvent> transactionState) { //<3>
         //....
     }
 }
@@ -262,4 +262,4 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 
 <1> The `handle` method is responsible for starting the saga transaction by using the `StackSagaKafkaTemplate` and providing the required parameters to start the transaction.
 <2> Fetch the current state of the transaction by using the `StackSagaKafkaTemplate`
-<3> Implement the `onStateChanged` method to listen to the transaction status changes by implementing the `TransactionEventListener` interface and override the `onStateChanged` method.
+<3> Implement the `onStateChanged` method to listen to the transaction status changes by implementing the `KafkaTransactionEventListener` interface and override the `onStateChanged` method.

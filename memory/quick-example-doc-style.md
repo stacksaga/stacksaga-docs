@@ -16,7 +16,7 @@ When asked to "refine / make nicer" a StackSaga quick-example tutorial doc (unde
 - Cross-link the sync and Kafka variants to each other; point "read more" xrefs at the matching engine's reference docs (sync→`stacksaga-sync/...`, Kafka→`stacksaga-kafka-implementation/...`).
 - Prerequisites: Kafka example needs a broker; sync example needs only MySQL. Add a Docker tip.
 - Add a runnable `curl` to the "Running" section and label outcomes "Happy path" / "Compensation path".
-- **Verify example code against the reference docs and fix bugs** — the Kafka doc had real ones (missing `SagaPrimaryEventAction.complete()` branch in `onNext`; reading `"amount"` instead of `"total_amount"`; no failure simulation so compensation never fired). Flag dependency concerns (e.g. the non-existent `spring-boot-starter-kafka` artifact) rather than silently changing build files.
+- **Verify example code against the reference docs and fix bugs** — the Kafka doc had real ones (missing `actionUtil.complete()` branch in `onNext`; reading `"amount"` instead of `"total_amount"`; no failure simulation so compensation never fired). Flag dependency concerns (e.g. the non-existent `spring-boot-starter-kafka` artifact) rather than silently changing build files.
 - Template class names: synchronous engine uses `SagaTemplate` / `ReactiveSagaTemplate`; Kafka uses `StackSagaKafkaTemplate`.
 
 The two quick-example files are linked from [[stacksaga-docs-overview]]'s `docs/modules/demo/nav.adoc`.

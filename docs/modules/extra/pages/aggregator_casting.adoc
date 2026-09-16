@@ -42,13 +42,13 @@ Then, while the old events are processed, that removed data will not be availabl
 
 For collecting missing properties it can be used `@JsonAnySetter` and `@JsonAnyGetter` with a custom method.
 But you don't need to create all the things from scratch.
-Because StackSaga provides the helper class called `MissingPropertyCollector` for extending without writing any custom methods.
+Because StackSaga provides the helper class called `UnknownPropertyArchive` (package `org.stacksaga.api`) for extending without writing any custom methods.
 
-NOTE: The root implementation (Custom DomainEntity) of the *DomainEntity* is by default extended from `MissingPropertyCollector`.
+NOTE: The root implementation (Custom DomainEntity) of the *DomainEntity* is by default extended from `UnknownPropertyArchive`.
 Therefore, the root Custom DomainEntity class is ready to collect the missing properties.
-But if you want to empower other inner classes that are used inside the Root DomainEntity class also with Missing properties collector capabilities, you can extend all the inner classes from `MissingPropertyCollector` as well.
+But if you want to empower other inner classes that are used inside the Root DomainEntity class also with Missing properties collector capabilities, you can extend all the inner classes from `UnknownPropertyArchive` as well.
 
-Here is an example for down-casting with using `MissingPropertyCollector` implementation.
+Here is an example for down-casting with using `UnknownPropertyArchive` implementation.
 
 - *Old Version Of the Custom DomainEntity.*
 
@@ -145,7 +145,7 @@ public class OrderDomainEntity extends DomainEntity {
     @Setter
     @AllArgsConstructor
     @NoArgsConstructor
-    public static class ItemDetail extends MissingPropertyCollector { //<3>
+    public static class ItemDetail extends UnknownPropertyArchive { //<3>
 
         @JsonProperty("order_id")
         private String itemName;
@@ -166,14 +166,13 @@ Relatively the old version, some attributes have been removed from the root clas
 That means that the old event data should be cast down when it is deserialized into the new domain-entity class.
 
 <1> The `comment` property has been removed from the root class.
-But should not be executed from the `MissingPropertyCollector`.
-Because the root class is already executed from the `MissingPropertyCollector` through the `DomainEntity` class.
+It does not need to explicitly extend `UnknownPropertyArchive` because the root class already inherits from `UnknownPropertyArchive` through the `DomainEntity` class.
 <2> The `note` property has been removed from the `ItemDetail` class.
 
-<3> To be collected that missing property (`note`), the `ItemDetail` has been extended from the `MissingPropertyCollector` class.
-Then the deserialization is happened that missing property will be saved in to the `missingProperties` map in side of the `MissingPropertyCollector` that has been provided by the framework.
+<3> To collect that missing property (`note`), the `ItemDetail` class extends `UnknownPropertyArchive`.
+When deserialization happens, that unrecognized property will be preserved in the `missingProperties` map inside `UnknownPropertyArchive` provided by the framework.
 
-WARNING: If the `ItemDetail` has not been extended from the `MissingPropertyCollector` class, an exception will be thrown by the framework when the application is started by mapping the old version's samples that you have given in the previous version through the `<<saga_serializable,SagaSerializable>>` implementation.
+WARNING: If the `ItemDetail` class does not extend `UnknownPropertyArchive`, an exception will be thrown by the framework when the application is started by mapping the old version's samples that you have given in the previous version through the `<<saga_serializable,SagaSerializable>>` implementation.
 It will ensure that the application is in a casting trouble.
 
 - *Getting The Collected Properties For specific Version.*

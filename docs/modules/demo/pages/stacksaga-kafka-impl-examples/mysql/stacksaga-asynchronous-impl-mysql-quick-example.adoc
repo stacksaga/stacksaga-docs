@@ -298,21 +298,25 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
     @NonNull
     @Override
     //<4>
-    public SagaPrimaryEventAction<PlaceOrderTopic> onNext(PlaceOrderTopic recentTopic, OrderDomainEntity currentDomainEntityState) {
+    public SagaPrimaryEventAction<PlaceOrderTopic> onNext(
+            PlaceOrderTopic recentTopic,
+            OrderDomainEntity currentDomainEntityState,
+            SagaPrimaryEventActionUtil<PlaceOrderTopic> actionUtil
+    ) {
         //<5>
         if (recentTopic.equals(PlaceOrderTopic.DO_USER_VALIDATED)) {
-            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_ORDER_RESERVED);
+            return actionUtil.next(PlaceOrderTopic.DO_ORDER_RESERVED);
         }
         //<6>
         if (recentTopic.equals(PlaceOrderTopic.DO_ORDER_RESERVED)) {
-            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
+            return actionUtil.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
         }
         //<7>
         if (recentTopic.equals(PlaceOrderTopic.DO_MAKE_PAYMENT)) {
-            return SagaPrimaryEventAction.complete();
+            return actionUtil.complete();
         }
         //<8>
-        return SagaPrimaryEventAction.error(new IllegalStateException("Unexpected topic: " + recentTopic));
+        return actionUtil.error(new IllegalStateException("Unexpected topic: " + recentTopic));
     }
 }
 ----
@@ -330,15 +334,15 @@ NOTE: Not shown here since `SHARED_GLOBAL` doesn't need it, but `SHARED_GROUP`/`
 
 <3> Override the `registerTopics` method to return the full list of topics this event manager uses (both `DO` and `UNDO`).
 This is where we register our topics with StackSaga, and it is called only once, when the application starts.
-<4> Override the `onNext` method to define the business logic of the event manager. this method is invoked by the framework after each primary-execution topic(span/atomic execution) is completed successfully until the end of the transaction (if it is not failed with `NonRetryableExecutorException`). and this is where we should navigate the engine to execute next topic after each one as shown above. you can use the given parameters to make the navigation decision.
-<5> If the most recently completed topic is `DO_USER_VALIDATED`, route the engine to `DO_ORDER_RESERVED` next.
-<6> If the most recently completed topic is `DO_ORDER_RESERVED`, route the engine to `DO_MAKE_PAYMENT` next.
-<7> `DO_MAKE_PAYMENT` is the *last* span, so once it completes there is nothing more to route — return `SagaPrimaryEventAction.complete()` to finish the saga successfully and move it to the terminal `COMPLETED` state. +
+<4> Override the `onNext` method to define the routing logic of the event manager. This method is invoked by the framework after each primary-execution topic (span/atomic execution) completes successfully until the end of the transaction (if it has not failed with `NonRetryableExecutorException`). You use the given parameters and the `actionUtil` helper to return the next navigation action (`actionUtil.next(...)`, `actionUtil.complete()`, or `actionUtil.error(...)`).
+<5> If the most recently completed topic is `DO_USER_VALIDATED`, route the engine to `DO_ORDER_RESERVED` next via `actionUtil.next(...)`.
+<6> If the most recently completed topic is `DO_ORDER_RESERVED`, route the engine to `DO_MAKE_PAYMENT` next via `actionUtil.next(...)`.
+<7> `DO_MAKE_PAYMENT` is the *last* span, so once it completes there is nothing more to route — return `actionUtil.complete()` to finish the saga successfully and move it to the terminal `COMPLETED` state. +
 IMPORTANT: Don't forget this branch.
 Without it, a *successful* payment would fall through to the `error(...)` below and the engine would wrongly start compensation.
 A saga always ends either with `complete()` here or with compensation triggered by a failure.
 <8> A defensive fall-through for an unexpected topic — with the routing above it should never be reached.
-Returning `SagaPrimaryEventAction.error(...)` (or throwing any exception) from `onNext()` transitions the saga to `FAILED` and triggers compensation.
+Returning `actionUtil.error(...)` (or throwing any exception) from `onNext()` transitions the saga to `FAILED` and triggers compensation.
 See the xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc[EventManager reference] for the full `onNext()`/`onNextRevert()` contract.
 
 [[create-handler]]

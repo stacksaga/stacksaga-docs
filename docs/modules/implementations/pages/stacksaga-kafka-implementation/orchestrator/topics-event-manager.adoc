@@ -167,23 +167,27 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 
     //<7>
     @Override
-    public @NonNull SagaPrimaryEventAction<PlaceOrderTopic> onNext(PlaceOrderTopic recentTopic, OrderDomainEntity currentDomainEntityState) {
+    public @NonNull SagaPrimaryEventAction<PlaceOrderTopic> onNext(
+            PlaceOrderTopic recentTopic,
+            OrderDomainEntity currentDomainEntityState,
+            SagaPrimaryEventActionUtil<PlaceOrderTopic> actionUtil
+    ) {
         if (recentTopic.equals(PlaceOrderTopic.DO_FETCH_USER_DETAILS)) {
             currentDomainEntityState.getMetadata().put("navigated-do-initialize-order-at", LocalDateTime.now().toString());
-            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INITIALIZE_ORDER);
+            return actionUtil.next(PlaceOrderTopic.DO_INITIALIZE_ORDER);
         }
         if (recentTopic.equals(PlaceOrderTopic.DO_INITIALIZE_ORDER)) {
             currentDomainEntityState.getMetadata().put("navigated-do-make-payment-at", LocalDateTime.now().toString());
-            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
+            return actionUtil.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
         }
         if (recentTopic.equals(PlaceOrderTopic.DO_MAKE_PAYMENT)) {
             currentDomainEntityState.getMetadata().put("navigated-do-inventory-update-at", LocalDateTime.now().toString());
-            return SagaPrimaryEventAction.next(PlaceOrderTopic.DO_INVENTORY_UPDATE);
+            return actionUtil.next(PlaceOrderTopic.DO_INVENTORY_UPDATE);
         }
         if (recentTopic.equals(PlaceOrderTopic.DO_INVENTORY_UPDATE)) {
-            return SagaPrimaryEventAction.complete();
+            return actionUtil.complete();
         }
-        return SagaPrimaryEventAction.error(new IllegalStateException("Unexpected topic: " + recentTopic));
+        return actionUtil.error(new IllegalStateException("Unexpected topic: " + recentTopic));
     }
 
     //<8>
@@ -235,11 +239,14 @@ See xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model
 
 <6> Override the `registerTopics()` method to register the topics that are used in the transaction. this method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. you should return the list of the topics via a supplier. in this example, it has been 7 topics that are used in the place-order example. these are the real topics that sends the message to the target services.
 
-<7> Override the `onNext()` method to determine the next topic based on the recently completed topic and the current state of the domain entity.
+<7> Override the `onNext()` method to determine the next topic based on the recently completed topic, the current state of the domain entity, and the provided `SagaPrimaryEventActionUtil` (`actionUtil`).
 This method is invoked by the framework after each successful execution in the primary flow and its primary responsibility is *routing* — deciding which topic to trigger next.
 Lightweight orchestrator-side bookkeeping is also permitted here: for example, recording a navigation timestamp in the domain entity metadata (as shown above) is a safe, low-cost operation that will be included in the persisted domain entity snapshot for traceability.
 However, business logic, database calls, external HTTP requests, or any other blocking I/O must not be placed here, because this method runs on the callback listener container's processing threads (a bounded pool sized by the container's concurrency); blocking them reduces callback throughput and can stall other sagas that share the container.
-Return `SagaPrimaryEventAction.next(topic)` to advance to the next step, or `SagaPrimaryEventAction.complete()` when all steps have been processed successfully.
+Use the `actionUtil` factory parameter to return the routing decision:
+* `actionUtil.next(topic)` to route the workflow to the next step/topic.
+* `actionUtil.complete()` when all steps have been processed successfully to finish the Long-Running Transaction (LRT).
+* `actionUtil.error(exception)` to abort the forward execution and initiate the compensation (rollback) flow.
 
 <8> Override the `onNextRevert()` (Optional) method to perform any action at each step of the compensation flow.
 *Call timing*: this method is called *after* `recentExecutedTopic` has completed its compensation successfully and *before* `nextTopic` is dispatched to the worker.
@@ -264,9 +271,9 @@ Executing expensive operations here occupies those threads, leading to head-of-l
 [cols="2,2,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Thrown From | Immediate Effect | Resulting State Transition
+| Thrown / Returned From | Immediate Effect | Resulting State Transition
 
-| `onNext()` — any exception (including `SagaPrimaryEventAction.error(...)`)
+| `onNext()` — any exception (including `actionUtil.error(...)`)
 | Compensation begins
 | `IN_PROGRESS` → `FAILED` → `COMPENSATING`
 
@@ -276,7 +283,7 @@ Executing expensive operations here occupies those threads, leading to head-of-l
 
 |===
 
-NOTE: Any exception thrown from `onNext()` — including via `SagaPrimaryEventAction.error(...)` — is treated by the framework as a non-retryable failure and immediately transitions the saga to `FAILED`, triggering the compensation sequence.
+NOTE: Any exception thrown from `onNext()` — or returned via `actionUtil.error(...)` — is treated by the framework as a non-retryable failure and immediately transitions the saga to `FAILED`, triggering the compensation sequence.
 This means `onNext()` can be used *intentionally* to start compensation based on orchestrator-side conditions: for instance, if a business rule evaluated after receiving a worker reply determines the saga should not proceed further. +
 Similarly, any exception thrown from `onNextRevert()` causes the compensation sequence to terminate immediately and the transaction is marked as compensation-failed.
 See the xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#exception-handling-reference[Exception Handling Reference] for the full breakdown across all methods.

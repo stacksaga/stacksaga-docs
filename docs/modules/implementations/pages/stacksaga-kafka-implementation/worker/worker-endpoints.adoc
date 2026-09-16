@@ -118,7 +118,7 @@ When implementing an endpoint method, use the following logic to decide which ex
 Exception handling is not limited to endpoint methods.
 The `onNext()` and `onNextRevert()` methods in the `EventManager` also participate in the saga failure model:
 
-* *`onNext()`* — Any exception thrown here (including via `SagaPrimaryEventAction.error(...)`) is treated as a non-retryable failure.
+* *`onNext()`* — Any exception thrown here (or returned via `actionUtil.error(...)`) is treated as a non-retryable failure.
 The framework transitions the saga to `FAILED` and begins the compensation sequence immediately.
 This means you can use `onNext()` *intentionally* to force compensation based on orchestrator-side business conditions — for instance, if a rule evaluated after a worker's reply determines the saga must not continue.
 
@@ -128,13 +128,13 @@ The transaction is marked as compensation-failed and will not be retried.
 [cols="2,2,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Thrown From | Immediate Effect | Resulting State Transition
+| Thrown / Returned From | Immediate Effect | Resulting State Transition
 
 | `doProcess()` — `NonRetryableExecutorException` or unhandled exception
 | Compensation begins
 | `IN_PROGRESS` → `FAILED` → `COMPENSATING`
 
-| `onNext()` — any exception
+| `onNext()` — any exception (or `actionUtil.error(...)`)
 | Compensation begins
 | `IN_PROGRESS` → `FAILED` → `COMPENSATING`
 
