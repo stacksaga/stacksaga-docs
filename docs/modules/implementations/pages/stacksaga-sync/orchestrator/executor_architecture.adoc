@@ -81,17 +81,19 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
             String orderId = this.orderService.initializeOrder(
                     currentDomainEntity.getUsername(),
                     currentDomainEntity.getProductItems(),
-                    currentDomainEntity.getTotalAmount()
+                    currentDomainEntity.getTotalAmount(),
+                    idempotencyKey
             );
             currentDomainEntity.setOrderId(orderId);
-            return stepManager.next(RserveItemsExecutor.class, () -> "ORDER_INITIALIZED");//<5>
-        } catch (FeignException.ServiceUnavailable unavailableException) {
+            return stepManager.next(RserveItemsExecutor.class, () -> "ORDER_INITIALIZED"); //<5>
+        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             //<6>
-            throw RetryableExecutorException
-                    .buildWith(unavailableException)
-                    .build();
-        } catch (FeignException.BadRequest badRequestException) {
+            return stepManager.next(RserveItemsExecutor.class, () -> "ORDER_INITIALIZED");
+        } catch (FeignException.ServiceUnavailable unavailableException) {
             //<7>
+            throw RetryableExecutorException.of(unavailableException);
+        } catch (FeignException.BadRequest badRequestException) {
+            //<8>
             throw NonRetryableExecutorException
                     .buildWith(badRequestException)
                     .put("time", LocalDateTime.now())
@@ -101,8 +103,8 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
     }
 
     @Override
-    @RevertBefore(startFrom = OrderInitializeSubBeforeExecutor.class) //<10>
-    @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<11>
+    @RevertBefore(startFrom = OrderInitializeSubBeforeExecutor.class) //<12>
+    @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<13>
     public SagaExecutionEventName doRevert(
             NonRetryableExecutorException processException,
             OrderDomainEntity finalDomainEntityState,
@@ -110,17 +112,18 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
             String idempotencyKey
     ) throws RetryableExecutorException {
         try {
-            //<8>
-            this.orderService.cancelOrder(finalDomainEntityState.getOrderId());
+            //<9>
+            this.orderService.cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
+            return () -> "ORDER_CANCELLED";
+        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
+            //<10>
             return () -> "ORDER_CANCELLED";
         } catch (FeignException.ServiceUnavailable unavailableException) {
-            //<9>
-            throw RetryableExecutorException
-                    .buildWith(unavailableException)
-                    .build();
+            //<11>
+            throw RetryableExecutorException.of(unavailableException);
         } catch (FeignException.BadRequest badRequestException) {
-            //<9>
             revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
+            throw new RuntimeException();
         }
     }
 }
@@ -129,44 +132,44 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `CommandExecutor` interface to make it as a command executor.
 <3> The `doProcess` method is overridden to implement the primary execution logic. +
-it passes the current state of the domain-entity, +
-a utility for managing the process steps, +
-and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
-<4> The primary execution logic is implemented inside the `doProcess` method. here you can update the domain-entity as needed and access data from the domain-entity. it contains all the changes that were made by the previous executors so far.
-<5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next` method. +
-it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
-There is another method called `stepManager.complete` that can be used to complete the entire transaction successfully after executing the current executor.
+StackSaga automatically supplies an `idempotencyKey` as the third parameter. This key is deterministic and stable across retries of this atomic execution. You pass this key to your downstream service (or in an HTTP/messaging header) so that the downstream service can detect duplicate requests. +
+NOTE: To learn how StackSaga generates this key or how to customize it, refer to xref:domain-entity.adoc#generateIdempotencyKey[Generating Idempotency Keys in Domain Entity].
+<4> The primary execution logic is implemented inside the `doProcess` method. Pass the `idempotencyKey` along with your business arguments to the downstream service call.
+<5> If the execution is done successfully, the next executor is navigated by using the `stepManager.next` method. +
+It should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
+There is another method called `stepManager.complete` that can be used to complete the entire transaction successfully after executing the current executor:
 +
 [source,java]
 ----
 stepManager.complete(() -> "ORDER_INITIALIZED");
 ----
 +
-<6> Catch the resource unavailability that can be retried to notify to the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
-you can wrap the original exception by using the `RetryableExecutorException.buildWith(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
-if you throw your own exception without wrapping to the `RetryableExecutorException`, the SEC will consider it as a non-retryable exception and it will stop the transaction forward and start the compensating executions in reverse order immediately.
-<7> Catch the non-retryable exceptions to notify to the SEC to stop the transaction forward and start the compensating executions in reverse order immediately. +
-you can wrap the original exception by using the `NonRetryableExecutorException.buildWith(Exception e)` method to create a new instance of `NonRetryableExecutorException` by wrapping the original exception, and also you can add any metadata that you want to store in the event-store regarding the exception by using the `put(String key, Object value)` method. +
-it can be accessed later in the next compensating execution by using the `RevertHintStore` that is passed to the `doRevert` method of the command executor. +
-if you throw your own exception without wrapping to the `NonRetryableExecutorException`, it doesn't matter in this case, because the SEC will consider it as a non-retryable exception internally, and it will stop the transaction forward and start the compensating executions in reverse order immediately.
+<6> **Handling Already-Executed Idempotent Responses (Developer Responsibility):**
++
+[IMPORTANT]
+====
+*Return Success on Already-Executed Operations — Do Not Throw an Error:* +
+Note that `OperationAlreadyExecutedException` in this code snippet is a custom exception created purely for illustration. In practice, how downstream services signal that an operation was already processed depends entirely on your service architecture — for example, a Feign client throwing an HTTP `409 Conflict`, a custom domain exception, or an API returning a response object with a status like `"ALREADY_PROCESSED"`.
 
-<8> The `doRevert` method is overridden to implement the compensating execution logic. +
-it passes the exception that caused the compensation, +
-the final state of the domain-entity before compensation, +
-the `RevertHintStore` for storing any metadata needed for compensation. +
-and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
-<9> Catch the resource unavailability exception that can be retried to notify to the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
-you can wrap the original exception by using the `RetryableExecutorException.buildWith(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
-if you throw your own exception without wrapping to the `RetryableExecutorException`, the SEC will consider it as a non-retryable exception and terminate the transaction. because `RetryableExecutorException` are not allowed in the compensating execution.
-in case it is thrown an unwrapped runtime exception, the SEC will terminate the transaction immediately. +
-If three is any possibility get a non-retryable exception in the compensating execution and also the compensating execution can be ignored, you can to catch that exception and store the metadata regarding that exception into the `RevertHintStore` by using the `put(String key, Object value)` method like above example.
-it can avoid the transaction termination.
+*As the developer, it is your responsibility to catch or identify that duplicate execution signal inside your executor and handle it appropriately:*
 
-<10> The `@RevertBefore` annotation is used to specify #starting sub-before-executor# that should be started before the main compensating execution of this command executor.
-it is optional to use. if there is no need to execute any sub-before-executors, you can avoid that annotation.
-
-<11> The `@RevertAfter` annotation is used to specify #starting sub-after-executor# that should be started after the main compensating execution of this command executor.
-it is optional to use. if there is no need to execute any sub-after-executors, you can avoid that annotation.
+* You **must treat it as a normal successful execution** and return the next step (`stepManager.next(...)`), **not throw an error**.
+* Because the target microservice already committed the desired state on a previous attempt, returning the next step informs StackSaga that this atomic unit of work is successfully satisfied, allowing the workflow to advance forward. Throwing an exception or letting one bubble up would cause the framework to falsely treat this completed step as a failure, triggering unnecessary compensation!
+====
++
+<7> Catch the resource unavailability that can be retried to notify the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
+You can wrap the original exception by using the `RetryableExecutorException.of(Exception e)` method to create a new instance of `RetryableExecutorException`. +
+If you throw your own exception without wrapping it in `RetryableExecutorException`, the SEC will consider it as a non-retryable exception, stop forward execution, and start compensating executions in reverse order immediately.
+<8> Catch the non-retryable exceptions to notify the SEC to stop forward execution and start compensating executions in reverse order immediately. +
+You can wrap the original exception by using `NonRetryableExecutorException.buildWith(Exception e)` and attach any metadata to the event store using `put(String key, Object value)`. This metadata can later be accessed in compensating executions via the `RevertHintStore`.
+<9> The `doRevert` method is overridden to implement the compensating execution logic. +
+It also receives the `idempotencyKey` to forward to the downstream compensation endpoint to ensure the reversal action is idempotent.
+<10> **Idempotent Compensation Return (Developer Responsibility):** +
+Just like in `doProcess`, handling duplicate execution during compensation is your responsibility as the developer. If the downstream service indicates that the cancellation or reversal was already executed on an earlier retry attempt (represented here by catching `OperationAlreadyExecutedException`), return the success event (`() -> "ORDER_CANCELLED"`). This confirms to the SEC that the compensation for this step is successfully completed, allowing the framework to proceed with compensating the next previous step in reverse order (or successfully finalize the rollback if all compensations are done).
+<11> Catch the resource unavailability exception that can be retried in compensation to keep the transaction in retry mode. +
+If there is a non-retryable exception in compensation that can be safely ignored, catch that exception and store metadata into `RevertHintStore` using `put(String key, Object value)` to avoid transaction termination.
+<12> The `@RevertBefore` annotation is used to specify a starting sub-before-executor that should run before the main compensating execution of this command executor.
+<13> The `@RevertAfter` annotation is used to specify a starting sub-after-executor that should run after the main compensating execution of this command executor.
 
 [[reactive-command-executors]]
 ==== Non-Blocking Command-Executor
@@ -179,6 +182,8 @@ NOTE: Only highlighted parts are described from the above example.
 @AllArgsConstructor
 public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<OrderDomainEntity> { //<1>
 
+    private final OrderService orderService;
+
     @Override //<2>
     @NonNull
     public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
@@ -188,14 +193,21 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
     ) {
         //<3>
         return this.orderService
-                .createOrder(currentDomainEntity.getUserData(), currentDomainEntity.getOrderDetails())
+                .createOrder(
+                        currentDomainEntity.getUserData(),
+                        currentDomainEntity.getOrderDetails(),
+                        idempotencyKey
+                )
                 .map(orderId -> {
                     currentDomainEntity.setOrderId(orderId);
                     return stepManager.next(ReactiveRserveItemsExecutor.class, () -> "ORDER_INITIALIZED");
                 })
                 .onErrorResume(throwable -> {
-                    if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                    if (throwable instanceof OperationAlreadyExecutedException) {
+                        // Return normal success step for already-executed operations — do not fail
+                        return Mono.just(stepManager.next(ReactiveRserveItemsExecutor.class, () -> "ORDER_INITIALIZED"));
+                    } else if (throwable instanceof ResourceUnavailableException) {
+                        return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         return Mono.error(NonRetryableExecutorException.buildWith(throwable)
                                 .put("time", String.valueOf(System.currentTimeMillis()))
@@ -208,14 +220,22 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
 
     @Override //<4>
     @NonNull
-    public Mono<SagaExecutionEventName> doRevert(NonRetryableExecutorException processException, OrderDomainEntity finalDomainEntityState, RevertHintStore revertHintStore, String idempotencyKey) {
+    public Mono<SagaExecutionEventName> doRevert(
+            NonRetryableExecutorException processException,
+            OrderDomainEntity finalDomainEntityState,
+            RevertHintStore revertHintStore,
+            String idempotencyKey
+    ) {
         //<5>
         return this.orderService
-                .cancelOrder(finalDomainEntityState.getOrderId())
+                .cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey)
                 .thenReturn((SagaExecutionEventName) () -> "ORDER_INITIALIZATION_REVERTED")
                 .onErrorResume(throwable -> {
-                    if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                    if (throwable instanceof OperationAlreadyExecutedException) {
+                        // Return success revert event for already-executed compensation
+                        return Mono.just((SagaExecutionEventName) () -> "ORDER_INITIALIZATION_REVERTED");
+                    } else if (throwable instanceof ResourceUnavailableException) {
+                        return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
                         SagaExecutionEventName ignored = () -> "ignored";
@@ -228,14 +248,15 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
 
 <1> The executor implements the `ReactiveCommandExecutor<OrderDomainEntity>` interface to make it as a reactive command executor. the generic type should be the domain-entity class that you want to use in the executor.
 <2> The `doProcess` method is overridden to implement the primary execution logic in a reactive way.
-<3> The primary execution logic is implemented inside the `doProcess` method by using reactive pipeline.
+<3> The primary execution logic is implemented inside the `doProcess` method by using reactive pipeline. +
+Notice that `idempotencyKey` is passed along to the downstream service call (`createOrder`). In `onErrorResume`, if a duplicate execution exception occurs (such as `OperationAlreadyExecutedException`), the pipeline recovers by returning `Mono.just(stepManager.next(...))` to treat it as a success, rather than propagating an error.
 +
 IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
 it is caused by primary execution exception and stopping the transaction forward and starting the compensating executions in reverse order immediately.
 +
 <4> The `doRevert` method is overridden to implement the compensating execution logic in a reactive way.
 <5> The compensating execution logic is implemented inside the `doRevert` method by using reactive pipeline. +
-The same policy of the primary execution is applied here as well. +
+The same idempotency policy applies: pass `idempotencyKey` to `cancelOrder`, and if an already-executed exception occurs in `onErrorResume`, return `Mono.just(...)` with the success revert event name so the framework recognizes this step as compensated. +
 It can not have a non-retryable exception due to compensating execution. if there is any possibility to have a non-retryable exception, it should be caught and stored in the `RevertHintStore` and return a dummy event name like above example to avoid the transaction termination.
 
 [[query-executors]]
@@ -276,9 +297,7 @@ public class ChekUserDetailsExecutor implements QueryExecutor<OrderDomainEntity>
             return stepManager.next(InitializeOrderExecutor.class, () -> "FETCHED_USER_DETAILS"); //<5>
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<6>
-            throw RetryableExecutorException
-                    .buildWith(unavailableException)
-                    .build();
+            throw RetryableExecutorException.of(unavailableException);
         } catch (FeignException.BadRequest badRequestException) {
             //<7>
             throw NonRetryableExecutorException
@@ -294,9 +313,7 @@ public class ChekUserDetailsExecutor implements QueryExecutor<OrderDomainEntity>
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `QueryExecutor` interface to make it as a query executor.
 <3> The `doProcess` method is overridden to implement the primary execution logic. +
-it passes the current state of the domain-entity, +
-a utility for managing the process steps, +
-and an idempotency key to handle duplicate requests. (the idempotency key is identical for each retrying of the same executor invocation of the same transaction).
+It passes the current state of the domain-entity, a utility for managing the process steps, and the framework-provided `idempotencyKey`. Because queries are read-only operations (naturally idempotent), duplicate request handling (such as catching already-executed exceptions) is not required for query executors.
 <4> The primary execution logic is implemented inside the `doProcess` method. here you can update the domain-entity as needed and access data from the domain-entity. it contains all the changes that were made by the previous executors so far.
 <5> if the execution is done successfully, The next executor is navigated by using the `stepManager.next` method. +
 it should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
@@ -308,7 +325,7 @@ stepManager.complete(() -> "ORDER_INITIALIZED");
 ----
 +
 <6> Catch the resource unavailability that can be retried to notify the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
-you can wrap the original exception by using the `RetryableExecutorException.buildWith(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
+you can wrap the original exception by using the `RetryableExecutorException.of(Exception e)` method to create a new instance of `RetryableExecutorException` by wrapping the original exception. +
 if you throw your own exception without wrapping to the `RetryableExecutorException`, the SEC will consider it as a non-retryable exception and it will stop the transaction forward and start the compensating executions in reverse order immediately.
 <7> Catch the non-retryable exceptions to notify to the SEC to stop the transaction forward and start the compensating executions in reverse order immediately. +
 you can wrap the original exception by using the `NonRetryableExecutorException.buildWith(Exception e)` method to create a new instance of `NonRetryableExecutorException` by wrapping the original exception, and also you can add any metadata that you want to store in the event-store regarding the exception by using the `put(String key, Object value)` method. +
@@ -344,7 +361,7 @@ public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<Or
                 })
                 .onErrorResume(throwable -> {
                     if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                        return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         return Mono.error(NonRetryableExecutorException.buildWith(throwable)
                                 .put("time", String.valueOf(System.currentTimeMillis()))
@@ -406,7 +423,10 @@ image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.dra
 [source,java]
 ----
 @SagaExecutor(executeFor = "order-service", value = "orderInitializeSubBeforeExecutor") //<1>
+@AllArgsConstructor
 public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<OrderDomainEntity, InitializeOrderExecutor> { //<2>
+
+    private final OrderService orderService;
 
     @Override //<3>
     public RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
@@ -416,8 +436,15 @@ public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<Or
             RevertBeforeStepManagerUtil<OrderDomainEntity, InitializeOrderExecutor> stepManager,
             String idempotencyKey)
     throws RetryableExecutorException {
-        //implement the sub-before-execution logic as the same way as the command executor's doRevert method.
-        return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"); //<4>
+        try {
+            this.orderService.preCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
+            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"); //<4>
+        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
+            // Return success if already executed on a previous retry attempt
+            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED");
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            throw RetryableExecutorException.of(unavailableException);
+        }
     }
 }
 ----
@@ -425,7 +452,7 @@ public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<Or
 <1> The executor is annotated with `@SagaExecutor` to make it as a spring bean and also to provide the necessary metadata such as the target service that the executor is executed for and the unique name of the executor.
 <2> The executor implements the `RevertBeforeExecutor<A, C>` interface to make it as a sub-before-executor. +
 it should provide the domain-entity class that is used in the entire transaction as the first generic parameter and the command executor class that should be executed before its main compensating execution as the second generic parameter.
-<3> The `doProcess` method is overridden to implement the sub-before-execution logic as the #same way as the command executor's doRevert method#.
+<3> The `doProcess` method is overridden to implement the sub-before-execution logic as the #same way as the command executor's doRevert method#. It receives the `idempotencyKey` to forward to downstream services, and catches duplicate execution exceptions to return success.
 <4> if the execution is done successfully, The next sub-before-executor is navigated to the main(parent) `doRevert` method by using the `stepManager.complete` method. +
 it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
 If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next` method.
@@ -451,11 +478,13 @@ public class ReactiveOrderInitializeSubBeforeExecutor implements ReactiveRevertB
     ) {
         //<4>
         return this.reactiveOrderService
-                .doSomething()
+                .doSomething(idempotencyKey)
                 .thenReturn(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"))
                 .onErrorResume(throwable -> {
-                    if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                    if (throwable instanceof OperationAlreadyExecutedException) {
+                        return Mono.just(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"));
+                    } else if (throwable instanceof ResourceUnavailableException) {
+                        return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("ReactiveOrderInitializeSubBeforeExecutor:FAILED", processException.getMessage());
                         SagaExecutionEventName ignored = () -> "ignored";
@@ -487,7 +516,10 @@ you can pass another sub-before-executor class that you want to navigate and als
 [source,java]
 ----
 @SagaExecutor(executeFor = "order-service", value = "orderInitializeSubAfterExecutor") //<1>
+@AllArgsConstructor
 public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<OrderDomainEntity, InitializeOrderExecutor> { //<2>
+
+    private final OrderService orderService;
 
     @Override //<3>
     public RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
@@ -497,7 +529,15 @@ public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<Orde
             RevertAfterStepManagerUtil<OrderDomainEntity, InitializeOrderExecutor> stepManager,
             String idempotencyKey
     ) throws RetryableExecutorException {
-        return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_REVERTED"); //<4>
+        try {
+            this.orderService.postCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
+            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_REVERTED"); //<4>
+        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
+            // Return success if already executed on a previous retry attempt
+            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_REVERTED");
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            throw RetryableExecutorException.of(unavailableException);
+        }
     }
 }
 ----
@@ -530,11 +570,13 @@ public class ReactiveOrderInitializeSubAfterExecutor implements ReactiveRevertAf
     ) {
         //<4>
         return this.reactiveOrderService
-                .doSomething()
+                .doSomething(idempotencyKey)
                 .thenReturn(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_EXECUTED"))
                 .onErrorResume(throwable -> {
-                    if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.buildWith(throwable).build());
+                    if (throwable instanceof OperationAlreadyExecutedException) {
+                        return Mono.just(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_EXECUTED"));
+                    } else if (throwable instanceof ResourceUnavailableException) {
+                        return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("ReactiveOrderInitializeSubAfterExecutor:FAILED", processException.getMessage());
                         SagaExecutionEventName ignored = () -> "ignored";

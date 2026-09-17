@@ -1,177 +1,250 @@
-:description: Idempotency and atomic transactions in microservices — the foundation for safe retries and compensation in Saga-based long-running transactions, across both HTTP and messaging (Kafka).
-:keywords: idempotency, idempotency key, atomic transaction, atomic operation, saga pattern, long-running transaction, microservices, distributed transactions, retries, compensation, kafka, eventual consistency, stacksaga
+:description: Atomic transactions and idempotency in microservices — the foundational building blocks for safe retries and compensation in Saga-based long-running transactions.
+:keywords: atomic transaction, atomic operation, idempotency, idempotency key, saga pattern, long-running transaction, microservices, distributed transactions, retries, compensation, kafka, eventual consistency, stacksaga
 
-= Idempotency & Atomic Transactions For LRT
+= Atomic Transactions & Idempotency in LRT
 
-== What is the idempotence?
+== Overview
 
-////
-Idempotence in the distributed system refers to the ability of a system to handle duplicate requests or retries without altering the system's state beyond the first application of the request.
-In other words, it allows sending the same request multiple times, and it will only affect the system once.
-Even if the same request is accidentally repeated due to network issues or retries, the result will be the same as if the request was made just one time.
-////
+In xref:introduction-to-saga-design-pattern.adoc[the previous section], we explored how the Saga pattern manages distributed business workflows as a *Long-Running Transaction (LRT)* — breaking a global transaction into a sequence of smaller, locally committed steps.
 
-Idempotency in a microservices architecture means that processing the *same operation multiple times* has the *same effect* as processing it once — whether that operation arrives as a repeated synchronous request (for example over HTTP/REST) or as a redelivered message from a broker (for example a Kafka record).
-This ensures that operations are *safe to retry* without causing unintended side effects, which is especially important in distributed systems where failures, retries, and message redeliveries are common.
+To understand how a Saga works in practice, developers need to understand:
 
-== Why is Idempotence Important in Microservices?
+. *What is the discrete unit of work executed at each step?* — An *Atomic Operation* or *Atomic Transaction*.
+. *What happens when a network call or service fails?* — The ambiguous outcome dilemma and the necessity of *Retries*.
+. *What prevents a retried step from corrupting data?* — *Idempotency*.
 
-In microservices architecture, services are often distributed and communicate over unreliable networks.
-As a result:
-
-* *Failures and Retries:* When an operation fails due to network issues or system crashes, the caller may retry it.
-Without idempotence, multiple retries could lead to inconsistent data or unexpected behavior.
-* *Asynchronous Messaging:* When using message queues, brokers may send the same message multiple times if acknowledgment is not received, or due to delivery guarantees such as "at-least-once."
-* *Concurrency:* Multiple instances of a service might attempt to process the same request or data at the same time, and idempotence ensures that this doesn't lead to incorrect results.
-For example, imagine a microservice responsible for billing.
-If a charge is applied twice due to a retry, the customer could be billed multiple times without idempotence in place.
-
-== Examples of Idempotent and Non-Idempotent Operations
-
-Idempotency is a property of the *operation*, not of the protocol that carries it.
-The same operation can travel over a synchronous protocol such as HTTP/REST or as a message consumed from a broker such as Kafka; what matters is its effect on state when it is applied more than once.
-
-=== Idempotent Operations
-
-* *Reading* an order — fetching the same order multiple times does not change the system state. +
-(REST: `GET /orders/123` — Messaging: a `get-order` query message)
-* *Updating* an order to a fixed value — applying the same update repeatedly results in the same final state. +
-(REST: `PUT /orders/123` — Messaging: an `order-updated` event carrying the full new state)
-* *Deleting* an order — deleting it again has the same effect as deleting it once. +
-(REST: `DELETE /orders/123` — Messaging: an `order-deleted` event keyed by the order id)
-
-=== Non-Idempotent Operations
-
-* *Creating* a new order on every call — each delivery creates another order. +
-(REST: `POST /orders` — Messaging: a `create-order` command consumed twice produces two orders)
-* *Relative* changes such as "add $100 to the balance" — each delivery shifts the state again. +
-(REST: `POST /wallets/123/add?amount=100` — Messaging: an `add-funds` command consumed twice doubles the amount)
-
-These non-idempotent operations are the ones that must be given an idempotency mechanism before they can be safely retried or redelivered.
-
-== Implementing Idempotency
-
-*Use idempotency keys:* The caller attaches a unique identifier to every operation so duplicates can be recognised.
-In REST this is typically a header such as `Idempotency-Key`; in messaging it is usually the message key or a header (for example a Kafka record key, or a `messageId` carried in the record headers).
-
-*Check before processing:* The receiver keeps a record of already-processed keys and ignores (or replays the stored result of) any operation it has seen before.
-
-*Design operations to be naturally idempotent:* Prefer setting an absolute state over applying a relative change.
-In REST this often means preferring `PUT` (set this resource to this value) over `POST` (create another one); in messaging it means modelling events as full-state, keyed records and using upserts rather than blind inserts.
-
-*Use database constraints:* Enforce unique constraints (for example a unique business key) so that a duplicate write fails fast instead of creating a second record.
-
-== Why Idempotency is Important with Retries?
-
-. Prevents Duplicate Transactions
-+
-Suppose a payment service handles a make-payment operation (an HTTP `POST /payments` call, or a `make-payment` command consumed from a topic).
-If the caller does not receive an acknowledgement due to a network failure and retries — or the broker redelivers the message — the same payment might be processed twice, leading to double charges for the customer.
-+
-With idempotency, the service recognises the repeated operation and ensures it is processed only once.
-
-. Ensures Data Integrity +
-Without idempotency, retrying a non-idempotent operation (like adding money to a wallet) might result in incorrect balances.
-+
-Example (delivered over any protocol):
-+
-First delivery: `add-funds(amount=100)` → Balance: $100
-+
-Redelivery after failure: `add-funds(amount=100)` → Balance: $200 (Incorrect!)
-+
-With idempotency, the service checks whether the operation has already been applied and ensures the balance remains correct.
-
-. Avoids Partial Updates & Inconsistencies
-+
-In distributed transactions, a microservice might update multiple databases or services.
-If retries happen without idempotency, it could lead to partially completed operations.
-+
-Example:
-+
-Step 1: Service A debits an account.
-+
-Step 2: Service B fails before updating the order status.
-+
-Step 3: The caller retries (or the broker redelivers), causing another debit.
-+
-Idempotency ensures only one successful debit happens, even with multiple retries.
-
-. Improves System Resilience
-+
-Retries happen automatically almost everywhere — client-side libraries such as Spring Retry or Resilience4j for synchronous calls, and at-least-once delivery in message brokers such as Kafka, RabbitMQ, or SQS for asynchronous communication.
-+
-If a service is not idempotent, these automatic retries and redeliveries might overload the system with unintended duplicate operations.
-
-== How to Ensure Idempotency for Retried Operations in General?
-
-. Use an Idempotency Key
-+
-The caller attaches a unique identifier to the operation (e.g., an `Idempotency-Key` header over HTTP, or a message key / `messageId` header on a Kafka record).
-+
-The receiver checks whether an operation with that key has already been processed.
-+
-If it has, the receiver skips re-execution — and, for request/response styles, returns the previously stored result instead of running the operation again.
-
-. Store Processed Keys
-+
-Maintain a record of processed keys in a database or cache to avoid reprocessing.
-
-. Use Database Constraints
-+
-Enforce unique constraints in the database (e.g., a unique business key such as the order id for payments).
-
-. Prefer State-Setting Operations over Relative Ones
-+
-A state-setting operation reaches the same final state no matter how many times it is applied, whereas a relative or create-style operation does not.
-In REST this means preferring `PUT /orders/123` over `POST /orders`; in messaging it means modelling events as full-state, keyed records and applying them as upserts.
+This page covers the foundational relationship between atomic transactions and idempotency, providing the architectural foundation for building resilient, failure-tolerant microservice workflows.
 
 [[atomic-operations]]
 == Understanding Atomic Operations and Atomic Transactions
 
-Before looking at how idempotency is applied inside a long-running transaction, you first need a clear picture of the unit that idempotency actually protects: the *atomic operation*.
+In monolithic systems, a transaction is governed by database-level ACID guarantees: multiple operations across multiple tables either all commit or all rollback as a single unit.
+In a microservices architecture with a database-per-service pattern, an LRT cannot span multiple databases in a single ACID transaction. Instead, the LRT is composed of discrete, service-local units of execution.
 
-An atomic transaction is a set of operations that must either all succeed or all fail as a single unit.
-Within microservices, such an all-or-nothing unit is referred to as an *atomic execution*.
+An *atomic execution* is an all-or-nothing unit of work executed within the boundary of a single service.
+However, not every atomic execution is the same. There is a critical distinction between a *read-only atomic operation* and a *state-changing atomic transaction*.
 
 image:implementations:executor/stacksaga-diagram-atomic-transaction.svg[alt="atomic operations of the place-order long-running transaction"]
 
-For instance, in the placing-order scenario above, there are 4 atomic operations.
-Each atomic execution can itself consist of multiple service-level operations.
-It is perfectly acceptable to have multiple service-level operations inside a single atomic execution, as long as they all belong to the same logical unit of work.
+Consider the `place-order` scenario illustrated above:
 
-IMPORTANT: *Fetching the user's details* is quite different from the other atomic executions, because it is a *read-only* operation that does not change any state in the user-service's database.
-It can therefore be considered an *atomic operation*, but it is *not an atomic transaction*.
-The others *are atomic transactions*, because each of them changes state in its respective service's database.
+. *Fetching User Details (`user-service`)*:
+This is a *read-only query operation*. It retrieves customer information to validate whether the order can proceed. It does not alter any data in the `user-service` database.
+Therefore, it is an *atomic operation*, but it is *not an atomic transaction*.
 
-In short, every atomic transaction is an atomic operation, but not every atomic operation is an atomic transaction — only the state-changing ones are.
+. *Creating the Order (`order-service`)*:
+Inserts the order record in a pending state. This modifies database state.
 
-Understanding where these atomic boundaries lie is crucial, because *there is no rollback mechanism once an atomic transaction has been committed to its service's database*.
-Once a local transaction commits, it stays committed; the only way back to a consistent state is a *compensating* action, not a rollback.
+. *Checking and Reserving Inventory (`inventory-service`)*:
+Decrements product stock. This modifies database state.
+
+. *Processing Payment (`payment-service`)*:
+Debits the user's account or charges their card. This modifies database state.
+
+Steps 2, 3, and 4 are *atomic transactions*: each performs a state-changing operation governed by a local ACID transaction within its service's database.
+
+[cols="1,2,2", options="header"]
+|===
+| Characteristic | Read-Only Atomic Operation | State-Changing Atomic Transaction
+| *Purpose* | Queries data needed for the workflow | Modifies data within a service boundary
+| *Database Effect* | None (read-only) | Mutates state (INSERT, UPDATE, DELETE)
+| *Transactional Nature* | Read consistency | Service-local ACID transaction
+| *Requires Compensation?* | No (nothing to reverse) | Yes (must have a compensating transaction)
+| *Natural Idempotency* | Naturally idempotent | Must be designed to be idempotent
+| *StackSaga Component* | `QueryExecutor` | `CommandExecutor`
+|===
+
+=== The Local Commit Boundary (The Point of No Return)
+
+The most important takeaway for developers new to microservices is this:
+
+*Once an atomic transaction commits to its local database, it stays committed.*
+
+There is no external distributed transaction coordinator holding a global lock or issuing a database-level `ROLLBACK` across services.
+If step 4 (`make-payment`) fails, step 2 (`create-order`) and step 3 (`reserve-inventory`) are already permanent in their respective databases.
+The only way to undo them is by executing *compensating transactions* (e.g. `cancel-order` and `release-inventory`) that semantically reverse the previous changes.
+
+[[network_timeouts_and_ambiguity]]
+== The Distributed Challenge: Network Timeouts and Ambiguous Failures
+
+Because microservices communicate over an unreliable network (a reality formalized by the *Fallacies of Distributed Computing*), executing atomic transactions across service boundaries introduces failure modes that do not exist in monolithic applications.
+
+=== The Ambiguous Outcome Dilemma (Network Timeouts & Dropped Packets)
+
+When a coordinator (or an upstream service) invokes an atomic transaction over HTTP/REST or via messaging, three outcomes are possible:
+
+. *Success*: The request arrives, the service executes the transaction, and the success response is received.
+. *Deterministic Failure*: The request arrives, the service rejects the transaction (e.g., insufficient balance), and returns an error response.
+. *Ambiguous State (Timeout / Network Drop)*: The caller sends the request, but the connection drops, times out, or the target instance crashes.
+
+image::stacksaga-diagram-distributed-transaction.svg[alt="distributed transaction network boundary"]
+
+In the third case, the caller faces an unsolvable ambiguity from the network alone:
+
+* Did the request drop *before* reaching the service (meaning the atomic transaction never ran)?
+* Or did the service execute the transaction successfully, but the network failed *afterwards* while returning the response?
+
+Because the caller cannot tell whether the remote state was modified or not, the outcome is completely ambiguous.
+
+=== Why Retries Are Mandatory
+
+To recover from transient network drops, socket timeouts, or momentary service restarts, the coordinator *must retry* the invocation:
+
+* *Forward Recovery*: If a transient network glitch occurs while invoking `reserve-inventory`, the coordinator retries the step until confirmation is received.
+* *Backward Recovery*: If a step fails permanently and compensation begins, compensating transactions (e.g., `release-inventory`) must also be retried if they encounter network blips.
+
+=== The Hazard: Duplicate Execution
+
+Retrying an operation across an unreliable network solves the problem of dropped connections, but it introduces a far more dangerous hazard: *duplicate execution*.
+
+Suppose `make-payment` was actually processed successfully on the first attempt, but the response was lost due to a timeout:
+
+* If the caller blindly retries `POST /payments/charge`, the service may charge the customer's credit card a second time!
+* If `inventory-service` blindly retries `POST /stock/decrement`, stock levels will be decremented twice for a single order.
+* If a message broker redelivers a `create-order` message due to an unacknowledged message (at-least-once delivery), multiple duplicate orders will be created.
+
+This leads directly to the core requirement of distributed systems: *every retried atomic operation and compensating transaction must be idempotent*.
+
+[[what_is_idempotency]]
+== What is Idempotency?
+
+*Idempotency* in a microservices architecture means that processing the *same operation multiple times* has the *same effect* as processing it once — whether that operation arrives as a repeated synchronous request (e.g. over HTTP/REST) or as a redelivered message from a broker (e.g. a Kafka record).
+
+In practice:
+
+* Whether an atomic transaction or compensation request arrives once, twice, or ten times — due to retries, network re-transmissions, or broker redeliveries — *the system state changes only once*.
+* Subsequent duplicate requests are recognized, safely handled, and return the same deterministic result without repeating the underlying mutation.
 
 [[idempotency-and-atomic-transactions]]
-== How Idempotency and Atomic Transactions Relate
+=== The Relationship: Granularity vs. Repeatability
 
-Idempotency and atomicity are two different ideas that work together inside a long-running transaction:
+Atomic transactions and idempotency are two complementary concepts that solve different aspects of distributed reliability:
 
-* An *atomic transaction* is about *granularity* — it is the all-or-nothing unit of work that the saga advances one step at a time.
-* *Idempotency* is about *repeatability* — it is the property that lets a single unit be applied many times with the same effect as applying it once.
+[quote]
+____
+*Atomicity* defines the *unit of execution* (an all-or-nothing step within a service boundary). +
+*Idempotency* defines the *safety of repeating that execution* across a network.
+____
 
-The two ideas meet because of how a saga keeps data consistent *without* a global transaction.
-Each atomic transaction commits to its own service's database independently, and — as noted above — once it commits there is no rollback.
-To stay consistent under failure, the saga engine relies on two safety nets:
+* The *Atomic Transaction* gives the Saga engine a clean, bounded step to advance or compensate.
+* *Idempotency* ensures that when the Saga engine retries that step — or when it executes its compensation — it is completely safe from double-execution side effects.
 
-. *Retry* — for transient failures (a network blip, a temporarily unavailable service), the same atomic execution is invoked again.
-. *Compensation* — for permanent failures, the atomic transactions that already committed are undone by their compensating actions in reverse order.
+== Examples: Idempotent vs. Non-Idempotent Operations
 
-Retry is exactly where idempotency becomes mandatory.
-When the engine re-invokes a state-changing atomic transaction, the operation may already have been applied on the first attempt.
-Without idempotency, the retry would apply it a second time — charging the customer twice, decrementing the stock twice, or creating a duplicate order.
+Idempotency is an inherent characteristic of how an operation modifies data — it is not tied to any single communication protocol. It applies equally to synchronous REST calls and asynchronous message consumers (Kafka, RabbitMQ).
 
-TIP: The *atomic transaction* defines _what_ gets retried, and *idempotency* guarantees that retrying it is _safe_ — one is the unit of work, the other is the property that makes that unit safe to repeat.
+=== Naturally Idempotent Operations
 
-This pairing also explains the read-only case.
-A read-only atomic operation (such as fetching the user's details) is *naturally idempotent* — repeating it changes nothing — which is precisely why it never needs a compensating action.
-It is the *state-changing* atomic transactions that must be made idempotent and given compensations.
+. *Read-Only Queries*:
+* REST: `GET /users/456`
+* Messaging: Querying a read-model from a topic
+* *Effect*: Reading data does not alter system state. Calling it 1 time or 100 times produces no side effects.
 
+. *Absolute State-Setting (Upsert / Fixed Value)*:
+* REST: `PUT /orders/123/status` with payload `{"status": "CONFIRMED"}`
+* Messaging: An `OrderConfirmedEvent` with explicit target state
+* *Effect*: Setting an absolute value repeatedly results in the exact same state.
 
+. *Deletions*:
+* REST: `DELETE /orders/123`
+* Messaging: An `OrderCancelled` tombstone message
+* *Effect*: Deleting an entity once removes it; subsequent delete attempts leave it removed.
 
+=== Non-Idempotent Operations
+
+. *Blind Resource Creation*:
+* REST: `POST /orders` (without an idempotency key)
+* Messaging: Consuming a `CreateOrderCommand` without deduplication
+* *Effect*: Every delivery creates a new database record, producing duplicates.
+
+. *Relative State Changes*:
+* REST: `POST /accounts/123/adjust-balance` with payload `{"delta": -50}`
+* Messaging: An `AdjustBalanceCommand` with relative offset
+* *Effect*: If delivered twice, the balance is deducted twice ($100 -> $50 -> $0).
+
+These non-idempotent operations are precisely the operations that *must* be fortified with an idempotency mechanism before they can participate safely in a Long-Running Transaction.
+
+== How to Implement Idempotency in Practice
+
+To ensure that retried atomic transactions and compensations do not produce duplicate mutations, developers use several proven implementation strategies:
+
+=== 1. Use Idempotency Keys (Correlation Identifiers)
+
+The caller attaches a unique, deterministic identifier to each operation:
+
+* In REST APIs, this is typically sent as an HTTP header: `Idempotency-Key: <saga-id>-<step-id>`.
+* In event-driven systems (Kafka/RabbitMQ), this is placed in the record header (e.g. `correlationId` or `messageId`), or used as the message key.
+
+When the service receives the request, it checks whether an execution with that key has already completed.
+
+=== 2. Check-Before-Processing (The Idempotency Store Pattern)
+
+The service maintains a record of processed idempotency keys (typically in a dedicated database table or fast distributed store):
+
+[arabic]
+. When a request arrives with an idempotency key, start a local database transaction.
+. Query the idempotency table for the key:
+* *If the key exists and status is COMPLETED*: Return the previously saved response immediately without re-executing the business logic.
+* *If the key exists and status is IN_PROGRESS*: A concurrent request with the same key is currently running. Return a conflict (`409 Conflict`) or wait.
+* *If the key does not exist*: Insert a new record with status `IN_PROGRESS`, execute the atomic transaction, save the response in the idempotency record, update status to `COMPLETED`, and commit the local transaction.
+
+This guarantees that even if a network timeout causes the client to retry, the second attempt receives the cached result of the first attempt without re-running payment or stock deduction.
+
+=== 3. Database Constraints (Unique Business Keys)
+
+Leverage the database engine's unique constraints to prevent duplicates at the storage level:
+
+* For orders: Place a unique constraint on `(customer_id, client_request_token)`.
+* For payments: Place a unique constraint on `order_id` in the payment ledger table.
+
+If a retried operation attempts to insert a second payment record for the same order, the database rejects the write with a unique key violation, preventing data corruption.
+
+=== 4. Prefer Absolute State Transitions Over Relative Offsets
+
+Whenever possible, design atomic transactions to be state-driven rather than relative:
+
+* *Instead of*: `UPDATE accounts SET balance = balance - 100 WHERE id = 123`
+* *Prefer*: Recording an immutable ledger entry with a unique transaction ID (`INSERT INTO ledger_entries (id, account_id, amount) VALUES ('tx-123', 123, -100)`), and calculating the current balance from the ledger or updating balance only if the transaction ID has not been processed.
+
+== How StackSaga Applies These Principles
+
+StackSaga translates these distributed concepts into clean, object-oriented abstractions in Spring Boot:
+
+. *Executors Map to Atomic Units*:
+
+* `CommandExecutor`: Encapsulates an **Atomic Transaction**. It defines both the *primary execution* (`doProcess`) and its corresponding *compensating execution* (`doRevert`).
+* `QueryExecutor`: Encapsulates a **Read-Only Atomic Operation** (`doProcess`), ensuring no unnecessary rollback logic is generated for non-mutating steps.
+
+. *Automatic State Tracking & Correlation*:
+* Every saga execution instance is assigned a unique `SagaId` and state machine correlation context.
+* StackSaga's event store tracks the outcome of each executor step by step. If a network fault causes a step to retry, StackSaga ensures the step is re-dispatched with consistent context.
+
+. *Safe Retries & Self-Healing*:
+* When a transient failure occurs, StackSaga's retry subsystem re-executes the executor.
+* Because your executors implement idempotency keys and state checks, retries advance the workflow forward safely without double-processing risks.
+
+[TIP]
+====
+*StackSaga Provides the Idempotency Key Automatically:* +
+In traditional microservices development, generating and maintaining unique idempotency keys across distributed retries is cumbersome and error-prone.
+StackSaga takes this responsibility completely off your shoulders: the orchestrator automatically generates a deterministic, collision-resistant `idempotencyKey` for every atomic step (both primary execution and compensation) and injects it directly into your executor methods (`doProcess` and `doRevert`).
+
+All you need to do is forward that `idempotencyKey` to the downstream service (e.g., via an HTTP header such as `Idempotency-Key` or a messaging header) to ensure safe, duplicate-proof execution across retries.
+
+* To see how executors receive and use this key in code, refer to xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[Saga Command Executors].
+* To learn how the key is calculated or how to customize the generator, see xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[Generating Idempotency Keys in Domain Entity].
+====
+
+== Summary: Mental Model for Developers
+
+[cols="1,2,2", options="header"]
+|===
+| Concept | Role in Microservices | Key Rule
+| *Atomic Operation* | The discrete execution step in an LRT | May be read-only (query) or state-changing (transaction).
+| *Atomic Transaction* | A state-changing step committing locally to a service database | Commits permanently; cannot be rolled back by 2PC — must be compensated.
+| *Compensating Transaction* | The semantic reversal of an atomic transaction | Must be idempotent and retryable until consistent.
+| *Idempotency* | The safety guarantee for repeating operations | Ensures retrying an atomic transaction or compensation never produces duplicate side effects.
+|===
+
+Next, explore how to implement these atomic steps in code using StackSaga Executors:
+xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[Explore Saga Executors in StackSaga &#8594;]
