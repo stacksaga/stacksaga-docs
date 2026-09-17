@@ -194,7 +194,7 @@ public class ValidateUserExecutor implements QueryExecutor<OrderDomainEntity> { 
             throw new RuntimeException(e);
         }
         //<4>
-        return stepManager.next(ReserveOrderExecutor.class, () -> "USER_VALIDATED");
+        return stepManager.next(ReserveOrderExecutor.class, "VALIDATED_USER");
     }
 }
 ----
@@ -206,7 +206,8 @@ public class ValidateUserExecutor implements QueryExecutor<OrderDomainEntity> { 
 It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. This is where you would implement the logic to validate the user information, such as calling an external service or performing checks against a database.
 
 <4> The `stepManager.next` method is called to indicate that the next step in the transaction flow should be executed, which in this case is the `ReserveOrderExecutor`.
-The lambda function provides event-name indicating that the user has been validated.
+The action event name (`"VALIDATED_USER"`) is passed directly as a string to be stored in the event store. +
+TIP: For action event naming conventions (past-tense verb first) and the recommended framework practice of maintaining a centralized enum implementing `SagaExecutionEventName`, see xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[Executor Architecture & Best Practices].
 
 IMPORTANT: The 1st executor can be a `QueryExecutor` or a `CommandExecutor`. there is no restriction on the type of the 1st executor in the transaction flow.
 
@@ -235,7 +236,7 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
             throw new RuntimeException(e);
         }
         //<4>
-        return stepManager.next(MakePaymentExecutor.class, () -> "ORDER_RESERVED");
+        return stepManager.next(MakePaymentExecutor.class, "RESERVED_ORDER");
     }
 
     @NonNull
@@ -255,7 +256,7 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
             throw new RuntimeException(e);
         }
         //<6>
-        return () -> "ORDER_REVERTED";
+        return SagaExecutionEventName.of("REVERTED_ORDER");
     }
 }
 ----
@@ -267,12 +268,12 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
 <3> The `doProcess` method is the main entry point for executing the primary logic of the executor.
 It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. this is where you would implement the logic to reserve the order, such as calling an external service or performing operations against a database to reserve the order. at this case the order service is the own service of the orchestrator application, so you can call the order service directly without any network call.
 
-<4> The `stepManager.next` method is called to indicate that the next step in the transaction flow should be executed, which in this case is the `MakePaymentExecutor`.
+<4> The `stepManager.next` method is called to indicate that the next step in the transaction flow should be executed, which in this case is the `MakePaymentExecutor`. The action event name (`"RESERVED_ORDER"`) is passed directly as a string.
 
 <5> The `doRevert` method is called when the transaction flow needs to be rolled back due to a failure in a subsequent step.
 It takes the exception that caused the rollback, the final state of the domain entity, a revert hint store for storing any necessary information for the revert operation, and an idempotency key. this is where you would implement the logic to revert the reserve order action, such as calling service or performing operations against a database to undo the reservation. at this case the order service is the own service of the orchestrator application, so you can call the order service directly without any network call.
 
-<6> The lambda function provides the event-name indicating that the order has been reverted.
+<6> `SagaExecutionEventName.of("REVERTED_ORDER")` provides the event-name indicating that the order reservation has been reverted. Alternatively, if maintaining a centralized enum implementing `SagaExecutionEventName` (such as `OrderExecutionEvent`), that enum value can be returned directly. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[Read more on event best practices].
 
 ==== Creating MakePaymentExecutor
 
@@ -302,10 +303,10 @@ public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
         //simulate payment failure randomly to test the compensation mechanism
         if (new Random().nextBoolean()) {
             throw NonRetryableExecutorException
-                    .buildWith(new RuntimeException("insufficient balance"), () -> "MAKE_PAYMENT_FAILED")
+                    .buildWith(new RuntimeException("insufficient balance"), SagaExecutionEventName.of("FAILED_PAYMENT"))
                     .build();
         } else {
-            return stepManager.complete(() -> "MADE_PAYMENT");
+            return stepManager.complete("MADE_PAYMENT");
         }
     }
 
@@ -332,7 +333,7 @@ It takes the current state of the domain entity, a step manager utility for mana
 TIP: `RetryableExecutorException` is not simulated in this stage.
 RetryableExecutorException is used in next stage with retry-subsystem.
 
-<4> The lambda function provides the event-name indicating that the payment was made or failed.
+<4> In `stepManager.complete("MADE_PAYMENT")`, the action event name indicating that the payment succeeded is passed directly as a string. If the payment fails, `NonRetryableExecutorException.buildWith(..., SagaExecutionEventName.of("FAILED_PAYMENT"))` signals a permanent failure with an event name to trigger compensation of previous steps.
 
 <5> The `doRevert` method is called when the transaction flow needs to be rolled back due to a failure in a subsequent step.
 It takes the exception that caused the rollback, the final state of the domain entity, a revert hint store for storing any necessary information for the revert operation, and an idempotency key. in this example, since the `MakePaymentExecutor` is the last step in the transaction flow, there is no need to implement the revert logic for this executor, because if the payment processing fails, we want to trigger the compensation for the previous successful step, which is the order reservation, and we want to revert that action by calling the `doRevert` method of the `ReserveOrderExecutor`. so we can simply throw an `UnsupportedOperationException` in the `doRevert` method of the `MakePaymentExecutor` to indicate that this will not be executed until there is another executor after this executor in the flow. if there was another executor after this executor in the flow, then we would need to implement the revert logic for this executor as well, to handle the case where the subsequent step fails and triggers compensation. in real payment processing scenarios, you definitely need to implement the revert logic for the payment processing.
@@ -636,7 +637,7 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-        return stepManager.next(MakePaymentExecutor.class, () -> "ORDER_RESERVED");
+        return stepManager.next(MakePaymentExecutor.class, "RESERVED_ORDER");
     }
 
     @NonNull
@@ -654,7 +655,7 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
-        return () -> "ORDER_REVERTED";
+        return SagaExecutionEventName.of("REVERTED_ORDER");
     }
 }
 ----
