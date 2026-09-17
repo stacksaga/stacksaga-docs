@@ -1,19 +1,23 @@
+:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator — fluent API, fire-and-forget, fire-and-watch, blocking fetch vs. reactive fetchAsync state retrieval, and real-time event listeners.
+:keywords: StackSaga, SagaTemplate, fireAndForget, fireAndWatch, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator, StateSpec, StartWithSpec, ExecutionModeSpec
 :page-priority: 0.7
 
-= StackSagaTemplate and Event-Listener
+= SagaTemplate and Event Listeners
 
 [[stacksaga-template-usage]]
-== StackSagaTemplate
+[[saga-template-usage]]
+== SagaTemplate
 
-`StackSagaTemplate` is the main entry point for accessing the StackSaga engine's (SEC) functionalities in the orchestrator service.
-It provides the API to start new transactions, checking the status of existing transactions.
+`SagaTemplate` is the main entry point for interacting with the StackSaga engine (SEC) in an orchestrator service.
+It provides a fluent builder API to initialize transactions, configure execution modes (fire-and-forget or fire-and-watch), and query the current state and execution history of any transaction.
 
-`StackSagaTemplate` can be used in both reactive(non-blocking) and non-reactive(blocking) programming models. if you are in non-reactive environment, it can be used as below.
+`SagaTemplate` seamlessly supports both imperative (blocking) and reactive (non-blocking) application architectures.
 
 [[stackSagaTemplate_usage_in_non_reactive_environment]]
-=== StackSagaTemplate in a Non-Reactive Environment
+[[sagaTemplate_usage_in_non_reactive_environment]]
+=== SagaTemplate in a Non-Reactive Environment
 
-This demonstrates how to use the `StackSagaTemplate` to start a new saga transaction for placing an order and also how to check the current state of the transaction.
+In a traditional Spring MVC or blocking environment, use `SagaTemplate` to initiate saga transactions and retrieve transaction snapshots synchronously:
 
 [source,java]
 ----
@@ -22,10 +26,10 @@ This demonstrates how to use the `StackSagaTemplate` to start a new saga transac
 @RequiredArgsConstructor
 public class PlaceOrderHandler {
 
-    private final SagaTemplate<OrderDomainEntity> stacksagaTemplate;//<1>
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate; //<1>
 
     public String handle(String username, double amount, List<String> items) {
-        String transactionId = this.stackSagaTemplate
+        String transactionId = this.sagaTemplate
                 //<2>
                 .init(() -> {
                     OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
@@ -51,15 +55,15 @@ public class PlaceOrderHandler {
     }
 
     public void printCurrentState(String transactionId) {
-        TransactionState<OrderDomainEntity> state = this
-                .stackSagaTemplate
+        TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state = this
+                .sagaTemplate
                 //<7>
                 .getCurrentState(transactionId)
-                .execute();
+                .fetch();
 
         TransactionCompleteStatus currentStatus = state.getCurrentStatus(); //<8>
         log.info("Current status of transaction {}: {}", transactionId, currentStatus);
-        NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();//<9>
+        NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory(); //<9>
         log.info("Execution history of transaction {}: {}", transactionId, executionHistory);
         OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity(); //<10>
         log.info("Current domain entity state: {}", currentDomainEntity); //<11>
@@ -69,38 +73,33 @@ public class PlaceOrderHandler {
 }
 ----
 
-<1> Autowire the `StackSagaTemplate` in your class. you have to provide the custom xref:stacksaga-sync/orchestrator/domain-entity.adoc#creating_custom_domain_entity[`DomainEntity`] as the generic parameter of the `StackSagaTemplate`.
-<2> Use the `init` operator to initialize the transaction by providing a supplier of the custom DomainEntity. this method is used to create the initial state of the transaction by providing the required properties for the saga execution in the DomainEntity.
-<3> Use the `peek` operator (optional) to perform any action with the initialized DomainEntity before starting the execution. the usage of this operator is that is to see the generated transactionId after initializing the DomainEntity because #the transactionId is generated and set in the DomainEntity by the framework at the time of passing via `init` operator#. therefore, you can use this operator to see the generated transactionId before starting the execution.
-<4> Use the `startWith` operator to specify the first xref:stacksaga-sync/orchestrator/executor_architecture.adoc[executor] that should be triggered to start the transaction.
+<1> Inject `SagaTemplate` configured for your custom xref:stacksaga-sync/orchestrator/domain-entity.adoc#creating_custom_domain_entity[`DomainEntity`] type.
+<2> Use `init()` to provide a `Supplier` creating the initial `DomainEntity`. The framework generates and assigns the unique `transactionId` during initialization.
+<3> Use `peek()` (optional) to inspect or enrich the initialized `DomainEntity` before execution begins.
+<4> Use `startWith()` to specify the initial xref:stacksaga-sync/orchestrator/executor_architecture.adoc[executor] that starts the transaction flow.
+<5> Use `fireAndForget()` to select the fire-and-forget execution mode.
+<6> Call `execute()` to initiate the transaction in a blocking manner. It returns the generated `transactionId` once initialized.
+<7> Call `getCurrentState(transactionId).fetch()` to retrieve a synchronous snapshot of the transaction state from the event-store.
+<8> Retrieve the overall completion status (`TransactionCompleteStatus`) of the transaction.
+<9> Retrieve the chronological execution history (`NavigableMap<Integer, ? extends SyncExecutionEvent<DE>>`) containing every executed span (primary and compensation) with metadata and status.
+<10> Retrieve the current domain entity snapshot representing all state mutations applied up to this point.
+<11> Log the domain entity snapshot.
+<12> Retrieve the start timestamp of the transaction.
 
-<5> Use the `fireAndForget` operator to start the execution of the transaction as fire-and-forget mode. that means the transaction totally runs in the background, and you don't have to wait for the execution to complete. it runs using the request thread only for initializing the transaction. after initializing the transaction, the request thread is released to serve other requests. the execution of the transaction runs in the background using a separate thread pool that is managed by the framework.
+NOTE: For real-time updates without polling, implement a xref:#event_listener_for_stage_change_events[State Change Listener].
 
-<6> Use the `execute` operator to start the execution of the transaction in blocking way.
+=== SagaTemplate in a Reactive Environment
 
-<7> Use the `getCurrentState` operator to get the current state of the transaction by providing the transactionId. this method is used to retrieve the current state of the transaction at any point in time by providing the transactionId. yu can see all the details about the transaction state in the returned `TransactionState` object such as the current status of the transaction, the execution history, the current state of the domain entity, the started time and many more details.
-<8> Get the current status of the transaction from the `TransactionState` object.
-<9> Get the execution history of the transaction from the `TransactionState` object. the execution history is a navigable map that contains all the executed endpoints in the transaction flow (primary and compensation) with their metadata such as the execution status, completed time event name and more.
-<10> Get the current state of the domain entity from the `TransactionState` object. this is the latest state of the domain entity after applying all the changes that are done by the executed endpoints in the transaction flow.
-<11> Log the current state of the domain entity.
-<12> Get the started time of the transaction from the `TransactionState` object and log it.
+In a reactive environment (e.g., Spring WebFlux), `SagaTemplate` provides non-blocking operators across all lifecycle phases.
 
-NOTE: There is another way to being updated about the transaction status changes by using the xref:#event_listener_for_stage_change_events[EventListener].
+There are two primary modes to execute a saga transaction reactively:
 
-IMPORTANT: Go through the Javadoc of the `TransactionState` class to see all the features that are provided in the transaction state object to get more insights about the transaction.
-
-=== StackSagaTemplate in a Reactive Environment
-
-If you are in a reactive environment, you can use the `StackSagaTemplate` in a non-blocking way by using the reactive operators provided by the template.
-There are two ways to execute a saga transaction in a reactive environment:
-
-. *Fire-and-Forget* — Start the transaction and immediately get back a `Mono<String>` containing the transaction ID. The saga runs entirely in the background. Use this when you only need the ID and will rely on `getCurrentState` or the xref:#event_listener_for_stage_change_events[EventListener] to track progress.
-. *Fire-and-Watch* — Start the transaction and observe every state transition in real-time as a `Flux`. Use this when you want to stream live execution events to a client (e.g., via Server-Sent Events).
+. *Fire-and-Forget* — Start the transaction and immediately receive a `Mono<String>` emitting the transaction ID once the saga is accepted. The saga executes in the background. Use this when you only need the transaction ID and will rely on `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track progress.
+. *Fire-and-Watch* — Start the transaction and observe real-time state transitions as a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`. Ideal for streaming live execution events to clients (e.g., via Server-Sent Events or WebSockets).
 
 ==== Fire-and-Forget
 
-The `fireAndForget()` operator hands the transaction off to the StackSaga engine and returns immediately.
-Calling `.executeAsync()` on the resulting spec returns a `Mono<String>` that emits the transaction ID once the saga is successfully initialised and handed over.
+Calling `.fireAndForget().executeAsync()` hands the transaction off to the StackSaga engine and returns a `Mono<String>` emitting the generated transaction ID:
 
 [source,java]
 ----
@@ -109,10 +108,10 @@ Calling `.executeAsync()` on the resulting spec returns a `Mono<String>` that em
 @RequiredArgsConstructor
 public class PlaceOrderHandler {
 
-    private final SagaTemplate<OrderDomainEntity> stacksagaTemplate;
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
 
     public Mono<String> handle(String username, double amount, List<String> items) {
-        return this.stackSagaTemplate
+        return this.sagaTemplate
                 .init(() -> {
                     OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
                     {//initializing the domain entity with the required properties for the saga execution.
@@ -134,12 +133,11 @@ public class PlaceOrderHandler {
 }
 ----
 
-<1> `executeAsync()` returns a `Mono<String>` that emits the transactionId once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId)` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress.
+<1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress.
 
 ==== Fire-and-Watch
 
-The `fireAndWatch(Duration waitTimeout)` operator starts the transaction and allows you to observe each state change in real-time.
-Calling `.toFlux()` on the resulting spec returns a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>` that emits one item per executor step as the saga progresses — making it ideal for streaming live updates to a client (for example via Server-Sent Events).
+Calling `.fireAndWatch(Duration waitTimeout).toFlux()` initiates the transaction and returns a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>` that emits an updated `TransactionState` snapshot after each executor span completes:
 
 [source,java]
 ----
@@ -159,43 +157,37 @@ public Flux<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEn
 }
 ----
 
-<1> The `waitTimeout` is the maximum duration the subscriber will wait for execution results before the pipeline is terminated with `WaitTimeExceededException`.
+<1> `waitTimeout` defines the maximum duration the subscriber will wait for execution results before the pipeline signals a `WaitTimeExceededException`.
 
 ===== Key Behaviors and Error Handling
 
-* *Timeout (`WaitTimeExceededException`)*: If the execution time exceeds the specified `Duration waitTimeout`, the pipeline signals a `WaitTimeExceededException` via `onError`. This **only terminates the subscription** — the underlying saga execution is not cancelled and continues asynchronously in the background.
-After the subscription ends, you can still track the transaction in two ways:
-** If you have implemented a xref:#event_listener_for_stage_change_events[State Change Listener] (`TransactionEventListener` or `ReactiveTransactionEventListener`), it will continue to receive state change notifications for every executor step as usual.
-** Alternatively, you can manually query the current state of the transaction at any time using `getCurrentState(transactionId)`.
+* *Timeout (`WaitTimeExceededException`)*: If execution exceeds the specified `Duration waitTimeout`, the pipeline terminates with a `WaitTimeExceededException` via `onError`. This **only ends the subscription** — the saga execution continues asynchronously in the background.
+After the subscription ends, you can still observe progress in two ways:
+** If you have registered a xref:#event_listener_for_stage_change_events[State Change Listener] (`TransactionEventListener` or `ReactiveTransactionEventListener`), it continues to receive event callbacks.
+** Alternatively, query the state at any time using `getCurrentState(transactionId).fetchAsync()`.
 
-* *Execution Pause (`TransactionPausedException`)*: If a step encounters a retryable exception (such as a database outage or a custom `RetryableExecutorException`), the execution is paused and rescheduled. Because `TransactionState` has no notion of this internal pause, the pipeline stops emitting and signals a `TransactionPausedException` via `onError`. This does not mean the transaction has failed — it only means the live subscription is halted.
-After the subscription ends, you can still track the transaction in two ways:
-** If you have implemented a xref:#event_listener_for_stage_change_events[State Change Listener] (`TransactionEventListener` or `ReactiveTransactionEventListener`), it will continue to receive state change notifications once the execution resumes after the retry.
-** Alternatively, you can manually check the current state of the transaction using `getCurrentState(transactionId)`.
-
-
+* *Execution Pause (`TransactionPausedException`)*: If a step encounters a retryable exception (such as a transient database failure or custom `RetryableExecutorException`), execution is paused and rescheduled. Because `TransactionState` only represents completed saga states, the live subscription halts and emits a `TransactionPausedException` via `onError`. This indicates a temporary retry pause, not a fatal failure.
+Once rescheduled and retried, state notifications continue via listeners, or you can query state using `getCurrentState(transactionId).fetchAsync()`.
 
 [[event_listener_for_stage_change_events]]
 == Observing Transaction State Changes
 
-After handing over the transaction to the StackSaga engine by calling the `execute` or `executeAsync` method of the `StackSagaTemplate`, the transaction is executed step by step (primary executors and compensation executors).
-There are two ways to observe and react to state changes during or after the transaction execution:
+After initiating a transaction via `execute()` or `executeAsync()`, the StackSaga engine executes each step sequentially (forward commands/queries and backward compensations).
 
-. *xref:#state-change-listeners[State Change Listeners]* — A push-based approach where the engine notifies your callback method in real-time after each executor step completes. Ideal for real-time use cases like pushing order status notifications to an end user.
-. *xref:#getcurrentstate-on-demand[`StackSagaTemplate.getCurrentState()`]* — A pull-based approach where you query the full state of the transaction on demand at any point in time. Ideal for on-demand lookups, such as when a user wants to see the current status of their order.
+There are two distinct mechanisms to observe state changes:
+
+. *xref:#state-change-listeners[State Change Listeners]* — Push-based: The engine notifies your listener callback automatically after each executor step completes. Best for real-time reactions such as dispatching notifications, updating caches, or emitting events.
+. *xref:#getcurrentstate-on-demand[`SagaTemplate.getCurrentState()`]* — Pull-based: Queries the event-store on demand to retrieve the latest state snapshot for a given transaction ID. Best for user-facing status queries and post-completion audits.
 
 [[state-change-listeners]]
 === Using State Change Listeners (Real-time)
 
-State Change Listeners are the recommended way to track transaction progress in real-time.
-The engine invokes the listener's `onStateChanged` callback after every executor step (both primary and compensation), passing the current `TransactionState` directly — so you never need to poll.
+State Change Listeners receive push notifications directly from the engine after every executor span completes (both forward execution and compensations).
 
-Listeners can be implemented based on your environment:
+Choose the listener interface matching your application architecture:
 
-. `TransactionEventListener` — for non-reactive (blocking) environments.
-. `ReactiveTransactionEventListener` — for reactive (non-blocking) environments.
-
-
+. `TransactionEventListener` — For imperative / blocking environments.
+. `ReactiveTransactionEventListener` — For reactive / non-blocking environments.
 
 [IMPORTANT]
 ====
@@ -207,12 +199,12 @@ Specifically, **the next span/executor step in the saga flow is triggered only a
 Performing heavy computations, slow I/O calls, or long-running operations inside `onStateChanged` directly blocks the progression of the transaction and increases total transaction latency.
 
 *Best Practice:*
-Keep `onStateChanged` lightweight (e.g., publishing a quick notification or logging status). If you need to perform heavy or time-consuming operations, offload the work to an asynchronous/separate thread pool (using a snapshot or deep copy of `TransactionState` if needed), allowing the engine to immediately proceed with the next span of the transaction.
+Keep `onStateChanged` lightweight (e.g., publishing a quick notification or logging status). If you need to perform heavy or time-consuming operations, offload the work to an asynchronous thread pool (using a snapshot or deep copy of `TransactionState` if needed), allowing the engine to immediately proceed with the next span of the transaction.
 ====
 
 ==== TransactionEventListener
 
-Implement the `TransactionEventListener` interface to listen to transaction events in a non-reactive environment.
+Implement `TransactionEventListener` to listen to transaction events in an imperative environment:
 
 [source,java]
 ----
@@ -220,11 +212,12 @@ Implement the `TransactionEventListener` interface to listen to transaction even
 @Component
 @RequiredArgsConstructor
 public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
+
     @Override
-    public void onStateChanged(TransactionState<OrderDomainEntity> state) {
+    public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state) {
         TransactionCompleteStatus currentStatus = state.getCurrentStatus();
         log.info("Current status of transaction: {}", currentStatus);
-        NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();
+        NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory();
         log.info("Execution history of transaction: {}", executionHistory);
         OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
         log.info("Current domain entity state: {}", currentDomainEntity);
@@ -234,11 +227,11 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 }
 ----
 
-NOTE: Because `onStateChanged` here is plain synchronous, blocking-capable user code, the engine invokes it on a dedicated blocking scheduler — the `blockingExecutionScheduler` supplied by the orchestrator's `AbstractSchedulerProvider` — rather than on the Kafka consumer thread or the framework's shared non-blocking scheduler. That keeps blocking work in your listener from starving Kafka message consumption or the dispatch of other, unrelated transactions. It still delays the progression of *this* transaction until the method returns, and the scheduler's thread pool is finite, so avoid unbounded or very long-running work here regardless. This pool's thread cap, queue capacity, TTL and daemon flag can be tuned via the `stacksaga.kafka.orchestrator.scheduler.blocking-execution.*` properties.
+NOTE: Because `onStateChanged` is synchronous, blocking user code, the engine invokes it on a dedicated bounded-elastic scheduler (`blockingExecutionScheduler`) supplied by `AbstractSchedulerProvider`. This isolates listener execution from the engine's core reactive threads. The thread cap, queue capacity, and TTL can be tuned via the `stacksaga.scheduler.blocking-execution.*` configuration properties. See xref:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties].
 
 ==== ReactiveTransactionEventListener
 
-Implement the `ReactiveTransactionEventListener` interface to listen to transaction events in a reactive environment.
+Implement `ReactiveTransactionEventListener` to listen to transaction events in a reactive environment:
 
 [source,java]
 ----
@@ -246,46 +239,83 @@ Implement the `ReactiveTransactionEventListener` interface to listen to transact
 @Component
 @RequiredArgsConstructor
 public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {
+
     @Override
-    public Mono<Void> onStateChanged(TransactionState<OrderDomainEntity> transactionState) {
+    public Mono<Void> onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) {
         return Mono
                 .just(transactionState)
                 .doOnNext(state -> {
                     TransactionCompleteStatus currentStatus = state.getCurrentStatus();
                     log.info("Current status of transaction: {}", currentStatus);
-                    NavigableMap<Integer, SagaExecutionEvent> executionHistory = state.getExecutionHistory();
+                    NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory();
                     log.info("Execution history of transaction: {}", executionHistory);
                     OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
                     log.info("Current domain entity state: {}", currentDomainEntity);
                     ZonedDateTime startedDateTime = state.getStartedDateTime();
                     log.info("Transaction started at: {}", startedDateTime.toLocalDateTime());
                 })
-                .flatMap(orderDomainEntityTransactionState -> {
-                    //simulate some async processing here.
-                    return Mono.delay(Duration.ofSeconds(1))
-                            .then();
+                .flatMap(state -> {
+                    // simulate async non-blocking processing
+                    return Mono.delay(Duration.ofSeconds(1)).then();
                 });
     }
 }
 ----
 
-NOTE: Unlike `TransactionEventListener`, no dedicated blocking scheduler is used here: the engine subscribes to the returned `Mono` on the same shared, non-blocking `executionScheduler` supplied by `AbstractSchedulerProvider` that also drives dispatch of other, unrelated transactions. Because that scheduler is shared and fixed-size, this pipeline must be genuinely non-blocking — any blocking call here risks starving unrelated, concurrently-running transactions, not just delaying this one. This pool's parallelism can be tuned via the `stacksaga.kafka.orchestrator.scheduler.execution.*` properties.
+NOTE: Unlike `TransactionEventListener`, `ReactiveTransactionEventListener#onStateChanged` runs on the shared non-blocking `executionScheduler`. The returned `Mono<Void>` must be fully non-blocking; any blocking calls will starve worker threads and affect other concurrent transactions. Parallelism can be tuned via `stacksaga.scheduler.execution.parallelism`. See xref:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties].
 
 [[getcurrentstate-on-demand]]
-=== Using StackSagaTemplate.getCurrentState() (On-demand)
+=== Using SagaTemplate.getCurrentState() (On-demand)
 
-`StackSagaTemplate.getCurrentState(transactionId)` is a pull-based approach that lets you fetch the full state of a transaction at any point in time by providing the transaction ID.
+`SagaTemplate.getCurrentState(String transactionId)` provides pull-based access to the complete state snapshot and execution history of any transaction by its ID.
 
-This is useful when you need to look up the details of a transaction on demand — for example, when a user wants to view the current status of their order after it has been placed, or when you want to inspect the execution history after the transaction has completed.
+Calling `getCurrentState(transactionId)` returns a `SagaTemplate.StateSpec<DE>` specification that provides two methods:
 
-NOTE: Unlike State Change Listeners, this method fetches the transaction state from the event-store on every call. It is not real-time and is not suitable for use as a polling mechanism during active execution. Prefer a State Change Listener for real-time tracking.
+* *`fetch()`* — Synchronous retrieval returning `TransactionState<DE, SyncExecutionEvent<DE>>`.
++
+[WARNING]
+====
+Do not call `fetch()` on non-blocking Reactor or Netty event loop threads. The method performs a thread check (`Schedulers.isInNonBlockingThread()`) and throws an `IllegalStateException` if invoked from a non-blocking thread. In reactive applications, always use `fetchAsync()`.
+====
 
+* *`fetchAsync()`* — Asynchronous retrieval returning `Mono<TransactionState<DE, SyncExecutionEvent<DE>>>`. Safe for use in Spring WebFlux and reactive event-loop threads.
+
+==== Blocking State Retrieval (Imperative / Spring MVC)
+
+[source,java]
+----
+TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state = 
+        this.sagaTemplate
+                .getCurrentState(transactionId)
+                .fetch();
+
+TransactionCompleteStatus status = state.getCurrentStatus();
+NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> history = state.getExecutionHistory();
+OrderDomainEntity entity = state.getCurrentDomainEntity();
+----
+
+==== Reactive State Retrieval (Reactive / Spring WebFlux)
+
+[source,java]
+----
+Mono<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>>> stateMono = 
+        this.sagaTemplate
+                .getCurrentState(transactionId)
+                .fetchAsync();
+
+stateMono.subscribe(state -> {
+    log.info("Transaction status: {}", state.getCurrentStatus());
+});
+----
+
+NOTE: Unlike State Change Listeners which receive pushed state events in memory as execution proceeds, `getCurrentState(transactionId)` queries the underlying event-store on every call. It is designed for on-demand queries, rather than high-frequency polling during active execution.
 
 [[recommended-handler-pattern]]
 == Recommended Handler Pattern
 
-StackSaga team suggests to implement the saga transaction related things in a separate class called `Handler` that is responsible for starting, listening and checking the status of the saga transactions.
-The below code snippet is showing the recommended architecture for the Handler.
+The StackSaga team recommends organizing saga transaction logic inside a dedicated `Handler` component that encapsulates transaction initiation, state queries, and lifecycle event observation.
+
+=== Imperative Handler Pattern
 
 [source,java]
 ----
@@ -294,32 +324,84 @@ The below code snippet is showing the recommended architecture for the Handler.
 @RequiredArgsConstructor
 public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
 
-    private StackSagaTemplate<OrderDomainEntity> stackSagaTemplate;
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
 
     public String handle(String username, double amount, List<String> items) { //<1>
-        return this
-                .stackSagaTemplate
+        return this.sagaTemplate
                 .init(() -> {
-                  //....
+                    OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
+                    orderDomainEntity.setUsername(username);
+                    orderDomainEntity.setTotalAmount(amount);
+                    return orderDomainEntity;
                 })
-                .....
+                .startWith(ValidateUserExecutor.class)
+                .fireAndForget()
+                .execute();
     }
 
     public CustomOrderStatusView getCurrentState(String orderId) { //<2>
-        return this
-                .stackSagaTemplate
+        TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state = this
+                .sagaTemplate
                 .getCurrentState(orderId)
-                ......
-
+                .fetch();
+        return new CustomOrderStatusView(state);
     }
+
     @Override
-    public void onStateChanged(TransactionState<OrderDomainEntity> transactionState) { //<3>
-        //....
+    public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) { //<3>
+        log.info("Transaction {} updated to status {}", 
+                transactionState.getTransactionId(), 
+                transactionState.getCurrentStatus());
     }
 }
 ----
 
-<1> The `handle` method is responsible for starting the saga transaction by using the `StackSagaTemplate` and providing the required parameters to start the transaction.
-<2> Fetch the current state of the transaction by using the `StackSagaTemplate`
-<3> Implement the `onStateChanged` method to listen to the transaction status changes by implementing the `TransactionEventListener` interface and override the `onStateChanged` method.
+<1> The `handle` method initiates the saga transaction using `SagaTemplate` and returns the generated transaction ID.
+<2> Retrieve the current transaction state on demand using `.getCurrentState(orderId).fetch()`.
+<3> Implement `onStateChanged` from `TransactionEventListener` to handle real-time lifecycle notifications.
 
+=== Reactive Handler Pattern
+
+[source,java]
+----
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {
+
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
+
+    public Mono<String> handle(String username, double amount, List<String> items) { //<1>
+        return this.sagaTemplate
+                .init(() -> {
+                    OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
+                    orderDomainEntity.setUsername(username);
+                    orderDomainEntity.setTotalAmount(amount);
+                    return orderDomainEntity;
+                })
+                .startWith(ValidateUserExecutor.class)
+                .fireAndForget()
+                .executeAsync();
+    }
+
+    public Mono<CustomOrderStatusView> getCurrentState(String orderId) { //<2>
+        return this.sagaTemplate
+                .getCurrentState(orderId)
+                .fetchAsync()
+                .map(CustomOrderStatusView::new);
+    }
+
+    @Override
+    public Mono<Void> onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) { //<3>
+        return Mono.fromRunnable(() -> 
+                log.info("Transaction {} updated to status {}", 
+                        transactionState.getTransactionId(), 
+                        transactionState.getCurrentStatus())
+        );
+    }
+}
+----
+
+<1> Non-blocking transaction initiation returning `Mono<String>` with the transaction ID.
+<2> Non-blocking state query using `.getCurrentState(orderId).fetchAsync()`.
+<3> Implement `onStateChanged` from `ReactiveTransactionEventListener` returning `Mono<Void>` for non-blocking event handling.
