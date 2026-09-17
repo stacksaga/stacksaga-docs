@@ -85,10 +85,10 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
                     idempotencyKey
             );
             currentDomainEntity.setOrderId(orderId);
-            return stepManager.next(RserveItemsExecutor.class, () -> "ORDER_INITIALIZED"); //<5>
+            return stepManager.next(RserveItemsExecutor.class, "INITIALIZED_ORDER"); //<5>
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             //<6>
-            return stepManager.next(RserveItemsExecutor.class, () -> "ORDER_INITIALIZED");
+            return stepManager.next(RserveItemsExecutor.class, "INITIALIZED_ORDER");
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<7>
             throw RetryableExecutorException.of(unavailableException);
@@ -114,10 +114,10 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
         try {
             //<9>
             this.orderService.cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return () -> "ORDER_CANCELLED";
+            return SagaExecutionEventName.of("CANCELLED_ORDER");
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             //<10>
-            return () -> "ORDER_CANCELLED";
+            return SagaExecutionEventName.of("CANCELLED_ORDER");
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<11>
             throw RetryableExecutorException.of(unavailableException);
@@ -136,13 +136,60 @@ StackSaga automatically supplies an `idempotencyKey` as the third parameter. Thi
 NOTE: To learn how StackSaga generates this key or how to customize it, refer to xref:domain-entity.adoc#generateIdempotencyKey[Generating Idempotency Keys in Domain Entity].
 <4> The primary execution logic is implemented inside the `doProcess` method. Pass the `idempotencyKey` along with your business arguments to the downstream service call.
 <5> If the execution is done successfully, the next executor is navigated by using the `stepManager.next` method. +
-It should be provided the next executor class that you want to navigate and also the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current executor. +
+It should be provided the next executor class that you want to navigate and the event action name that will be stored in the event-store regarding the successful execution of the current executor. +
 There is another method called `stepManager.complete` that can be used to complete the entire transaction successfully after executing the current executor:
 +
 [source,java]
 ----
-stepManager.complete(() -> "ORDER_INITIALIZED");
+stepManager.complete("INITIALIZED_ORDER");
 ----
++
+[TIP]
+====
+*`stepManager` Methods & Best Practices for Event Actions:*
+
+`stepManager` provides two overloaded method signatures for navigating (`next`) and completing (`complete`) transactions:
+
+. *Passing Event Name Directly as `String` (Direct & Convenient)*: +
+You can pass the event action name directly as a `String` (e.g. `stepManager.next(ReserveItemsExecutor.class, "INITIALIZED_ORDER")` or `stepManager.complete("INITIALIZED_ORDER")`). Under the hood, StackSaga automatically records this event action in the event store.
+
+. *Passing Event Name as `SagaExecutionEventName` (Centralized Enum - Recommended)*: +
+Instead of scattering string literals across multiple executors, the recommended framework practice is to maintain a centralized `enum` implementing `SagaExecutionEventName` for each custom LRT domain entity (e.g. `OrderDomainEntity`):
++
+[source,java]
+----
+public enum OrderExecutionEvent implements SagaExecutionEventName {
+    INITIALIZED_ORDER,
+    CANCELLED_ORDER,
+    FETCHED_USER_DETAILS,
+    MADE_PAYMENT,
+    REFUNDED_PAYMENT,
+}
+----
++
+This provides compile-time type safety and centralized traceability across the saga:
++
+[source,java]
+----
+// Forward navigation in doProcess:
+return stepManager.next(ReserveItemsExecutor.class, OrderExecutionEvent.INITIALIZED_ORDER);
+
+// Completing transaction in doProcess:
+return stepManager.complete(OrderExecutionEvent.INITIALIZED_ORDER);
+
+// Compensating in doRevert:
+return OrderExecutionEvent.CANCELLED_ORDER;
+----
+
+. *Action Event Naming Convention*:
+* **First word**: Must be a verb in past-tense format (e.g., `INITIALIZED`, `CANCELLED`, `FETCHED`, `MADE`, `REFUNDED`, `REVERTED`, `EXECUTED`).
+* **Second phase**: Represents the real subject or domain entity (e.g., `ORDER`, `USER_DETAILS`, `PAYMENT`).
++
+_Examples_: `INITIALIZED_ORDER`, `CANCELLED_ORDER`, `FETCHED_USER_DETAILS`, `MADE_PAYMENT`, `REFUNDED_PAYMENT`.
+
+. *Direct Factory Method (`SagaExecutionEventName.of`)*: +
+For methods where a `SagaExecutionEventName` return type is required (such as in `doRevert(...)`) and you are not using a custom enum, you can directly use `SagaExecutionEventName.of("CANCELLED_ORDER")`.
+====
 +
 <6> **Handling Already-Executed Idempotent Responses (Developer Responsibility):**
 +
@@ -165,7 +212,7 @@ You can wrap the original exception by using `NonRetryableExecutorException.buil
 <9> The `doRevert` method is overridden to implement the compensating execution logic. +
 It also receives the `idempotencyKey` to forward to the downstream compensation endpoint to ensure the reversal action is idempotent.
 <10> **Idempotent Compensation Return (Developer Responsibility):** +
-Just like in `doProcess`, handling duplicate execution during compensation is your responsibility as the developer. If the downstream service indicates that the cancellation or reversal was already executed on an earlier retry attempt (represented here by catching `OperationAlreadyExecutedException`), return the success event (`() -> "ORDER_CANCELLED"`). This confirms to the SEC that the compensation for this step is successfully completed, allowing the framework to proceed with compensating the next previous step in reverse order (or successfully finalize the rollback if all compensations are done).
+Just like in `doProcess`, handling duplicate execution during compensation is your responsibility as the developer. If the downstream service indicates that the cancellation or reversal was already executed on an earlier retry attempt (represented here by catching `OperationAlreadyExecutedException`), return the success event (`SagaExecutionEventName.of("CANCELLED_ORDER")`). This confirms to the SEC that the compensation for this step is successfully completed, allowing the framework to proceed with compensating the next previous step in reverse order (or successfully finalize the rollback if all compensations are done).
 <11> Catch the resource unavailability exception that can be retried in compensation to keep the transaction in retry mode. +
 If there is a non-retryable exception in compensation that can be safely ignored, catch that exception and store metadata into `RevertHintStore` using `put(String key, Object value)` to avoid transaction termination.
 <12> The `@RevertBefore` annotation is used to specify a starting sub-before-executor that should run before the main compensating execution of this command executor.
@@ -200,12 +247,12 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
                 )
                 .map(orderId -> {
                     currentDomainEntity.setOrderId(orderId);
-                    return stepManager.next(ReactiveRserveItemsExecutor.class, () -> "ORDER_INITIALIZED");
+                    return stepManager.next(ReactiveRserveItemsExecutor.class, "INITIALIZED_ORDER");
                 })
                 .onErrorResume(throwable -> {
                     if (throwable instanceof OperationAlreadyExecutedException) {
                         // Return normal success step for already-executed operations — do not fail
-                        return Mono.just(stepManager.next(ReactiveRserveItemsExecutor.class, () -> "ORDER_INITIALIZED"));
+                        return Mono.just(stepManager.next(ReactiveRserveItemsExecutor.class, "INITIALIZED_ORDER"));
                     } else if (throwable instanceof ResourceUnavailableException) {
                         return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
@@ -229,16 +276,16 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
         //<5>
         return this.orderService
                 .cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey)
-                .thenReturn((SagaExecutionEventName) () -> "ORDER_INITIALIZATION_REVERTED")
+                .thenReturn(SagaExecutionEventName.of("REVERTED_ORDER_INITIALIZATION"))
                 .onErrorResume(throwable -> {
                     if (throwable instanceof OperationAlreadyExecutedException) {
                         // Return success revert event for already-executed compensation
-                        return Mono.just((SagaExecutionEventName) () -> "ORDER_INITIALIZATION_REVERTED");
+                        return Mono.just(SagaExecutionEventName.of("REVERTED_ORDER_INITIALIZATION"));
                     } else if (throwable instanceof ResourceUnavailableException) {
                         return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
-                        SagaExecutionEventName ignored = () -> "ignored";
+                        SagaExecutionEventName ignored = SagaExecutionEventName.of("IGNORED");
                         return Mono.just(ignored);
                     }
                 });
@@ -294,7 +341,7 @@ public class ChekUserDetailsExecutor implements QueryExecutor<OrderDomainEntity>
             UserDetailDto userDetail = this.userService.getUserDetails(currentDomainEntity.getUsername());
             currentDomainEntity.setUserDetail(userDetail);
 
-            return stepManager.next(InitializeOrderExecutor.class, () -> "FETCHED_USER_DETAILS"); //<5>
+            return stepManager.next(InitializeOrderExecutor.class, "FETCHED_USER_DETAILS"); //<5>
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<6>
             throw RetryableExecutorException.of(unavailableException);
@@ -321,7 +368,7 @@ There is another method called `stepManager.complete` that can be used to comple
 +
 [source,java]
 ----
-stepManager.complete(() -> "ORDER_INITIALIZED");
+stepManager.complete("INITIALIZED_ORDER");
 ----
 +
 <6> Catch the resource unavailability that can be retried to notify the SEC to keep the transaction in retry mode and it will be exposed to the next retrying schedule as you configured. +
@@ -357,7 +404,7 @@ public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<Or
                     currentDomainEntity.setTel(userData.getPhoneNumber());
                     currentDomainEntity.setEmail(userData.getEmail());
                     currentDomainEntity.setAddress(userData.getEmail());
-                    return stepManager.next(ReactiveInitializeOrderExecutor.class, () -> "FETCHED_USER_DETAILS");
+                    return stepManager.next(ReactiveInitializeOrderExecutor.class, "FETCHED_USER_DETAILS");
                 })
                 .onErrorResume(throwable -> {
                     if (throwable instanceof ResourceUnavailableException) {
@@ -438,10 +485,10 @@ public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<Or
     throws RetryableExecutorException {
         try {
             this.orderService.preCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"); //<4>
+            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE"); //<4>
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             // Return success if already executed on a previous retry attempt
-            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED");
+            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE");
         } catch (FeignException.ServiceUnavailable unavailableException) {
             throw RetryableExecutorException.of(unavailableException);
         }
@@ -479,16 +526,15 @@ public class ReactiveOrderInitializeSubBeforeExecutor implements ReactiveRevertB
         //<4>
         return this.reactiveOrderService
                 .doSomething(idempotencyKey)
-                .thenReturn(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"))
+                .thenReturn(stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE"))
                 .onErrorResume(throwable -> {
                     if (throwable instanceof OperationAlreadyExecutedException) {
-                        return Mono.just(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_BEFORE_REVERTED"));
+                        return Mono.just(stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE"));
                     } else if (throwable instanceof ResourceUnavailableException) {
                         return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("ReactiveOrderInitializeSubBeforeExecutor:FAILED", processException.getMessage());
-                        SagaExecutionEventName ignored = () -> "ignored";
-                        return Mono.just(stepManager.complete(ignored));
+                        return Mono.just(stepManager.complete("IGNORED"));
                     }
                 });
     }
@@ -531,10 +577,10 @@ public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<Orde
     ) throws RetryableExecutorException {
         try {
             this.orderService.postCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_REVERTED"); //<4>
+            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_AFTER"); //<4>
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             // Return success if already executed on a previous retry attempt
-            return stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_REVERTED");
+            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_AFTER");
         } catch (FeignException.ServiceUnavailable unavailableException) {
             throw RetryableExecutorException.of(unavailableException);
         }
@@ -571,16 +617,15 @@ public class ReactiveOrderInitializeSubAfterExecutor implements ReactiveRevertAf
         //<4>
         return this.reactiveOrderService
                 .doSomething(idempotencyKey)
-                .thenReturn(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_EXECUTED"))
+                .thenReturn(stepManager.complete("EXECUTED_ORDER_INITIALIZATION_SUB_AFTER"))
                 .onErrorResume(throwable -> {
                     if (throwable instanceof OperationAlreadyExecutedException) {
-                        return Mono.just(stepManager.complete(() -> "ORDER_INITIALIZATION_SUB_AFTER_EXECUTED"));
+                        return Mono.just(stepManager.complete("EXECUTED_ORDER_INITIALIZATION_SUB_AFTER"));
                     } else if (throwable instanceof ResourceUnavailableException) {
                         return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("ReactiveOrderInitializeSubAfterExecutor:FAILED", processException.getMessage());
-                        SagaExecutionEventName ignored = () -> "ignored";
-                        return Mono.just(stepManager.complete(ignored));
+                        return Mono.just(stepManager.complete("IGNORED"));
                     }
                 });
     }
