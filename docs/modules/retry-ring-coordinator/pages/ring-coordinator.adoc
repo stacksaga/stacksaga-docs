@@ -216,6 +216,76 @@ It must be `tcp` for retry ring-coordinator services.
 
 <10> The `RSocket` server host of the Master this Slave connects to, in the same region and cluster.
 
+[[kubernetes-statefulset-deployment]]
+== Automated Role Detection via Kubernetes StatefulSet
+
+When deploying a Clustered Ring-Coordinator on Kubernetes, configuring separate Deployments for Master (`stacksaga.coordinator.instance-type=master`) and Slaves (`stacksaga.coordinator.instance-type=slave`) adds unnecessary operational overhead.
+Instead, it is recommended to run the Ring-Coordinator cluster as a **Kubernetes StatefulSet**.
+
+In a StatefulSet, each pod receives a deterministic, ordinal-indexed hostname:
+----
+<statefulset-name>-0  (e.g., ring-coordinator-0)
+<statefulset-name>-1  (e.g., ring-coordinator-1)
+<statefulset-name>-2  (e.g., ring-coordinator-2)
+----
+
+StackSaga can automatically determine the coordinator's role directly from this ordinal index using the `stacksaga.coordinator.deploy.index-based` property:
+
+* **Pod Index `0`** is automatically designated as the **`master`** node.
+* **Pod Index `> 0`** (e.g. index 1, 2, ...) are automatically designated as **`slave`** nodes.
+
+=== Enabling Index-Based Role Resolution
+
+To enable automatic role detection, set `stacksaga.coordinator.deploy.index-based=true`:
+
+.application.properties
+[source,properties]
+----
+# Enable index-based role detection for Kubernetes StatefulSet
+stacksaga.coordinator.deploy.index-based=true #<1>
+
+# Optional: instance-type does not need to be set; it is derived automatically #<2>
+
+# Target service(s) coordinated by this cluster
+stacksaga.coordinator.target-services=order-service,payment-service #<3>
+
+# RSocket server settings
+spring.rsocket.server.port=7777 #<4>
+spring.rsocket.server.transport=tcp
+
+# Target master connection (used by Slave pods when index > 0)
+stacksaga.coordinator.slave.target-master.host=ring-coordinator-0.ring-coordinator-headless #<5>
+stacksaga.coordinator.slave.target-master.port=7777 #<6>
+
+# Cluster and region metadata
+stacksaga.instance.cluster=cluster1
+stacksaga.instance.region=us-east-1
+stacksaga.instance.zone=us-east-1a
+----
+
+<1> Enables automated index-based role detection.
+<2> `stacksaga.coordinator.instance-type` becomes optional. Pod `0` automatically runs as `master`, while pods `1..N` run as `slave`.
+<3> The services coordinated by this ring-coordinator cluster.
+<4> RSocket port used for communication.
+<5> The hostname of the Master pod (pod `0`). In Kubernetes, this typically points to the headless service DNS of the Master pod (e.g., `<statefulset-name>-0.<headless-service-name>`). When pod `0` starts as Master, it ignores this property; when pods `1..N` start as Slaves, they use it to connect to pod `0`.
+<6> The port of the Master pod.
+
+=== Pod Identifier Resolution Order
+
+When `stacksaga.coordinator.deploy.index-based=true` is set, StackSaga determines the pod index by inspecting the following sources in order:
+
+1. `stacksaga.coordinator.instance-id` (explicit override if specified in configuration)
+2. `POD_NAME` (standard Kubernetes downward API environment variable)
+3. `HOSTNAME` (standard Kubernetes pod hostname environment variable)
+
+The numeric index is extracted from the suffix after the last hyphen (`-`), ignoring any FQDN domain suffixes (e.g., `ring-coordinator-0.ring-coordinator-headless.default.svc.cluster.local` resolves index `0`).
+
+[NOTE]
+====
+In standard Docker containers and standalone Linux environments, `stacksaga.coordinator.deploy.index-based` should remain `false` (the default).
+When disabled, StackSaga will not attempt to parse container IDs or hostnames as StatefulSet ordinals, and will use the explicitly configured `stacksaga.coordinator.instance-type`.
+====
+
 [[configuration-properties]]
 == Configuration Properties Reference
 
@@ -230,10 +300,15 @@ NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory a
 
 4+s| Common — applies to both Master and Slave instances
 
+|`stacksaga.coordinator.deploy.index-based`
+|`false`
+|`boolean`
+|Whether the coordinator instance role (`master` or `slave`) is determined automatically based on the pod ordinal index (e.g., in a Kubernetes StatefulSet). When `true`, pod index `0` runs as `master` and indices `>0` run as `slave`, and `stacksaga.coordinator.instance-type` becomes optional.
+
 |`stacksaga.coordinator.instance-type`
 |-
 |`InstanceType` (Enum)
-|The role this instance runs as — `master` or `slave`. This is the primary property that determines the instance's responsibilities and how it connects to the other components in the architecture.
+|The role this instance runs as — `master` or `slave`. Required when `stacksaga.coordinator.deploy.index-based` is `false`. When index-based deployment is enabled, this property is derived automatically from the pod index.
 
 |`stacksaga.coordinator.target-services`
 |-

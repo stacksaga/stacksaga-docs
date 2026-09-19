@@ -746,6 +746,7 @@ Here are some common deployment topologies:
 ** xref:#shared-clustered-ring-coordinator-deployment[Shared Mode]
 ** xref:#dedicated-clustered-ring-coordinator-deployment[Dedicated Mode]
 ** xref:#hybrid-clustered-ring-coordinator-deployment[Hybrid Mode]
+** xref:#kubernetes-statefulset-clustered-deployment[Kubernetes StatefulSet Deployment]
 
 === Embedded Ring-Coordinator Deployment
 
@@ -820,5 +821,20 @@ For instance, if there are three microservice domains (Order, Payment, Inventory
 See the diagram below,
 
 image::stacksaga-diagram-clustered-ring-coordinator-hybrid-mode.svg[]
+
+[[kubernetes-statefulset-clustered-deployment]]
+==== Kubernetes StatefulSet Deployment for Clustered Coordinators
+
+In containerized Kubernetes environments, a Clustered Ring-Coordinator is recommended to run as a **StatefulSet**.
+
+StatefulSets provide stable network identities and predictable ordinal indexing for each replica (`coordinator-0`, `coordinator-1`, `coordinator-2`, etc.).
+StackSaga Ring-Coordinator natively leverages this through index-based deployment (`stacksaga.coordinator.deploy.index-based=true`):
+
+* The replica with index **`0`** (`coordinator-0`) automatically boots as the **Master** node.
+* All replicas with index **`> 0`** (`coordinator-1`, `coordinator-2`, etc.) automatically boot as **Slave** nodes.
+
+This design enables operations teams to maintain a single unified StatefulSet manifest and ConfigMap for the entire coordinator cluster, eliminating the need to maintain separate deployment configurations for Master and Slave instances.
+
+For full configuration guidelines and properties, see xref:ring-coordinator.adoc#kubernetes-statefulset-deployment[Automated Role Detection via Kubernetes StatefulSet in the Ring-Coordinator guide].
 
 include::disabled-and-terminated-transaction.adoc[leveloffset=+2]
