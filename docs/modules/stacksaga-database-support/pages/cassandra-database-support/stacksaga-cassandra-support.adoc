@@ -1,51 +1,47 @@
 :impl_name: cassandra
 :toc-title: Stacksaga Cassandra Reactive Support | Cassandra Database Integration Guide
-:description: Learn how to integrate Stacksaga with Cassandra using the reactive support module. Step-by-step guide for schema setup, connection configuration, and transaction recovery in distributed systems.
+:description: Learn how to integrate Stacksaga with Cassandra using the reactive support module. Comprehensive guide for schema setup, connection configuration, 5-tier hierarchical retry architecture, and transaction recovery in distributed systems.
 :revnumber: 1.0.0
 :revdate: {localdate}
-:keywords: Stacksaga, Cassandra, Reactive Support, Database Integration, Event Store, Transaction Recovery, Distributed Systems, Java, Orchestrator, Schema Creation, Connection Configuration, High Throughput, Multi-Region, Idempotency, Saga design pattern, Spring Boot, Spring WebFlux, Spring Saga
+:keywords: Stacksaga, Cassandra, Reactive Support, Database Integration, Event Store, Transaction Recovery, Distributed Systems, Java, Orchestrator, Schema Creation, Connection Configuration, High Throughput, Multi-Region, Idempotency, Saga design pattern, Spring Boot, Spring WebFlux, Spring Saga, Tombstone-Free, Murmur3
 :robots: index,follow
-
 
 = Stacksaga Cassandra Reactive Support
 
 == Overview
 
 `stacksaga-cassandra-reactive-support` is the *Cassandra reactive (non-blocking)* implementation of the xref:stacksaga-database-support:overview/database-support-overview.adoc[].
-It provides all the necessary facilities for accessing the Cassandra database for the Stacksaga engine, and exposes endpoints for accessing the event store to display tracing details in the xref:trace-window:stacksaga-trace-window.adoc[].
+It provides all the facilities for accessing the Cassandra event store for the StackSaga engine, powering transaction persistence, asynchronous transient failure recovery, and exposing tracing details for the xref:trace-window:stacksaga-trace-window.adoc[].
 
-It is used in the orchestrator service alongside any StackSaga orchestrator starter.
+It is deployed within the orchestrator service alongside any StackSaga orchestrator starter.
 See xref:implementations:engine-overview.adoc[] for the full list of available implementations and their respective starters.
 
 [IMPORTANT]
 ====
-*Retry Ordering Guarantee (No Strict FIFO in Cassandra):* +
-Unlike SQL implementations where retrying is processed strictly in chronological First-In, First-Out (FIFO) order (`ORDER BY paused_time ASC`), the Cassandra event-store implementation fetches transactions by **token order (`token(transaction_id)`)**, not by insertion or paused timestamp.
+*Retry Ordering Guarantee (Murmur3 Token Order vs. Strict FIFO):* +
+In distributed architectures, transient retries occur when a downstream microservice is temporarily slow, restarting, or experiencing network latency.
+In Cassandra, rows are distributed across cluster nodes via the **Murmur3 token hash**.
 
-Consequently, **Cassandra does not guarantee strict chronological retry ordering** within the same schedule window.
-If your business domain strictly requires exact FIFO retry ordering, Cassandra is not recommended as the event-store.
+Within an individual 1-minute retry window, transactions are discovered by worker instances in **token order**, not by exact failure millisecond.
+Across different minute windows and calendar days, retry processing is **strictly chronological** (earlier minute windows and earlier calendar dates are always traversed first).
 
-*Architectural Recommendation for Strict FIFO Requirements:* +
-As a general best practice, StackSaga recommends using the same database technology for both your primary domain data and the event-store to eliminate the operational overhead of running multiple database engines.
-However, if your system uses Cassandra as its primary database *and* has a strict requirement for exact FIFO retry ordering, StackSaga recommends using **one of the SQL database implementations** specifically for the event-store.
-In this architecture, your high-throughput domain operations execute against Cassandra, while StackSaga manages its event store and retry queue in SQL to guarantee strict FIFO ordering.
-See xref:#retry-ordering-guarantee[Retry & Recovery Ordering Guarantee: Token Order vs. Strict FIFO] for technical details.
+*Architectural Recommendation for Strict Sequential FIFO Requirements:* +
+For the vast majority of microservice domains (such as e-commerce, banking, logistics, and telecom), token order within a 1-minute retry window is completely standard and safe, because once the downstream resource recovers, all failed transactions from that minute resolve successfully.
+However, if your system contains a strict requirement for exact microsecond First-In, First-Out (FIFO) retry ordering between concurrent users (such as financial order-matching engines), StackSaga recommends using **one of the SQL database support modules** (PostgreSQL or MySQL) specifically for the event store.
 ====
 
-== Adding cassandra-support to your orchestrator application
+== Adding Cassandra Support to Your Orchestrator Application
 
-Adding cassandra-support to your orchestrator application consists of 3 simple steps.
+Adding Cassandra support to your orchestrator application consists of 3 steps:
 
-xref:#adding-cassandra-support[Step-1]:: Add `stacksaga-cassandra-reactive-support` as a dependency to your orchestrator application.
-xref:#executing-schema-creation-script[Step-2]:: Execute the schema creation script provided by the `stacksaga-cassandra-reactive-support` module.
-xref:#connection-configuration[Step-3]:: Configure the Cassandra connection configurations.
-
-The following sections will explain each step in detail.
+xref:#adding-cassandra-support[Step 1]:: Add `stacksaga-cassandra-reactive-support` as a dependency.
+xref:#executing-schema-creation-script[Step 2]:: Create the keyspace and execute the unified schema creation script.
+xref:#connection-configuration[Step 3]:: Configure the Cassandra connection properties.
 
 [[adding-cassandra-support]]
-=== Adding `stacksaga-cassandra-reactive-support` as a dependency
+=== Step 1: Adding `stacksaga-cassandra-reactive-support` as a Dependency
 
-Here is the way that you can add the library into your existing orchestrator application as a dependency.
+Add the library to your orchestrator project's `pom.xml`:
 
 .Adding `stacksaga-cassandra-reactive-support` as a dependency
 [source,xml,subs="attributes+"]
@@ -61,60 +57,191 @@ Here is the way that you can add the library into your existing orchestrator app
         </dependency>
     </dependencies>
 </dependencyManagement>
+
 <dependency>
     <groupId>org.stacksaga</groupId>
     <artifactId>stacksaga-cassandra-reactive-support</artifactId>
 </dependency>
 ----
 
-IMPORTANT: It is recommended to use http://init.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+TIP: You can also use http://init.stacksaga.org/[StackSaga Initializer] to generate a project starter with pre-configured dependencies.
 
 [[executing-schema-creation-script]]
-=== Generate Schema
+=== Step 2: Keyspace & Schema Creation
 
-Because StackSaga creates some dynamic tables based on the *service name*, *region*, and *cluster* for saving transaction data, a schema creation tool is provided for your convenience.
+Before starting your application, execute the CQL script in your Cassandra cluster.
+The script creates the target keyspace along with all static tables required by both the **Core Event Store** and the **5-Tier Hierarchical Retry Engine**.
 
-==== Understanding Region and Virtual Cluster
+==== 1. Creating the Keyspace
 
-Before generating the schema, it is important to understand what *region* and *cluster* mean in the StackSaga context -- because these two inputs directly determine the names of the generated tables.
+For production deployments, always use `NetworkTopologyStrategy` configured with your local datacenter name and replication factor:
 
-*What is "Region"?* +
-A region maps to your physical deployment location (e.g. `us-central`, `asia-south`).
-Every transaction is stamped with the region of the orchestrator that created it.
-This ensures that recovery and retry operations in one region never interfere with those in another -- even when both share the same Cassandra cluster.
+.Keyspace Creation Script
+[source,sql]
+----
+CREATE KEYSPACE IF NOT EXISTS stacksaga_event_store
+WITH replication = {
+  'class': 'NetworkTopologyStrategy',
+  'datacenter1': 3
+}
+AND durable_writes = true;
+----
 
-*What is a "Virtual Cluster"?* +
-By default, a region contains exactly one cluster (a one-to-one relationship -- for example, region `us-central` maps to a single cluster also named `us-central`).
+NOTE: For local development or isolated testing, you can use `'class': 'SimpleStrategy', 'replication_factor': 1`.
 
-However, for large-scale deployments you can create *multiple virtual clusters within the same physical region* (e.g. `us-central-c1`, `us-central-c2`, `us-central-c3`).
-Each virtual cluster gets its own independent set of generated tables (`es_rt_*` and `es_irt_*`) and its own dedicated xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Retry Ring Coordinator] deployment.
-This lets you split the retry subsystem into isolated streams -- if one virtual cluster's coordinator fails, the others continue operating normally.
+==== 2. Executing the Unified Schema Script
 
-See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Clusters] for the full conceptual explanation and xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[Ring-Coordinator Deployment Topologies] to understand how the Ring-Coordinator and Retry-Nodes are deployed in practice across single and multiple virtual clusters.
+All tables in StackSaga use static names. Multi-tenancy, service scoping, regional boundaries, and virtual clusters are isolated via composite Partition Keys (`PRIMARY KEY ((region, cluster, service_name), ...)`), eliminating the need for dynamic per-service table generation.
 
-*How does this affect table names?* +
-The generated tables are named using a hash suffix derived from the combination of service name, region, and cluster.
-This hash-based approach keeps table names short and avoids issues with special characters in region or cluster identifiers.
-You never need to construct these names manually -- the schema generator tool produces the correct names for you based on your inputs.
+.Unified Cassandra Schema Script (`schema.cql`)
+[source,sql]
+----
+USE stacksaga_event_store;
 
-==== Schema Generator
+-- ====================================================================
+-- CORE EVENT STORE TABLES
+-- ====================================================================
 
-Enter your service name, region, and cluster name to generate and download the `.cql` schema script for your Cassandra database.
+-- 1. Main transaction state store (Single-Row Partition)
+CREATE TABLE IF NOT EXISTS es_transaction
+(
+    transaction_id          text PRIMARY KEY,
+    aggregator_name         text,
+    init_aggregator_version text,
+    init_datetime           timestamp,
+    instance_id             text,
+    process_exception_json  blob,
+    recent_retry_id         uuid,
+    region                  text,
+    cluster                 text,
+    running_status          text,
+    has_termination_error   int,
+    termination_error_log   text,
+    service_name            text,
+    service_release_version text,
+    target_retry_end_time   timestamp,
+    zone_id                 text
+);
 
-IMPORTANT: If you deploy the application in multiple regions or clusters, you must run the generator separately for each combination of service name, region, and cluster.
-Each run produces a distinct set of *Generated Tables* (with a different hash suffix), while the *Constant Tables* are the same across all runs.
+-- 2. Transaction step (tryout) records (Multi-Row Partition co-located with parent transaction)
+CREATE TABLE IF NOT EXISTS es_transaction_tryout
+(
+    transaction_id      text,
+    span_key            text,
+    executed_order      int,
+    active_datetime     timestamp,
+    duration            bigint,
+    end_datetime        timestamp,
+    executor_name       text,
+    has_error           int,
+    instance_id         text,
+    process_error       text,
+    span_type           text,
+    start_datetime      timestamp,
+    step_state          text,
+    PRIMARY KEY (transaction_id, span_key, executed_order)
+) WITH CLUSTERING ORDER BY (span_key ASC, executed_order ASC);
 
-xref:cassandra-database-support/cassandra-schema-generator.adoc[-> Open the Cassandra Schema Generator]
+-- 3. Execution markers for idempotency and write protection
+CREATE TABLE IF NOT EXISTS es_execution_markers
+(
+    service_name     text,
+    transaction_id   text,
+    span_key         text,
+    execution_state  text,
+    lease_owner      text,
+    PRIMARY KEY ((service_name, transaction_id), span_key)
+);
+
+-- 4. Compensation failed transactions requiring manual intervention
+CREATE TABLE IF NOT EXISTS es_frozen_transaction
+(
+    transaction_id         text PRIMARY KEY,
+    freezing_datetime      timestamp,
+    freezing_reason        text,
+    region                 text,
+    cluster                text,
+    service_name           text,
+    process_exception_json blob
+);
+
+-- ====================================================================
+-- 5-TIER HIERARCHICAL RETRY ENGINE TABLES
+-- ====================================================================
+
+-- Tier 1: Active calendar days directory
+CREATE TABLE IF NOT EXISTS es_days_by_year
+(
+    region       text,
+    cluster      text,
+    service_name text,
+    date_of_year date,
+    PRIMARY KEY ((region, cluster, service_name), date_of_year)
+) WITH CLUSTERING ORDER BY (date_of_year ASC);
+
+-- Tier 2: Active UTC minute windows directory (0 to 1439)
+CREATE TABLE IF NOT EXISTS es_retry_windows_by_day
+(
+    region        text,
+    cluster       text,
+    service_name  text,
+    date_of_year  date,
+    minute_of_day int,
+    PRIMARY KEY ((region, cluster, service_name, date_of_year), minute_of_day)
+) WITH CLUSTERING ORDER BY (minute_of_day ASC);
+
+-- Tier 3: Microservice instances clustered by Murmur3 token hash
+CREATE TABLE IF NOT EXISTS es_instances_by_retry_window
+(
+    region            text,
+    cluster           text,
+    service_name      text,
+    date_of_year      date,
+    minute_of_day     int,
+    instance_id_token bigint,
+    instance_id       text,
+    PRIMARY KEY ((region, cluster, service_name, date_of_year, minute_of_day), instance_id_token, instance_id)
+) WITH CLUSTERING ORDER BY (instance_id_token ASC);
+
+-- Tier 4: Sequential bucket allocation directory
+CREATE TABLE IF NOT EXISTS es_buckets_by_instance
+(
+    region        text,
+    cluster       text,
+    service_name  text,
+    date_of_year  date,
+    minute_of_day int,
+    instance_id   text,
+    bucket_index  int,
+    PRIMARY KEY ((region, cluster, service_name, date_of_year, minute_of_day, instance_id), bucket_index)
+) WITH CLUSTERING ORDER BY (bucket_index ASC);
+
+-- Tier 5: Bounded retry transaction metadata partitions
+CREATE TABLE IF NOT EXISTS es_retry_transactions_by_instance
+(
+    region              text,
+    cluster             text,
+    service_name        text,
+    date_of_year        date,
+    minute_of_day       int,
+    instance_id         text,
+    bucket_index        int,
+    transaction_id      text,
+    added_datetime      timestamp,
+    allocation_key      text,
+    allocation_datetime timestamp,
+    stacksaga_impl_type text,
+    payload             blob,
+    PRIMARY KEY ((region, cluster, service_name, date_of_year, minute_of_day, instance_id, bucket_index), transaction_id)
+) WITH CLUSTERING ORDER BY (transaction_id ASC);
+----
 
 [[connection-configuration]]
-== Configuring Cassandra connection
+=== Step 3: Configuring the Cassandra Connection
 
-To connect your orchestrator application to the Cassandra cluster, `stacksaga-cassandra-reactive-support` utilizes the standard Datastax Java Driver (version 4.x) configuration format.
+To connect your orchestrator application to the cluster, `stacksaga-cassandra-reactive-support` utilizes the standard DataStax Java Driver configuration format.
 
-=== 1. Providing `stacksaga-cassandra.conf`
-
-Create a file named `stacksaga-cassandra.conf` in your orchestrator project's `src/main/resources` directory.
-This file defines cluster contact points, local datacenter, keyspace, authentication credentials, and driver execution policies.
+Create a file named `stacksaga-cassandra.conf` in your project's `src/main/resources` directory:
 
 .Example `src/main/resources/stacksaga-cassandra.conf`
 [source,hocon]
@@ -123,7 +250,7 @@ datastax-java-driver {
   basic {
     # Cassandra cluster contact points (host:port)
     contact-points = ["127.0.0.1:9042"]
-    
+
     # Target keyspace where StackSaga tables are created
     session-keyspace = "stacksaga_event_store"
 
@@ -150,591 +277,399 @@ datastax-java-driver {
 }
 ----
 
-NOTE: If you need to place `stacksaga-cassandra.conf` in a custom path or external location, you can point to it in your `application.yml` via the `stacksaga.cassandra.config` property (e.g., `stacksaga.cassandra.config: file:/etc/stacksaga/cassandra.conf`).
-
-=== 2. Creating the Keyspace
-
-Before running the schema script generated in Step-2, ensure that the target keyspace exists in your Cassandra cluster.
-For production deployments, always use `NetworkTopologyStrategy` configured with your physical datacenter name and appropriate replication factor:
-
-.Example Keyspace Creation Script
-[source,sql]
-----
--- Production multi-datacenter keyspace
-CREATE KEYSPACE IF NOT EXISTS stacksaga_event_store
-WITH replication = {
-  'class': 'NetworkTopologyStrategy',
-  'datacenter1': 3
-}
-AND durable_writes = true;
-----
-
-NOTE: For local development or isolated testing, you can use `'class': 'SimpleStrategy', 'replication_factor': 1`.
-
+NOTE: You can customize the configuration file path in `application.yml` via `stacksaga.cassandra.config` (e.g., `stacksaga.cassandra.config: file:/etc/stacksaga/cassandra.conf`).
 
 == How Transaction Data Is Stored in Cassandra
 
-The primary responsibility of the Cassandra database support implementation is providing the facilities for saving transaction data in the event store.
-The approach to saving transaction data is quite different from SQL support implementations due to Cassandra's data modeling characteristics -- Denormalized Schema, clustering, partitioning, and the absence of centralized indexing.
-
-=== Table Overview
-
-All tables used by StackSaga fall into two categories:
-
-*Constant Tables* -- table names never change regardless of service, region, or cluster.
-These are created once as part of the schema script and are shared across all deployments:
-
-[cols="1,2",options="header"]
-[.google-anno-skip]
-|===
-| Table | Purpose
-| `es_transaction` | Main transaction metadata store
-| `es_transaction_tryout` | Transaction execution step (tryout) records
-| `es_execution_markers` | Write protection and duplicate detection for Kafka event streaming
-| `es_frozen_transaction` | Compensation failed transactions requiring manual intervention
-|===
-
-*Generated Tables* -- table names include a hash suffix derived from your service name, region, and cluster.
-A separate set is created for each combination of service, region, and cluster:
-
-[cols="1,2",options="header"]
-[.google-anno-skip]
-|===
-| Table Pattern | Purpose
-| `es_rt_1_{hash}`, `es_rt_2_{hash}`, `es_rt_3_{hash}` | Transaction recovery retention (crash / missing transaction tracking)
-| `es_irt_1_{hash}`, `es_irt_2_{hash}`, `es_irt_3_{hash}` | Immediate retry retention (paused transaction tracking)
-|===
-
-NOTE: The `{hash}` suffix is computed by the xref:cassandra-schema-generator.adoc[schema generator tool] from your service name, region, and cluster name.
-
-=== es_transaction table
-
-`es_transaction` is the main table where transaction metadata is saved in the event store, using the *transaction ID* as the *Partition Key*.
-All transactions are saved in this table as *https://cassandra.apache.org/doc/stable/cassandra/data_modeling/data_modeling_refining.html[Single-Row Partition]*.
-The Single-Row Partition approach enables handling millions of transactions without creating database hotspots across Cassandra nodes, because transactions are distributed across all available nodes efficiently as shown below.
-
-image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-managing-throughput.drawio.svg[alt="StackSaga cassandra managing throughput"]
-
-IMPORTANT: Even though Single-Row Partition helps overcome the database hotspot problem, data cannot be fetched without knowing the exact transaction key.
-This makes it impossible to bulk-scan for transactions needing recovery or retry.
-This is addressed by the xref:#transaction_recovery_retention[`es_rt_*` recovery tables] and xref:#transaction_retry_retention[`es_irt_*` retry tables] described below.
-
-=== es_transaction_tryout table
-
-`es_transaction_tryout` is the table where transaction tryout data is saved, using the *transaction ID* as the *Partition Key*.
-Transaction tryouts are saved under the *transaction ID* with a *Multi-Row Partition* approach.
-Because tryout data is keyed by the same *transaction ID*, it is stored on the same Cassandra node as the parent transaction in `es_transaction`.
-This colocation optimizes network latency -- all related data flows to and from the same node.
-
-image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-es-transaction-tryout-table.svg[alt="StackSaga cassandra es_transaction_tryout table"]
-
-As shown in the diagram above, tryout data is saved on the same node as the parent transaction.
-If the `tx-8dKz7LpJ2Q` transaction metadata is saved on `Node-1`, the `tx-8dKz7LpJ2Q` tryout data is also saved on `Node-1`.
-
-=== es_execution_markers table
-
-`es_execution_markers` is the table used by StackSaga's Cassandra reactive event store to track individual executed records/spans and enforce write protection.
-For complete details on how this table prevents duplicate execution in Kafka event streaming and guards against concurrent race conditions, see xref:#write-protection[Write Protection & Duplicate Prevention].
-
-=== es_frozen_transaction table
-
-`es_frozen_transaction` is a constant table that stores *Compensation Failed Transactions* -- transactions where a compensation span itself failed with a permanent, non-retryable error, leaving the transaction stuck in a partially compensated state.
-These transactions cannot be retried automatically and require *manual developer intervention*: the team diagnoses the root cause, deploys a fix, and manually restores the transaction via the restore endpoint.
-
-See xref:foundations:proportional-analysis-of-long-running-transactions-in-saga.adoc#compensation_failed_transactions[Compensation Failed Transactions] for the full explanation of this failure category.
-
-=== Two Tracking Problems: Recovery vs. Retry
-
-Cassandra's partition-based distribution prevents bulk filtering of transactions directly from the main transaction table (see xref:#bulk-filtering-not-possible[Why Bulk Filtering is Not Possible in Cassandra] for details).
-To track transactions that need attention, StackSaga uses two separate sets of generated tables -- each solving a fundamentally different problem:
+Cassandra stores data using a denormalized schema, partition key hashing, and immutable SSTables without centralized B-Tree indexing.
+StackSaga divides its database architecture into two coordinated groups of tables:
 
 [cols="1,2,2",options="header"]
-[.google-anno-skip]
 |===
-| Problem | Table Set | When a record is added / deleted
+| Category | Table Name | Purpose
 
-| *Transaction paused due to transient error* +
-A downstream resource was temporarily unavailable.
-| `es_irt_1_{hash}` / `es_irt_2_{hash}` / `es_irt_3_{hash}` +
-(immediate retry retention)
-| *Added* only when the transaction *stops* due to a retryable error. +
-*Deleted* immediately after it is fetched by a Retry-Node for re-invocation.
+.4+| *Core Event Store*
+| `es_transaction` | Primary transaction metadata store (Single-Row Partition).
+| `es_transaction_tryout` | Step execution (tryout) store, co-located by transaction ID.
+| `es_execution_markers` | Idempotency markers and write protection for event streaming.
+| `es_frozen_transaction` | Quarantined transactions with permanent compensation failures.
 
-| *Transaction crashed / went missing* +
-The orchestrator node died unexpectedly mid-execution.
-| `es_rt_1_{hash}` / `es_rt_2_{hash}` / `es_rt_3_{hash}` +
-(recovery retention)
-| *Added* when the transaction is *initialized*. +
-*Deleted* only when it *completes successfully*.
+.5+| *5-Tier Retry Engine*
+| `es_days_by_year` | Tier 1: Directory of active calendar dates with pending retries.
+| `es_retry_windows_by_day` | Tier 2: Directory of active 1-minute time windows per day.
+| `es_instances_by_retry_window` | Tier 3: Pod instance markers clustered by Murmur3 token hash.
+| `es_buckets_by_instance` | Tier 4: Sequential bucket indices per instance window.
+| `es_retry_transactions_by_instance` | Tier 5: Bounded retry metadata partitions (< 100MB).
 |===
 
-Both table sets use the same three-table rotation mechanism, but with very different time windows -- typically hours for recovery and minutes for retry.
+=== `es_transaction` Table
 
-[[bulk-filtering-not-possible]]
-==== Why Bulk Filtering is Not Possible in Cassandra
+`es_transaction` stores the primary state and metadata for every transaction, using `transaction_id` as the **Partition Key**.
+Every transaction is saved as a **Single-Row Partition**.
 
-* *Partition-Based Distribution* +
-Cassandra shards data across multiple nodes using the transaction ID as the partition key.
-Because rows are distributed across the entire cluster, querying transactions based on a field (such as status or timestamp) without knowing the exact partition key requires contacting multiple nodes, making global status queries inefficient and impractical at scale.
-* *No Centralized Indexing for Status-Based Queries* +
-In a relational database, finding pending transactions is as simple as running `WHERE status = 'PENDING'`.
-In Cassandra, secondary indexes on low-cardinality columns (like status) cause severe performance degradation across cluster nodes.
-Consequently, status-based bulk filtering directly on the main transaction table is not feasible.
+Because transaction IDs are distributed uniformly across all Cassandra nodes via the partitioner hash, this approach enables sustained high throughput without creating database hot spots:
 
-==== The Alternative: Dedicated Rotating Tables as Status Queues
+image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-managing-throughput.drawio.svg[alt="StackSaga Cassandra Managing Throughput"]
 
-Because Cassandra cannot filter transactions by status in-place, StackSaga adopts an architectural solution where *table membership itself represents the transaction's state*:
+=== `es_transaction_tryout` Table
 
-* *Presence in `es_irt_*`* = The transaction paused due to a transient error and needs retry.
-* *Presence in `es_rt_*`* = The transaction was initialized and has not yet completed.
-If it remains in the table past the retention window, it is considered crashed or missing and needs recovery.
-* *State Transition via Deletion:* Once a transaction is picked up and referred for execution by a Retry-Node, its row is immediately deleted from the table.
-Deletion acts as the status update.
+`es_transaction_tryout` stores individual execution step records (tryouts) for each saga.
+It uses `transaction_id` as the **Partition Key** with a **Multi-Row Partition** approach:
 
-==== Why Are There Three Tables per Category?
+image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-es-transaction-tryout-table.svg[alt="StackSaga Cassandra es_transaction_tryout table"]
 
-Both recovery (`es_rt_*`) and retry (`es_irt_*`) use a rotating set of **three tables** (`_1`, `_2`, and `_3`):
+Because tryouts share the exact same `transaction_id` partition key as the parent transaction, Cassandra places them on the **exact same physical storage node**.
+This colocation minimizes network hops: queries reading a transaction and its tryout history are routed to a single node.
 
-* Each table is assigned to a specific scheduled time slot in a round-robin rotation.
-* Dividing the retention period across three tables allows the system to drain and process batches on a predictable schedule without requiring expensive time-range scans across Cassandra partitions.
+=== `es_frozen_transaction` Table
 
-==== Why Tables Are Generated per Service, Region, and Virtual Cluster
+`es_frozen_transaction` stores transactions where an automated compensation step itself encountered an unrecoverable error, leaving the transaction in a partially compensated state.
+These transactions are safely quarantined to protect downstream systems.
+They require developer diagnosis and manual re-triggering via the administrative restore endpoint.
 
-Generated tables (`es_rt_*` and `es_irt_*`) carry a hash suffix derived from the service name, region, and virtual cluster:
+== The Cassandra Retry Challenge & The 5-Tier Directory Architecture
 
-* *Regional and Cluster Isolation:* Retry-Nodes only access tables matching their own service, region, and virtual cluster.
-A Retry-Node in `us-east-1` never touches data originating from `us-west-1`, even in a globally shared Cassandra cluster.
-* *Independent Scaling:* Virtual clusters can scale up or down independently and deploy dedicated Retry Ring Coordinators without cross-cluster interference.
-* *Clean Partition Scopes:* Schema scripts generate distinct table sets for each cluster, keeping individual tables compact and manageable.
+=== Why Cassandra Requires a Directory-Based Retry Architecture
 
-==== How Retry-Nodes Process These Tables (Token Range-Based Batch Fetching)
+In relational databases (PostgreSQL, MySQL), implementing a retry queue is straightforward:
+[source,sql]
+----
+SELECT * FROM retry_queue
+WHERE status = 'PENDING' AND retry_time <= NOW()
+ORDER BY retry_time ASC LIMIT 100;
+----
+Relational engines use a B-Tree index to locate pending rows in milliseconds, and update or delete them in place.
 
-[NOTE]
-====
-*Why the table itself acts as the status indicator* +
-In a SQL database you can simply filter `WHERE status = 'PENDING'` to find work.
-In Cassandra, that is not possible without an expensive full cluster scan, because data is sharded by partition key across nodes.
-StackSaga's solution is elegant: *the presence of a row in the table IS the status*.
-If a row exists in `es_rt_*`, that transaction needs recovery.
-If a row exists in `es_irt_*`, that transaction needs retry.
-No status field is needed -- membership in the table is the signal.
-====
+In Cassandra, attempting to use a flat table as an active polling queue is a well-known distributed anti-pattern:
 
-The actual fetching and re-invocation is done by *Retry-Nodes* -- orchestrator instances that have the xref:retry-ring-coordinator:ring-coordinator-connector.adoc[Ring-Coordinator Connector] added and enabled.
-The xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator] (Master + Slave) is *not* responsible for touching the database.
-Its only role is to assign each Retry-Node a *token range* -- a unique, non-overlapping slice of the Cassandra token ring -- so that no two Retry-Nodes ever fetch the same rows simultaneously.
+1. **Absence of Global Secondary Indexing for Queues:**
+   Cassandra distributes partitions across cluster nodes using partition key hashes. There is no global B-Tree index across partitions.
+   Polling a flat table for pending items without knowing partition keys requires full cluster range scans (`ALLOW FILTERING`), creating excessive network I/O and query timeouts.
 
-NOTE: The way Ring-Coordinator instances and Retry-Nodes are deployed together depends on the scale and virtual cluster configuration of your system.
-See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[Ring-Coordinator Deployment Topologies] for the available deployment options -- from an embedded single-instance setup to fully clustered multi-virtual-cluster deployments.
+2. **The Queue Anti-Pattern & Tombstone Scanning:**
+   Cassandra data files (SSTables) are immutable. When records are deleted, Cassandra writes tombstones.
+   In a polling queue where tasks are continuously added and deleted, queries scanning for the next available tasks must read past all the tombstones of completed tasks before reaching live data. If a scan crosses more than 100,000 tombstones, Cassandra aborts the query (`ReadFailureException`).
 
-Here is how a Retry-Node processes a table (the same flow applies to both `es_rt_*` and `es_irt_*`):
+3. **Predictable Performance Requires Partition-Key Targeting:**
+   Cassandra is exceptionally fast and scalable when queries provide the exact composite partition key.
 
-. *Receive a token range from the coordinator* +
-The Retry Ring Coordinator pushes the Retry-Node its assigned token range (e.g., token `1` to `1000`) for the current time window.
-The Ring Coordinator itself never connects to the Cassandra database; it only manages and assigns token ranges across active Retry-Nodes.
+=== The 5-Tier Directory Solution
 
-. *Determine the target table* +
-Based on the configured schedule, the Retry-Node identifies which table slot is currently active (e.g., `es_irt_1_{hash}` at 00:00, `es_irt_2_{hash}` at 00:02, etc.).
+Rather than treating retries as a flat polling queue, StackSaga models retry discovery as a **hierarchical active directory**:
 
-. *Fetch a batch by token range (without specifying partition keys)* +
-Because we need to fetch a batch and do not know in advance which transaction IDs are in the table, we query using Cassandra's `token()` function across our assigned range rather than filtering on specific partition keys or statuses:
+* **Zero Blind Polling:** Workers never scan across empty tables. They only query partitions discovered through the active directory tree (`es_days_by_year` -> `es_retry_windows_by_day` -> `es_instances_by_retry_window`).
+* **Partition-Level Compaction:** Transactions are grouped into bounded bucket partitions. When a bucket finishes, the entire partition is dropped at once (`DELETE ... WHERE ... bucket_index = :b`), creating a single partition tombstone that Cassandra cleans up in O(1) time during SSTable compaction.
+
+.StackSaga 5-Tier Retry Directory Hierarchy & Primary Event Store
+image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-hierarchical-retry-schema.svg[alt="StackSaga 5-Tier Retry Directory Hierarchy & Primary Event Store"]
+
+The numbered components of the architecture operate as follows:
+
+<1> **Tier 1 (`es_days_by_year`) -- Active Calendar Dates:** +
+Tracks which calendar dates contain pending retry transactions for a given service.
+When a calendar day has no pending retries, its directory record is deleted.
+Workers query active dates directly, eliminating empty table scans.
+
+<2> **Tier 2 (`es_retry_windows_by_day`) -- UTC Minute Windows:** +
+Divides each 24-hour day into discrete one-minute time windows (`minute_of_day`, `0` to `1439` UTC).
+Workers process windows in ascending chronological order (`minute_of_day ASC`), ensuring older transient failures are retried before newer ones.
+
+<3> **Tier 3 (`es_instances_by_retry_window`) -- Token-Partitioned Worker Slicing:** +
+Records which microservice pods encountered failures in that minute window, clustered by their 64-bit Murmur3 token hash (`instance_id_token = token(instance_id)`).
+Retry workers query only the instances whose token hash falls within their assigned token lease range.
+
+<4> **Tier 4 (`es_buckets_by_instance`) -- Bucket Allocation Directory:** +
+Maintains the sequential bucket indices (`0, 1, 2...`) allocated by an instance within that minute window.
+Workers read this directory to discover active buckets without speculative queries.
+
+<5> **Tier 5 (`es_retry_transactions_by_instance`) -- Bounded Metadata Partitions:** +
+Stores lightweight retry metadata records inside strictly bounded partitions.
+Crucially, when all transactions in a bucket are processed, the worker drops the **entire bucket partition at once**:
 +
 [source,sql]
 ----
-SELECT * FROM es_irt_1_{hash}
-WHERE token(transaction_id) >= 1 AND token(transaction_id) <= 1000
-LIMIT 100;  -- controlled by stacksaga.cassandra.transaction.stream.batch-size
+DELETE FROM es_retry_transactions_by_instance
+WHERE region = :region AND cluster = :cluster AND service_name = :service_name
+  AND date_of_year = :date AND minute_of_day = :window
+  AND instance_id = :instance_id AND bucket_index = :bucket_index;
 ----
 +
-*Targeted Node Retrieval (No Full Cluster Scan):* Cassandra's broker knows exactly which physical nodes hold partitions within token range `[1, 1000]`.
-If the data within that range spans across 10 nodes in the cluster, the broker routes requests strictly to those 10 nodes and aggregates the results -- it never queries all nodes in the cluster.
-The Retry-Node receives up to `batch-size` (e.g., 100) records.
+Because the deletion targets the composite partition key, Cassandra writes a **single Partition Tombstone** rather than thousands of individual cell tombstones.
+During background SSTable compaction, Cassandra drops the entire partition from disk in $O(1)$ time, completely preventing tombstone accumulation.
 
-. *Re-invoke the transactions* +
-Each fetched transaction is immediately referred for execution, starting from the last successfully recorded span.
+<6> **Primary Event Store (`es_transaction`) -- Decoupled Heavy State:** +
+None of the 5 retry tables store business payloads.
+Tier 5 holds strictly lightweight metadata pointers (~50 to 100 bytes per row).
+When re-executing, the worker fetches the actual saga payload lazily from the primary event store using `transaction_id`, keeping memory usage low and constant.
 
-. *Delete the rows immediately after referral* +
-Once a transaction is handed over for re-invocation, its row is deleted from the table:
+=== Bounded Partition Sizing (< 100MB) via Local In-Memory Counters
+
+If a major downstream outage generates 150,000 transaction failures in a single minute, placing all 150,000 records into one partition would create an oversized partition, triggering long garbage collection pauses and compaction pressure.
+
+To prevent oversized partitions without burdening Cassandra with expensive `SELECT count(*)` checks, each application pod maintains an **atomic counter in local JVM memory** for the active minute window:
+
+.Pseudocode: Local In-Memory Bucket Rollover
+[source,text]
+----
+function registerFailure(transaction):
+    currentWindow = computeTargetWindow(UTC_NOW)
+    counter = getLocalWindowCounter(currentWindow)
+    
+    // Atomically increment local counter (takes ~2 nanoseconds)
+    currentCount = counter.incrementAndGet()
+    
+    // Determine bucket index (default cap: 50,000 records per bucket)
+    bucketIndex = currentCount / 50_000
+    
+    // Register directory path (idempotent upserts)
+    insertDirectoryPath(currentWindow, instanceId, bucketIndex)
+    
+    // Insert lightweight retry pointer into bounded partition
+    insertRetryMetadata(currentWindow, instanceId, bucketIndex, transaction.id)
+----
+
+* **Zero Read Latency on Writes:** Checking an in-memory counter takes 2 nanoseconds, adding no database read overhead to the live write path.
+* **Safe Partition Sizing:** Each 50,000-row metadata partition consumes only ~3MB to 5MB on disk, remaining far below Cassandra's 100MB partition size limit.
+
+== The Dual-Window Synchronization Model
+
+Grouped time windows eliminate expensive range queries across timestamps by providing fixed, discrete partition keys.
+To prevent race conditions between writers and readers, StackSaga enforces the **Dual-Window Model**:
+
+.Dual-Window Synchronization Timeline: Writer & Reader Isolation
+image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-dual-window-timeline.svg[alt="Dual-Window Synchronization Timeline: Writer & Reader Isolation"]
+
+The model operates through the following numbered mechanics:
+
+<1> **Closed Read-Window ($\le W$):** +
+Retry workers only read windows that have already closed (less than or equal to the current active read window $W$).
+Window $W$ is sealed against new writes, guaranteeing stable, non-shifting query results.
+
+<2> **Active Write-Window ($W+1$):** +
+Live application pods experiencing failures **always write ahead into window $W+1$** (the next scheduled minute window).
+No application thread will write to window $W$ while workers are reading or compacting it.
+
+<3> **Live Application Pods (Write-Ahead Rule):** +
+Because live writers write ahead to $W+1$, writers and readers never touch the same partition at the same time.
+This complete separation eliminates write/read collisions and row lock contention without distributed locking.
+
+<4> **Retry Workers (Sealed Read & Compaction):** +
+Workers process completed windows without competing for row locks or encountering phantom reads.
+Once all buckets in window $W$ are retried, the partition is dropped with a single tombstone.
+
+<5> **Automatic Cooldown Period:** +
+Writing to $W+1$ provides an inherent 10-second to 70-second cooldown buffer before retries begin.
+This prevents the retry engine from immediately hammering a downstream service that is in the middle of a reboot or network blip.
+
+.Pseudocode: Dual-Window Calculation & Midnight Rollover
+[source,text]
+----
+constant TOTAL_WINDOWS_PER_DAY = 1440 // for 1-minute delay
+
+function getCurrentReadWindow(utcTimestamp):
+    minutesSinceMidnight = (utcTimestamp.hour * 60) + utcTimestamp.minute
+    windowIndex = minutesSinceMidnight / delayInMinutes
+    return Window(date = utcTimestamp.date, index = windowIndex)
+
+function getCurrentWriteWindow(utcTimestamp):
+    readWindow = getCurrentReadWindow(utcTimestamp)
+    nextIndex = readWindow.index + 1
+    
+    // Check midnight UTC rollover
+    if nextIndex >= TOTAL_WINDOWS_PER_DAY:
+        return Window(date = utcTimestamp.date + 1 day, index = 0)
+    else:
+        return Window(date = utcTimestamp.date, index = nextIndex)
+----
+
+== Spatial Worker Isolation & Murmur3 Token Slicing
+
+When multiple retry worker nodes run in parallel, they must process retries without fetching the same records and without relying on heavy distributed locks (such as Redis locks or Cassandra Paxos LWT).
+StackSaga achieves this through **Murmur3 Token Range Leasing**:
+
+.Murmur3 Token Ring Slicing & Spatial Worker Isolation
+image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-token-ring-instance-mapping.svg[alt="Murmur3 Token Ring Slicing & Spatial Worker Isolation"]
+
+The numbered components operate as follows:
+
+<1> **Murmur3 64-bit Token Ring:** +
+Cassandra hashes partition keys into a continuous 64-bit integer space from `-9,223,372,036,854,775,808` to `9,223,372,036,854,775,807` (`-2^63` to `2^63 - 1`).
+
+<2> **Ring Coordinator Non-Overlapping Leases:** +
+An external RSocket Ring Coordinator divides the entire 64-bit token ring into mutually exclusive, non-overlapping segments and assigns one lease to each connected retry worker node (e.g. Node-0, Node-1, Node-2).
+
+<3> **Deterministic Instance Routing (`token(instance_id)`):** +
+When an application pod registers in Tier 3 (`es_instances_by_retry_window`), its clustering key includes `instance_id_token = token(instance_id)`.
+Any pod's token hash falls deterministically into **exactly one** worker's assigned token range.
+
+<4> **Spatial Isolation (Zero Lock Contention):** +
+Workers query Tier 3 with their assigned token bounds:
 +
 [source,sql]
 ----
-DELETE FROM es_irt_1_{hash} WHERE transaction_id = :transaction_id;
+SELECT instance_id, instance_id_token
+FROM es_instances_by_retry_window
+WHERE region = :region AND cluster = :cluster AND service_name = :service_name
+  AND date_of_year = :date AND minute_of_day = :window
+  AND instance_id_token >= :lease_min_token
+  AND instance_id_token <= :lease_max_token;
 ----
 +
-*Why immediate deletion is mandatory:* In Cassandra, tables do not support in-place status mutation without incurring heavy secondary indexing penalties.
-Instead, *table membership itself represents status*.
-Deleting the row immediately upon batch retrieval marks it as processed and prevents that same transaction from being exposed again in the subsequent batch fetch.
+Because leases do not overlap, two workers never touch the same instance markers or bucket partitions.
+Distributed locking is unnecessary, and throughput scales linearly as more worker nodes are added.
 
-. *Continuous long-polling with configured delay* +
-Even if a batch query returns empty (no records found), the Retry-Node does not stop.
-It maintains a continuous long-polling loop with a small configured delay throughout the active time window, ensuring that any new transactions arriving in the table partition are picked up promptly.
-Once the time window expires, the Retry-Node advances to the next scheduled table slot.
+<5> **Lease Validity Guard (Failover Protection):** +
+Every coordinator lease includes a validity timestamp window (`from` to `to` in epoch milliseconds).
+Every database query and execution step verifies that the current timestamp falls within the lease window.
+If a network partition causes a lease to expire, execution stops immediately, preventing split-brain execution while surviving nodes rebalance and take over the uncompleted ranges.
 
-.Retry-Node Token-Range Batch Processing Flow
-[plantuml,target=stacksaga-cassandra-retry-node-processing-flow,format=svg]
+== End-to-End Traversal, Execution & Compaction Pipeline
+
+The complete lifecycle from transaction failure to re-invocation and clean directory removal is structured as a top-down pipeline:
+
+.Top-Down Traversal & Compaction Lifecycle Pipeline
+image:stacksaga-database-support:cassandra/stacksaga-diagram-cassandra-traversal-pipeline.svg[alt="Top-Down Traversal & Compaction Lifecycle Pipeline"]
+
+The numbered pipeline steps proceed in order:
+
+<1> **Failure Detection & Target Window Calculation:** +
+A saga step encounters a transient error. The pod calculates target write-window $W+1$ (handling UTC midnight rollover if needed).
+
+<2> **Local In-Memory Counter Check:** +
+The pod increments its local atomic counter for window $W+1$ to determine the active bucket index (0, 1, 2...).
+
+<3> **Path Registration & Metadata Insertion:** +
+The pod registers the path in Tiers 1 through 4, then inserts the lightweight metadata pointer into Tier 5 (`es_retry_transactions_by_instance`).
+
+<4> **Worker Lease Acquisition & Lease Guard:** +
+The retry worker acquires its token range lease from the coordinator and verifies lease validity.
+
+<5> **Top-Down Traversal (Tiers 1, 2, 3):** +
+The worker queries active calendar dates (`es_days_by_year`), picks the earliest eligible minute window (`es_retry_windows_by_day`), and filters instances matching its leased token range (`es_instances_by_retry_window`).
+
+<6> **Bucket Discovery & Transaction Metadata Streaming:** +
+The worker reads active bucket indices from Tier 4 (`es_buckets_by_instance`) and streams metadata records from Tier 5 (`es_retry_transactions_by_instance`).
+
+<7> **Lazy Payload Fetching & Concurrent Re-Invocation:** +
+Using the `transaction_id` metadata pointer, the worker fetches the full saga payload on demand from the primary transaction store and dispatches re-invocation with controlled concurrency.
+
+<8> **Data Compaction (Partition Drop):** +
+Once all transactions in the bucket have been dispatched, the worker executes a partition delete on Tier 5 and deletes the bucket index row from Tier 4.
+
+<9> **Instance Marker Deletion:** +
+When all buckets for an instance are completed, the worker deletes its instance marker from Tier 3 (`es_instances_by_retry_window`).
+
+<10> **Node-0 Gate 1 & Gate 2 Verification:** +
+The dedicated Compactor Overseer (Node-0) inspects Tier 3 across all token ranges to confirm zero pending instances remain across the whole cluster, and verifies that the window has elapsed into the past.
+
+<11> **Node-0 Directory Compaction:** +
+Node-0 safely deletes the completed minute window from Tier 2 (`es_retry_windows_by_day`), and deletes the calendar date from Tier 1 (`es_days_by_year`) once all minutes for that day are clear.
+
+=== Safe Shutdown & Zero Data Loss Guarantee
+
+If a retry worker pod is restarted while processing a 50,000-transaction bucket, deleting the partition prematurely would lose any transactions that had not yet run.
+
+The traversal pipeline enforces a strict shutdown invariant:
+
+.Pseudocode: Partial Batch Preservation on Shutdown
+[source,text]
 ----
-@startuml stacksaga-cassandra-retry-node-processing-flow
-!theme plain
-skinparam backgroundColor #FAFAFA
-skinparam defaultFontName "DejaVu Sans"
-skinparam defaultFontSize 12
-skinparam shadowing false
-skinparam roundcorner 6
-
-skinparam participant {
-  BackgroundColor #EEF4FF
-  BorderColor #4A6FA5
-  FontColor #1A1A2E
-}
-
-skinparam database {
-  BackgroundColor #E8F5E9
-  BorderColor #2E7D32
-  FontColor #1A1A2E
-}
-
-skinparam collections {
-  BackgroundColor #FFF3E0
-  BorderColor #E65100
-  FontColor #1A1A2E
-}
-
-skinparam sequence {
-  ArrowColor #4A6FA5
-  LifeLineBorderColor #4A6FA5
-  LifeLineBackgroundColor #EEF4FF
-  GroupBackgroundColor #F7FAFC
-  GroupBorderColor #B0BEC5
-  DividerBackgroundColor #ECEFF1
-  DividerBorderColor #90A4AE
-}
-
-autonumber "<b>[00]</b>"
-
-participant "Retry-Node\n(Orchestrator)" as RetryNode
-database "Cassandra Coordinator\n(Broker)" as Broker
-collections "Target Cassandra Nodes\n(Owning Token Range)" as StorageNodes
-participant "Saga Execution\nEngine" as Engine
-
-note over RetryNode
-  Retry-Node operates using its assigned token range
-  (e.g., [1, 1000]) for the current time slot.
-end note
-
-== 1. Batch Retrieval by Token Range (No Partition Key Needed) ==
-RetryNode -> RetryNode : Determine active schedule table\n(e.g., es_irt_1_{hash} or es_rt_1_{hash})
-
-loop while active time window is open (Continuous Long-Polling)
-  RetryNode -> Broker : SELECT * FROM es_irt_1_{hash}\nWHERE token(transaction_id) >= 1 AND token(transaction_id) <= 1000\nLIMIT 100 (batch-size)
-  activate Broker
-  
-  Broker -> StorageNodes : Query ONLY storage nodes\nowning tokens in [1, 1000]
-  activate StorageNodes
-  note over Broker, StorageNodes
-    NO full-cluster scan!
-    Cassandra broker queries strictly the specific
-    storage nodes owning that token range.
-  end note
-  StorageNodes --> Broker : Return matched partition rows
-  deactivate StorageNodes
-  
-  Broker --> RetryNode : Return batch (up to 100 transactions)
-  deactivate Broker
-  
-  alt Batch contains transactions
-    loop for each transaction in batch
-      == 2. Re-invocation & Immediate Deletion ==
-      RetryNode -> Engine : Re-invoke transaction from\nlast successfully completed span
-      activate Engine
-      Engine --> RetryNode : Execution triggered
-      deactivate Engine
-      
-      RetryNode -> Broker : DELETE FROM es_irt_1_{hash}\nWHERE transaction_id = :tx_id
-      activate Broker
-      Broker -> StorageNodes : Delete row immediately
-      activate StorageNodes
-      StorageNodes --> Broker : Acknowledged
-      deactivate StorageNodes
-      Broker --> RetryNode : Deletion confirmed
-      deactivate Broker
-      note right of RetryNode
-        Immediate deletion acts as status transition;
-        prevents re-fetching in the next batch!
-      end note
-    end
-  else Batch is empty
-    RetryNode -> RetryNode : Wait small configured delay\n(long-polling continues until time window expires)
-  end
-end
-@enduml
+function onBucketBatchComplete(bucket, totalTransactions, executedCount):
+    // If worker is stopping OR not all transactions were executed
+    if isShutdownRequested() or executedCount < totalTransactions:
+        log.info("Worker shutting down or partial execution. Preserving bucket in Cassandra.")
+        return // Do NOT delete bucket partition!
+        
+    // Only delete partition when 100% of transactions were dispatched
+    dropBucketPartition(bucket)
+    deleteBucketIndex(bucket)
 ----
 
-[TIP]
-====
-*Why is this safe with multiple Retry-Nodes running in parallel?* +
-Each Retry-Node holds a *non-overlapping token range*.
-Token range `1–1000` and token range `1001–2000` can never produce the same rows.
-This means multiple Retry-Nodes can fetch from the same table concurrently without coordination, locks, or conflicts -- a major architectural advantage of this design over SQL-based implementations.
-====
+When a worker stops mid-bucket, the partition remains intact in Cassandra.
+Upon restart (or when another worker takes over the token range), the remaining transactions are picked up and re-invoked safely.
 
-[[retry-ordering-guarantee]]
-==== Retry & Recovery Ordering Guarantee: Token Order vs. Strict FIFO
+=== Deep Historical Recovery
 
-When designing a distributed transaction retry strategy, understanding how the database driver orders retrieved batches is critical.
+The retry scanner does not inspect only recent minutes. It is built for deep historical recovery after extended outages:
 
-===== How SQL Implementations Achieve Strict FIFO Ordering
+1. **Configurable Lookback:** On startup, workers generate candidate dates going back multiple days based on `start-digging-in-advance` (default: 2 days).
+2. **Chronological Day Traversal:** Workers query Tier 1 (`es_days_by_year`) in ascending order (`date_of_year ASC`), processing older calendar days first.
+3. **Chronological Minute Traversal:** Within each day, workers query Tier 2 (`es_retry_windows_by_day`) in ascending order (`minute_of_day ASC`).
 
-In SQL implementations, identifying transactions to retry or recover is executed via indexed queries with explicit sorting:
+If an application was offline throughout an entire weekend, workers systematically discover and process Friday's remaining windows, then Saturday's, Sunday's, and finally today's in chronological sequence.
 
-[source,sql]
-----
-SELECT * FROM saga_retry_queue
-WHERE status = 'PAUSED'
-ORDER BY paused_time ASC
-LIMIT 100;
-----
+== Directory Compaction: Node-0 Compactor Overseer vs. Worker Responsibilities
 
-Because the SQL database sorts by timestamp, transactions are retried in strict **First-In, First-Out (FIFO)** order: a transaction that paused at `00:02:10` is guaranteed to be retried before a transaction that paused at `00:02:40`.
+Compaction responsibilities are divided cleanly between general worker nodes and Node-0:
 
-===== How Cassandra Processes Batches: Murmur3 Token Order
-
-In Cassandra, rows are partitioned across cluster nodes using a hashing function (by default, `Murmur3Partitioner`).
-As explained in the batch retrieval steps above, Retry-Nodes do not query by timestamp; they query by the Murmur3 token hash of the transaction ID:
-
-[source,sql]
-----
-SELECT * FROM es_irt_1_{hash}
-WHERE token(transaction_id) >= :start_token AND token(transaction_id) <= :end_token
-LIMIT 100;
-----
-
-Cassandra returns matching rows ordered by the numerical value of `token(transaction_id)`, **not by the timestamp when the transaction was paused or created**.
-
-.Example: Out-of-Chronological-Order Retry Execution
-Consider two transactions that encountered transient errors within the same schedule window (both saved into `es_irt_1_{hash}`):
-
-* `tx-1`: Paused at `00:02:10` -> `token(tx-1) = 850`
-* `tx-2`: Paused at `00:02:40` -> `token(tx-2) = 150`
-
-When the Retry-Node queries token range `[1, 1000]`:
-
-. Because `token(tx-2)` (`150`) is smaller than `token(tx-1)` (`850`), Cassandra returns `tx-2` **before** `tx-1`.
-. As a result, `tx-2` is fetched and retried **before** `tx-1`, even though `tx-1` failed 30 seconds earlier.
-
-[NOTE]
-====
-This reordering occurs **only within the same scheduled time window** (i.e. transactions co-located in the same table slot).
-Transactions assigned to different table slots (for example, `es_irt_1` at 00:00 vs. `es_irt_2` at 00:02) are strictly processed in their respective schedule windows.
-====
-
-===== Architectural Guidance: When to Pair Cassandra with an SQL Event Store
-
-In the vast majority of microservice architectures, transient errors (such as network blips or temporary resource limits) resolve within seconds or minutes, making minor non-FIFO execution variations within a 1-to-2 minute window completely acceptable.
-
-However, if your business domain contains strict sequential requirements (for example, financial order books or sequential inventory allocation where `tx-1` must strictly precede `tx-2` under all circumstances):
-
-* *Default Rule:* StackSaga strongly recommends keeping the event-store technology aligned with the system's primary database to avoid the operational overhead of managing multiple database engines.
-* *The FIFO Exception:* If your application uses Cassandra as its primary database but strictly requires exact FIFO retry ordering, deploy StackSaga with **one of the SQL database support modules** for the event-store.
-This hybrid pattern provides the best of both worlds: Cassandra delivers massive write throughput for your primary domain operations, while the SQL event-store guarantees strict chronological FIFO ordering for saga retries and recovery.
-
-[[transaction_retry_retention]]
-=== es_irt_* tables (Immediate Retry Retention)
-
-In StackSaga, asynchronous xref:architecture:transaction-retrying.adoc[transaction retrying] is an essential feature that ensures transactions are retried when they fail due to transient errors (such as resource unavailability or temporary network timeouts).
-
-When a transaction fails with a retryable error, it is stored in one of the active `es_irt_*` tables.
-At the next scheduled time window, a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Node] fetches it by token range, re-invokes it, and deletes the row immediately using the token range batch processing flow described above.
-
-TIP: The key difference between *immediate retry retention* (`es_irt_*`) and *transaction recovery retention* (`es_rt_*`) is the time window: retry retention uses a much shorter delay (minutes) compared to recovery retention (hours), since paused transactions are expected to be retried quickly once the downstream resource becomes available again.
-
-==== `es_irt_*` table selection formula
-
-image::stacksaga-database-support:cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-retry.svg[]
-
-Suppose you configure the *Transaction retry retention time* to be **2 minutes**.
-The actual time a transaction waits before being retried will naturally oscillate between **1 minute and 3 minutes**.
-
-*Why does this oscillation happen?*
-
-When the retry delay is set to 2 minutes, 3 scheduled rotation slots run in round-robin fashion throughout the day:
-
-. *00:00* -> `es_irt_1_{hash}`
-. *00:02* -> `es_irt_2_{hash}`
-. *00:04* -> `es_irt_3_{hash}`
-. *00:06* -> `es_irt_1_{hash}`
-. *00:08* -> `es_irt_2_{hash}`
-. and so on...
-
-==== The Challenge: Preventing Premature Retries
-
-Imagine a transaction encounters a transient error and pauses at `00:03:58`.
-The next scheduled batch runs at `00:04:00` -- just *2 seconds later*.
-If we placed that transaction into `es_irt_3_{hash}` (the `00:04:00` table), it would be retried after only 2 seconds!
-Retrying immediately would defeat the purpose of the 2-minute cooldown and risk overwhelming an already struggling downstream service.
-Every transaction must be guaranteed a fair minimum cooldown period (at least half of the configured delay).
-
-==== The Solution: The Midpoint Boundary Rule
-
-To solve this, StackSaga divides each 2-minute scheduling interval in half using the **midpoint as a boundary point**:
-
-* For the active interval between `00:02:00` and `00:04:00`, the configured duration is 2 minutes, making **`00:03:00` the midpoint boundary**.
-
-*Transaction Placement Rule:*
-
-. *First Half (Before Midpoint -- `00:02:00` to `00:03:00`):* +
-The transaction paused early enough in the interval.
-By the time the next schedule (`00:04:00`) runs, it will have waited at least 1 minute (the minimum threshold).
-Therefore, it is placed in the table for the **immediate next schedule (`es_irt_3_{hash}` at 00:04:00)**.
-
-. *Second Half (After Midpoint -- `00:03:00` to `00:04:00`):* +
-The transaction paused too close to the `00:04:00` schedule (less than 1 minute remaining).
-To protect it from premature retry, it skips `00:04:00` and is placed into the table for the **schedule after next (`es_irt_1_{hash}` at 00:06:00)**.
-
-.Example Scenario: Transactions Pausing Between 00:02:00 and 00:04:00
-[cols="^1,^1,^1,^1,^1,^1",options="header"]
-[.google-anno-skip]
+[cols="1,2,2",options="header"]
 |===
-| Transaction | Stopped Time | Time Remaining until 00:04:00 | Position in Interval | Assigned Table & Schedule | Total Actual Wait Time
-| T4 | 00:02:50 | 1 min 10 sec (>= 1 min) | First half (Before `00:03:00`) | `es_irt_3_{hash}` (Runs at 00:04:00) | 1 min 10 sec
-| T5 | 00:03:08 | 52 sec (< 1 min) | Second half (After `00:03:00`) | `es_irt_1_{hash}` (Runs at 00:06:00) | 2 min 52 sec
-| T6 | 00:03:58 | 2 sec (< 1 min) | Second half (After `00:03:00`) | `es_irt_1_{hash}` (Runs at 00:06:00) | 2 min 02 sec
+| Responsibility | General Retry Workers (Node-1, Node-2, etc.) | Node-0 (Compactor Overseer)
+
+| **Scope of Work**
+| Handles only instances matching its assigned token lease.
+| Inspects cluster-wide state across all token ranges.
+
+| **Compaction Targets**
+| - Tier 5: Bounded Bucket partitions (`es_retry_transactions_by_instance`) +
+- Tier 4: Bucket index rows (`es_buckets_by_instance`) +
+- Tier 3: Its own instance markers (`es_instances_by_retry_window`)
+| - Tier 2: Minute window records (`es_retry_windows_by_day`) +
+- Tier 1: Completed calendar dates (`es_days_by_year`)
+
+| **Execution Timing**
+| Runs immediately as each bucket or instance finishes.
+| Runs on a periodic loop checking active windows.
 |===
 
-*Why Wait Time Fluctuates Between 1 and 3 Minutes:*
+=== Why Node-0 Compaction Solves the Premature Deletion Problem
 
-* *Minimum wait (1 minute):* A transaction stopping exactly at the midpoint (`00:03:00`) waits 1 minute until execution at `00:04:00`.
-* *Maximum wait (nearly 3 minutes):* A transaction stopping just after the midpoint (`00:03:01`) waits 59 seconds until `00:04:00`, plus the full 2-minute cycle until `00:06:00` (total 2 minutes 59 seconds).
+If every worker were allowed to delete minute windows from Tier 2, a fast worker with 5 transactions would delete minute 500 in 100 milliseconds, while a peer worker is still busy processing 40,000 transactions for that same minute.
+The premature deletion would hide minute 500 from the directory, orphaning the remaining transactions.
 
-[[transaction_recovery_retention]]
-=== es_rt_* tables (Transaction Recovery Retention)
+Node-0 prevents this by passing **Two Strict Gates** before deleting directory records:
 
-While `es_irt_*` tables track transactions paused due to transient errors, the `es_rt_*` tables track **crashed or missing transactions** -- scenarios where an orchestrator node died unexpectedly mid-execution (e.g., node crash, hardware failure, or unhandled network partition).
+* **Gate 1 (Cluster-Wide Completion):**
+  Node-0 queries Tier 3 across the entire cluster without token filtering:
+  `SELECT instance_id FROM es_instances_by_retry_window WHERE minute_of_day = :window`.
+  If any instance marker exists anywhere in the cluster, Node-0 waits.
 
-When a transaction is initialized, its data is stored in one of the active `es_rt_*` tables.
-If the transaction completes its full saga journey successfully, its row is deleted from the table.
-However, if a transaction fails to complete due to an unexpected crash, its row persists in the `es_rt_*` table, making it a candidate for recovery.
+* **Gate 2 (Time Moved into Past):**
+  Node-0 checks that the clock has moved past the minute window. Even if all instance markers are gone, Node-0 waits until the window has elapsed to ensure no late writes occur.
 
-==== Identifying Missing Transactions
+Only when both gates pass does Node-0 safely remove the minute window from Tier 2.
 
-Consider a scenario where 1,000 transactions are executed within a specified time period across multiple nodes.
-Ideally, all transactions that complete their journey are deleted from the `es_rt_*` table.
-However, if even one transaction fails to complete -- due to a node crash, power failure, or unexpected interruption -- its row persists in the table.
-When the scheduled time window arrives, a Retry-Node fetches that row (along with any others in its token range) from the respective `es_rt_*` table, re-invokes the transaction from the last successfully completed span, and then deletes the row so it is not picked up again.
-
-==== `es_rt_*` table selection formula
-
-image::stacksaga-database-support:cassandra/stacksaga-diagram-stacksaga-cassandra-how-transactions-saved-for-recovery.svg[]
-
-Suppose you configure the *Transaction recovery retention time* to be **8 hours** (480 minutes).
-The actual time a transaction is allowed to run before being considered missing will naturally oscillate between **4 hours and 12 hours**.
-
-*Why does this oscillation happen?*
-
-When recovery retention is configured as 8 hours, 3 schedulers run in round-robin fashion throughout the day:
-
-. *1st schedule at 00:00* -> `es_rt_1_{hash}`
-. *2nd schedule at 08:00* -> `es_rt_2_{hash}`
-. *3rd schedule at 16:00* -> `es_rt_3_{hash}`
-
-==== The Challenge: Preventing Premature Recovery for In-Flight Transactions
-
-Imagine a transaction is initialized at `15:59:00`.
-The next recovery scheduler triggers at `16:00:00` -- just *1 minute later*.
-If we placed that transaction into `es_rt_3_{hash}` (the `16:00:00` table), the recovery scheduler would find it still in the table at 16:00, assume it crashed, and trigger a duplicate recovery attempt -- even though the transaction is perfectly healthy and only started 1 minute ago!
-Every transaction must be granted at least half of the configured retention window (4 hours) as a minimum completion buffer before it can be flagged as missing.
-
-==== The Solution: The Midpoint Boundary Rule
-
-To prevent false alarms, StackSaga divides each 8-hour scheduling window in half using the **midpoint as a boundary point**:
-
-* For the active interval between `08:00:00` and `16:00:00`, the configured duration is 8 hours, making **`12:00:00` the midpoint boundary**.
-
-*Transaction Placement Rule:*
-
-. *First Half (Before Midpoint -- `08:00:00` to `12:00:00`):* +
-The transaction was initialized early in the window.
-By the time the next recovery schedule (`16:00:00`) arrives, the transaction will have been running for at least 4 hours (the minimum threshold).
-Therefore, it is placed into the table for the **immediate next schedule (`es_rt_3_{hash}` at 16:00:00)**.
-
-. *Second Half (After Midpoint -- `12:00:00` to `16:00:00`):* +
-The transaction was initialized after the midpoint (less than 4 hours before the 16:00 schedule).
-To give it adequate time to complete naturally, it skips the 16:00 schedule and is placed into the table for the **schedule after next (`es_rt_1_{hash}` at 00:00:00)**.
-
-.Example Scenario: Transactions Initialized Between 08:00:00 and 16:00:00
-[cols="^1,^1,^1,^1,^1,^1",options="header"]
-[.google-anno-skip]
-|===
-| Transaction | Initialization Time | Time Remaining until 16:00:00 | Position in Interval | Assigned Table & Schedule | Total Grace Period Before Recovery
-| T4 | 11:30 | 4 hours 30 min (>= 4h) | First half (Before `12:00`) | `es_rt_3_{hash}` (Runs at 16:00:00) | 4 hours 30 min
-| T5 | 12:30 | 3 hours 30 min (< 4h) | Second half (After `12:00`) | `es_rt_1_{hash}` (Runs at 00:00:00) | 11 hours 30 min
-| T6 | 15:59 | 1 minute (< 4h) | Second half (After `12:00`) | `es_rt_1_{hash}` (Runs at 00:00:00) | 8 hours 01 min
-|===
-
-*Why Grace Period Fluctuates Between 4 and 12 Hours:*
-
-* *Minimum grace period (4 hours):* A transaction initialized exactly at the midpoint (`12:00:00`) is checked at `16:00:00` (4 hours elapsed).
-* *Maximum grace period (nearly 12 hours):* A transaction initialized just after the midpoint (`12:00:01`) waits 3 hours 59 minutes until `16:00`, plus the full 8-hour cycle until `00:00` (total 11 hours 59 minutes).
-
-'''
-
-++++
-include::image$cassandra/window-visualizer.html[]
-++++
-
-[[write-protection]]
 == Write Protection & Duplicate Prevention (Kafka Event Sourcing)
 
 When using Cassandra reactive support with event-driven streaming (such as Apache Kafka), guarding against duplicate execution and concurrent race conditions is essential.
 
-=== Why Execution Markers are Needed
+=== Why Execution Markers Are Needed
 
 StackSaga's Kafka implementation uses *at-least-once delivery semantics*.
-Because of this, duplicate event deliveries are naturally expected in distributed environments, +
-for example:
+Duplicate event deliveries can occur in distributed environments due to:
 
 * Consumer group rebalances when pods scale up or down.
-* Consumer node restarts or crashes before offset commits are acknowledged.
+* Consumer node restarts before offset commits are acknowledged.
 * Network timeouts and automated message retries.
 
-To ensure *idempotency*, StackSaga saves an *execution marker* in the `es_execution_markers` table in Cassandra.
-Before or during processing, the framework inspects this table so that already-processed events are detected and not executed again.
+To guarantee *idempotency*, StackSaga saves an *execution marker* in the `es_execution_markers` table.
+Before processing, the engine inspects this table so that already-processed events are detected and skipped without side effects.
 
-=== Database Safety vs. Event Listener Side Effects (The Real Issue with Races)
+=== Consistency Modes & Overhead Trade-offs
 
-Technically, a concurrent race condition does not corrupt the Cassandra database itself because Cassandra write queries are idempotent.
-Writing the same event-store record twice will not break the database state.
-
-However, the real issue is what happens *after* the database write:
-
-[IMPORTANT]
-====
-StackSaga publishes state-changed events to registered event listeners *after* successfully updating the event store:
-
-* `org.stacksaga.api.listener.KafkaTransactionEventListener`
-* `org.stacksaga.api.listener.ReactiveKafkaTransactionEventListener` (for Kafka event streams)
-
-====
-
-If a concurrent race condition causes the same record to be inserted multiple times, these state-changed listeners *will also be invoked that same number of times*.
-
-If the listener triggers external side effects -- such as sending a confirmation email or SMS notification to a customer, calling a third-party payment gateway, or dispatching an external API call -- the customer would receive duplicate notifications unless the developer explicitly built custom idempotency into their listener code.
-
-=== Choosing Between Consistency Modes & Overhead Trade-offs
-
-StackSaga provides two write-protection modes to balance strictness and throughput:
+StackSaga provides two consistency modes to balance strictness and throughput:
 
 ==== 1. STRICT Mode
 
-* *When to use:* Recommended when you must prevent duplicate listener calls (such as customer-facing notifications or non-idempotent third-party APIs) and you do not want to build custom idempotency logic into every listener.
+* *When to use:* Recommended when you must strictly prevent duplicate side effects (such as customer notifications or non-idempotent third-party APIs) without writing custom deduplication code in your listeners.
 * *How it works:*
-1. *LWT Lease Acquisition:* Before running the execution, a worker acquires an exclusive temporary lock in Cassandra using Lightweight Transactions (LWT: `INSERT INTO es_execution_markers ... IF NOT EXISTS USING TTL <leaseDuration>`).
-2. *Active Lease Wait:* If another worker is already processing the same record (marker exists with `TTL > 0`), the second worker waits for the remaining TTL duration and retries.
-3. *Permanent Marker Commitment:* When the first worker successfully commits its batch, it writes a permanent marker (`TTL = 0`).
-When concurrent workers retry, they see `TTL = 0` and terminate cleanly with `OptimisticLockConflictException`.
-4. *Automatic Crash Recovery:* If the first worker crashes mid-flight, the temporary lease expires automatically when its TTL finishes, permitting another worker to retry and safely complete the saga step without deadlocks.
+1. **LWT Lease Acquisition:** Before running business logic, the worker acquires an exclusive temporary lock in Cassandra using Lightweight Transactions (LWT):
+   `INSERT INTO es_execution_markers ... IF NOT EXISTS USING TTL <leaseDuration>`.
+2. **Active Lease Wait:** If another worker is currently executing the same step (marker exists with `TTL > 0`), the second worker backs off for the remaining TTL duration and retries.
+3. **Permanent Marker Commitment:** When the worker commits its batch, it updates the marker to permanent (`TTL = 0`). Concurrent workers see `TTL = 0` and terminate cleanly.
+4. **Crash Recovery:** If a worker crashes mid-flight, the temporary lease expires when its TTL finishes, permitting another worker to retry and complete the saga step.
 
 .STRICT Mode Execution Flow
-
 [plantuml,target=stacksaga-cassandra-write-protection-flow,format=svg]
 ----
 @startuml stacksaga-cassandra-write-protection-flow
@@ -800,27 +735,11 @@ stop
 @enduml
 ----
 
-.STRICT Mode Lifecycle Breakdown
-* *Claim the Lease (`INSERT ... IF NOT EXISTS USING TTL`):* Before executing business logic, the worker attempts an atomic conditional insert with a temporary lease TTL (`default-lease-duration` or domain override).
-If another node crashes mid-flight, this lease automatically expires after the TTL window, preventing permanent distributed deadlocks without manual intervention.
-* *Evaluate Acquisition (`[applied] == true`):*
-** *Lease Won (`applied == true`):* The worker exclusively owns the step.
-It executes the saga step and persists the event store batch along with a permanent execution marker (`TTL = 0`).
-Once persisted, registered transaction event listeners are safely dispatched.
-** *Collision Detected (`applied == false`):* A marker already exists.
-The worker queries the record to check whether processing is still active or already completed.
-* *Collision Inspection & Safe Deduplication:*
-** *Lease Active (`TTL > 0`):* Another worker is currently executing the step, or a crashed worker's lease has not expired yet.
-The waiting worker backs off for the remaining lease duration and retries.
-** *Permanently Finalized (`TTL == 0`):* The step was already completed by another worker.
-The current message is a duplicate Kafka delivery and is safely discarded without re-executing logic or triggering duplicate listener events.
-
 ==== 2. RELAXED_WITH_DEDUP Mode
 
-* *When to use:* Recommended when duplicate listener calls are harmless (e.g. idempotent downstream consumers, cache invalidations, simple loggers), OR when you already handle idempotency inside your listener logic.
-* *How it works:* Before running, the framework checks if a completed execution marker exists (`checkExists`).
-If found, it skips execution.
-This avoids Cassandra LWT locks, maximizing throughput, but does not prevent the rare race condition where two workers execute at the exact same millisecond.
+* *When to use:* Recommended when duplicate listener invocations are harmless (e.g. idempotent downstream consumers, cache evictions, loggers), or when you handle idempotency inside your listener logic.
+* *How it works:* Before execution, the engine performs a lightweight read against `es_execution_markers`. If a completed marker is found, execution is skipped.
+This avoids Cassandra LWT Paxos round-trips, maximizing throughput.
 
 .RELAXED_WITH_DEDUP Mode Execution Flow
 [plantuml,target=stacksaga-cassandra-write-protection-relaxed-flow,format=svg]
@@ -858,8 +777,7 @@ start
 (Fast read: SELECT FROM es_execution_markers);
 
 if (Marker already exists?) then (YES)
-  :Duplicate delivery detected
-  (throw SpanAlreadyExecutedException);
+  :Duplicate delivery detected;
   :Skip execution safely without side effects;
   stop
 
@@ -880,35 +798,9 @@ endif
 @enduml
 ----
 
-.RELAXED_WITH_DEDUP Mode Lifecycle Breakdown
-* *Fast Duplicate Check (`checkExists`):* Before executing the step, the worker performs a lightweight read against `es_execution_markers` in Cassandra using standard read consistency (`LOCAL_QUORUM`).
-This query does not trigger Cassandra Paxos consensus (LWT), completely avoiding coordination round-trips.
-* *Evaluate Existence:*
-** *Marker Exists (`YES`):* A previous execution has already processed this record.
-The framework recognizes this as a duplicate Kafka event redelivery, aborts further processing with `SpanAlreadyExecutedException`, and safely terminates without re-running business logic or triggering duplicate listener notifications.
-** *Marker Does Not Exist (`NO`):* The worker proceeds to execute the saga step's business logic.
-* *Atomic Batch Persistence & Listener Dispatch:* Upon business logic completion, the worker writes the saga event store state changes and the permanent `ExecutionMarker` (`TTL = 0`) together in an atomic logged batch.
-After the batch write successfully completes, registered transaction event listeners are dispatched.
-
-[TIP]
-====
-*Overhead Comparison:* Managing idempotency manually in application code (such as using Redis distributed locks or custom database tables) incurs roughly the same overhead as having the framework do it, and the framework's Cassandra LWT lease mechanism is built-in and highly optimized.
-
-However, if duplicate listener invocations do not matter for your business use case, choosing `RELAXED_WITH_DEDUP` eliminates the LWT coordination overhead completely and delivers maximum write throughput.
-====
-
 === Domain-Level Configuration
 
-Write protection can be configured globally and fine-tuned per domain entity.
-Because different saga workflows have distinct consistency and performance requirements, you can maintain both the *consistency mode* and the *lease TTL duration* differently for each saga based on its domain.
-
-For example:
-
-* *Critical Sagas* (such as `order-saga` or `payment-saga`) that trigger external side effects like payments or customer notifications can be configured with `STRICT` mode and an appropriate lease duration (e.g., `10s` or `5s`) to completely prevent duplicate executions.
-* *High-Throughput Sagas* (such as `notification-saga` or internal auditing) where operations are naturally idempotent can use `RELAXED_WITH_DEDUP` to bypass LWT locking overhead and maximize write throughput.
-
-The domain key configured under `domains` corresponds to the domain entity name defined by `@SagaDomainEntity#name()` (matched case-insensitively).
-Any domain that is not explicitly overridden will automatically inherit the global default values (`default-mode` and `default-lease-duration`).
+Write protection can be configured globally and fine-tuned per domain:
 
 .Example `application.yml`
 [source,yaml]
@@ -916,8 +808,8 @@ Any domain that is not explicitly overridden will automatically inherit the glob
 stacksaga:
   cassandra:
     write-protection:
-      default-mode: RELAXED_WITH_DEDUP      # Default High-throughput mode
-      default-lease-duration: 5s            # Default LWT lease TTL (only for mode=STRICT mode)
+      default-mode: RELAXED_WITH_DEDUP      # Default high-throughput mode
+      default-lease-duration: 5s            # Default LWT lease TTL (only for STRICT mode)
       domains:
         order-saga:
           mode: STRICT                      # Strict mutual exclusion for order saga
@@ -930,39 +822,76 @@ stacksaga:
 
 == Configuring Properties
 
+The following properties configure the Cassandra reactive support module:
+
 [cols="1,1,1,<1"]
 [.properties-table.google-anno-skip]
 |===
-|Property Name|Default Value|Type|Property Description
-|`stacksaga.cassandra.read-consistency-level`|`LOCAL_QUORUM`|`SagaSupportConsistencyLevel`[QUORUM,LOCAL_QUORUM]|Consistency level for read operations. Default is `LOCAL_QUORUM`, which provides a good balance between consistency. The consistency level that provided via `stacksaga-cassandra.conf` will override this value internally by the framework. Stacksaga only supports `QUORUM` and `LOCAL_QUORUM` consistency levels for read.
-|`stacksaga.cassandra.write-consistency-level`|`LOCAL_QUORUM`|`SagaSupportConsistencyLevel`[QUORUM,LOCAL_QUORUM]|Consistency level for write operations. Default is `LOCAL_QUORUM`, which provides a good balance between consistency and availability. The consistency level that provided via `stacksaga-cassandra.conf` will override this value internally by the framework. Stacksaga only supports `QUORUM` and `LOCAL_QUORUM` consistency levels for write.
-|`stacksaga.cassandra.config`|`classpath:stacksaga-cassandra.conf`|`Resource`|Location of the configuration file to use. See https://docs.datastax.com/en/developer/java-driver/4.17/manual/core/configuration/index.html[configuration options] for more details about how to provide the .conf file and the available configuration options in the .conf file.
+| Property Name | Default Value | Type | Property Description
+
+| `stacksaga.cassandra.read-consistency-level`
+| `LOCAL_QUORUM`
+| `SagaSupportConsistencyLevel` [QUORUM, LOCAL_QUORUM]
+| Consistency level for read operations. `LOCAL_QUORUM` is recommended for multi-datacenter deployments to ensure local datacenter reads without cross-region WAN latency.
+
+| `stacksaga.cassandra.write-consistency-level`
+| `LOCAL_QUORUM`
+| `SagaSupportConsistencyLevel` [QUORUM, LOCAL_QUORUM]
+| Consistency level for write operations. `LOCAL_QUORUM` ensures strong consistency within the local datacenter while Cassandra replicates asynchronously across datacenters.
+
+| `stacksaga.cassandra.config`
+| `classpath:stacksaga-cassandra.conf`
+| `Resource`
+| Path to the DataStax Java driver configuration file.
 
 4+|
-*Write Protection Properties:* The following properties configure duplicate protection, LWT lease TTL durations, and per-saga consistency modes under `stacksaga.cassandra.write-protection.*`. See xref:#write-protection[Write Protection & Duplicate Prevention] for the conceptual explanation.
+*Write Protection Properties:* Configure idempotency and duplicate prevention under `stacksaga.cassandra.write-protection.*`.
 
-|`stacksaga.cassandra.write-protection.default-mode`|`RELAXED_WITH_DEDUP`|`ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]|Default write-protection mode applied to sagas that do not specify a per-domain override. `RELAXED_WITH_DEDUP` provides fast duplicate detection without LWT locks. `STRICT` uses Cassandra LWT for linearizable mutual exclusion.
-|`stacksaga.cassandra.write-protection.default-lease-duration`|`5s`|`Duration`|Default temporary marker lease duration for `STRICT` mode. Specifies how long an in-flight worker holds an exclusive lock in Cassandra before expiring via TTL, and the retry backoff duration for racing workers.
-|`stacksaga.cassandra.write-protection.domains.<domain-name>.mode`|`null`|`ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]|Optional per-domain consistency mode override, keyed by `@SagaDomainEntity#name()` (case-insensitive).
-|`stacksaga.cassandra.write-protection.domains.<domain-name>.lease-duration`|`null`|`Duration`|Optional per-domain lease duration override for `STRICT` mode. If null, falls back to `default-lease-duration`.
+| `stacksaga.cassandra.write-protection.default-mode`
+| `RELAXED_WITH_DEDUP`
+| `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
+| Default write-protection mode applied to sagas that do not specify a per-domain override.
+
+| `stacksaga.cassandra.write-protection.default-lease-duration`
+| `5s`
+| `Duration`
+| Default temporary marker lease duration for `STRICT` mode. Specifies how long an in-flight worker holds an exclusive lock in Cassandra before expiring via TTL.
+
+| `stacksaga.cassandra.write-protection.domains.<domain-name>.mode`
+| `null`
+| `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
+| Per-domain consistency mode override, keyed by saga domain entity name (case-insensitive).
+
+| `stacksaga.cassandra.write-protection.domains.<domain-name>.lease-duration`
+| `null`
+| `Duration`
+| Per-domain lease duration override for `STRICT` mode. Falls back to `default-lease-duration` if null.
 
 4+|
-*Transaction Properties:* The following properties configure transaction lifetime, retry/restore scheduling, and the in-memory streaming buffer used by the recovery pipeline. See xref:#transaction_recovery_retention[Transaction Recovery] and xref:#transaction_retry_retention[Transaction Retry] for the conceptual explanation.
+*Transaction Lifetime & 5-Tier Retry Properties:* Configure transaction retention and the 5-tier retry scanning engine under `stacksaga.cassandra.transaction.*`.
 
-|`stacksaga.cassandra.transaction.lifetime`|`24h`|`Duration`|How long a transaction is kept as live. After reaching the lifetime the transaction will not be exposed for retrying even if the transaction is still in processing mode. +
-default: 24 hours
-|`stacksaga.cassandra.transaction.retry.delay-in-minutes`|`1`|`int`|How long the transaction should be kept waiting before the next retry exposure. This ensures that transactions are not retried too frequently within a short period. The transaction is frozen for some period of time even if it fails again after a recent retry. The value must evenly divide 1440 (24*60). The delay time can fluctuate within `delayInMinutes` to `delayInMinutes+(delayInMinutes/2)`. For example, if `delayInMinutes` is 2, the transaction can be exposed for retrying after 2 to 3 minutes. +
-https://docs.stacksaga.org/stacksaga/latest/stacksaga-database-support/cassandra-database-support/stacksaga-cassandra-support.html[read more] +
-default: two minutes
-|`stacksaga.cassandra.transaction.restore.delay-in-minutes`|`480`|`int`|How long before a transaction is considered crashed and exposed for recovery. In rare cases, transactions may crash without acknowledging the failure (e.g. application crash). This value determines after how long the transaction is considered crashed and exposed for restoring and retrying. The value must evenly divide 24. The delay time can fluctuate within `delayInMinutes` to `delayInMinutes+(delayInMinutes/2)`. For example, if `delayInMinutes` is 540, the transaction can be exposed for restoring after 540 to 810 minutes. +
-https://docs.stacksaga.org/stacksaga/latest/stacksaga-database-support/cassandra-database-support/stacksaga-cassandra-support.html[read more] +
-default: 480 minutes (8 hours)
-|`stacksaga.cassandra.transaction.stream.batch-size`|`100`|`int`|Controls how many transactions are fetched from the database at once into the in-memory buffer. This maps to the highTide parameter of Reactor's limitRate(). A higher value reduces the number of database round trips but increases memory usage. A lower value keeps memory footprint small but increases database pressure. +
-default: 100
-|`stacksaga.cassandra.transaction.stream.refill-threshold`|`75`|`int`|Controls when the framework triggers the next database fetch to refill the buffer. This maps to the lowTide parameter of Reactor's limitRate(). When the number of buffered transactions drops to this value, a new fetch is triggered in the background -- so processing never stalls waiting for data. Should always be less than batch-size. A common rule of thumb is 75% of batch-size. +
-default: 75
-|`stacksaga.cassandra.transaction.stream.concurrency`|`100`|`int`|Controls how many transactions are processed simultaneously in the recovery pipeline. This maps to the concurrency parameter of Reactor's `flatMap(concurrency)`. Each concurrent slot handles one transaction's full retry/restore pipeline, which may involve multiple database calls per transaction. Therefore, the concurrency value should always be less than or equal to the dedicated recovery connection pool size to avoid connection starvation and pipeline stalls. +
-*Recommended:* Set concurrency to 50-70% of the recovery connection pool size when the recovery pipeline performs multiple database operations per transaction. If the recovery datasource is isolated (dedicated pool), concurrency can be pushed closer to `pool-size - 2` to reserve connections for background fetch operations. +
-*Warning:* Setting concurrency equal to or greater than the connection pool size risks starving the background `limitRate` refill fetch query, which silently stalls the entire recovery pipeline.
-|`stacksaga.cassandra.transaction.stream.pre-fetch`|`70`|`int`|Controls how many transactions are pre-fetched and buffered in memory before processing begins. This maps to the prefetch parameter of Reactor's `flatMap(concurrency, prefetch)`. Prefetching allows the framework to have a ready supply of transactions to process without waiting for the completion of the previous batch, thus improving throughput and reducing latency.
+| `stacksaga.cassandra.transaction.lifetime`
+| `24h`
+| `Duration`
+| How long a transaction is kept active in the event store. After reaching this threshold, the transaction is quarantined and will not be re-exposed for retrying.
+
+| `stacksaga.cassandra.transaction.retry.delay-in-minutes`
+| `1`
+| `int`
+| Granularity of discrete time windows in minutes. The value must evenly divide 1440 (minutes in a 24-hour day). For example, `1` divides the day into 1440 windows; `5` divides the day into 288 windows of 5 minutes each.
+
+| `stacksaga.cassandra.transaction.retry.concurrency`
+| `100`
+| `int`
+| Maximum number of transactions concurrently dispatched for re-invocation by a worker during bucket processing.
+
+| `stacksaga.cassandra.transaction.retry.start-digging-in-advance`
+| `2`
+| `int`
+| Number of historical days to scan backwards from today on worker startup (`[today - lookback .. today]`). Enables systematic recovery of pending failures after extended downtime.
+
+| `stacksaga.cassandra.transaction.retry.maximum-retry-bucket-size`
+| `50000`
+| `int`
+| Maximum number of retry transactions per bucket partition. When an instance exceeds this count in a minute window, it atomically increments the bucket index, ensuring all Cassandra partitions remain strictly bounded below 100MB.
 |===

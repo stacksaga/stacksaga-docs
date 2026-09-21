@@ -1,0 +1,828 @@
+= Cassandra Reactive Retry Scanning Architecture: Complete Technical Guide
+:toc: left
+:toclevels: 4
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Introduction
+
+In the StackSaga framework, when a distributed transaction (Saga) runs across different microservices, some steps might fail because of temporary issues.
+For example:
+
+* A downstream service is temporarily slow or restarting.
+* A network timeout happens.
+* A service returns HTTP 503 (Service Unavailable).
+
+In these cases, we should not fail the entire business transaction immediately.
+Instead, the orchestrator pauses the transaction and retries it after some time until it succeeds.
+
+In our Cassandra reactive support module (`stacksaga-cassandra-reactive-support`), we designed and implemented a special **retry scanning and compaction system**.
+This document explains why we designed the system this way, what real problems we faced with Cassandra, and how our solution solves each problem in a simple and clear way.
+
+---
+
+== 1. Why Fetching Data is Much More Critical in Cassandra Than in SQL Databases
+
+To understand our design, we first need to see the big difference between SQL databases (like MySQL or PostgreSQL) and Apache Cassandra.
+
+=== How SQL Databases Handle Retry Queues
+In SQL, creating a retry queue is very simple:
+
+* You create a table with columns like `transaction_id`, `status`, and `retry_time`.
+* You add a B-Tree index on `status` and `retry_time`.
+* When a worker wants pending retries, it runs:
+[source,sql]
+----
+SELECT * FROM retry_table
+WHERE status = 'PENDING' AND retry_time <= NOW()
+ORDER BY retry_time ASC
+LIMIT 100;
+----
+* In SQL, the database uses the index, goes directly to those rows, and returns them in milliseconds.
+* When retried, the worker updates the row or deletes it. SQL modifies the existing disk pages or marks them clean later.
+
+=== Why This Completely Fails in Cassandra
+Cassandra does not work like SQL at all.
+If you try to do the same thing in Cassandra, your cluster will crash or stop responding very quickly. Here is why:
+
+1. **Cassandra has no global table index:**
+   In Cassandra, data is distributed across different nodes using the Partition Key hash.
+   There is no single global B-Tree index across all partitions.
+   If you try to run `SELECT * FROM retry_table WHERE status = 'PENDING'`, Cassandra has to scan every single node and every single SSTable file in your cluster (`ALLOW FILTERING`). This causes huge network traffic and query timeouts.
+
+2. **The Tombstone Problem (How Cassandra deletes data):**
+   In Cassandra, disk files (SSTables) are **read-only and immutable**.
+   When you delete a row, Cassandra does not delete it from disk immediately.
+   Instead, it writes a small marker called a **Tombstone**.
+
+   * If you insert 100,000 retry transactions and later delete them row by row, you now have 100,000 tombstones on disk.
+   * Next time your worker queries the table, Cassandra has to read from disk and scan past all those 100,000 dead tombstones just to find live rows.
+   * If Cassandra scans more than 1,000 tombstones, it logs warnings.
+   * If it scans more than 100,000 tombstones (`tombstone_failure_threshold`), Cassandra immediately fails the query with an error:
+     `ReadFailureException: Scanned over 100001 tombstones; query aborted`.
+
+   * This means your retry queue completely stops working.
+
+3. **In Cassandra, you must always query by Partition Key:**
+   Cassandra is fast only when you give the exact Partition Key in your `WHERE` clause (`WHERE partition_key = ?`).
+   You cannot scan tables randomly.
+
+=== How We Solved This
+Instead of a single queue table with row deletions, we created a **5-tier directory structure**:
+
+* `es_days_by_year` (Tier 1: calendar date)
+* `es_retry_windows_by_day` (Tier 2: minute window)
+* `es_instances_by_retry_window` (Tier 3: instance ID with Murmur3 token)
+* `es_buckets_by_instance` (Tier 4: bucket number)
+* `es_retry_transactions_by_instance` (Tier 5: transaction records)
+
+Workers navigate down this exact tree.
+Most importantly, when transactions are finished, we delete the **entire bucket partition at once**:
+[source,sql]
+----
+DELETE FROM es_retry_transactions_by_instance
+WHERE region = :region AND cluster = :cluster AND service_name = :service_name
+  AND date_of_year = :date AND minute_of_day = :window
+  AND instance_id = :instance_id AND bucket_index = :bucket_index;
+----
+In Cassandra, deleting by partition key creates **only 1 Partition Tombstone**, not 50,000 row tombstones!
+When Cassandra runs background compaction, it drops the entire partition from disk in O(1) time.
+This keeps Cassandra healthy and completely free of tombstone issues.
+
+---
+
+== 2. Why Fetching Data in Isolation by Each Instance (Without Overlapping) is Necessary
+
+In a real deployment, we run multiple retry worker nodes (for example: Node-1, Node-2, and Node-3).
+
+=== What Happens if Nodes Overlap?
+If two retry worker nodes read the same retry transactions at the same time:
+
+1. **Duplicate Executions:**
+   Both Node-1 and Node-2 will pick up the same transaction `TX-101` and call the downstream service.
+   If that step was charging money, ordering an item, or sending an SMS, it will happen twice!
+
+2. **Deletion Conflicts:**
+   When Node-1 finishes, it will delete the partition.
+   If Node-2 is still running the same partition, it gets confused or its remaining queries fail.
+
+3. **Cassandra Does Not Have Row Locks:**
+   In SQL, you can do `SELECT ... FOR UPDATE SKIP LOCKED` so other workers skip locked rows.
+   Cassandra has **no row lock support**.
+   If you try to use Cassandra Lightweight Transactions (LWT / Paxos) for locking every row, the database slows down terribly because Paxos requires multiple network round trips for every single row.
+
+=== How We Solved This
+We made sure that every retry node works in **complete spatial isolation**.
+This means:
+
+* Every retry node gets its own separate slice of data.
+* Node-1 and Node-2 will never read, touch, or delete the same transactions.
+* There is zero lock contention, and no distributed lock service (like Redis or Zookeeper) is needed.
+
+---
+
+== 3. Why We Use Token Ranges and How Token Ranges Work Across Retry Nodes
+
+To give each retry node its own separate work without using database locks, we use Cassandra's native **Murmur3 Token Range**.
+
+=== How Murmur3 Tokens Work
+In Cassandra, all partition keys are hashed into a 64-bit integer between:
+`-9,223,372,036,854,775,808` and `9,223,372,036,854,775,807` (`-2^63` to `2^63 - 1`).
+
+When a regular microservice instance registers in Tier 3 (`es_instances_by_retry_window`), its clustering key includes:
+[source,sql]
+----
+instance_id_token = token(instance_id)
+----
+Cassandra's `token()` function converts any instance ID string (like `order-service-pod-1`) into this 64-bit number.
+
+=== How the Ring Coordinator Divides the Range
+We have a lightweight external service called the **RSocket Ring Coordinator**.
+All retry nodes connect to this coordinator.
+The coordinator takes the full 64-bit circle and divides it equally among the available retry nodes.
+
+For example, if there are 3 retry nodes:
+
+* **Retry Node 0:** gets range `[-2^63 to -3.07 * 10^18]`
+* **Retry Node 1:** gets range `[-3.07 * 10^18 + 1 to 3.07 * 10^18]`
+* **Retry Node 2:** gets range `[3.07 * 10^18 + 1 to 2^63 - 1]`
+
+When Retry Node 1 queries Cassandra, it runs:
+[source,sql]
+----
+SELECT instance_id, instance_id_token
+FROM es_instances_by_retry_window
+WHERE region = :region AND cluster = :cluster AND service_name = :service_name
+  AND date_of_year = :date AND minute_of_day = :window
+  AND instance_id_token >= :lease_min_token
+  AND instance_id_token <= :lease_max_token;
+----
+
+=== Why This is Great
+
+* Every instance ID's hash falls into **exactly one** node's leased range.
+* Node-0 and Node-1 will never get the same instance.
+* There is no database lock, no wait time, and no conflict.
+* If you add more retry nodes, the token space is simply divided into smaller pieces, so throughput increases linearly.
+
+---
+
+== 4. How Regular Nodes Store Retry Transactions Based on the Configured Window
+
+In StackSaga, we have:
+
+* **Regular Nodes:** Normal microservice pods that handle live business traffic.
+* **Retry Nodes:** Background workers that pick up failed transactions and retry them.
+
+When a regular node is running a saga step and a temporary failure happens, here is what it does step by step:
+
+1. **It calculates the target window:**
+   It checks the current UTC time and configured delay (`delayInMinutes`, default is 1 minute).
+   Instead of writing to the current minute, it calculates **W+1** (one window ahead):
++
+[source,text]
+----
+current_minute = (utc_now.hour * 60) + utc_now.minute
+target_minute  = (current_minute + 1) % 1440
+----
+   If current time is 10:15 UTC (minute 615), target window is 616 (10:16 UTC).
+   If current time is 23:59 UTC (minute 1439), target window rolls over to minute 0 of tomorrow's date!
+
+2. **It registers the directory path in Cassandra:**
+   Because Cassandra writes are idempotent, it does lightweight upserts:
+
+   * **Tier 1 (`es_days_by_year`):** inserts target date (e.g. `2026-09-22`).
+   * **Tier 2 (`es_retry_windows_by_day`):** inserts target minute window (e.g. `616`).
+   * **Tier 3 (`es_instances_by_retry_window`):** inserts its own `instance_id` along with `token(instance_id)`.
+
+3. **It checks local memory counter for bucket index:**
+   It checks an atomic counter in its own JVM memory for that window.
+   If count is under 50,000, `bucket_index = 0`.
+   If count reaches 50,000, it increments `bucket_index = 1`.
+
+4. **It registers the bucket:**
+   * **Tier 4 (`es_buckets_by_instance`):** inserts `bucket_index`.
+
+5. **It inserts the transaction metadata pointer:**
+   * **Tier 5 (`es_retry_transactions_by_instance`):** inserts only the lightweight retry metadata record, including `transaction_id`, `added_datetime`, `allocation_key`, and `stacksaga_impl_type`.
+   * **No payload is added to this table:** The actual business payload and saga state remain in the primary transaction event store. Tier 5 only stores lightweight metadata pointers. When retrying later, the execution engine fetches the payload on demand using this `transaction_id`.
+
+Now the regular node is done and can immediately continue serving live user requests.
+
+---
+
+== 5. Why We Use a Time Window
+
+Why did we divide the day into windows (like 1-minute slices) instead of just storing timestamps?
+
+=== 1. Avoids Costly Range Scans
+If you store data with exact timestamps like `10:15:23.451`, workers have to run range queries across time (`WHERE time >= start AND time <= end`).
+In Cassandra, range queries across timestamps touch multiple SSTables and scan through tombstones.
+By grouping time into discrete window numbers (`0, 1, 2 ... 1439`), we get **fixed partition keys** that Cassandra can query directly.
+
+=== 2. Separation of Writers and Readers (The Dual-Window Rule)
+This is a very important rule:
+
+* Live application pods **always write into window W+1**.
+* Retry workers **only read closed windows (less than or equal to W)**.
+
+Because writers always write into the next minute, the current minute `W` is completely closed.
+No application thread will ever write into window `W`.
+Workers can read window `W` peacefully, knowing that no new data will suddenly arrive in it.
+
+=== 3. Free Cooldown Time
+If a network failure happens at `10:15:50` UTC, writing to window `10:16` means workers will not touch it until 10:16 starts.
+This gives an automatic 10-second to 70-second cooling period so the downstream service has time to recover before the retry starts.
+
+=== 4. Clean Compaction Unit
+A minute window is a complete, bounded unit of work.
+Once all transactions in minute 615 are retried and deleted, the entire minute window is removed from the directory.
+
+---
+
+== 6. What Happens When Retry Nodes Change in the Cluster (Impact of Token Range)
+
+In production, retry nodes can change at any time:
+
+* A pod crashes or is killed by Kubernetes.
+* A deployment rolls out new pods.
+* Autoscaling adds more retry pods.
+
+Here is how our architecture handles this smoothly without losing any transactions:
+
+1. **Heartbeat Failure Detection:**
+   Every retry node maintains an active RSocket connection with the Ring Coordinator.
+   If a node crashes, the coordinator detects it in less than 1 second.
+
+2. **Automatic Range Rebalancing:**
+   The coordinator recalculates the token ranges:
+
+   * If a node leaves: its token range is divided and given to surviving nodes.
+   * If a node joins: token ranges are sliced to share work with the new node.
+
+3. **Instant Safe Cutover via `TimeWindowGuard`:**
+   In our code (`CassandraRetryTraversalAndCompactionService.java`), every database query is wrapped with `TimeWindowGuard`.
+   Every lease from the coordinator has a validity timestamp (`from` to `to` in milliseconds).
+   If a node's lease expires, `TimeWindowGuard` immediately throws `TimeWindowExpiredException`.
+   This stops the node from running queries on an old lease, preventing any duplicate work.
+
+4. **Smooth Work Handover:**
+   Any uncompleted instances or buckets that belonged to the dead node now fall into the expanded token range of a surviving node.
+   On the very next traversal cycle, the surviving node queries Cassandra, finds those uncompleted instances, and finishes them.
+   **Not a single transaction is lost or stuck.**
+
+---
+
+== 7. Compaction (Partition Clearing) Responsibilities: Node-0 vs. Other Nodes
+
+In our system, "compaction" means deleting data and directory records from Cassandra once retries are finished.
+We strictly divided the work between general worker nodes and Node-0:
+
+[cols="1,2,2",options="header"]
+|===
+| Responsibility | General Retry Nodes (Node-1, Node-2, etc.) | Node-0 (Compactor Overseer)
+
+| **Scope of Work**
+| Only handles instances in its own token lease.
+| Inspects the entire cluster across all token ranges.
+
+| **What It Deletes**
+| - Tier 5: Bounded Bucket partitions (`es_retry_transactions_by_instance`) +
+- Tier 4: Bucket index rows (`es_buckets_by_instance`) +
+- Tier 3: Its own instance markers (`es_instances_by_retry_window`)
+| - Tier 2: Minute window rows (`es_retry_windows_by_day`) +
+- Tier 1: Completed calendar dates (`es_days_by_year`)
+
+| **When It Runs**
+| Runs immediately as soon as a bucket or instance finishes.
+| Runs on a periodic loop checking active windows.
+|===
+
+---
+
+== 8. Why Node-0 Should Do Directory Compaction Instead of All Retry Nodes
+
+Why can't every retry node delete minute windows and days when it finishes?
+
+=== The Premature Deletion Bug
+Imagine a scenario with two retry nodes working on minute window 500:
+
+* **Node-1** owns Instance A (which had only 5 failed transactions).
+* **Node-2** owns Instance B (which had 40,000 failed transactions).
+
+Now look at what happens if any node can delete the window:
+
+1. Node-1 finishes Instance A in 100 milliseconds.
+2. If Node-1 is allowed to delete window 500 from `es_retry_windows_by_day`, it executes `DELETE ... WHERE minute_of_day = 500`.
+3. Meanwhile, Node-2 is still busy retrying the 40,000 transactions for Instance B!
+4. Because window 500 was deleted from the directory:
+   * If Node-2 restarts, or another node checks the directory, window 500 is gone!
+   * The remaining transactions of Instance B are now hidden and orphaned.
+
+=== How Node-0 Prevents This with Two Gates
+To avoid this disaster, only **Node-0** is allowed to delete Tier 2 (`es_retry_windows_by_day`) and Tier 1 (`es_days_by_year`).
+And Node-0 must pass **Two Strict Gates** before deleting:
+
+* **Gate 1 (Cluster-Wide Completion):**
+  Node-0 queries `es_instances_by_retry_window` for window 500 across the *entire cluster* (without filtering by token range).
+  If any instance marker is still present (meaning Node-2 is still working), Node-0 skips deletion and waits.
+
+* **Gate 2 (Time Moved into the Past):**
+  Node-0 checks `validateMoveable(retryWindow)`.
+  Even if all instance markers are deleted, if the current clock is still inside minute 500, Node-0 waits until the clock moves past minute 500.
+
+Only when both gates pass does Node-0 safely delete minute 500.
+This completely prevents premature deletions.
+
+---
+
+== 9. Why Every Retry Node Can Safely Compact Tiers 5, 4, and 3
+
+While directory compaction (Tiers 1 and 2) must be done only by Node-0, **data compaction (Tiers 3, 4, and 5) is done by all retry nodes concurrently.**
+
+=== Why This is 100% Safe
+Every retry node can safely delete its own completed buckets and instance markers because of **token range isolation**:
+
+* Tier 5 (`es_retry_transactions_by_instance`), Tier 4 (`es_buckets_by_instance`), and Tier 3 (`es_instances_by_retry_window`) all contain `instance_id` in their primary key.
+* Because of Murmur3 token leasing, Instance A belongs *only* to Node-1.
+* Node-2 will *never* query or touch Instance A.
+* Therefore, when Node-1 deletes:
+  * The bucket partition in Tier 5
+  * The bucket index in Tier 4
+  * The instance marker in Tier 3
+* It is deleting data that belongs exclusively to itself!
+* There is no chance of another node interfering. Every retry node can clean up its own data immediately without waiting for anyone.
+
+---
+
+== 10. Why `es_instances_by_retry_window` is Used Even Though Regular Nodes Don't Retry Data
+
+This is an important design question:
+When an error happens on `order-service-pod-3` (a regular node), it writes its ID into `es_instances_by_retry_window`.
+But `order-service-pod-3` does NOT retry its own transactions!
+The retry nodes (like Node-0, Node-1) do the retrying.
+
+So why do we store the regular node's `instance_id` in `es_instances_by_retry_window`?
+
+=== Reason 1: It Acts as the Sharding Key for Token Ranges
+To distribute work evenly across retry nodes, we need a key to hash.
+By using `token(instance_id)`, all transactions generated by that regular pod are grouped together and routed to a specific retry node.
+This balances the retry work across the cluster without needing any master dispatcher.
+
+=== Reason 2: Decouples Regular Nodes from Retry Nodes
+The regular application pod should only care about processing customer requests fast.
+It should not run background polling loops or manage retry timers.
+By writing under its own instance ID, the regular pod simply records the failure and returns immediately.
+The retry nodes pick it up asynchronously.
+
+=== Reason 3: It Acts as a Completion Semaphore for Node-0
+`es_instances_by_retry_window` tells the cluster which instances have pending work in that minute.
+When a retry node finishes all buckets for an instance, it deletes that instance row from `es_instances_by_retry_window`.
+This gives Node-0 a very simple, clean way to check progress:
+Node-0 simply checks `SELECT instance_id FROM es_instances_by_retry_window WHERE minute = ?`.
+When this query returns 0 rows, Node-0 knows with 100% certainty that all retry work for that minute across the whole cluster is completely finished!
+
+---
+
+== 11. How We Keep Cassandra Happy (< 100MB) via Local In-Memory Counters and Dynamic Buckets
+
+In Cassandra, partition size is critical.
+If any partition grows larger than 100MB:
+
+* Background compaction causes long JVM garbage collection pauses.
+* Nodes become hot spots.
+* Read queries slow down.
+
+=== The Challenge During Major Outages
+Suppose an external payment gateway goes down for 30 minutes during a busy sale.
+A single service might generate 150,000 failed transactions in one minute!
+If all 150,000 transaction metadata records are dumped into a single Cassandra partition, that partition becomes very wide with 150,000 clustering rows.
+Even though these rows contain only small metadata, scanning and compacting very wide partitions puts unnecessary pressure on Cassandra's read latency and SSTables.
+Dividing into dynamic buckets of 50,000 rows keeps each partition tiny (~3MB to 5MB) and allows Cassandra to drop the entire partition in O(1) time when finished.
+
+=== Why We Do NOT Query Cassandra for Row Count
+If the regular node ran `SELECT count(*) FROM table` before every failure write to see if the partition is full, Cassandra would be flooded with count queries during an outage and crash.
+
+=== Our In-Memory Atomic Counter Approach
+Instead of querying Cassandra, each regular node maintains a simple **AtomicInteger in local memory** for the active minute window:
+
+[source,text]
+----
+Local In-Memory Counter:
+------------------------
+For Minute 843:
+  - Atomic counter: 0 .. 50,000  --> bucket_index = 0
+  - Once count reaches 50,000:
+
+      * Atomically switch to bucket_index = 1
+      * Register bucket_index = 1 in es_buckets_by_instance (Tier 4)
+      * Next failures land in bucket_index = 1 (Tier 5)
+----
+
+=== Why This Solution is So Effective
+
+1. **Zero Database Overhead:** Checking an atomic counter in local JVM memory takes 2 nanoseconds. There is zero database read query on the write path.
+2. **Fair and Bounded Partition Sizing:** Transactions are cleanly split into uniform 50,000-row chunks (~45MB to 50MB each).
+3. **Cassandra Stays Happy:** No matter how big the outage is, every single Cassandra partition stays comfortably below 100MB.
+4. **Clean Streaming:** When retry workers process the data, they read one 50,000-row bucket at a time, protecting the worker's JVM heap from OutOfMemory errors.
+
+---
+
+== 12. Why No Data is Missed Even Though Data is Spread Chunk-by-Chunk Across the Cluster
+
+In our design, retry transactions are split across 5 tables, across 1440 minute windows, across multiple instances, and across sequential buckets.
+
+Why can we be 100% confident that no transaction is ever lost or missed?
+
+=== The 5 Safety Guarantees
+
+1. **Tree Directory Integrity:**
+   A transaction record cannot exist in Tier 5 without its full path being registered in Tier 4 (`es_buckets_by_instance`), Tier 3 (`es_instances_by_retry_window`), Tier 2 (`es_retry_windows_by_day`), and Tier 1 (`es_days_by_year`).
+   Because workers traverse down from Tier 1, any transaction written is guaranteed to be discovered.
+
+2. **The W+1 Rule (No Late Writes in Active Windows):**
+   Because writes always go to window `W+1`, workers only read closed windows `<= W`.
+   No application thread will ever write a transaction into a window that is currently being read or compacted.
+
+3. **100% Token Ring Coverage (No Gaps):**
+   The Ring Coordinator leases the entire token space from `-2^63` to `2^63 - 1` without any missing gaps.
+   Every instance's token hash is guaranteed to belong to one active retry node.
+
+4. **Shutdown Protection (Safe Partial Batch Handling):**
+   What happens if a retry pod is restarted while processing a 50,000-transaction bucket?
+   In our code:
++
+[source,java]
+----
+if (!this.isRunning.get() || executedCount.get() < retryTransactions.size()) {
+    log.info("Shutdown or partial execution. Preserving bucket partition in Cassandra.");
+    return Mono.empty(); // Do NOT delete bucket partition!
+}
+----
+   If all transactions in the bucket were not executed, **the worker does NOT delete the bucket partition**.
+   The transactions remain safe in Cassandra.
+   When the node restarts (or another node takes over the token range), the remaining transactions are picked up and executed.
+
+5. **Node-0 Two-Gate Verification:**
+   Node-0 never deletes a minute window until Tier 3 confirms all instances across the cluster are finished AND time has moved past the window.
+
+Because of these five invariants, data loss is mathematically impossible.
+
+---
+
+== 13. Ability to Retry Old Retry Transactions (Not Just the Current Window)
+
+Some naive retry systems only look at "the current minute" or "the last 5 minutes".
+If an outage lasts 4 hours, or if the entire service was down overnight, naive systems restart, look only at the current minute, and permanently forget all historical failures!
+
+=== How StackSaga Retries Historical Failures
+
+Our retry scanner is designed for **deep historical recovery**:
+
+1. **The Lookback Window (`candidateDays()`):**
+   When a retry worker starts up, it generates candidate dates going back multiple days (`startDiggingInAdvance`, default: 2 days):
++
+[source,text]
+----
+[today - 2 days .. today]
+----
+
+2. **Ascending Chronological Day Traversal (Tier 1):**
+   It queries `es_days_by_year` using `date_of_year ASC`.
+   Cassandra returns the oldest active date first (e.g. yesterday before today).
+
+3. **Ascending Chronological Minute Traversal (Tier 2):**
+   Within that day, it queries `es_retry_windows_by_day` using `minute_of_day ASC`.
+   It processes earlier minutes (like minute 10, minute 50) before later minutes.
+
+4. **Past Days are Always Eligible:**
+   In `RetryWindowUtils.java`, any date before today is recognized as completely closed and immediately readable:
++
+[source,java]
+----
+if (retryWindow.date().isBefore(today.toLocalDate())) {
+    return true; // Past dates are completely closed and eligible immediately
+}
+----
+
+=== What Happens in Practice
+If your application was stopped on Friday night and restarted on Monday morning:
+
+* Workers discover Friday's active date in `es_days_by_year`.
+* They process Friday's minute windows from earliest to latest.
+* When Friday is clean, Node-0 deletes Friday from the directory.
+* Workers then automatically move to Saturday, Sunday, and finally today!
+
+Old transactions are never abandoned.
+The system systematically recovers all historical failures in chronological order.
+
+---
+
+== Conclusion
+
+By designing the retry scanning engine around Cassandra's real strengths and respecting its limitations, we achieved a system that is:
+
+* **Tombstone-Free:** Partition-level deletes drop data in O(1) time without cell tombstones.
+* **Safe Partition Sizing:** In-memory atomic counters keep every partition strictly under 100MB.
+* **Race-Free:** Writing to `W+1` while reading `<= W` ensures writers and readers never collide.
+* **Lock-Free:** Murmur3 token leases give each worker a separate slice of work with zero contention.
+* **Zero Data Loss:** Safe shutdown logic preserves partial batches in Cassandra.
+* **Self-Cleaning:** Node-0 two-gate compaction prunes directory records without blinding other workers.
+* **Historically Resilient:** Multi-day lookback systematically recovers older failures after extended downtime.
+
+This architecture gives StackSaga the highest possible reliability and throughput while keeping the Cassandra cluster healthy, stable, and fast.
+
+---
+
+== Senior Developer & Architect Q&A: System Design Deep Dive
+
+When senior engineers, principal developers, and system architects evaluate migrating their existing microservices to StackSaga's Cassandra reactive retry engine, several important technical questions arise.
+Below is a comprehensive question-and-answer guide addressing these real-world architectural concerns.
+
+=== Q1: In our SQL database, we always do strict FIFO retries (`ORDER BY created_at ASC`). Why does StackSaga process retries in Murmur3 token order within a window instead of strict FIFO? Will this break our business logic?
+
+**Answer:**
+Let us understand why this happens and why it is completely safe for 99% of business cases:
+
+1. **How Cassandra Works Under the Hood:**
+   In Cassandra, rows inside a partition are clustered by their clustering key.
+   In Tier 3 (`es_instances_by_retry_window`), instances are clustered by `instance_id_token` (Murmur3 hash) so that workers can query their assigned token slice without locking.
+   Therefore, within a single 1-minute window, instances are returned in token order, not by exact failure millisecond.
+
+2. **Why This is Completely Safe in Practice:**
+   Why do transient retries happen?
+   Usually because a downstream microservice is restarting, a database connection pool is full, or a network timeout happened.
+   When that downstream service recovers, all transactions that failed during that 1-minute outage become eligible for retry.
+   Whether transaction A (which failed at 10:15:05) runs 200 milliseconds before or after transaction B (which failed at 10:15:15) makes zero difference to the business outcome.
+   Both will successfully complete.
+
+3. **Cross-Window Ordering is Strictly Chronological:**
+   Across different minutes and days, StackSaga is strictly chronological!
+   Earlier minute windows (`minute_of_day ASC`) and earlier calendar dates (`date_of_year ASC`) are always discovered and retried first.
+   So you always process 10:14 before 10:15, and 10:15 before 10:16.
+
+4. **The Strict FIFO Exception:**
+   If your application is an order-matching engine or a high-frequency trading platform where millisecond-level FIFO ordering between concurrent users is legally required, you should use StackSaga's SQL module (PostgreSQL or MySQL) for the event store instead of Cassandra.
+   For all other microservice architectures (e-commerce, banking, logistics, telecom), token order within a minute window is completely standard and safe.
+
+=== Q2: When a failure happens, the regular node writes into 5 different tables. Isn't this huge write amplification? Will it slow down our live API responses?
+
+**Answer:**
+Not at all. In fact, it is blazingly fast. Here is why:
+
+1. **Cassandra Writes are Append-Only in Memory:**
+   In Cassandra, an `INSERT` does not read from disk or update B-tree pages.
+   Cassandra simply appends the write to the on-disk CommitLog (sequential write) and inserts it into an in-memory Memtable.
+   This takes less than 1 millisecond.
+
+2. **Directory Rows are Written Only Once:**
+   Look closely at what is being written:
+   * `es_days_by_year` (Tier 1): Written only once per calendar date.
+   * `es_retry_windows_by_day` (Tier 2): Written only once per minute window.
+   * `es_instances_by_retry_window` (Tier 3): Written only once per instance per minute.
+   * `es_buckets_by_instance` (Tier 4): Written only once per bucket index (once every 50,000 transactions).
+   Because Cassandra writes are idempotent upserts, subsequent writes in that same minute do not create new rows; they simply touch the existing key in memory.
+
+3. **No Payload is Stored in the 5 Retry Tables:**
+   There is **no payload added to any of the 5 retry tables**.
+   All 5 tables store strictly lightweight metadata (such as `transaction_id`, timestamps, and instance routing keys).
+   The actual transaction payload is stored in the primary transaction event store.
+   Because Tier 5 only stores a tiny metadata record (~50 to 100 bytes per row), writing to Tier 5 is extremely fast and consumes almost zero disk I/O.
+   When retrying later, each execution uses that metadata (`transaction_id`) to fetch the payload on demand.
+
+4. **The Real Comparison:**
+   Compare this with the alternative:
+   If you try to write to a single SQL-like table and delete rows individually, you create millions of cell tombstones that destroy your cluster's read performance.
+   Writing a few tiny directory markers to keep Cassandra completely free of tombstones is an incredible engineering trade-off.
+
+=== Q3: What happens if the RSocket Ring Coordinator crashes? Is it a single point of failure (SPOF)? Will live transactions or retries stop?
+
+**Answer:**
+No, the system is designed to be highly resilient against coordinator downtime:
+
+1. **Live Business Transactions are Completely Unaffected:**
+   Regular application pods processing live user traffic never communicate with the Ring Coordinator!
+   When a regular pod encounters an error, it writes directly to Cassandra ($W+1$).
+   Even if the coordinator is completely down, live applications continue accepting traffic and recording failures without any problem.
+
+2. **Retry Workers Continue Running on Current Leases:**
+   When a retry worker connects to the coordinator, it receives a token lease with a validity duration (`from` to `to` in EpochMilli).
+   If the coordinator restarts or has a network blip, workers continue processing transactions within their current lease window.
+
+3. **Coordinator High Availability (Master / Slave):**
+   The StackSaga Ring Coordinator supports multi-instance active/standby deployments (Master and Slave).
+   If the Master fails, the Slave takes over the session and maintains the token ring.
+
+4. **Self-Healing on Reconnect:**
+   Once the coordinator comes back online, workers automatically re-establish their persistent RSocket streams, re-verify their token intervals, and continue smoothly.
+
+=== Q4: In cloud deployments (AWS, GCP, Azure), server clocks have slight drifts. What happens if pod clocks differ by 1 or 2 seconds? Will clock skew break the Dual-Window model?
+
+**Answer:**
+The Dual-Window model is immune to normal cloud clock drift. Here is why:
+
+1. **Strict UTC Zone Usage:**
+   All nodes in StackSaga use `ZoneOffset.UTC` explicitly.
+   The framework never relies on the host machine's default local timezone.
+
+2. **NTP Drift in Cloud is Tiny:**
+   Modern cloud providers (AWS Time Sync Service, Google Cloud NTP) synchronize instance clocks via Amazon Time Sync or Google TrueTime.
+   Real-world clock drift between cloud VMs or Kubernetes pods is typically under 10 to 30 milliseconds.
+
+3. **The 60-Second Window Cushion:**
+   Our retry windows are typically 1 minute (60,000 milliseconds) long.
+   A clock drift of 50 milliseconds is less than 0.1% of a window slice.
+
+4. **The W+1 Safety Buffer:**
+   Because writers write ahead into window $W+1$ (the next minute), there is an automatic 10-second to 70-second cooldown buffer before that window is ever touched by readers.
+   Even if a writer pod's clock is 2 seconds behind, its write to $W+1$ still lands safely in the future relative to the active read window.
+   A writer will never accidentally write into a closed read window.
+
+=== Q5: What if our saga aggregator payload is large (e.g. 500KB to 2MB)? Will storing 50,000 transactions in a bucket partition cause large partition issues in Cassandra, and how is memory managed during retrying?
+
+**Answer:**
+This is one of the most important architectural design decisions in StackSaga:
+
+1. **No Payload is Stored in Any of the 5 Retry Tables:**
+   There is **no payload added to any of the 5 retry tables**.
+   The 5 retry tables (`es_days_by_year` through `es_retry_transactions_by_instance`) store **strictly lightweight metadata pointers** (such as `transaction_id`, timestamps, instance IDs, and allocation keys).
+   The actual transaction payload (saga aggregator state, error details, tryouts) is stored safely in the primary transaction event store.
+
+2. **Partitions Stay Tiny Regardless of Business Payload Size:**
+   Because Tier 5 (`es_retry_transactions_by_instance`) only stores small metadata (~50 to 100 bytes per row):
+   * A full bucket of 50,000 transactions takes only **~3MB to 5MB** on disk!
+   * Even if your microservice's saga payload is 500KB or 2MB, the retry bucket partition in Cassandra will never exceed a few megabytes.
+   * It is completely impossible for a retry bucket partition to violate Cassandra's 100MB partition size limit.
+
+3. **On-Demand Lazy Payload Fetching During Execution:**
+   When a retry worker reads a bucket from Tier 5:
+   * It reads only the lightweight metadata stream (`transaction_id`).
+   * It does not load heavy payloads during the bucket scan.
+   * For each transaction, at the exact time of execution, the worker uses the `transaction_id` metadata to fetch the actual payload from the transaction event store.
+   * It then executes the saga retry step.
+
+4. **Bounded Memory via Controlled Concurrency:**
+   Because execution is reactive and concurrency-controlled (e.g. `flatMap(concurrency = 100)`):
+   * The worker does NOT load 50,000 payloads into JVM heap memory at once.
+   * Only the transactions currently being executed (e.g. 100 in flight) have their payloads loaded in memory.
+   * As soon as an execution step completes, its payload is immediately garbage collected.
+   * Even with large 2MB payloads, JVM heap usage remains low, flat, and completely safe from `OutOfMemoryError` (OOM).
+
+=== Q6: If a retry worker pod crashes while processing transaction #25,000 in a 50,000-transaction bucket, the bucket is preserved in Cassandra. Won't transactions 1 to 25,000 be re-executed twice by another worker? How is duplicate execution prevented?
+
+**Answer:**
+This is where the **Execution Marker Pattern** (`es_execution_markers`) protects your business:
+
+1. **The Shutdown Invariant:**
+   As you noted, if a worker crashes midway, `executedCount < totalCount` causes the worker to skip deleting the bucket partition.
+   The bucket remains intact in Cassandra so the remaining transactions (#25,001 to #50,000) are not lost.
+
+2. **What Happens When Another Worker Picks Up the Bucket:**
+   The new worker starts reading the bucket from row 1.
+   Before executing each saga step, the framework checks the execution marker:
++
+[source,sql]
+----
+SELECT execution_state, lease_owner
+FROM es_execution_markers
+WHERE service_name = :service AND transaction_id = :tx_id AND span_key = :span;
+----
+
+3. **How `STRICT` Mode Discards Duplicates:**
+   In `STRICT` mode, when transactions 1 to 25,000 were completed by the previous worker, their markers were finalized with `execution_state = 'COMMITTED'` and `TTL = 0`.
+   When the new worker checks transactions 1 to 25,000:
+   * It sees the marker is already `COMMITTED`.
+   * It immediately skips re-executing the step.
+   * No HTTP calls, no payment requests, and no event listener notifications are fired again.
+   * When the worker reaches transaction #25,001 (which was never executed), its marker is missing or uncommitted, so it executes normally.
+
+4. **Result:**
+   You get **at-least-once recovery with exactly-once execution semantics**.
+   Your downstream services and customers are completely protected from duplicate side effects.
+
+=== Q7: Why is directory compaction restricted only to Node-0? What if Node-0 crashes? How does the cluster recover?
+
+**Answer:**
+Here is how the leader role is managed safely:
+
+1. **Why Node-0 is Necessary:**
+   If any worker node could delete minute windows from `es_retry_windows_by_day`, a fast worker that finished its 10 transactions in 100ms would delete the window, blinding a slower peer node that is still retrying 40,000 transactions in that same window.
+   Having a single compactor overseer (Node-0) guarantees that the window is only deleted after **all** instances across the whole cluster are finished.
+
+2. **What Happens if Node-0 Crashes:**
+   * **Retries Keep Running:** All other worker nodes (Node-1, Node-2, etc.) continue processing their assigned token ranges and deleting their bucket partitions in Tier 5 and Tier 4. Transaction retries do not stop!
+   * **Coordinator Re-election:** The Ring Coordinator detects Node-0's heartbeat failure within 1 second.
+   * When rebalancing the token ring, the coordinator automatically assigns rank `nodeIndex = 0` to one of the surviving nodes (for example, Node-1 is promoted to Node-0).
+   * The newly promoted Node-0 immediately assumes the compactor overseer role and resumes directory compaction on its next cycle.
+
+3. **Worst-Case Scenario (Temporary Compaction Pause):**
+   Even if the compactor role is delayed for a few minutes, the only effect is that already-processed minute rows remain in `es_retry_windows_by_day` temporarily.
+   No transactions are lost, no data is corrupted, and as soon as Node-0 runs, it cleans up the pending directory rows in seconds.
+
+=== Q8: Which Cassandra compaction strategy (STCS, LCS, TWCS) should we configure for the 5-tier retry tables?
+
+**Answer:**
+Here is the recommended Cassandra table tuning:
+
+1. **For Tier 5 (`es_retry_transactions_by_instance`):**
+   * **Recommended Strategy:** `SizeTieredCompactionStrategy` (STCS) or `LeveledCompactionStrategy` (LCS).
+   * **Why:** Because StackSaga deletes at the partition level (`DELETE FROM es_retry_transactions_by_instance WHERE partition_keys = ...`), Cassandra writes a single partition tombstone covering the whole partition. When STCS or LCS merges SSTables, it drops the entire partition from disk instantly.
+   * **Tombstone GC Setting:** You can lower `gc_grace_seconds` on this table (e.g. to 86400 / 1 day or 3600 / 1 hour if running single-datacenter with frequent repairs) so Cassandra reclaims disk space rapidly.
+
+2. **For Historical Tables (`es_transaction_history`):**
+   * **Recommended Strategy:** `TimeWindowCompactionStrategy` (TWCS).
+   * **Why:** Historical logs are append-only with a fixed TTL (e.g. 30 days). TWCS groups SSTables by time window and drops entire SSTable files when all records expire, with zero compaction disk I/O.
+
+3. **For Directory Tables (Tiers 1, 2, 3, 4):**
+   * **Recommended Strategy:** `SizeTieredCompactionStrategy` (STCS).
+   * **Why:** These tables contain tiny metadata rows. Their total size is minuscule (usually only a few megabytes for the entire cluster).
+
+=== Q9: How does this architecture handle multi-region active-active deployments across multiple datacenters?
+
+**Answer:**
+StackSaga was built from day one for multi-region active-active clouds:
+
+1. **Region and Cluster are Part of the Partition Key:**
+   Notice the primary key of every table:
++
+[source,sql]
+----
+PRIMARY KEY ((region, cluster, service_name, ...))
+----
+   Data is physically separated by region (e.g. `us-east-1`, `eu-west-1`) and virtual cluster name.
+
+2. **Single-Region Low Latency (`LOCAL_QUORUM`):**
+   Workers configure `LOCAL_QUORUM` for both reads and writes:
++
+[source,yaml]
+----
+stacksaga:
+  cassandra:
+    read-consistency-level: LOCAL_QUORUM
+    write-consistency-level: LOCAL_QUORUM
+----
+   This means every query requires confirmation only from replica nodes in the local datacenter.
+   Writes and reads take 2ms to 4ms, without waiting for high-latency cross-ocean WAN replication.
+
+3. **Background Cross-Region Replication:**
+   Cassandra replicates the data asynchronously to the remote datacenter using `NetworkTopologyStrategy`.
+   If an entire cloud region suffers an AWS/GCP outage, the surviving region already has the event store replicated and can resume saga orchestration.
+
+=== Q10: What are the JVM heap and CPU recommendations for running StackSaga retry workers in Kubernetes?
+
+**Answer:**
+Because the entire traversal engine is non-blocking and built on **Project Reactor**, resource consumption is very lightweight:
+
+1. **Recommended Kubernetes Pod Sizing:**
+   * **CPU:** 1 to 2 vCPUs
+   * **Memory:** 1.5GB to 2GB RAM (JVM `-Xms1g -Xmx1g`)
+
+2. **Why Memory Usage is So Low:**
+   * **Only Lightweight Metadata in Buckets:** When loading a bucket from Tier 5, the worker only streams lightweight metadata (`transaction_id`), which takes only ~3MB to 5MB of memory for 50,000 rows.
+   * **Lazy Payload Fetching with Controlled Concurrency:** The worker does not load payloads in bulk. Instead, each execution fetches the transaction payload on demand using `transaction_id`. With `flatMap(concurrency = 100)`, only 100 transaction payloads are actively in flight in JVM memory at any single moment.
+   * As each transaction completes, its payload is released for garbage collection immediately.
+   * The JVM heap remains flat and stable without memory spikes or long GC pauses.
+
+=== Q11: Can we configure different retry delays (e.g. 5 minutes or 10 minutes) instead of 1 minute?
+
+**Answer:**
+Yes! You can configure `delay-in-minutes` in your `application.yml`:
+
+[source,yaml]
+----
+stacksaga:
+  cassandra:
+    transaction:
+      retry:
+        delay-in-minutes: 5   # Divides day into 288 windows of 5 minutes each
+        concurrency: 200      # Increases concurrent re-invocation throughput
+        start-digging-in-advance: 3 # Scans up to 3 days back for historical retries
+----
+
+`RetryWindowUtils` automatically recalculates:
+* `totalWindows = (24 * 60) / 5 = 288 windows per day`.
+* `windowIndex = minutesSinceMidnight / 5`.
+The entire 5-tier directory hierarchy, $W+1$ write-ahead logic, and compaction engine automatically adapt to your configured interval with zero code changes.
+
+=== Q12: How do we migrate from our existing SQL retry table or Kafka dead-letter queue (DLQ) to StackSaga without downtime?
+
+**Answer:**
+We recommend a smooth **Phased Migration Strategy**:
+
+1. **Phase 1: Deploy Keyspace & Schemas:**
+   Run the keyspace and 5-tier table creation CQL scripts in your Cassandra cluster.
+
+2. **Phase 2: Enable StackSaga on New Transactions:**
+   Deploy your microservices with `stacksaga-cassandra-reactive-support`.
+   All new saga transactions will execute through StackSaga.
+   Any new transient failures will naturally land in Cassandra's 5-tier structure.
+
+3. **Phase 3: Drain Legacy Retries:**
+   Keep your existing SQL retry worker or DLQ consumer running in the background.
+   Allow it to finish processing and draining all remaining historical retries from your old table.
+
+4. **Phase 4: Decommission Legacy Queue:**
+   Once your old SQL queue depth drops to 0, stop the legacy retry worker and drop the old SQL table.
+   Your entire system is now running 100% on the high-throughput, tombstone-free Cassandra engine with zero downtime during the cutover!
+

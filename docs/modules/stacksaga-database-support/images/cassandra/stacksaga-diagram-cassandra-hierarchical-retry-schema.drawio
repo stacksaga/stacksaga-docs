@@ -1,0 +1,104 @@
+<mxfile host="app.diagrams.net" modified="2026-09-22T02:35:00.000Z" agent="Mozilla/5.0" version="21.0.0" type="device">
+  <diagram id="hierarchical-retry-schema" name="5-Tier Retry Hierarchy">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" background="#FAFBFD" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="StackSaga 5-Tier Retry Directory &amp;amp; Event Store Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#0F172A;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="24" width="600" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Top-down active directory routing with partition-level drops and decoupled event storage" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontColor=#64748B;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="48" width="600" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- Tier 1: es_days_by_year -->
+        <mxCell id="tier1_card" value="&lt;b style=&quot;font-size: 14px; color: #0F172A;&quot;&gt;es_days_by_year&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 11px; color: #64748B;&quot;&gt;Tier 1: Active Calendar Date Directory&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #94A3B8;&quot;&gt;PK: ((region, cluster, service_name), date_of_year ASC)&lt;/span&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;strokeWidth=1.2;align=left;spacingLeft=65;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="480" height="68" as="geometry" />
+        </mxCell>
+        <mxCell id="tier1_badge" value="1" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#2563EB;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=14;align=center;" vertex="1" parent="1">
+          <mxGeometry x="58" y="98" width="32" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="tier1_tag" value="Active Dates" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#BFDBFE;fontColor=#1D4ED8;fontSize=10;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="400" y="94" width="105" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Tier 2: es_retry_windows_by_day -->
+        <mxCell id="tier2_card" value="&lt;b style=&quot;font-size: 14px; color: #0F172A;&quot;&gt;es_retry_windows_by_day&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 11px; color: #64748B;&quot;&gt;Tier 2: UTC Minute Window Directory&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #94A3B8;&quot;&gt;PK: ((region, cluster, service_name, date_of_year), minute_of_day ASC)&lt;/span&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;strokeWidth=1.2;align=left;spacingLeft=65;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="180" width="480" height="68" as="geometry" />
+        </mxCell>
+        <mxCell id="tier2_badge" value="2" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#2563EB;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=14;align=center;" vertex="1" parent="1">
+          <mxGeometry x="58" y="198" width="32" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="tier2_tag" value="0..1439 UTC Windows" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#BFDBFE;fontColor=#1D4ED8;fontSize=10;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="385" y="194" width="120" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Tier 3: es_instances_by_retry_window -->
+        <mxCell id="tier3_card" value="&lt;b style=&quot;font-size: 14px; color: #0F172A;&quot;&gt;es_instances_by_retry_window&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 11px; color: #64748B;&quot;&gt;Tier 3: Token-Partitioned Worker Slicing&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #94A3B8;&quot;&gt;PK: ((region, cluster, service_name, date, window), instance_id_token ASC, id)&lt;/span&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;strokeWidth=1.2;align=left;spacingLeft=65;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="280" width="480" height="68" as="geometry" />
+        </mxCell>
+        <mxCell id="tier3_badge" value="3" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#2563EB;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=14;align=center;" vertex="1" parent="1">
+          <mxGeometry x="58" y="298" width="32" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="tier3_tag" value="Murmur3 Slices" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#BFDBFE;fontColor=#1D4ED8;fontSize=10;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="390" y="294" width="115" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Tier 4: es_buckets_by_instance -->
+        <mxCell id="tier4_card" value="&lt;b style=&quot;font-size: 14px; color: #0F172A;&quot;&gt;es_buckets_by_instance&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 11px; color: #64748B;&quot;&gt;Tier 4: Sequential Bucket Allocation Directory&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #94A3B8;&quot;&gt;PK: ((region, cluster, service_name, date, window, instance_id), bucket_index ASC)&lt;/span&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;strokeWidth=1.2;align=left;spacingLeft=65;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="380" width="480" height="68" as="geometry" />
+        </mxCell>
+        <mxCell id="tier4_badge" value="4" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#2563EB;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=14;align=center;" vertex="1" parent="1">
+          <mxGeometry x="58" y="398" width="32" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="tier4_tag" value="Seq Buckets" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#BFDBFE;fontColor=#1D4ED8;fontSize=10;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="405" y="394" width="100" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Tier 5: es_retry_transactions_by_instance -->
+        <mxCell id="tier5_card" value="&lt;b style=&quot;font-size: 14px; color: #065F46;&quot;&gt;es_retry_transactions_by_instance&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 11px; color: #047857;&quot;&gt;Tier 5: Bounded Metadata Partitions (&amp;lt; 50k rows)&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #059669;&quot;&gt;PK: ((region, cluster, service, date, window, instance, bucket), transaction_id ASC)&lt;/span&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ECFDF5;strokeColor=#10B981;strokeWidth=1.8;align=left;spacingLeft=65;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="480" width="480" height="74" as="geometry" />
+        </mxCell>
+        <mxCell id="tier5_badge" value="5" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#059669;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=14;align=center;" vertex="1" parent="1">
+          <mxGeometry x="58" y="501" width="32" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="tier5_tag" value="O(1) Drop" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#D1FAE5;strokeColor=#6EE7B7;fontColor=#065F46;fontSize=10;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="415" y="496" width="90" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Primary Event Store: es_transaction -->
+        <mxCell id="store_card" value="&lt;b style=&quot;font-size: 15px; color: #5B21B6;&quot;&gt;es_transaction&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 11px; color: #6D28D9;&quot;&gt;Primary Distributed Event Store&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #7C3AED;&quot;&gt;PK: (transaction_id)&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #8B5CF6;&quot;&gt;Stores business state &amp;amp; step payloads&lt;/span&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#F5F3FF;strokeColor=#8B5CF6;strokeWidth=1.8;align=left;spacingLeft=65;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="600" y="480" width="340" height="74" as="geometry" />
+        </mxCell>
+        <mxCell id="store_badge" value="6" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#7C3AED;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=14;align=center;" vertex="1" parent="1">
+          <mxGeometry x="618" y="501" width="32" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="store_tag" value="Decoupled Store" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#EDE9FE;strokeColor=#C4B5FD;fontColor=#5B21B6;fontSize=10;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="815" y="496" width="110" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Connecting Arrows between Tiers -->
+        <mxCell id="edge_t1_t2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3B82F6;strokeWidth=2;endArrow=block;endFill=1;endSize=5;" edge="1" parent="1" source="tier1_card" target="tier2_card">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_t2_t3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3B82F6;strokeWidth=2;endArrow=block;endFill=1;endSize=5;" edge="1" parent="1" source="tier2_card" target="tier3_card">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_t3_t4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3B82F6;strokeWidth=2;endArrow=block;endFill=1;endSize=5;" edge="1" parent="1" source="tier3_card" target="tier4_card">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_t4_t5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3B82F6;strokeWidth=2;endArrow=block;endFill=1;endSize=5;" edge="1" parent="1" source="tier4_card" target="tier5_card">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Horizontal Arrow from Tier 5 to es_transaction -->
+        <mxCell id="edge_t5_store" value="Lazy fetch via transaction_id" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#7C3AED;strokeWidth=2;endArrow=block;endFill=1;endSize=5;fontColor=#6D28D9;fontSize=10;fontStyle=1;" edge="1" parent="1" source="tier5_card" target="store_card">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
