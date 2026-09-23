@@ -692,13 +692,13 @@ image::stacksaga-database-support:cassandra/stacksaga-traversal-pipeline.svg[alt
 
 *What if our entire service was offline for an entire weekend — do all those failed transactions get abandoned?* +
 Never.
-On startup, workers generate candidate dates going back multiple days based on `recovery.retry.lookback-days` (default: `2`).
+On startup, workers generate candidate dates going back multiple days based on `recovery.lookback-days` (default: `2`).
 Workers traverse Tier 1 in ascending order (`date_of_year ASC`) and Tier 2 in ascending order (`minute_of_day ASC`), recovering Friday's, Saturday's, and Sunday's backlog chronologically before transitioning smoothly to the live stream.
 
 .Deep Historical Lookback Across Calendar Days
 image::stacksaga-database-support:cassandra/stacksaga-deep-historical-recovery.svg[alt="Deep Historical Lookback Across Calendar Days"]
 
-<1> **Lookback Range Calculation:** On startup, workers calculate candidate dates based on `recovery.retry.lookback-days`.
+<1> **Lookback Range Calculation:** On startup, workers calculate candidate dates based on `recovery.lookback-days`.
 <2> **Ascending Day Sweep:** Workers traverse Tier 1 in ascending order (`date_of_year ASC`), recovering older backlog first.
 <3> **Live Transition:** Once historical windows are processed, workers transition smoothly to the live minute stream (W).
 
@@ -732,11 +732,11 @@ When a Standard-Node **starts processing** any transaction, it immediately:
 +
 [source,text]
 ----
-restore_window = current_window + (recovery.restore.delay-windows * recovery.window-interval-minutes)
+restore_window = current_window + (recovery.restore.domains.<domain>.delay-windows * recovery.window-interval-minutes)
 
 Example:
   window-interval-minutes = 1   (1-minute windows)
-  restore.delay-windows   = 600
+  restore.domains.default.delay-windows = 600
   → watchdog row is placed 600 minutes (10 hours) ahead in the directory
 ----
 2. Writes a lightweight watchdog row into an **odd bucket** in Tier 5 at that restore window.
@@ -1093,19 +1093,10 @@ This is why the architecture provides a dedicated tombstone isolation mechanism 
 
 '''
 
-=== Planned Enhancements
+=== Per-Domain-Entity Restore & Retry Delay Configuration
 
 [#per-domain-delay-config]
-==== Per-Domain-Entity Restore & Retry Delay Configuration
-
-[IMPORTANT]
-====
-*Status: Planned — not yet implemented.* +
-This enhancement is being considered for a future release of `stacksaga-cassandra-reactive-support`.
-====
-
-Currently, `recovery.restore.delay-windows` and `recovery.retry.delay-windows` are **global settings** shared across all saga domain entities.
-This works correctly for most deployments, but different saga types can have structurally different execution durations based purely on system-level factors — the number of downstream microservice hops, network round-trip times, and external API response times — not business-domain decisions.
+Different saga types can have structurally different execution durations based purely on system-level factors — the number of downstream microservice hops, network round-trip times, and external API response times — not business-domain decisions.
 
 For example:
 
@@ -1114,41 +1105,45 @@ A restore watchdog 10 hours ahead is unnecessarily distant — if the pod crashe
 * An `order-saga` that orchestrates 8 downstream services across multiple regions may legitimately take 20–30 minutes under degraded network conditions.
 With a short global restore delay, the watchdog could fire while the saga is still in-flight on a healthy pod, triggering a spurious status-check re-invocation cycle.
 
-The planned enhancement introduces **per-domain-entity override** for both restore and retry delay windows, modeled after the existing `write-protection.domains` pattern:
+StackSaga provides **per-domain-entity overrides** for both restore and retry delay windows under `stacksaga.cassandra.recovery.retry.domains` and `stacksaga.cassandra.recovery.restore.domains`, with automatic fallback to the `default` entry:
 
-.Proposed `application.yml` Configuration Shape _(planned)_
+.Example `application.yml` with Per-Domain Overrides
 [source,yaml]
 ----
 stacksaga:
   cassandra:
     recovery:
-      restore:
-        delay-windows: 600          # Global default: 10 hours ahead
       retry:
-        delay-windows: 1            # Global default: W+1 (next window)
+        domains:
+          default:
+            delay-windows: 1            # Global default: W+1 (next window)
+          order-saga:
+            delay-windows: 3            # W+3 — longer cooldown for slow external APIs
+          payment-saga:
+            delay-windows: 1
 
-      domains:
-        order-saga:
-          restore-delay-windows: 1200   # 20 hours — multi-hop orchestration saga
-          retry-delay-windows: 3        # W+3 — longer cooldown for slow external APIs
-        payment-saga:
-          restore-delay-windows: 300    # 5 hours — shorter lifecycle
-          retry-delay-windows: 1        # Standard W+1 retry
-        notification-saga:
-          restore-delay-windows: 60     # 1 hour — very fast lifecycle
-          retry-delay-windows: 1
+      restore:
+        domains:
+          default:
+            delay-windows: 600          # Global default: 10 hours ahead (600 × 1 min)
+          order-saga:
+            delay-windows: 1200         # 20 hours — multi-hop orchestration saga
+          payment-saga:
+            delay-windows: 300          # 5 hours — shorter lifecycle
+          notification-saga:
+            delay-windows: 60           # 1 hour — fast notification lifecycle
 ----
 
 *Why the directory structure requires zero changes:*
 
-The `delay-windows` value is consumed **only at transaction start time**, when the Standard-Node writes the watchdog row into Tier 5.
+The `delay-windows` value is consumed **only at write time** (when the Standard-Node writes ahead on failure or registers a watchdog row at transaction start).
 Each transaction independently stores its full watchdog partition path (`restore_date`, `restore_window`, `restore_instance_id`, `restore_bucket`) in `es_transaction`.
-Retry-Nodes discover and process watchdog rows through the normal 5-tier traversal — they have no awareness of which domain entity a watchdog belongs to.
+Retry-Nodes discover and process watchdog and retry rows through the normal 5-tier traversal — they have no awareness of which domain entity a record belongs to.
 
 This means:
 
 * A `payment-saga` watchdog landing at `W+300` and an `order-saga` watchdog landing at `W+1200` coexist in the same Tier 5 table across different windows — processed by the same pipeline with zero structural changes.
-* Domain-level fallback to the global default is seamless — any domain without an explicit override inherits the global `restore.delay-windows` and `retry.delay-windows` values.
+* Domain-level fallback to `default` is seamless — any domain without an explicit override automatically inherits `domains.default.delay-windows`.
 * No schema changes, no new tables, no new tiers required.
 
 [#properties-reference]
@@ -1205,7 +1200,7 @@ The following properties configure the Cassandra reactive support module.
 4+|
 *Transaction Lifetime*
 
-| `stacksaga.cassandra.transaction.lifetime`
+| `stacksaga.cassandra.transaction-lifetime`
 | `24h`
 | `Duration`
 | How long a transaction is kept active in the event store. After this threshold, stalled transactions are quarantined and will not be re-exposed for recovery.
@@ -1228,27 +1223,41 @@ The following properties configure the Cassandra reactive support module.
 | `int`
 | Maximum number of transactions concurrently dispatched for re-invocation by a Retry-Node during bucket processing.
 
-4+|
-*Recovery Engine — Retry-Specific Properties*
-
-| `stacksaga.cassandra.recovery.retry.lookback-days`
+| `stacksaga.cassandra.recovery.lookback-days`
 | `2`
 | `int`
 | Number of historical calendar days to scan backwards on worker startup (`[today - lookback-days .. today]`). Enables systematic recovery after extended downtime.
 
 4+|
-*Recovery Engine — Restore-Specific Properties*
+*Recovery Engine — Retry-Specific Properties* (Configure under `stacksaga.cassandra.recovery.retry.*`)
 
-| `stacksaga.cassandra.recovery.restore.delay-windows`
+| `stacksaga.cassandra.recovery.retry.domains.default.delay-windows`
+| `1`
+| `int`
+| Default number of windows ahead at which retry transactions are scheduled (W+1).
+
+| `stacksaga.cassandra.recovery.retry.domains.<domain-name>.delay-windows`
+| `null`
+| `int`
+| Per-domain retry delay override in windows. Allows longer cooldown windows for sagas with slow external dependencies. Falls back to `domains.default.delay-windows` if unset.
+
+4+|
+*Recovery Engine — Restore-Specific Properties* (Configure under `stacksaga.cassandra.recovery.restore.*`)
+
+| `stacksaga.cassandra.recovery.restore.domains.default.delay-windows`
 | `600`
 | `int`
-| Number of windows ahead (relative to `window-interval-minutes`) at which the restore watchdog row is placed when a transaction starts. +
-Actual time offset = `delay-windows × window-interval-minutes`. For example, `delay-windows = 600` with `window-interval-minutes = 1` places the watchdog row 600 minutes (10 hours) ahead. +
-This is a global default applied to all saga domain entities. See xref:#per-domain-delay-config[Per-Domain-Entity Restore & Retry Delay Configuration] for the planned per-domain override feature.
+| Default number of windows ahead (relative to `window-interval-minutes`) at which the restore watchdog row is placed when a transaction starts. +
+Actual time offset = `delay-windows × window-interval-minutes`. For example, `delay-windows = 600` with `window-interval-minutes = 1` places the watchdog row 600 minutes (10 hours) ahead.
+
+| `stacksaga.cassandra.recovery.restore.domains.<domain-name>.delay-windows`
+| `null`
+| `int`
+| Per-domain restore watchdog delay override in windows. Allows shorter watchdog windows for fast sagas (e.g. 60 min) and longer windows for multi-hop orchestration sagas (e.g. 1200 min). Falls back to `domains.default.delay-windows` if unset.
 |===
 
-TIP: A planned enhancement will allow overriding both `restore-delay-windows` and `retry-delay-windows` per saga domain entity under `stacksaga.cassandra.recovery.domains.<domain-name>`, enabling shorter watchdog windows for fast sagas and longer windows for multi-hop orchestration sagas — with zero schema or directory changes required.
-See xref:#per-domain-delay-config[Planned Enhancements].
+TIP: Overriding `delay-windows` per saga domain entity under `stacksaga.cassandra.recovery.retry.domains.<domain-name>` and `stacksaga.cassandra.recovery.restore.domains.<domain-name>` enables shorter watchdog windows for fast sagas and longer windows for multi-hop orchestration sagas — with zero schema or directory changes required.
+See xref:#per-domain-delay-config[Per-Domain-Entity Restore & Retry Delay Configuration].
 
 .Complete `application.yml` Example
 [source,yaml]
@@ -1279,15 +1288,26 @@ stacksaga:
           mode: RELAXED_WITH_DEDUP
 
     recovery:
+      concurrency: 100                      # Concurrent re-invocations per cycle
       window-interval-minutes: 1            # 1440 discrete windows per day
       bucket-size: 50000                    # ~5MB max per partition (shared: retry + restore)
-      concurrency: 100                      # Concurrent re-invocations per cycle
+      lookback-days: 2                      # Scan up to 2 days back for historical failures
 
       retry:
-        lookback-days: 2                    # Scan up to 2 days back for historical failures
+        domains:
+          default:
+            delay-windows: 1                # Global default retry delay (W+1)
+          order-saga:
+            delay-windows: 3                # Custom W+3 retry delay for slow dependencies
 
       restore:
-        delay-windows: 600                  # Watchdog row placed 600 min ahead (600 × 1 min)
+        domains:
+          default:
+            delay-windows: 600              # Global default: 600 min ahead (600 × 1 min = 10h)
+          order-saga:
+            delay-windows: 1200             # 20 hours ahead for multi-hop saga
+          notification-saga:
+            delay-windows: 60               # 1 hour ahead for fast saga
 ----
 
 '''
@@ -1484,9 +1504,9 @@ See <<silent-crash-restore-watchdog,How Restore Works: The Dead-Man's Switch>>.
 **No.** StackSaga includes **Deep Historical Recovery**.
 
 * **Multi-Day Scan on Boot:** When worker nodes boot, they do not merely start listening at the current clock minute.
-They query Tier 1 (`es_days_by_year`) backwards by `recovery.retry.lookback-days` (default: 2 days, configurable to any duration).
+They query Tier 1 (`es_days_by_year`) backwards by `recovery.lookback-days` (default: 2 days, configurable to any duration).
 * **Ascending Chronological Traversal:** Workers traverse historical calendar days in ascending order (`date_of_year ASC`) and historical minute windows in ascending order (`minute_of_day ASC`), systematically processing Friday's, Saturday's, and Sunday's accumulated backlog before transitioning smoothly to live traffic.
-* **Quarantine Safeguard:** Transactions older than `stacksaga.cassandra.transaction.lifetime` (default: 24h) are safely quarantined to `es_frozen_transaction` to prevent stale processing.
+* **Quarantine Safeguard:** Transactions older than `stacksaga.cassandra.transaction-lifetime` (default: 24h) are safely quarantined to `es_frozen_transaction` to prevent stale processing.
 
 See <<deep-historical-recovery,Deep Historical Recovery>>.
 
