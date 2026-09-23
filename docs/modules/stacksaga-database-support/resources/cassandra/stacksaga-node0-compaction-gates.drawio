@@ -1,0 +1,45 @@
+<mxfile host="app.diagrams.net" modified="2026-09-23T18:35:00.000Z" agent="Mozilla/5.0" version="21.0.0" type="device">
+  <diagram id="node0-compaction-gates" name="Node-0 Compaction Gates">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="920" pageHeight="340" background="#FFFFFF" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="Node-0 Compactor Overseer: Two-Gate Verification Protocol" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=15;fontStyle=1;fontColor=#0F172A;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="30" y="15" width="600" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Gate 1 -->
+        <mxCell id="g1_box" value="&lt;b style=&quot;font-size: 13px; color: #1E40AF;&quot;&gt;GATE 1: Tier 3 Instance Partition Scan&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #0369A1; font-family: monospace;&quot;&gt;SELECT instance_id FROM es_instances_by_recovery_window&lt;br/&gt;WHERE date_of_year = :date AND minute_of_day = :window&lt;/span&gt;&lt;br/&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10.5px; color: #475569;&quot;&gt;• Single-partition, exact-key in-memory scan&lt;br/&gt;• Verifies 0 rows remaining across all instances&lt;br/&gt;• If rows exist: Window still active, compaction aborts&lt;/span&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#3B82F6;strokeWidth=1.2;align=left;verticalAlign=top;spacingLeft=45;spacingTop=15;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="380" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="bg1" value="1" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#2563EB;strokeColor=#FFFFFF;strokeWidth=1.5;fontColor=#FFFFFF;fontStyle=1;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="52" y="72" width="22" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Gate 2 -->
+        <mxCell id="g2_box" value="&lt;b style=&quot;font-size: 13px; color: #7C3AED;&quot;&gt;GATE 2: Ring Coordinator Lease Verification&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #0369A1; font-family: monospace;&quot;&gt;ringCoordinator.getActiveLeases(window)&lt;/span&gt;&lt;br/&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10.5px; color: #475569;&quot;&gt;• Confirms all worker sector leases have expired or drained&lt;br/&gt;• Guarantees zero workers are in-flight mid-transaction&lt;br/&gt;• Prevents race condition during slow network re-invocations&lt;/span&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#F5F3FF;strokeColor=#8B5CF6;strokeWidth=1.2;align=left;verticalAlign=top;spacingLeft=45;spacingTop=15;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="500" y="60" width="380" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="bg2" value="2" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#7C3AED;strokeColor=#FFFFFF;strokeWidth=1.5;fontColor=#FFFFFF;fontStyle=1;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="512" y="72" width="22" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Action Box -->
+        <mxCell id="act_box" value="&lt;b style=&quot;font-size: 12px; color: #166534;&quot;&gt;Compaction Execution: Delete Window &amp;amp; Day Directory Markers&lt;/b&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #0369A1; font-family: monospace;&quot;&gt;DELETE FROM es_recovery_windows_by_day WHERE minute_of_day = :window&lt;/span&gt;&lt;br/&gt;&lt;span style=&quot;font-size: 10px; color: #475569;&quot;&gt;When minute 1439 is deleted, Day T is cleanly removed from Tier 1 (es_days_by_year)&lt;/span&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#F0FDF4;strokeColor=#10B981;strokeWidth=1.2;align=center;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="500" y="215" width="380" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="eg1" edge="1" parent="1" source="g1_box" target="g2_box" style="edgeStyle=none;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563EB;strokeWidth=2;endArrow=classic;endFill=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eg2" edge="1" parent="1" source="g2_box" target="act_box" style="edgeStyle=none;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#10B981;strokeWidth=2;endArrow=classic;endFill=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
