@@ -1,9 +1,11 @@
 [[sql-configuration-properties]]
 == Configuration Properties
 
-The connection, connection-pool, and transaction retry/restore/streaming properties below are bound by a dialect-neutral configuration class shared across every `stacksaga-*-reactive-support` SQL module — xref:mysql-database-support/stacksaga-mysql-support.adoc[MySQL], xref:oracle-database-support/stacksaga-oracle-support.adoc[Oracle], xref:postgresql-database-support/stacksaga-postgresql-support.adoc[PostgreSQL], and any other SQL dialect added in the future. This is why the property prefix below is `stacksaga.datasource.*` rather than being named after any single database, and why transaction tuning is bound under `stacksaga.sql.transaction.*` even when the module in use is not MySQL — the retry engine itself lives in a vendor-neutral runtime module and is not duplicated per dialect.
+The connection, connection-pool, transaction recovery, and recovery-node streaming properties below are bound by dialect-neutral configuration classes shared across every `stacksaga-*-reactive-support` SQL module — xref:mysql-database-support/stacksaga-mysql-support.adoc[MySQL], xref:oracle-database-support/stacksaga-oracle-support.adoc[Oracle], xref:postgresql-database-support/stacksaga-postgresql-support.adoc[PostgreSQL], and any other SQL dialect added in the future:
 
-Setting either of these prefixes configures the behaviour for whichever SQL database support module you have added.
+* `stacksaga.datasource.*` configures the dedicated reactive R2DBC connection factory and connection pool for the event store.
+* `stacksaga.sql.transaction.recovery.*` configures transaction retry delay, crash-restore delay, and transaction lifetime per saga domain entity (with global defaults).
+* `stacksaga.transaction.recovery-node.*` tunes the reactive streaming pipeline when the orchestrator instance operates as a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry-Node]. This pipeline is only active when enabled via xref:retry-ring-coordinator:ring-coordinator-connector.adoc#common_configuration_properties[`stacksaga.coordinator.connector.enabled=true`] (which defaults to `false`).
 
 [.scrollable-div]
 --
@@ -32,15 +34,95 @@ Setting either of these prefixes configures the behaviour for whichever SQL data
 |`stacksaga.datasource.r2dbc.pool.max-acquire-time`|`10s`|`Duration`| The maximum time to wait when acquiring a connection from the event-store's pool before failing.
 |`stacksaga.datasource.r2dbc.pool.validation-query`|`SELECT 1`|`String`| The query used to validate an event-store connection before it is handed out from the pool.
 
-4+|*The following `stacksaga.sql.transaction.*` properties control transaction retry, crash-restore, and recovery-stream tuning for the event-store, regardless of which SQL database is used.*
+4+|*The following `stacksaga.sql.transaction.recovery.*` properties control transaction retry, crash-restore, and transaction lifetime for the event-store, configurable with global defaults and overridable per saga domain entity.*
 
-|`stacksaga.sql.transaction.lifetime`|`24h`|`Duration`| How long a transaction stays live. After this period it is no longer exposed for retry even if it is still in a processing state.
-|`stacksaga.sql.transaction.retry.delay`|`1m`|`Duration`| How long a transaction is kept waiting before it is next exposed for retrying, to avoid retrying a transaction too frequently in a short period of time.
-|`stacksaga.sql.transaction.restore.delay`|`5h`|`Duration`| How long a transaction may go without being updated before it is considered crashed (e.g. due to an application crash) and is restored and exposed for retrying.
-|`stacksaga.sql.transaction.stream.batch-size`|`100`|`int`| How many transactions are fetched from the database at once into the in-memory buffer (Reactor `limitRate` high tide).
-|`stacksaga.sql.transaction.stream.refill-threshold`|`75`|`int`| The buffered-transaction count at which the next database fetch is triggered to refill the buffer (Reactor `limitRate` low tide). Should always be less than `stream.batch-size` — a common rule of thumb is 75% of it.
-|`stacksaga.sql.transaction.stream.concurrency`|`8`|`int`| How many transactions are processed simultaneously in the recovery pipeline (Reactor `flatMap` concurrency). Should stay within 50-70% of the recovery connection pool size to avoid connection starvation.
-|`stacksaga.sql.transaction.stream.pre-fetch`|`4`|`int`| How many transactions are pre-fetched and buffered before processing begins (Reactor `flatMap` prefetch).
+|`stacksaga.sql.transaction.recovery.default.retry.delay`|`1m`|`Duration`| Default duration a transaction is kept waiting before it is next exposed for retrying, avoiding frequent retries within a short time window.
+|`stacksaga.sql.transaction.recovery.default.restore.delay`|`5h`|`Duration`| Default duration a transaction may remain without updates before it is considered crashed (e.g. ungraceful pod/application crash) and is restored for retrying.
+|`stacksaga.sql.transaction.recovery.default.lifetime`|`24h`|`Duration`| Default maximum duration a transaction stays live in the event store. After this period it is quarantined and will not be re-exposed for recovery even if still in a processing state.
+|`stacksaga.sql.transaction.recovery.<domain-name>.retry.delay`|`-`|`Duration`| Per-domain retry delay override (e.g. `order-domain`). Falls back to `default.retry.delay` if unset.
+|`stacksaga.sql.transaction.recovery.<domain-name>.restore.delay`|`-`|`Duration`| Per-domain crash restore delay override (e.g. `order-domain`). Falls back to `default.restore.delay` if unset.
+|`stacksaga.sql.transaction.recovery.<domain-name>.lifetime`|`-`|`Duration`| Per-domain transaction lifetime override (e.g. `order-domain`). Falls back to `default.lifetime` if unset.
+
+4+|*The following `stacksaga.transaction.recovery-node.*` properties configure the reactive batch-fetch and streaming pipeline. These properties apply only when the orchestrator instance is enabled as a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry-Node] via xref:retry-ring-coordinator:ring-coordinator-connector.adoc#common_configuration_properties[`stacksaga.coordinator.connector.enabled=true`].*
+
+|`stacksaga.transaction.recovery-node.batch-size`|`100`|`int`| Controls how many transactions are fetched from the database at once into the in-memory buffer (Reactor `limitRate` high tide). A higher value reduces database round trips but increases memory usage.
+|`stacksaga.transaction.recovery-node.refill-threshold`|`75`|`int`| Controls when the framework triggers the next database fetch to refill the buffer (Reactor `limitRate` low tide). When the buffered count drops to this threshold, a background fetch is triggered so processing never stalls. Should always be less than `batch-size` (recommended ~75%).
+|`stacksaga.transaction.recovery-node.concurrency`|`8`|`int`| Controls how many transactions are processed concurrently in the recovery pipeline (Reactor `flatMap` concurrency). Must stay within 50–70% of the recovery connection pool size to avoid connection starvation.
+|`stacksaga.transaction.recovery-node.pre-fetch`|`4`|`int`| Controls how many transactions are pre-fetched and buffered in memory before processing begins (Reactor `flatMap` prefetch), improving throughput and reducing latency between batches.
 |===
 
 --
+
+=== Recovery Configuration Examples
+
+StackSaga provides built-in defaults under `stacksaga.sql.transaction.recovery.default.*` and allows per-domain-entity overrides (e.g., `order-domain`) with automatic fallback to the default settings when a specific property is not configured for that domain:
+
+.Example `application.properties`
+[source,properties]
+----
+# Built-in defaults (applied across all saga domains)
+stacksaga.sql.transaction.recovery.default.retry.delay=1m
+stacksaga.sql.transaction.recovery.default.restore.delay=5h
+stacksaga.sql.transaction.recovery.default.lifetime=24h
+
+# Per-domain overrides (e.g. for "order-domain")
+stacksaga.sql.transaction.recovery.order-domain.retry.delay=10s
+stacksaga.sql.transaction.recovery.order-domain.restore.delay=1h
+stacksaga.sql.transaction.recovery.order-domain.lifetime=12h
+----
+
+.Example `application.yml`
+[source,yaml]
+----
+stacksaga:
+  sql:
+    transaction:
+      recovery:
+        default:
+          retry:
+            delay: 1m
+          restore:
+            delay: 5h
+          lifetime: 24h
+        order-domain:
+          retry:
+            delay: 10s
+          restore:
+            delay: 1h
+          lifetime: 12h
+----
+
+=== Recovery-Node Pipeline Configuration Examples
+
+By default, all orchestrator instances run as **Standard-Nodes** (`stacksaga.coordinator.connector.enabled=false`) and do not process recovery tasks. To turn an instance into a dedicated xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry-Node], add the `stacksaga-ring-coordinator-connector` dependency and set xref:retry-ring-coordinator:ring-coordinator-connector.adoc#common_configuration_properties[`stacksaga.coordinator.connector.enabled=true`]. The `stacksaga.transaction.recovery-node.*` properties then tune the reactive batch-fetch and concurrency pipeline:
+
+.Example `application.properties` (Retry-Node instance)
+[source,properties]
+----
+# Enable this instance as a Retry-Node in the retry ring architecture
+stacksaga.coordinator.connector.enabled=true
+
+# Recovery-Node streaming and concurrency tuning
+stacksaga.transaction.recovery-node.batch-size=100
+stacksaga.transaction.recovery-node.refill-threshold=75
+stacksaga.transaction.recovery-node.concurrency=8
+stacksaga.transaction.recovery-node.pre-fetch=4
+----
+
+.Example `application.yml` (Retry-Node instance)
+[source,yaml]
+----
+stacksaga:
+  coordinator:
+    connector:
+      enabled: true # Enable Retry-Node mode
+  transaction:
+    recovery-node:
+      batch-size: 100
+      refill-threshold: 75
+      concurrency: 8
+      pre-fetch: 4
+----
+
+
+

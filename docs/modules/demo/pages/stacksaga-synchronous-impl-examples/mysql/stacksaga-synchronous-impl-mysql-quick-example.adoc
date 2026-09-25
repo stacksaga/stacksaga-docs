@@ -463,8 +463,8 @@ stacksaga.instance.region=local-region
 stacksaga.instance.zone=local-zone
 #stacksaga-starter properties
 stacksaga.domain-entity-scan=org.example.orderservice.domain //<2>
-#stacksaga-mysql-database-support properties //<3>
-stacksaga.datasource.r2dbc.url=mysql.r2dbc.url=r2dbc:mysql://localhost:3306
+#stacksaga-datasource properties //<3>
+stacksaga.datasource.r2dbc.url=r2dbc:mysql://localhost:3306
 stacksaga.datasource.r2dbc.database=order_service_event_store
 stacksaga.datasource.r2dbc.username=${MYSQL_USER:root}
 stacksaga.datasource.r2dbc.password=${MYSQL_PASSWORD:password}
@@ -474,7 +474,7 @@ stacksaga.datasource.r2dbc.password=${MYSQL_PASSWORD:password}
 
 <2> The `stacksaga.domain-entity-scan` property is used to specify the package where the domain entity classes are located. the StackSaga engine will scan this package to find the domain entity classes and register them for use in the transaction flow. it can be provided as a comma-separated list of packages if you have multiple packages containing domain entity classes.
 
-<3> The `stacksaga.mysql.r2dbc` properties are used to configure the R2DBC connection for the StackSaga engine to connect to the MySQL database as the event-store. you need to provide the URL, database name, username, and password for the MySQL connection. the event-store should be a separate database schema dedicated for storing the transaction events and data, it should not be the same database schema used by your application for its regular data storage to avoid any potential conflicts and to have better separation of concerns.
+<3> The `stacksaga.datasource.r2dbc.*` properties configure the reactive R2DBC connection used by the StackSaga engine to persist transaction checkpoints and execution tryout history in the MySQL event-store. Specify the connection URL, database name, username, and password. The event-store should be a dedicated database schema separate from regular application business tables to avoid thread and connection contention.
 
 [[running-application]]
 === Running the Application and Testing the Transaction Flow
@@ -757,15 +757,18 @@ And the update the following properties in your `application.properties` or `app
 [source,properties]
 ----
 #retry properties
-stacksaga.mysql.transaction.retry.delay=1m //<1>
+stacksaga.sql.transaction.recovery.default.retry.delay=1m //<1>
 stacksaga.coordinator.connector.enabled=true //<2>
 stacksaga.coordinator.connector.master.requester.host=localhost //<3>
 stacksaga.coordinator.connector.master.requester.port=4455
+
+# Optional: Recovery-Node batch streaming and concurrency tuning
+#stacksaga.transaction.recovery-node.batch-size=100
+#stacksaga.transaction.recovery-node.concurrency=8
 ----
 
-<1> The `stacksaga.mysql.transaction.retry.delay` property is used to configure how long time the transaction should be frozen without exposing for retrying. as per the configured value, the transaction will be exposed for retrying after one minute. +
-retry delay property comes with the database support module. the retry mechanism can have some different configurations based on the database support you are using, so it is recommended to check the documentation of the database support module you are using for more details about the available retry configurations.
-<2> The `stacksaga.coordinator.connector.enabled` property is used to enable the Ring Coordinator Connector in the orchestrator application. you need to set it to `true` to turn the standard Orchestrator service into a `Retry Node` that can receive the token range information from the Ring Coordinator and handle the retrying of transactions accordingly.
+<1> The `stacksaga.sql.transaction.recovery.default.retry.delay` property sets the duration a stalled transaction is kept waiting before being exposed for retrying. As configured, the transaction will be exposed for retry after one minute. You can also configure per-domain overrides (e.g. `stacksaga.sql.transaction.recovery.order-domain.retry.delay=30s`), crash-restore delays, and transaction lifetime. See xref:stacksaga-database-support:sql-database-support/stacksaga-sql-configuration-properties.adoc[SQL Database Configuration Properties] for full details.
+<2> The `stacksaga.coordinator.connector.enabled` property is used to enable the Ring Coordinator Connector in the orchestrator application. Setting it to `true` turns the standard Orchestrator service into a `Retry Node` that receives token range allocations from the Ring Coordinator and processes retries. This also activates the `stacksaga.transaction.recovery-node.*` streaming pipeline.
 
 <3> Host and the port properties for connecting to the master instance. after connection is established, master will suggest an available slave node (at this time only one we have,) and internally it connects with the slave node and subscribe to the token range information.
 
