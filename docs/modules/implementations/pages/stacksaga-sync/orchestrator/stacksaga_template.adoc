@@ -169,6 +169,85 @@ After the subscription ends, you can still observe progress in two ways:
 * *Execution Pause (`TransactionPausedException`)*: If a step encounters a retryable exception (such as a transient database failure or custom `RetryableExecutorException`), execution is paused and rescheduled. Because `TransactionState` only represents completed saga states, the live subscription halts and emits a `TransactionPausedException` via `onError`. This indicates a temporary retry pause, not a fatal failure.
 Once rescheduled and retried, state notifications continue via listeners, or you can query state using `getCurrentState(transactionId).fetchAsync()`.
 
+[[resuming-paused-transactions]]
+=== Resuming Paused Transactions (Pausable LRT)
+
+When a saga executor participates in a xref:stacksaga-sync/index.adoc#pausable-lrt[*Pausable Long-Running Transaction*] and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`].
+
+At that moment, the transaction enters an intentional business wait state: the `SagaDomainEntity` state is persisted to the event store, and CPU worker threads are freed.
+
+To wake up and continue the transaction once the external system completes its task, `SagaTemplate` provides the `resume(...)` operator.
+
+==== Correlation Mechanism: `idempotencyKey` as `correlationKey`
+
+[IMPORTANT]
+====
+To ensure that incoming callbacks resume the exact paused span and prevent race conditions or replay mismatches:
+
+. In `doProcess(...)`, the executor forwards its assigned `idempotencyKey` to the downstream asynchronous service (in request payload or HTTP header).
+. The executor calls xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(NextExecutor.class, "EVENT_NAME", duration)`].
+. When the downstream service finishes its asynchronous task, it invokes the orchestrator's webhook endpoint, supplying both the `transactionId` and that exact `idempotencyKey`.
+. The orchestrator invokes `sagaTemplate.resume(transactionId, correlationKey)` using the returned `idempotencyKey` as the `correlationKey`.
+. StackSaga validates that the `correlationKey` matches the paused span's `idempotencyKey` in the event store before advancing to `NextExecutor`.
+====
+
+==== Imperative (Blocking) Resumption
+
+In a Spring MVC or traditional servlet application, invoke `resume(...)` followed by `execute()`:
+
+[source,java]
+----
+this.sagaTemplate
+        .resume(transactionId, correlationKey)
+        .execute();
+----
+
+==== Reactive (Non-Blocking) Resumption
+
+In a Spring WebFlux application, invoke `resume(...)` followed by `executeAsync()`:
+
+[source,java]
+----
+Mono<Void> resumeMono = this.sagaTemplate
+        .resume(transactionId, correlationKey)
+        .executeAsync();
+----
+
+==== Example Callback Controller
+
+The following example demonstrates a Spring REST controller receiving an asynchronous webhook (e.g., from a payment gateway or restaurant confirmation system) and resuming the paused saga:
+
+[source,java]
+----
+@Slf4j
+@RestController
+@RequestMapping("/orders/callbacks")
+@RequiredArgsConstructor
+public class OrderCallbackController {
+
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
+
+    @PostMapping("/order-ready")
+    public ResponseEntity<Void> onOrderReadyCallback(@RequestBody OrderReadyCallbackDto callbackDto) {
+        log.info("Received order-ready callback for transaction: {} with correlationKey: {}",
+                callbackDto.getTransactionId(), callbackDto.getCorrelationKey());
+
+        // Resume the paused saga from the executor configured in stepManager.pause(...)
+        this.sagaTemplate
+                .resume(callbackDto.getTransactionId(), callbackDto.getCorrelationKey())
+                .execute();
+
+        return ResponseEntity.ok().build();
+    }
+}
+----
+
+When `resume(...)` is called:
+. StackSaga retrieves the paused transaction snapshot from the event store.
+. It verifies that the `correlationKey` matches the `idempotencyKey` stored during the `stepManager.pause(...)` invocation.
+. It restores the `OrderDomainEntity` with its accumulated state.
+. It immediately schedules and executes the target executor specified in xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] (e.g., dispatching a delivery driver). See xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable LRT Architecture] for the full conceptual lifecycle.
+
 [[event_listener_for_stage_change_events]]
 == Observing Transaction State Changes
 
