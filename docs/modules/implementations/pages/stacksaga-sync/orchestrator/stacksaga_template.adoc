@@ -248,6 +248,24 @@ When `resume(...)` is called:
 . It restores the `OrderDomainEntity` with its accumulated state.
 . It immediately schedules and executes the target executor specified in xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] (e.g., dispatching a delivery driver). See xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable LRT Architecture] for the full conceptual lifecycle.
 
+[[pausable-lrt-timeout-reexecution]]
+=== Timeout Re-Execution Mechanics (When No Callback Arrives)
+
+When an executor pauses with a maximum duration (e.g., `stepManager.pause(DeliveryDispatchExecutor.class, "ORDER_PREPARING", Duration.ofHours(5))`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
+
+However, in worst-case scenarios where the external system crashes, network connectivity is lost, or the callback is never delivered within the configured timeout:
+
+* **Why the Framework Re-Executes the Paused Executor:**
+The framework **cannot forcibly advance** to the next executor (`DeliveryDispatchExecutor`) because the downstream business operation was never confirmed.
+Furthermore, the logic required to invoke the external target service, verify order or payment status, and initiate callbacks resides **inside that paused executor**.
+Therefore, StackSaga's retry coordinator re-executes the transaction directly from the executor where it was paused (`MakePaymentExecutor`), even though its primary execution had previously succeeded before entering the pause.
+
+* **Re-Invocation Flow:**
+Upon timeout expiration, the retry coordinator claims ownership of the stalled transaction, safely reconstructs the pristine `SagaDomainEntity` up to the checkpoint prior to that executor, and invokes `doProcess(...)` again. This gives the executor an opportunity to query the external system's status (e.g., checking if the payment went through), re-trigger the external call, or throw `NonRetryableExecutorException` to initiate compensation.
+
+* **Impact on State Listeners:**
+Because the paused executor is executed again, this directly affects registered state change listeners. See the detailed guidance in xref:#at-least-once-listener-semantics[At-Least-Once Notification in Pausable LRT] below.
+
 [[event_listener_for_stage_change_events]]
 == Observing Transaction State Changes
 
@@ -279,6 +297,29 @@ Performing heavy computations, slow I/O calls, or long-running operations inside
 
 *Best Practice:*
 Keep `onStateChanged` lightweight (e.g., publishing a quick notification or logging status). If you need to perform heavy or time-consuming operations, offload the work to an asynchronous thread pool (using a snapshot or deep copy of `TransactionState` if needed), allowing the engine to immediately proceed with the next span of the transaction.
+====
+
+[[at-least-once-listener-semantics]]
+[WARNING]
+.At-Least-Once Notification in Pausable LRT (Duplicate Listener Invocations)
+====
+In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses awaiting an external callback with a timeout `Duration` (e.g., 5 hours), the listener callback (`onStateChanged`) can be invoked **multiple times** for that same executor:
+
+. **First Invocation (Initial Success):** When the executor successfully completes its initial forward logic (such as dispatching an asynchronous request to an external payment provider) and pauses via `stepManager.pause(...)`, the engine invokes `onStateChanged`.
+. **Second Invocation (Timeout Re-Execution):** If no external callback arrives to resume the saga before the configured duration expires, the framework re-executes the paused executor. Upon successful re-execution, the engine invokes `onStateChanged` **again** for that same executor.
+
+*Crucial Design Rules:*
+
+* **Never place critical business logic or state mutations in a listener:**
+Because listener callbacks follow at-least-once semantics and can be re-triggered during retries and timeout recoveries, placing non-idempotent business logic, state mutations, or external charges inside `onStateChanged` will cause duplicate side-effects. Listeners should be strictly reserved for observational tasks (logging, metrics, or pushing user notifications).
+
+* **Recommended Pattern — Use a `QueryExecutor`:**
+If your workflow requires an operation to execute immediately following an executor (such as generating an internal receipt, updating a read model, or creating an audit log) that does not require compensation, **do not place it in `TransactionEventListener`**.
+Instead, model it as a formal **`QueryExecutor`** within the saga flow (e.g., chaining it via `stepManager.next(RecordAuditQueryExecutor.class, ...)`).
+As a first-class saga participant, a `QueryExecutor` guarantees:
+** Durable recording and tracking in the Event Store.
+** Deterministic execution aligned with the saga's forward progression.
+** Full idempotency protection and visibility in the transaction execution history.
 ====
 
 ==== TransactionEventListener
