@@ -35,6 +35,15 @@ The scenario we orchestrate is a simple *place-order* operation, modelled as a s
 
 If any step fails, StackSaga automatically *compensates* the previously completed *command* steps in reverse order — for example, releasing the reserved order when the payment fails — so the system is always left in a consistent state.
 
+[NOTE]
+.Architecture Reminder: Continuous vs. Pausable LRT
+====
+This quick example demonstrates a xref:implementations:stacksaga-sync/index.adoc#continuous-lrt[*Continuous Long-Running Transaction (Continuous LRT)*], where execution proceeds sequentially across microservices without stopping.
+
+If your real-world business requirements involve **asynchronous callbacks, external payment webhooks, or Human-in-the-Loop (HITL) manual approvals** (e.g., waiting for a restaurant order confirmation or manager sign-off), StackSaga also natively supports xref:implementations:stacksaga-sync/index.adoc#pausable-lrt[*Pausable Long-Running Transactions (Pausable LRT)*].
+In those scenarios, executors call xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] to release compute threads until resumed via xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(...)`].
+====
+
 We build this up across three progressive stages:
 
 . xref:#stage-1[Stage-1 — Minimal Implementation]: create the domain-entity, the three executors, the event handler, and a REST controller to trigger the happy path together with compensation.
@@ -287,7 +296,8 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
 <3> The `doProcess` method is the main entry point for executing the primary logic of the executor.
 It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. this is where you would implement the logic to reserve the order, such as calling an external service or performing operations against a database to reserve the order. at this case the order service is the own service of the orchestrator application, so you can call the order service directly without any network call.
 
-<4> The `stepManager.next` method is called to indicate that the next step in the transaction flow should be executed, which in this case is the `MakePaymentExecutor`. The action event name (`"RESERVED_ORDER"`) is passed directly as a string.
+<4> The `stepManager.next` method is called to indicate that the next step in the transaction flow should be executed, which in this case is the `MakePaymentExecutor`. The action event name (`"RESERVED_ORDER"`) is passed directly as a string. +
+TIP: In this continuous flow, `stepManager.next(...)` advances immediately to the next step. If your business logic instead required pausing to await an external webhook, async callback, or human approval before proceeding to payment, you would return xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] instead. See xref:implementations:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transactions].
 
 <5> The `doRevert` method is called when the transaction flow needs to be rolled back due to a failure in a subsequent step.
 It takes the exception that caused the rollback, the final state of the domain entity, a revert hint store for storing any necessary information for the revert operation, and an idempotency key. this is where you would implement the logic to revert the reserve order action, such as calling service or performing operations against a database to undo the reservation. at this case the order service is the own service of the orchestrator application, so you can call the order service directly without any network call.
