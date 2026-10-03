@@ -1,3 +1,5 @@
+:description: Architectural guide to StackSaga Executors — Command and Query Executors, navigation patterns (stepManager.next, pause, complete), Event Sourcing state restoration, and compensating transactions for resilient distributed microservices.
+:keywords: StackSaga, saga executors, CommandExecutor, QueryExecutor, stepManager, pause, next, complete, event sourcing, idempotencyKey, correlationKey, compensation, doRevert, doProcess, Spring Boot, distributed transactions
 :page-priority: 0.7
 
 = Saga Executors
@@ -165,6 +167,7 @@ return stepManager.pause(DeliveryExecutor.class, "ORDER_PREPARING", Duration.ofH
 ====
 * **`idempotencyKey` as the `correlationKey`**: In a pausable step, pass the `idempotencyKey` (supplied as the 3rd parameter to `doProcess`) to the downstream asynchronous service (in request body, query parameter, or HTTP header). When that service later calls your webhook/callback endpoint, it must return this exact key. You will then pass it as the `correlationKey` to xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(transactionId, correlationKey)`] to resume execution safely. See xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable LRT architecture] for full details.
 * **Timeout Duration**: The third parameter (`Duration`) specifies how long the engine should wait for the external callback before exposing the paused executor for retry re-invocation. If passed as `null`, the transaction remains paused indefinitely without automatic retry exposure. If specified (e.g. `Duration.ofHours(5)`), the framework re-invokes the paused executor span after 5 hours if no callback has been received, allowing your application to re-query the external system or initiate compensation.
+* **Pristine State Restoration via Event Sourcing**: When an executor is re-invoked following a timeout, StackSaga's event-sourcing engine reconstructs `currentDomainEntity` from the event store up to the state prior to entering that executor. Any in-memory mutations made during the previous paused attempt are discarded. The executor executes as a fresh invocation against the pristine original state, preventing dirty state leaks across retries.
 ====
 
 * *`stepManager.complete(...)` (Terminal Completion)*: +

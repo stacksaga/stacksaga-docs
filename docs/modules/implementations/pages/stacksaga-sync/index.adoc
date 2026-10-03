@@ -1,5 +1,5 @@
-:description: Deep-dive technical reference for the StackSaga Framework (Synchronous) — reactive saga orchestration in Spring Boot microservices over synchronous transports (REST, gRPC, GraphQL) for long-running distributed transaction management.
-:keywords: StackSaga, saga orchestration, microservices, Java, Spring Boot, REST, gRPC, GraphQL, distributed transactions, event sourcing, reactive programming, transaction management, idempotency, fault tolerance, workflow compensation, LRT, CHES
+:description: Technical reference for StackSaga Framework (Synchronous) — enterprise saga orchestration in Spring Boot microservices for Banking, Fintech, and distributed systems. Supports Straight-Through Processing (STP), Pausable LRTs, Human-in-the-Loop (HITL) approvals, Event Sourcing auditability, and financial transaction compensation over REST, gRPC, and GraphQL.
+:keywords: StackSaga, saga orchestration, banking microservices, fintech distributed transactions, straight-through processing, STP, human-in-the-loop, HITL, event sourcing, Spring Boot, Java, payment orchestration, financial audit trail, idempotency, fault tolerance, transaction compensation, long-running transactions, LRT, REST, gRPC, GraphQL
 :page-priority: 1.0
 
 = StackSaga Framework (Synchronous)
@@ -120,9 +120,18 @@ StackSaga categorizes long-running distributed transactions into two primary exe
 Understanding the distinction between these two models ensures that developers choose the appropriate navigation pattern (xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.next`] vs. xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause`]) and configure callback endpoints correctly.
 
 [[continuous-lrt]]
-=== 1. Continuous Long-Running Transactions (Straight-Through LRT)
+=== 1. Continuous Long-Running Transactions (Continuous LRT)
 
-A *Continuous Long-Running Transaction* (also known in enterprise and financial systems as *Straight-Through Processing (STP)* or a *Non-Wait-State Transaction*) is an end-to-end workflow designed to progress sequentially through every participating microservice without any intentional business pauses.
+A *Continuous Long-Running Transaction (Continuous LRT)* is an end-to-end workflow designed to progress sequentially through every participating microservice without any intentional business pauses.
+
+[NOTE]
+.Banking & Financial Systems: Straight-Through Processing (STP) and Moving Beyond It
+====
+In banking, fintech, and capital markets, transactions executed without manual intervention are commonly referred to as **Straight-Through Processing (STP)**:
+
+* *Continuous LRT as Pure STP*: When a payment, order settlement, or trade requires fully automated execution across microservices, StackSaga's Continuous LRT functions as an ideal STP pipeline.
+* *Overcoming STP Limitations with Pausable LRT*: Traditional STP architectures often struggle or fail outright when an exception occurs, when asynchronous clearing or settlement webhooks are involved, or when manual compliance approval is mandated. In StackSaga, developers can seamlessly extend straight-through flows into **Pausable LRTs** (`stepManager.pause(...)`). This allows the transaction to transition cleanly into a wait state without breaking the saga or holding resources, accommodating both pure STP and complex human-in-the-loop / asynchronous requirements.
+====
 
 image::implementations:stacksaga-sync/continuous-lrt-flow.svg[Continuous LRT Flow,width=1000]
 
@@ -171,8 +180,14 @@ A payment gateway (e.g., 3D-Secure bank redirects, asynchronous SEPA/ACH transfe
 The payment executor initiates the charge, forwards its `idempotencyKey`, and calls xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`].
 Once the payment gateway notifies the orchestrator's webhook endpoint, the orchestrator resumes the saga with the callback payload via xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(...)`].
 
-* *Human-in-the-Loop (HITL) Approvals*:
-Corporate expense approvals, KYC compliance reviews, or high-value order sign-offs where the transaction waits days for a manager's decision before proceeding.
+* *Human-in-the-Loop (HITL) Sagas*:
+Many critical enterprise workflows cannot be 100% automated because they mandate human judgment, authorization, or physical operational action before proceeding. StackSaga's Pausable LRT natively supports **Human-in-the-Loop (HITL)** workflows without thread starvation or memory leaks:
++
+--
+** **Manager & Financial Approvals**: Transactions exceeding business thresholds (e.g., corporate expenses > $10,000, credit lines, or high-value loan disbursements) pause via `stepManager.pause(DisburseFundsExecutor.class, "AWAITING_MANAGER_APPROVAL", Duration.ofDays(3))`. A manager reviews the case on an administrative dashboard and clicks "Approve", which invokes the callback endpoint to resume the saga.
+** **Operational & Physical Actions**: In on-demand platforms (such as Uber Eats, DoorDash, or logistics warehousing), human kitchen staff or package sorters physically tap a terminal to signal "Order Accepted" or "Package Prepared", triggering the webhook to resume courier dispatch.
+** **Compliance & Manual KYC Review**: When automated document OCR or fraud detection flags an edge case, the saga pauses safely in the Event Store for human compliance officer review without holding server threads or blocking system resources.
+--
 
 ==== Key Architectural Mechanism: `idempotencyKey` as the `correlationKey`
 
@@ -209,6 +224,17 @@ The third parameter of `stepManager.pause(...)` controls how the framework handl
 
 * *Passing `null`*: The transaction remains paused indefinitely without being exposed to the automatic retry scheduler. Use this when the business process has no fixed deadline and must wait strictly for the external callback or human intervention.
 * *Passing a `Duration` (e.g., `Duration.ofHours(2)`)*: If the external system fails to deliver the callback within the specified duration, StackSaga's retry engine exposes the paused executor for re-invocation. This allows the executor to check the external system's status, re-trigger the request, or initiate compensation if the deadline expired.
+
+[IMPORTANT]
+.Event Sourcing Advantage: Pristine State Restoration on Re-Execution
+====
+A fundamental architectural advantage of StackSaga's **Event Sourcing** engine is that when an executor is re-invoked following a timeout, the `SagaDomainEntity` is restored to its **exact original state prior to entering that executor**:
+
+* Suppose during the initial execution attempt, the executor receives `currentDomainEntity` and mutates some of its fields in-memory before calling `stepManager.pause(...)`.
+* If the callback is not received within the configured `Duration`, StackSaga's retry engine re-invokes the paused executor.
+* Upon re-execution, the framework **discards all in-memory mutations** made during the previous attempt and reconstructs the domain entity cleanly from the event store up to the checkpoint preceding this executor.
+* Consequently, the re-invoked executor runs against a completely fresh, uncorrupted snapshot—preventing dirty state leakage and guaranteeing deterministic, idempotent re-executions.
+====
 
 === Comparison: Continuous vs. Pausable LRT
 
