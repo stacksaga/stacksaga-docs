@@ -112,6 +112,14 @@ The framework supplies a per-span idempotency key with every message so that a d
 
 NOTE: The callback topics (on the orchestrator) and the command topics (on the workers) are consumed through Spring for Apache Kafka listener containers. Each container can use either the classic Kafka *consumer-group* protocol or the *Kafka 4 share-group* protocol (KIP-932) — a queue-style model whose parallelism is not capped by the partition count — selectable per event manager and per endpoint via the `groupType` attribute. See xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[the orchestrator listener models] and xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[the worker listener models].
 
+[[stacksaga-kafka-dual-lrt-support]]
+=== Dual LRT Models: Continuous STP and Pausable HITL
+
+The StackSaga-Kafka orchestrator engine natively supports both execution dynamics:
+
+* *Continuous LRT (Straight-Through Processing - STP)*: In fully automated, unbroken processing pipelines, the orchestrator produces command messages to worker topics and consumes their replies sequentially without pausing. The entire multi-service transaction runs at Kafka event-stream speed from initiation to final completion or compensation.
+* *Pausable LRT (Wait-States & Human-in-the-Loop - HITL)*: When a transaction must pause for external asynchronous events — such as waiting for a payment gateway webhook, a warehouse physical confirmation, or manager/KYC manual review — the transaction enters a `PAUSED` wait state. The orchestrator records the wait state in the event store and releases worker threads and Kafka consumer resources. Once the callback or approval event arrives, execution resumes safely from the exact paused milestone.
+
 [[stacksaga-kafka-architecture-2nd-stage]]
 == Stage 2 — Retry-Ready Setup
 

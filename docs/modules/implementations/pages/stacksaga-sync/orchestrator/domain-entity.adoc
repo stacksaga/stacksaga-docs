@@ -526,14 +526,14 @@ Do not use properties from `UnSafeIdempotentInput` to construct idempotency keys
 Always derive idempotency keys exclusively from `SafeIdempotentInput`, which provides deterministic, stable attributes guaranteed to remain consistent across retries throughout the transaction lifecycle.
 ====
 
-The framework's default implementation produces a fixed-length MD5 hash by concatenating the `transactionId`, `currentExecutor`, and `executionMode` from `SafeIdempotentInput` and hashing the composite string via the provided `HashGenerator`. This ensures compact, collision-resistant idempotency keys.
+The framework's default implementation produces a fixed-length MD5 hash by concatenating the `transactionId`, `currentExecutionName`, and `executionMode` from `SafeIdempotentInput` and hashing the composite string via the provided `HashGenerator`. This ensures compact, collision-resistant idempotency keys.
 
 [[custom_key_generator_example]]
 === Custom Key Generator Example
 
 Here is an example of how to override `generateTransactionKeyPrefix` and `generateIdempotencyKey` to provide custom logic and configure it in your custom `DomainEntity` class.
 
-NOTE: Because `AbstractDomainEntityKeyGenerator` provides default implementations for all methods, you only need to override the specific methods you want to customize.
+NOTE: Because `AbstractDomainEntityKeyGenerator` provides default implementations for all methods, you only need to override the specific methods you want to customize (e.g., overriding only `generateTransactionKeyPrefix` if you only need custom prefix naming, or only `generateIdempotencyKey` if you only require custom idempotency logic).
 
 [source,java]
 ----
@@ -550,11 +550,11 @@ public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenera
     @Override //<4>
     public String generateIdempotencyKey(SafeIdempotentInput safeIdempotentInput, UnSafeIdempotentInput unSafeIdempotentInput) {
          final String rowKey = new StringJoiner(":")
-                .add(safeIdempotentInput.transactionId())
+                .add(safeIdempotentInput.transactionId().toString())
                 .add(safeIdempotentInput.currentExecutionName())
                 .add(safeIdempotentInput.executionMode().name().toLowerCase())
                 .toString();
-       return this.hashGenerator.generateHash(rowKey, HashGenerator.ALGType.MD5);
+       return this.hashGenerator().generateHash(rowKey, HashGenerator.ALGType.MD5);
     }
 }
 
@@ -581,10 +581,97 @@ public class OrderDomainEntity extends DomainEntity {
 #The method is called before each span execution is invoked.#
 <5> Provide your custom class as `keyGen` of `@SagaDomainEntity` in your DomainEntity class.
 
-IMPORTANT: it is highly recommended to use the provided `hashGenerator` to produce a fixed-length hash of a composite string for generating the idempotency key, rather than returning a raw concatenation of input values. this approach ensures that the idempotency key is compact, consistent in length, and has a low risk of collisions, even when the input values are long or contain variable content.
+IMPORTANT: It is highly recommended to use the base class method `hashGenerator()` to produce a fixed-length hash of a composite string for generating the idempotency key, rather than returning a raw concatenation of input values. This approach ensures that the idempotency key is compact, consistent in length, and has a low risk of collisions, even when the input values are long or contain variable content.
 
 WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
 The framework may invoke it concurrently.
+
+[[idempotency_key_versioning_and_inflight_transactions]]
+=== Modifying Idempotency Key Logic Across Releases & In-Flight Transactions
+
+In production microservice architectures, applications evolve continuously through zero-downtime rolling deployments.
+When releasing a new service version that alters how idempotency keys are constructed, you must ensure that **in-flight transactions** remain backward-compatible and deterministic.
+
+==== The In-Flight Retry Hazard
+
+Consider the following distributed scenario:
+
+1. Service version `1.0.0` is deployed and executing transactions.
+2. An executor executes an atomic operation (e.g., calling an external payment or inventory API), dispatching a request with idempotency key `K1`.
+3. Before the response can be committed to the Event Store, a transient network error, gateway timeout, or container restart occurs. The transaction is marked for retry in the Event Store.
+4. Next, service version `1.1.0` is deployed with an updated idempotency key generation formula in `OrderDomainEntityKeyGenerator`.
+5. When the StackSaga retry subsystem or scheduler re-invokes the paused transaction under version `1.1.0`, it invokes `generateIdempotencyKey(...)`.
+6. *The Failure Mode:* If the key generator applies the *new* `1.1.0` formula to this retried transaction, it generates key `K2` instead of `K1`.
+Because `K2 != K1`, the downstream microservice cannot recognize this request as a retry of the earlier attempt. It treats `K2` as a brand-new transaction and executes the side-effect a second time (e.g., duplicate charges or double inventory reservations).
+
+[CAUTION]
+====
+**Idempotency Key Invariance:**
+An idempotency key for any given execution span must remain **strictly identical** across all attempts, retries, and compensations throughout the transaction lifecycle, even across application deployments.
+====
+
+==== Semantic Version Branching with Object-Level Methods
+
+To prevent this issue, increment the version in `@SagaDomainEntityVersion` when changing key generation logic and use the **`DomainEntity` object-level versioning API** to branch conditionally.
+
+The framework provides the target `DomainEntity` via `unSafeIdempotentInput.domainEntity()`. This instance preserves the transaction's **initial event version** (the version stamped when the transaction was first created in the Event Store), allowing your key generator to distinguish historical in-flight transactions from newly initiated transactions.
+
+`DomainEntity` exposes the following object-level version-comparison methods:
+
+* *`domainEntity.compare(String versionString)`*: Compares the transaction's initialized version with a semantic version string (e.g., `domainEntity.compare("1.1.0")`). Returns a negative integer if the transaction was initialized under an older version, `0` if equal, or a positive integer if newer.
+* *`domainEntity.compare(Version versionY)`*: Compares against a pre-parsed Jackson `tools.jackson.core.Version` object.
+* *`domainEntity.isInitializedVersionBetween(DomainEntityVersionDetail from, DomainEntityVersionDetail to)`*: Determines whether the transaction was initialized within a specific historical version range.
+* *`domainEntity.compareInitializedVersionToCurrentVersion()`*: Compares the transaction's initialized version from the Event Store with the version declared on the current application's `@SagaDomainEntity` annotation.
+* *`domainEntity.getInitializedVersionAsString()`*: Returns the initial version as a string (e.g., `"1.0.0"`).
+
+[TIP]
+====
+*Why use `compare(...)` instead of raw string equality?* +
+In active production systems, in-flight transactions in the Event Store may span **multiple prior versions** (e.g., `1.0.0`, `1.0.1`, `1.0.2`) when deploying `1.1.0`. Hardcoding string checks like `"1.0.0".equals(...)` is fragile and requires manually enumerating every previous version. Checking `domainEntity.compare("1.1.0") < 0` cleanly routes all historical transactions to the legacy formula in a single check.
+====
+
+==== Multi-Version Key Generator Implementation
+
+Here is an example of an `AbstractDomainEntityKeyGenerator` that supports legacy in-flight transactions while executing the new formula for fresh transactions:
+
+[source,java]
+----
+@Component
+public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenerator {
+
+    @Override
+    public String generateIdempotencyKey(
+            SafeIdempotentInput safeIdempotentInput,
+            UnSafeIdempotentInput unSafeIdempotentInput
+    ) {
+        DomainEntity domainEntity = unSafeIdempotentInput.domainEntity();
+
+        // Check if the transaction originated before version 1.1.0 (covers 1.0.0, 1.0.1, 1.0.2, etc.)
+        if (domainEntity != null && domainEntity.compare("1.1.0") < 0) {
+            return generateLegacyIdempotencyKey(safeIdempotentInput);
+        }
+
+        // Standard key generation for version 1.1.0 and above
+        return generateModernIdempotencyKey(safeIdempotentInput);
+    }
+
+    private String generateLegacyIdempotencyKey(SafeIdempotentInput safeInput) {
+        // Legacy key generation formula used in releases prior to 1.1.0
+        final String rawKey = safeInput.transactionId().toString() + ":" + safeInput.currentExecutionName();
+        return this.hashGenerator().generateHash(rawKey, HashGenerator.ALGType.MD5);
+    }
+
+    private String generateModernIdempotencyKey(SafeIdempotentInput safeInput) {
+        // Updated key generation formula for 1.1.0+
+        final String rawKey = new StringJoiner(":")
+                .add(safeInput.transactionId().toString())
+                .add(safeInput.currentExecutionName())
+                .add(safeInput.executionMode().name().toLowerCase())
+                .toString();
+        return this.hashGenerator().generateHash(rawKey, HashGenerator.ALGType.MD5);
+    }
+}
+----
 // end::further-configurations[]
 
 // tag::domain-entity-versioning[]
@@ -625,6 +712,7 @@ The version declared in `@SagaDomainEntityVersion(major = ..., minor = ..., patc
 * xref:#executor_changing[Executor Modifications]
 ** xref:#changing_something_inside_the_existing_executor[Modifying existing executor logic]
 ** xref:#changing_executors_count[Altering executor count (Adding or removing executors)]
+* xref:#key_generator_changing[Key Generator & Idempotency Logic Modifications]
 
 [[domain_entity_structure_changing]]
 ==== 1. Domain-Entity Structure Changes
@@ -689,6 +777,17 @@ If historical transactions remain pending in the Event Store at a step that refe
 ====
 While upgrading an existing `QueryExecutor` to a `CommandExecutor` is theoretically possible, converting a `CommandExecutor` to a `QueryExecutor` is strictly prohibited because compensating historical commands requires rollback capabilities. The StackSaga team recommends against changing existing executor types.
 ====
+
+[[key_generator_changing]]
+==== 3. Key Generator & Idempotency Logic Changes
+
+If you alter how idempotency keys are generated in your custom `AbstractDomainEntityKeyGenerator` implementation, you must increment the `@SagaDomainEntityVersion`.
+
+Incrementing the version ensures that:
+
+* In-flight transactions recovered from the Event Store after transient errors can be identified via `domainEntity.compare(...)` or `domainEntity.isInitializedVersionBetween(...)`.
+* The custom key generator can route historical transactions to the legacy key generation algorithm, preserving exact idempotency key invariance across retries and preventing duplicate downstream executions.
+* For a detailed architectural explanation and code sample, see xref:#idempotency_key_versioning_and_inflight_transactions[Modifying Idempotency Key Logic Across Releases & In-Flight Transactions].
 
 [[domain_entity_version_casting]]
 === Domain-Entity Version Casting (The SEC Replay Mechanism)
@@ -907,8 +1006,8 @@ public class OrderSaveExecutor implements CommandExecutor<OrderDomainEntity> {
             String idempotencyKey
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
-        // Check if the transaction originated under version 1.0.0
-        if ("1.0.0".equals(currentDomainEntity.getRealVersionAsString())) { // <1>
+        // Check if the transaction originated before version 1.1.0 (covers 1.0.0, 1.0.1, etc.)
+        if (currentDomainEntity.compare("1.1.0") < 0) { // <1>
             // Retrieve root missing property
             Object comment = currentDomainEntity.getMissingProperties().get("comment"); // <2>
             if (comment != null) {
@@ -937,18 +1036,18 @@ public class OrderSaveExecutor implements CommandExecutor<OrderDomainEntity> {
             RevertHintStore revertHintStore,
             String idempotencyKey
     ) throws RetryableExecutorException {
-        // Revert logic can also inspect finalDomainEntityState.getRealVersionAsString() and getMissingProperties() if needed
+        // Revert logic can also inspect finalDomainEntityState.compare(...) or getMissingProperties() if needed
         return SagaExecutionEventName.of("REVERTED_ORDER_SAVE");
     }
 }
 ----
-<1> Use `currentDomainEntity.getRealVersionAsString()` to detect the transaction's baseline event version.
+<1> Use `currentDomainEntity.compare("1.1.0") < 0` (or `currentDomainEntity.getRealVersionAsString()`) to detect the transaction's baseline event version. Comparing against a cutoff threshold covers all historical releases (e.g. `1.0.0`, `1.0.1`) without requiring manual string checks for each release.
 <2> Retrieve root-level removed properties via `currentDomainEntity.getMissingProperties().get(...)`.
 <3> Retrieve nested removed properties via `itemDetail.getMissingProperties().get(...)`.
 
 [NOTE]
 ====
-The `getMissingProperties()` map and `getRealVersionAsString()` method are accessible across all executor types, including `CommandExecutor`, `QueryExecutor`, and `RevertAfterExecutor`.
+The `getMissingProperties()` map and object-level versioning methods (`compare(...)`, `isInitializedVersionBetween(...)`, `getRealVersionAsString()`) are accessible across all executor types, including `CommandExecutor`, `QueryExecutor`, and `RevertAfterExecutor`.
 ====
 // end::domain-entity-versioning[]
 
