@@ -9,8 +9,10 @@
 *StackSaga Framework (Synchronous)* (`stacksaga-spring-boot-starter`) is the synchronous transport implementation of the StackSaga ecosystem.
 It coordinates long-running distributed transactions (LRT) across microservices that already communicate over synchronous protocols — REST (over HTTP), gRPC (over HTTP/2), or GraphQL (over HTTP) — without introducing a message broker into your topology.
 
-Unlike a choreography approach where each service reacts to events independently, StackSaga follows a *centralized orchestration* model: a single orchestrator service owns the full saga lifecycle, invokes the required operation on each participating service through that service's existing endpoint, and advances the saga based on the response it receives.
-This gives you the deterministic control flow and auditability of the saga orchestration pattern while letting every participating service keep its existing synchronous API untouched.
+Unlike choreography approaches where each service reacts to broadcast events independently, StackSaga follows a **domain-centric orchestration** model:
+instead of deploying a heavy, dedicated external orchestration server, you embed StackSaga directly into the standard microservice that naturally owns the business domain (for example, `order-service` for order placement, or `payment-service` for multi-step payment clearance).
+That domain service acts as the orchestrator for its own saga lifecycle—invoking required operations on participating utility services through their existing synchronous endpoints (REST, gRPC, GraphQL) and advancing or compensating the workflow deterministically.
+This gives you centralized control and complete auditability for the domain while letting all participating downstream services keep their existing APIs untouched with zero StackSaga dependencies.
 
 The framework is built on top of Spring Boot and integrates with StackSaga's core engine for event sourcing, state management, retry scheduling, and cluster coordination.
 Each saga execution is fully persisted — every state transition of the `SagaDomainEntity` (the saga's aggregate root and payload carrier) is written to the event store through `stacksaga-database-support` — so that any in-progress transaction can be recovered, retried, or inspected at any point in time.
