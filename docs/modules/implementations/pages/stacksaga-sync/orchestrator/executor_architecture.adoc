@@ -107,19 +107,20 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
     @Override
     @RevertBefore(startFrom = OrderInitializeSubBeforeExecutor.class) //<12>
     @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<13>
-    public SagaExecutionEventName doRevert(
+    public RevertStepManager doRevert(
             NonRetryableExecutorException processException,
             OrderDomainEntity finalDomainEntityState,
             RevertHintStore revertHintStore,
-            String idempotencyKey
+            String idempotencyKey,
+            RevertStepManagerUtil stepManager
     ) throws RetryableExecutorException {
         try {
             //<9>
             this.orderService.cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return SagaExecutionEventName.of("CANCELLED_ORDER");
+            return stepManager.done("CANCELLED_ORDER");
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             //<10>
-            return SagaExecutionEventName.of("CANCELLED_ORDER");
+            return stepManager.done("CANCELLED_ORDER");
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<11>
             throw RetryableExecutorException.of(unavailableException);
@@ -216,7 +217,7 @@ return stepManager.pause(DeliveryExecutor.class, OrderExecutionEvent.ORDER_PREPA
 return stepManager.complete(OrderExecutionEvent.INITIALIZED_ORDER);
 
 // Compensating in doRevert:
-return OrderExecutionEvent.CANCELLED_ORDER;
+return stepManager.done(OrderExecutionEvent.CANCELLED_ORDER);
 ----
 
 . *Action Event Naming Convention*:
@@ -225,8 +226,8 @@ return OrderExecutionEvent.CANCELLED_ORDER;
 +
 _Examples_: `INITIALIZED_ORDER`, `CANCELLED_ORDER`, `FETCHED_USER_DETAILS`, `MADE_PAYMENT`, `REFUNDED_PAYMENT`.
 
-. *Returning `SagaExecutionEventName` in `doRevert(...)` and Factory Method (`SagaExecutionEventName.of`)*: +
-In compensating methods like `doRevert(...)`, which return `SagaExecutionEventName`, your custom enum can be returned directly (e.g. `return OrderExecutionEvent.CANCELLED_ORDER;`) because the enum implements `SagaExecutionEventName`. Optionally, if you prefer not to define a custom enum, you can also use the factory method `SagaExecutionEventName.of("CANCELLED_ORDER")` to supply the event name.
+. *Returning `RevertStepManager` in `doRevert(...)` via `RevertStepManagerUtil`*: +
+In compensating methods like `doRevert(...)`, which return `RevertStepManager`, you use `stepManager.done(...)` to complete compensation (e.g. `return stepManager.done(OrderExecutionEvent.CANCELLED_ORDER);` or `return stepManager.done("CANCELLED_ORDER");`), or `stepManager.pause(...)` to enter a business wait state awaiting an asynchronous callback (e.g. `return stepManager.pause("REFUND_INITIATED", Duration.ofHours(24));`). See xref:#pausable-compensation[Pausable Compensation in doRevert].
 ====
 +
 <6> **Handling Already-Executed Idempotent Responses (Developer Responsibility):**
@@ -248,9 +249,9 @@ If you throw your own exception without wrapping it in `RetryableExecutorExcepti
 <8> Catch the non-retryable exceptions to notify the SEC to stop forward execution and start compensating executions in reverse order immediately. +
 You can wrap the original exception by using `NonRetryableExecutorException.buildWith(Exception e)` and attach any metadata to the event store using `put(String key, Object value)`. This metadata can later be accessed in compensating executions via the `RevertHintStore`.
 <9> The `doRevert` method is overridden to implement the compensating execution logic. +
-It also receives the `idempotencyKey` to forward to the downstream compensation endpoint to ensure the reversal action is idempotent.
+It receives the `idempotencyKey` to forward to the downstream compensation endpoint to ensure the reversal action is idempotent, and `RevertStepManagerUtil stepManager` to navigate or pause rollback. It also optionally accepts `ResumeContext` when resumed.
 <10> **Idempotent Compensation Return (Developer Responsibility):** +
-Just like in `doProcess`, handling duplicate execution during compensation is your responsibility as the developer. If the downstream service indicates that the cancellation or reversal was already executed on an earlier retry attempt (represented here by catching `OperationAlreadyExecutedException`), return the success event (`SagaExecutionEventName.of("CANCELLED_ORDER")`). This confirms to the SEC that the compensation for this step is successfully completed, allowing the framework to proceed with compensating the next previous step in reverse order (or successfully finalize the rollback if all compensations are done).
+Just like in `doProcess`, handling duplicate execution during compensation is your responsibility as the developer. If the downstream service indicates that the cancellation or reversal was already executed on an earlier retry attempt (represented here by catching `OperationAlreadyExecutedException`), return the success step (`stepManager.done("CANCELLED_ORDER")`). This confirms to the SEC that the compensation for this step is successfully completed, allowing the framework to proceed with compensating the next previous step in reverse order (or successfully finalize the rollback if all compensations are done).
 <11> Catch the resource unavailability exception that can be retried in compensation to keep the transaction in retry mode. +
 If there is a non-retryable exception in compensation that can be safely ignored, catch that exception and store metadata into `RevertHintStore` using `put(String key, Object value)` to avoid transaction termination.
 <12> The `@RevertBefore` annotation is used to specify a starting sub-before-executor that should run before the main compensating execution of this command executor.
@@ -305,26 +306,26 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
 
     @Override //<4>
     @NonNull
-    public Mono<SagaExecutionEventName> doRevert(
+    public Mono<RevertStepManager> doRevert(
             NonRetryableExecutorException processException,
             OrderDomainEntity finalDomainEntityState,
             RevertHintStore revertHintStore,
-            String idempotencyKey
+            String idempotencyKey,
+            RevertStepManagerUtil stepManager
     ) {
         //<5>
         return this.orderService
                 .cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey)
-                .thenReturn(SagaExecutionEventName.of("REVERTED_ORDER_INITIALIZATION"))
+                .thenReturn(stepManager.done("REVERTED_ORDER_INITIALIZATION"))
                 .onErrorResume(throwable -> {
                     if (throwable instanceof OperationAlreadyExecutedException) {
-                        // Return success revert event for already-executed compensation
-                        return Mono.just(SagaExecutionEventName.of("REVERTED_ORDER_INITIALIZATION"));
+                        // Return success revert step for already-executed compensation
+                        return Mono.just(stepManager.done("REVERTED_ORDER_INITIALIZATION"));
                     } else if (throwable instanceof ResourceUnavailableException) {
                         return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
-                        SagaExecutionEventName ignored = SagaExecutionEventName.of("IGNORED");
-                        return Mono.just(ignored);
+                        return Mono.just(stepManager.done("IGNORED"));
                     }
                 });
     }
@@ -339,10 +340,156 @@ Notice that `idempotencyKey` is passed along to the downstream service call (`cr
 IMPORTANT: the exception can not be passed outside of the pipeline, such as in imperative way. and also the method can not be return `null` or `Mono.empty()`.
 it is caused by primary execution exception and stopping the transaction forward and starting the compensating executions in reverse order immediately.
 +
-<4> The `doRevert` method is overridden to implement the compensating execution logic in a reactive way.
+<4> The `doRevert` method is overridden to implement the compensating execution logic in a reactive way returning `Mono<RevertStepManager>`.
 <5> The compensating execution logic is implemented inside the `doRevert` method by using reactive pipeline. +
-The same idempotency policy applies: pass `idempotencyKey` to `cancelOrder`, and if an already-executed exception occurs in `onErrorResume`, return `Mono.just(...)` with the success revert event name so the framework recognizes this step as compensated. +
-It can not have a non-retryable exception due to compensating execution. if there is any possibility to have a non-retryable exception, it should be caught and stored in the `RevertHintStore` and return a dummy event name like above example to avoid the transaction termination.
+The same idempotency policy applies: pass `idempotencyKey` to `cancelOrder`, and if an already-executed exception occurs in `onErrorResume`, return `Mono.just(stepManager.done(...))` with the success revert step so the framework recognizes this step as compensated. +
+It cannot have an unhandled non-retryable exception during compensating execution. If there is any possibility of a non-retryable exception that can be safely ignored, catch that exception, store metadata into the `RevertHintStore`, and return `Mono.just(stepManager.done("IGNORED"))` to avoid transaction termination.
+
+[[resume-context-in-executors]]
+==== Consuming `ResumeContext` in Forward Execution (`doProcess`)
+
+When an executor pauses waiting for an external callback (such as a 3D-Secure payment confirmation, merchant acceptance, or KYC verification), the incoming webhook delivers payload data via xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey).put(...)`].
+
+To consume this external payload safely without exposing the core domain aggregate to unvalidated mutations, implement the overloaded `doProcess(...)` method accepting `ResumeContext`:
+
+[source,java]
+----
+@Override
+public ProcessStepManager<OrderDomainEntity> doProcess(
+        OrderDomainEntity currentDomainEntity,
+        ProcessStepManagerUtil<OrderDomainEntity> stepManager,
+        String idempotencyKey,
+        ResumeContext resumeContext //<1>
+) throws RetryableExecutorException, NonRetryableExecutorException {
+
+    //<2> Canonical Branching Pattern:
+    if (resumeContext.isEmpty()) {
+        // --- 1. INITIAL EXECUTION ATTEMPT ---
+        // Dispatch asynchronous request to downstream provider forwarding idempotencyKey
+        this.paymentGateway.initiateAsyncCharge(
+                currentDomainEntity.getTotalAmount(),
+                idempotencyKey
+        );
+
+        // Pause forward execution awaiting external callback webhook:
+        return stepManager.pause(
+                DispatchDeliveryExecutor.class,
+                "PAYMENT_INITIATED",
+                Duration.ofHours(2)
+        );
+    }
+
+    // --- 2. RESUMED EXECUTION ATTEMPT ---
+    // Callback arrived! Extract and validate payload parameters from read-only ResumeContext
+    String paymentStatus = resumeContext.get("paymentStatus").orElse("FAILED"); //<3>
+    String gatewayRef = resumeContext.get("gatewayTransactionId").orElse(null);
+
+    if ("SUCCESS".equalsIgnoreCase(paymentStatus)) {
+        // Safely mutate domain entity based on verified callback data
+        currentDomainEntity.setPaymentRef(gatewayRef);
+        return stepManager.next(DispatchDeliveryExecutor.class, "PAYMENT_CONFIRMED"); //<4>
+    } else {
+        // Fail forward execution and initiate compensation
+        throw NonRetryableExecutorException
+                .buildWith(new PaymentDeclinedException("Payment rejected: " + paymentStatus))
+                .put("paymentStatus", paymentStatus)
+                .build();
+    }
+}
+----
+
+<1> Receive `ResumeContext` alongside `currentDomainEntity`, `stepManager`, and `idempotencyKey`.
+<2> Check `resumeContext.isEmpty()` to distinguish between the **initial execution** (triggering async request and pausing) and the **resumed callback execution** (processing callback data).
+<3> Safely query context entries via `resumeContext.get(key)`. The context is strictly read-only within the executor; mutating methods throw `UnsupportedOperationException`. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resume-context-contract[ResumeContext Contract].
+<4> Advance to the next executor (`DispatchDeliveryExecutor`) using `stepManager.next(...)`.
+
+See xref:stacksaga-sync/index.adoc#resume-context-concept[Decoupling External Callback Payloads] and xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#callback-controller-pattern[Callback Controller Ingestion] for the complete lifecycle.
+
+[[pausable-compensation]]
+==== Pausable Compensation in `doRevert(...)` (Rollback Wait-States)
+
+In enterprise microservices (particularly in banking, fintech, and e-commerce), rollback operations frequently cannot finish synchronously.
+For example, cancelling an authorized transaction often requires initiating an **asynchronous refund** with an external acquirer, which notifies the system hours or days later via a webhook.
+
+StackSaga supports pausing within compensating transactions using `RevertStepManagerUtil.pause(...)`. When paused:
+* The transaction remains in `REVERTING` status in the event store with `is_paused = 1`.
+* The `idempotencyKey` of that compensating step is registered as `current_resume_key`.
+* CPU threads are freed until the webhook calls xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey)`].
+* When resumed, StackSaga re-invokes `doRevert(...)` with the populated `ResumeContext`.
+
+[[pausable-compensation-example]]
+===== Production Example: Asynchronous Payment Refund Compensation
+
+[source,java]
+----
+@SagaExecutor(executeFor = "payment-service", value = "paymentCommandExecutor")
+@AllArgsConstructor
+public class PaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentGatewayClient paymentGatewayClient;
+
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            OrderDomainEntity currentDomainEntity,
+            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        // Forward synchronous charge
+        String paymentRef = this.paymentGatewayClient.charge(
+                currentDomainEntity.getTotalAmount(),
+                idempotencyKey
+        );
+        currentDomainEntity.setPaymentRef(paymentRef);
+        return stepManager.next(ReserveStockExecutor.class, "PAYMENT_CHARGED");
+    }
+
+    @Override
+    public RevertStepManager doRevert(
+            NonRetryableExecutorException primaryExecutionException,
+            OrderDomainEntity finalDomainEntityState,
+            RevertHintStore revertHintStore,
+            String idempotencyKey,
+            RevertStepManagerUtil stepManager,
+            ResumeContext resumeContext //<1>
+    ) throws RetryableExecutorException {
+
+        //<2> Check if this is the initial compensation execution or the resumed callback
+        if (resumeContext.isEmpty()) {
+            // --- 1. INITIAL COMPENSATION ATTEMPT ---
+            // Initiate asynchronous refund with the external payment gateway
+            String refundSessionId = this.paymentGatewayClient.initiateAsyncRefund(
+                    finalDomainEntityState.getPaymentRef(),
+                    idempotencyKey //<3>
+            );
+            revertHintStore.put("refundSessionId", refundSessionId);
+
+            // Pause compensation awaiting refund confirmation webhook:
+            return stepManager.pause("REFUND_INITIATED", Duration.ofHours(24)); //<4>
+        }
+
+        // --- 2. RESUMED COMPENSATION ATTEMPT ---
+        // Webhook arrived! Ingest refund result from ResumeContext
+        String refundStatus = resumeContext.get("refundStatus").orElse("FAILED"); //<5>
+
+        if ("SUCCESS".equalsIgnoreCase(refundStatus)) {
+            // Reversal completed: finalize this compensation step
+            return stepManager.done("REFUND_COMPLETED"); //<6>
+        } else {
+            // Transient gateway delay or pending clearing: retry
+            throw new RetryableExecutorException("Refund processing in banking gateway, retrying verification");
+        }
+    }
+}
+----
+
+<1> Implement the 6-parameter `doRevert` overload accepting `ResumeContext`.
+<2> Use `if (resumeContext.isEmpty())` to branch between initial refund request and resumed webhook processing.
+<3> Forward the framework-provided `idempotencyKey` to the external refund API. This exact key acts as the `correlationKey` when the gateway posts back to your webhook.
+<4> Call `stepManager.pause("REFUND_INITIATED", Duration.ofHours(24))` to place the compensation flow into an intentional wait state.
+<5> When the webhook arrives and calls `sagaTemplate.resume(txId, correlationKey).put("refundStatus", ...).execute()`, the framework wakes up the saga and passes the parameters via `ResumeContext`.
+<6> Return `stepManager.done("REFUND_COMPLETED")` to confirm that compensation for this step is finished. StackSaga then automatically proceeds to compensate the next previous executor in reverse order.
+
+See xref:stacksaga-sync/index.adoc#async-compensation-refund[Asynchronous Compensation in index.adoc] and xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#uniform-resumption[Uniform Resumption Flow].
 
 [[query-executors]]
 === Query executors
@@ -680,10 +827,10 @@ IMPORTANT: the exception can not be passed outside of the pipeline, such as in i
 it leads to non-retryable exception with a termination. because it is considered as a non-retryable error. +
 If there is any possibility to have a non-retryable exception, it should be caught and stored in the `RevertHintStore` and return a dummy event name like above example to avoid the transaction termination.
 +
-If the process is done successfully, and there is no more sub-before-executor for the respective command executor, it can be navigated to the main (parent) `doRevert` method by using the `stepManager.complete` method.
-it should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor. +
-If you have more than one sub-before-executor, you can navigate to the next sub-before-executor by using the `stepManager.next`. +
-you can pass another sub-before-executor class that you want to navigate and also the event name that will be used to store the event name in the event-store regarding the successful execution of the current sub-before-executor.
+If the process is done successfully, and there is no more sub-after-executor for the respective command executor, it can be navigated to complete the after-compensation sequence by using the `stepManager.complete` method.
+It should be provided the event name supplier that will be used to store the event name in the event-store regarding the successful execution of the current sub-after-executor. +
+If you have more than one sub-after-executor, you can navigate to the next sub-after-executor by using the `stepManager.next` method.
+Additionally, sub-after-executors support pausing awaiting external callbacks using `stepManager.pauseWithNext(...)` or `stepManager.pauseWithComplete(...)`.
 
 === Summary
 
@@ -736,6 +883,56 @@ you can pass another sub-before-executor class that you want to navigate and als
 |
 
 |===
+
+[[step-manager-navigation-reference]]
+[[revert-step-manager-util]]
+== Step Manager Navigation Reference
+
+StackSaga provides specialized step manager utilities for each phase of execution.
+These utilities allow developers to programmatically steer the Saga Execution Coordinator (SEC) without central routing tables:
+
+[cols="1,2,2,2",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Utility Interface | Primary Method | Pausing Method | Terminal / Chaining Method
+
+| *`ProcessStepManagerUtil<DE>`* +
+_(Forward Flow)_
+| `next(Class nextStep, event)` +
+Advances to the next executor span in the primary workflow.
+| `pause(Class nextStep, event, duration)` +
+Pauses forward flow in an intentional business wait state awaiting an external callback. See xref:#stepManager_pause[Forward Pausing].
+| `complete(event)` +
+Terminal success: marks the entire saga as completed in the event store.
+
+| *`RevertStepManagerUtil`* +
+_(Compensation Flow)_
+| N/A _(Reverse order is determined automatically by the SEC engine)_
+| `pause(event, duration)` +
+Pauses compensation in a rollback wait state awaiting an external reversal webhook. See xref:#pausable-compensation[Pausable Compensation].
+| `done(event)` +
+Marks this command executor's compensation as finished, enabling the SEC to move backward to the next previous step.
+
+| *`RevertBeforeStepManagerUtil<DE, E>`* +
+_(Sub-Before Flow)_
+| `next(Class nextSubBefore, event)` +
+Advances to the next sub-before-executor in the chain.
+| `pauseWithNext(Class, event, duration)` or `pauseWithComplete(event, duration)` +
+Pauses sub-before rollback awaiting an asynchronous webhook.
+| `complete(event)` +
+Completes the sub-before chain and routes execution to the parent command executor's `doRevert()`.
+
+| *`RevertAfterStepManagerUtil<DE, E>`* +
+_(Sub-After Flow)_
+| `next(Class nextSubAfter, event)` +
+Advances to the next sub-after-executor in the chain.
+| `pauseWithNext(Class, event, duration)` or `pauseWithComplete(event, duration)` +
+Pauses sub-after rollback awaiting an asynchronous webhook.
+| `complete(event)` +
+Completes the sub-after chain, finalizing compensation for this command executor.
+|===
+
+See xref:stacksaga-sync/index.adoc#glossary-step-manager[Step Manager in Glossary], xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Architecture], and xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[Resuming via SagaTemplate] for how these utilities connect with the rest of the ecosystem.
 
 == Guidelines for Creating Executors
 
