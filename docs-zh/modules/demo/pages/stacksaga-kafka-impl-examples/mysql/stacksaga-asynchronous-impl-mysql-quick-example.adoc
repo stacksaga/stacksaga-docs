@@ -1,135 +1,129 @@
-:description: A step-by-step quick example that builds a complete order-placement saga on the StackSaga-Kafka (asynchronous) orchestration engine with MySQL as the event store — covering the orchestrator, three worker services, topics, the EventManager, compensation, and configuration.
-:keywords: StackSaga-Kafka, quick example, saga orchestration, Kafka, MySQL event store, orchestrator, worker, AbstractTopic, EventManager, compensation
+:description: 一个循序渐进的快速入门示例，演示如何在 StackSaga-Kafka（异步）编排引擎上构建完整的订单提交流程（以 MySQL 作为事件存储）——涵盖编排器、三个工作节点服务、主题定义、EventManager、补偿机制以及配置调优。
+:keywords: StackSaga-Kafka, 快速入门示例, saga 编排, Kafka, MySQL 事件存储, 编排器, 工作节点, AbstractTopic, EventManager, 补偿
 
-= Quick Example: StackSaga-Kafka:MySQL
+= 快速入门示例：StackSaga-Kafka:MySQL
 
-This quick example walks you through building a complete *order-placement* saga on the *StackSaga-Kafka* (asynchronous) orchestration engine, using *MySQL* as the event store.
+本快速入门示例将引导您在 *StackSaga-Kafka*（异步）编排引擎上构建一个完整的*下单 (order-placement)* Saga，并使用 *MySQL* 作为事件存储 (Event Store)。
 
-Unlike the xref:stacksaga-synchronous-impl-examples/mysql/stacksaga-synchronous-impl-mysql-quick-example.adoc[synchronous quick example] — where every step runs inside a single orchestrator process — here the orchestrator talks to independent *worker services* entirely through *Kafka* topics, so the work is distributed across several Spring Boot applications.
-By the end you will have a working multiservice saga that places an order across three services and automatically *compensates* (rolls back) the completed steps when a later step fails.
+与 xref:stacksaga-synchronous-impl-examples/mysql/stacksaga-synchronous-impl-mysql-quick-example.adoc[同步快速入门示例]（其中每个步骤都在单个编排器进程内运行）不同，在 Kafka 架构下，编排器完全通过 *Kafka* 主题与独立的*工作节点服务 (Worker Services)* 进行异步通信，因此业务执行分布在多个独立的 Spring Boot 应用程序之间。
+通过本指南，您将构建一个跨三个服务运行的分布式多微服务 Saga，并在后续步骤发生失败时自动*补偿 (Compensate / 回滚)* 此前已完成的步骤。
 
-== Overview
+== 概述 (Overview)
 
-The scenario we orchestrate is a simple *place-order* operation, modelled as a single long-running transaction (LRT) made up of three atomic steps (*spans*).
-Because this is the Kafka (asynchronous) engine, each span is executed by a *worker service* that the orchestrator reaches over Kafka — never through a direct in-process or blocking HTTP call.
+我们编排的业务场景是一个简化的*下单 (place-order)* 操作，建模为由三个原子步骤（*跨度 / Spans*）组成的单个长事务 (Long-Running Transaction, LRT)。
+由于这是 Kafka（异步）引擎，每个跨度都由编排器通过 Kafka 调用对应的*工作节点服务 (Worker Service)* 执行——绝不通过直接的进程内调用或阻塞式 HTTP 请求。
 
 [cols="1,2,2,3,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| # | Span (Step) | Action Type | Worker Service | Compensated By
+| # | 跨度 (步骤) | 动作类型 | 工作节点服务 | 补偿对应项
 
 | 1
-| *Validate User*
-| Query (read-only)
+| *验证用户*
+| 查询 (Query / 只读)
 | `user-service`
-| — _(queries are never compensated)_
+| — _(查询操作从不补偿)_
 
 | 2
-| *Reserve Order*
-| Command (state-changing)
-| `order-service` _(the orchestrator itself)_
+| *预留订单*
+| 命令 (Command / 状态变更)
+| `order-service` _(编排器自身)_
 | `UNDO_ORDER_RESERVED`
 
 | 3
-| *Make Payment*
-| Command (state-changing)
+| *执行支付*
+| 命令 (Command / 状态变更)
 | `payment-service`
 | `UNDO_MAKE_PAYMENT`
 |===
 
-If any step fails, StackSaga automatically *compensates* the previously completed *command* steps in reverse order — for example, releasing the reserved order when the payment fails — so the system is always left in a consistent state.
+如果任何步骤失败，StackSaga 会自动按倒序*补偿 (Compensate)* 此前已完成的*命令*步骤——例如在支付失败时释放已预留的订单——从而确保系统最终始终处于一致状态。
 
 [[overview-services-and-roles]]
-=== Services and Their Roles
+=== 服务及其职责角色 (Services and Their Roles)
 
-This example spans three Spring Boot applications.
-The orchestrator/worker labels describe a service's *involvement in this saga*, not separate deployments — see xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc#stacksaga-kafka-identifying-service-roles[Service Classification] for the full explanation.
+此示例涵盖三个 Spring Boot 应用程序。
+编排器/工作节点标签描述的是服务*在当前 Saga 事务流中的参与角色*，而非物理部署形态——有关完整说明，请参阅 xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc#stacksaga-kafka-identifying-service-roles[服务分类 (Service Classification)]。
 
 [cols="2,2,3",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Service | StackSaga Role | Key Dependency
+| 服务 | StackSaga 角色 | 核心依赖项
 
 | `order-service`
-| *Orchestrator* (and also a *worker* for the _Reserve Order_ span)
+| *编排器 (Orchestrator)*（同时兼任“预留订单”跨度的*工作节点 (Worker)*）
 | `stacksaga-kafka-orchestrator-spring-boot-starter` + `stacksaga-mysql-reactive-support`
 
 | `user-service`
-| *Worker*
+| *工作节点 (Worker)*
 | `stacksaga-kafka-worker-spring-boot-starter`
 
 | `payment-service`
-| *Worker*
+| *工作节点 (Worker)*
 | `stacksaga-kafka-worker-spring-boot-starter`
 |===
 
-NOTE: `order-service` plays two roles at once — it *drives* the saga (orchestrator) and also *executes* the _Reserve Order_ span (worker).
-You do **not** add the worker starter to it separately: the orchestrator starter already brings the worker capability in transitively.
-Only the orchestrator owns the MySQL *event store*; the workers are stateless with respect to the saga.
+NOTE: `order-service` 同时扮演双重角色——它既*驱动*整个 Saga（编排器），又*执行*“预留订单”跨度（工作节点）。您**无需**向其单独引入 worker starter：orchestrator starter 已经通过传递依赖包含了 worker 的全部能力。只有编排器拥有 MySQL *事件存储 (Event Store)*；工作节点服务相对于 Saga 而言是无状态的。
 
 [[overview-execution-flow]]
-=== How the Saga Executes
+=== Saga 执行流程 (How the Saga Executes)
 
-. A client calls `POST /api/v1/order` on the *orchestrator* (`order-service`).
-The controller initialises the `OrderDomainEntity` and hands it to the engine through `StackSagaKafkaTemplate`.
-. The engine asks the `PlaceOrderEventManager` for the first topic (`DO_USER_VALIDATED`) and publishes a *command message* to that worker's Kafka topic.
-. The target *worker* (`user-service`) consumes the command through its `@SagaEndpoint`, runs the business logic, and publishes a *reply* to the framework-managed per-domain callback topic.
-. The orchestrator consumes the reply and calls `EventManager.onNext(...)` to decide what to do next — route to `DO_ORDER_RESERVED`, then `DO_MAKE_PAYMENT`, and finally `complete()`.
-. Every state transition is persisted to the MySQL *event store*, so an in-flight transaction can always be recovered.
-. If a worker reports a non-retryable failure (or `onNext()` returns an error), the engine switches to compensation and dispatches the `UNDO_*` commands to the relevant workers in reverse order.
+. 客户端向*编排器* (`order-service`) 发起 `POST /api/v1/order` 请求。控制器初始化 `OrderDomainEntity` 并通过 `StackSagaKafkaTemplate` 将其移交给引擎。
+. 引擎向 `PlaceOrderEventManager` 请求首个主题 (`DO_USER_VALIDATED`)，并将*命令消息 (Command Message)* 发布至该目标工作节点的 Kafka 主题。
+. 目标*工作节点* (`user-service`) 通过其 `@SagaEndpoint` 消费该命令，执行本地业务逻辑，并将*应答 (Reply)* 发布回框架统一管理的领域专属回调主题。
+. 编排器消费该应答并调用 `EventManager.onNext(...)` 判定下一步走向——依次路由至 `DO_ORDER_RESERVED`、`DO_MAKE_PAYMENT`，最后调用 `complete()`。
+. 每次状态流转都会持久化至 MySQL *事件存储*，因此运行中的在途事务随时均可恢复。
+. 如果工作节点上报不可重试的失败（或 `onNext()` 返回错误），引擎将切换至补偿模式，并按相反顺序向相关工作节点分发 `UNDO_*` 撤销命令。
 
-For the full picture, see xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc[StackSaga-Kafka Architecture].
+有关整体架构全貌，请参阅 xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc[StackSaga-Kafka 架构]。
 
 [[overview-what-this-guide-covers]]
-=== What This Guide Covers
+=== 本指南涵盖的内容 (What This Guide Covers)
 
-This guide implements the *minimal, working topology*: the orchestrator, the three worker spans, compensation, and MySQL persistence.
-Once it runs, two production-hardening layers can be added on top *without changing any of the code below*:
+本指南实现了*最小可用拓扑*：编排器、三个工作节点跨度、故障补偿以及 MySQL 持久化。
+一旦运行就绪，您可以在*无需修改以下任何业务代码*的前提下，叠加两层生产加固能力：
 
-* *Retry* — make stalled transactions self-healing with the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Ring Coordinator].
-See xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc#stacksaga-kafka-architecture-2nd-stage[Architecture · Stage 2].
-* *Observability* — visualise every transaction in real time with the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window].
-See xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc#stacksaga-kafka-architecture-3rd-stage[Architecture · Stage 3].
+* *重试机制 (Retry)* —— 使用 xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[环形协调器 (Ring Coordinator)] 使停滞事务具备自愈能力。参阅 xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc#stacksaga-kafka-architecture-2nd-stage[架构 · 阶段二]。
+* *可观测性 (Observability)* —— 使用 xref:trace-window:stacksaga-trace-window.adoc[StackSaga 链路追踪窗口 (Trace Window)] 实时可视化每个事务。参阅 xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc#stacksaga-kafka-architecture-3rd-stage[架构 · 阶段三]。
 
 [[stage-1]]
-== Stage-1 [Minimal Implementation]
+== 阶段一 [最小实现] (Stage-1 [Minimal Implementation])
 
-This stage demonstrates a minimal, end-to-end implementation of StackSaga's Kafka orchestration using MySQL as the event store.
-We will build it in the following order:
+本阶段演示以 MySQL 作为事件存储的 StackSaga Kafka 编排的最小端到端实现。我们将按以下顺序进行构建：
 
-. xref:#prerequisites[]
-. xref:#creating_order_service[] — the orchestrator: domain entity, topics, EventManager, handler, controller, and configuration.
-. xref:#configuring-user-service[] — the first worker service.
-. xref:#configuring-order-service[] — the orchestrator acting as a worker for the _Reserve Order_ span.
-. xref:#configuring-payment-service[] — the second external worker service.
-. xref:#running-application[] — run everything and watch the happy path and compensation in action.
+. xref:#prerequisites[前置准备]
+. xref:#creating_order_service[创建订单服务（编排器服务）] —— 编排器：领域实体、主题定义、EventManager、处理器、控制器以及配置。
+. xref:#configuring-user-service[配置用户服务作为工作节点] —— 第一个工作节点服务。
+. xref:#configuring-order-service[配置订单服务作为工作节点] —— 编排器同时承担“预留订单”跨度的工作节点角色。
+. xref:#configuring-payment-service[配置支付服务作为工作节点] —— 第二个外部工作节点服务。
+. xref:#running-application[运行应用并测试事务流程] —— 启动所有组件并观察正常流与补偿流的实际运行。
 
 [[prerequisites]]
-=== Prerequisites
+=== 前置准备 (Prerequisites)
 
-Make sure you have the following installed and running before getting started:
+在开始之前，请确保已安装并运行以下组件：
 
 . Java 21+
 . Spring Boot 4.x
-. Apache Kafka 4.x — a running broker with share groups enabled (the orchestrator and workers communicate exclusively over Kafka; the default `groupType = SHARE` uses the Kafka 4 share-group protocol / KIP-932).
-. MySQL 8+ — used by the orchestrator as the event store.
+. Apache Kafka 4.x —— 启用了共享消费组 (Share Groups) 的运行中 Broker（编排器与工作节点之间完全通过 Kafka 通信；默认 `groupType = SHARE` 使用 Kafka 4 共享消费组协议 / KIP-932）。
+. MySQL 8+ —— 由编排器用作事件存储 (Event Store)。
 . Maven
 
-TIP: The quickest way to get a local broker and database up is Docker — e.g. a `bitnami/kafka` (or Redpanda) container for Kafka and a `mysql:8` container for MySQL.
+TIP: 启动本地 Broker 和数据库的最快捷方式是 Docker——例如针对 Kafka 运行 `bitnami/kafka`（或 Redpanda）容器，针对 MySQL 运行 `mysql:8` 容器。
 
 [[creating_order_service]]
-=== Creating Order Service (Orchestrator service)
+=== 创建订单服务（编排器服务）(Creating Order Service (Orchestrator service))
 
-As the first step, we will create the Order Service (Orchestrator service) that will handle the order placement and orchestrate the other services.
+第一步，我们将创建订单服务（编排器服务），负责处理订单提交并编排其他微服务。
 
 [[getting-started]]
-==== Getting Started - Initial project setup
+==== 起步 - 初始项目搭建 (Getting Started - Initial project setup)
 
-In this demo we use Spring MVC as the web framework and MySQL as the primary database for the event-store.
+在本示例中，我们使用 Spring MVC 作为 Web 框架，并使用 MySQL 作为事件存储的主数据库。
 
-So, To get started, create a new Spring Boot application and include the following dependencies and plugin configuration in your `pom.xml`:
+首先创建一个新的 Spring Boot 应用程序，并在 `pom.xml` 中添加以下依赖项与插件配置：
 
-IMPORTANT: It is recommended to use the http://init.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+IMPORTANT: 建议使用 http://init.stacksaga.org/[StackSaga Initializer] 获取相关依赖配置代码，以确保版本兼容性与初始配置正确无误。
 
 [source,xml,subs="attributes+"]
 ----
@@ -185,23 +179,21 @@ IMPORTANT: It is recommended to use the http://init.stacksaga.org/[StackSaga Ini
 </build>
 ----
 
-<1> This section imports the StackSaga BOM (Bill of Materials) which manages the versions of all StackSaga related dependencies, ensuring compatibility and simplifying dependency management.
+<1> 此部分导入 StackSaga BOM (物料清单)，统一管理所有 StackSaga 依赖项的版本，确保兼容性并简化版本控制。
 
-<2> This is the main StackSaga Starter dependency that includes the core functionalities of StackSaga, such as the orchestration engine, event handling, and transaction management.
-It provides the necessary components to implement the StackSaga pattern in your application.
+<2> 这是核心 StackSaga Kafka 编排器 Starter 依赖项，包含编排引擎、事件处理和事务管理等核心功能，提供在应用中实现 Saga 编排所需的所有组件。
 
-<3> This dependency provides support for using MySQL as the event-store in a reactive manner.
-It includes the necessary components and configurations to integrate MySQL with StackSaga, allowing you to store and manage events in a MySQL database while leveraging reactive programming paradigms. xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[]
+<3> 该依赖项提供以响应式 (Reactive) 方式将 MySQL 作为事件存储的支持。它包含将 MySQL 与 StackSaga 集成所需的组件和配置，允许您在 MySQL 数据库中存储和管理事件，同时利用响应式编程范式。xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[]
 
-<4> Configuring the `spring-boot-maven-plugin` with the `build-info` goal generates `META-INF/build-info.properties` during the build. StackSaga uses this metadata to record the exact application version at which each transaction was started.
+<4> 为 `spring-boot-maven-plugin` 配置 `build-info` 目标会在构建时生成 `META-INF/build-info.properties`。StackSaga 利用此元数据记录每个事务启动时所处的确切应用程序版本。
 
-TIP: Adding the `build-info` goal helps you track which version the transaction was started at. If this is not configured, StackSaga cannot determine the application version and records the transaction application version as `unknown` in the event store.
+TIP: 添加 `build-info` 目标有助于追踪事务是在哪个应用版本下发起的。若未配置该插件目标，StackSaga 将无法识别应用程序版本，并在事件存储中将事务的应用版本记录为 `unknown`。
 
 [[creating-domain-entity]]
-==== Creating the Domain-Entity
+==== 创建领域实体 (Creating the Domain-Entity)
 
-Domain-Entity is the main entity that will be used in the transaction flow, it represents the main data structure that will be manipulated and processed throughout the transaction.
-In StackSaga-Kafka it is also the payload that travels (serialized) between the orchestrator and the workers over Kafka. xref:implementations:stacksaga-kafka-implementation/orchestrator/domain-entity.adoc#creating_custom_domain_entity[read more]
+领域实体 (Domain-Entity) 是事务流程中流转的核心实体，它代表在整个事务期间被操作和处理的主数据结构。
+在 StackSaga-Kafka 中，它也是通过 Kafka 在编排器与工作节点之间网络传输（序列化）的载荷数据 (Payload)。xref:implementations:stacksaga-kafka-implementation/orchestrator/domain-entity.adoc#creating_custom_domain_entity[了解更多]
 
 [source,java]
 ----
@@ -232,19 +224,18 @@ public class OrderDomainEntity extends DomainEntity { //<2>
 }
 ----
 
-<1> The `@SagaDomainEntity` annotation marks this class as a domain entity for StackSaga, which means it will be used to represent the state and data of the transaction as it flows through the different steps of the saga.
-xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#domain_entity_versioning[The version] attribute allows you to manage changes to the domain entity over time.
+<1> `@SagaDomainEntity` 注解将该类标记为 StackSaga 的领域实体，表示它将用于承载事务流经 Saga 各步骤时的状态与数据。xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#domain_entity_versioning[版本号]属性使您能够随着时间推移规范管理领域实体的版本演进。
 
-<2> The `OrderDomainEntity` class extends the `DomainEntity` base class provided by StackSaga, which includes common functionality and properties needed for domain entities.
+<2> `OrderDomainEntity` 类继承自 StackSaga 提供的 `DomainEntity` 基类，该基类包含了领域实体所需的通用功能与内置属性。
 
-<3> The constructor calls the superclass constructor with the class type, which is necessary for StackSaga to properly manage and serialize the domain entity during the transaction flow.
+<3> 构造函数通过传入自身类类型调用父类构造函数，这是 StackSaga 在事务流转期间正确管理与序列化领域实体所必需的。
 
 [[creating-topics]]
-==== Creating Topics
+==== 创建主题 (Creating Topics)
 
-Defining topics is one of the most important steps in a StackSaga-Kafka implementation, because the topics *are* the saga: each one represents an atomic execution point (span) routed to a specific worker service.
-In StackSaga-Kafka, topics are not just plain string names — they carry metadata such as the topic name, a unique topic key, the action type (primary `DO` or compensation `UNDO`), and the target service.
-You declare them by extending `AbstractTopic<T>` and exposing each topic as a constant, as shown below. xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[read more]
+定义主题 (Topics) 是 StackSaga-Kafka 实现中最核心的步骤之一，因为主题*即* Saga 的结构骨架：每个主题代表路由至特定工作节点服务的一个原子执行点（跨度 / Span）。
+在 StackSaga-Kafka 中，主题不仅是普通字符串名称——它们携带了丰富的元数据，例如主题名称、唯一主题键 (Topic Key)、动作类型（正向 `DO` 或逆向补偿 `UNDO`）以及目标服务。
+通过继承 `AbstractTopic<T>` 并将每个主题暴露为静态常量来声明它们，如下所示。xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[了解更多]
 
 [source,java]
 ----
@@ -272,24 +263,18 @@ public class PlaceOrderTopic extends AbstractTopic<PlaceOrderTopic> { //<1>
 }
 ----
 
-<1> Create a custom topic class for your domain and extend `AbstractTopic<T>`, where `<T>` is the topic class itself (the curiously-recurring generic pattern).
+<1> 为您的业务领域创建一个自定义主题类并继承 `AbstractTopic<T>`，其中 `<T>` 为主题类自身（即奇异递归模板模式 / Curiously Recurring Template Pattern）。
 
-<2> Override the two constructors required by `AbstractTopic<T>`.
-The 4-parameter constructor is used to declare a *primary* (`DO`) topic; the 5-parameter constructor adds a `parent` argument and is used to declare a *compensation* (`UNDO`) topic, linking it back to the primary topic it reverses.
-You never call these constructors yourself other than from the constants below — just override them and leave the bodies as the `super(...)` delegation.
+<2> 重写 `AbstractTopic<T>` 所要求的两个构造函数。4 参数构造函数用于声明*正向* (`DO`) 主题；5 参数构造函数增加了 `parent` 参数，用于声明*逆向补偿* (`UNDO`) 主题，并将其关联回所逆转的正向主题。除了在下方的常量中调用外，您绝不需要自行调用这些构造函数——只需重写它们并通过 `super(...)` 委托即可。
 
-<3> Declare every topic of the LRT (long-running transaction) as a `public static final` constant.
-This example has *3 primary (`DO`) topics* and *2 compensation (`UNDO`) topics* — note that `DO_USER_VALIDATED` is a read-only query and therefore has no compensation counterpart.
-Each topic specifies its name, a unique `float` topic key (negative for compensation), the `SagaEventType`, and the target service.
-See xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[the topic specification] for the naming and topic-key rules.
+<3> 将长事务 (LRT) 的每个主题声明为 `public static final` 常量。本示例包含 *3 个正向 (`DO`) 主题* 与 *2 个补偿 (`UNDO`) 主题*——注意 `DO_USER_VALIDATED` 为只读查询，因而没有补偿主题。每个主题指定其名称、唯一的 `float` 类型主题键（补偿主题为负数）、`SagaEventType` 以及目标服务。有关命名与主题键规则，请参阅 xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[主题规范]。
 
-NOTE: The custom topic class only *declares* topics according to the StackSaga-Kafka specification — it is plain Java, not a Spring bean, so do not annotate it with any Spring stereotype.
+NOTE: 自定义主题类仅根据 StackSaga-Kafka 规范*声明*主题元数据——它是纯 Java 类，而非 Spring Bean，因此无需添加任何 Spring 组件注解。
 
 [[creating-topics-event-manager]]
-==== Creating the Topic EventManager
+==== 创建主题 EventManager (Creating the Topic EventManager)
 
-To use the defined topics we have to create a custom event manager as per the Stacksaga specifications as below.
-This custom event manager creates a domain-topic for receiving the response from the target services. read more xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc[]
+要使用定义的主题，必须根据 StackSaga 规范创建自定义事件管理器 (EventManager)。该自定义事件管理器会声明用于接收来自目标服务响应结果的领域回调主题。xref:implementations:stacksaga-kafka-implementation/stacksaga-kafka-architecture.adoc[了解更多]
 
 [source,java]
 ----
@@ -340,39 +325,34 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 }
 ----
 
-<1> Create your custom event manager by extending the `AbstractEventManager<DE,T>` class. `DE` is the domain-entity and the `<T>` is the topic class that we created about.
+<1> 通过继承 `AbstractEventManager<DE,T>` 类创建自定义事件管理器。`DE` 为领域实体类型，`<T>` 为上文创建的主题类。
 
-<2> Annotate the class with `@SagaEventManager` and configure the required properties. +
-* `value` The name of the bean.
-* `listenerScope` The container scope for consuming the callback (reply) topic. Here it is `OrchestratorListenerScope.SHARED_GLOBAL`, so this event manager pools into the single global callback listener container shared by all default event managers instead of getting a dedicated one.
-* `groupType` The Kafka group protocol used by that container. Here it is `GroupType.SHARE` (the Kafka 4 share-group protocol / KIP-932, queue-style consumption); use `GroupType.CONSUMER` for the classic consumer-group protocol.
-* `domainCallbackTopicSuffix` Suffix for creating the domain's callback topic. +
-read more xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[]
+<2> 使用 `@SagaEventManager` 注解标记该类并配置必要属性： +
+* `value`：Bean 的名称。
+* `listenerScope`：消费回调（应答）主题的监听器容器作用域。此处为 `OrchestratorListenerScope.SHARED_GLOBAL`，表示该事件管理器共享由所有默认事件管理器共用的单个全局回调监听容器，而非创建专用容器。
+* `groupType`：该容器使用的 Kafka 消费协议。此处为 `GroupType.SHARE`（Kafka 4 共享消费组协议 / KIP-932，队列式消费）；使用 `GroupType.CONSUMER` 则对应经典的传统消费者组协议。
+* `domainCallbackTopicSuffix`：用于创建该领域专属回调主题的后缀。 +
+xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[了解更多] +
 +
-NOTE: Not shown here since `SHARED_GLOBAL` doesn't need it, but `SHARED_GROUP`/`ISOLATED` event managers also configure `autoStart` (whether the container starts automatically on application startup, default `true`) via the `sharedGroupExecutionListener`/`isolatedExecutionListener` attributes — see xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc#orchestrator_auto_start[].
+NOTE: 此处未展示，因为 `SHARED_GLOBAL` 不需要它，但 `SHARED_GROUP`/`ISOLATED` 事件管理器还可以通过 `sharedGroupExecutionListener`/`isolatedExecutionListener` 属性配置 `autoStart`（容器是否在应用启动时自动启动，默认 `true`）——参见 xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc#orchestrator_auto_start[]。
 
-<3> Override the `registerTopics` method to return the full list of topics this event manager uses (both `DO` and `UNDO`).
-This is where we register our topics with StackSaga, and it is called only once, when the application starts.
-<4> Override the `onNext` method to define the routing logic of the event manager. This method is invoked by the framework after each primary-execution topic (span/atomic execution) completes successfully until the end of the transaction (if it has not failed with `NonRetryableExecutorException`). You use the given parameters and the `actionUtil` helper to return the next navigation action (`actionUtil.next(...)`, `actionUtil.complete()`, or `actionUtil.error(...)`).
-<5> If the most recently completed topic is `DO_USER_VALIDATED`, route the engine to `DO_ORDER_RESERVED` next via `actionUtil.next(...)`.
-<6> If the most recently completed topic is `DO_ORDER_RESERVED`, route the engine to `DO_MAKE_PAYMENT` next via `actionUtil.next(...)`.
-<7> `DO_MAKE_PAYMENT` is the *last* span, so once it completes there is nothing more to route — return `actionUtil.complete()` to finish the saga successfully and move it to the terminal `COMPLETED` state. +
-IMPORTANT: Don't forget this branch.
-Without it, a *successful* payment would fall through to the `error(...)` below and the engine would wrongly start compensation.
-A saga always ends either with `complete()` here or with compensation triggered by a failure.
-<8> A defensive fall-through for an unexpected topic — with the routing above it should never be reached.
-Returning `actionUtil.error(...)` (or throwing any exception) from `onNext()` transitions the saga to `FAILED` and triggers compensation.
-See the xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc[EventManager reference] for the full `onNext()`/`onNextRevert()` contract.
+<3> 重写 `registerTopics` 方法，返回该事件管理器使用的完整主题列表（包含 `DO` 和 `UNDO`）。在此处向 StackSaga 注册所有主题，仅在应用启动时调用一次。
+<4> 重写 `onNext` 方法以定义事件管理器的路由调度逻辑。在每个正向执行主题（跨度/原子执行）成功完成后，框架会依次调用此方法直至事务结束（若未发生 `NonRetryableExecutorException` 失败）。使用传入的参数和 `actionUtil` 辅助工具返回下一步导航操作（`actionUtil.next(...)`、`actionUtil.complete()` 或 `actionUtil.error(...)`）。
+<5> 若最近完成的主题是 `DO_USER_VALIDATED`，通过 `actionUtil.next(...)` 将引擎路由至 `DO_ORDER_RESERVED`。
+<6> 若最近完成的主题是 `DO_ORDER_RESERVED`，通过 `actionUtil.next(...)` 将引擎路由至 `DO_MAKE_PAYMENT`。
+<7> `DO_MAKE_PAYMENT` 是*最后*一个跨度，因此一旦其完成，后续无需再路由任何步骤——返回 `actionUtil.complete()` 顺利完成 Saga 并将其置为终态 `COMPLETED`。 +
+IMPORTANT: 切勿遗漏此分支。若缺少该分支，*成功*的支付也会穿透到下方的 `error(...)`，导致引擎错误地触发补偿。Saga 总是以在此调用 `complete()` 成功结束，或者因故障触发补偿而终结。
+<8> 针对非预期主题的防御性兜底分支——在上述路由逻辑下永远不应被触发。从 `onNext()` 返回 `actionUtil.error(...)`（或抛出任何异常）会将 Saga 置为 `FAILED` 并触发逆向补偿。有关完整的 `onNext()`/`onNextRevert()` 契约，请参阅 xref:implementations:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc[EventManager 参考]。
 
 [[create-handler]]
-==== Creating the Handler
+==== 创建事件处理器 (Creating the Handler)
 
-Following the xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#recommended-handler-pattern[recommended handler pattern] from the StackSaga team, a *Handler* is the single class responsible for starting the saga, checking its state, and xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[receiving the transaction events] the engine emits during the flow.
-In this quick example we keep the handler minimal and use it only to receive transaction state-change events; in a real application it is also the natural place to host the `StackSagaKafkaTemplate` call that starts the saga.
+遵循 StackSaga 团队的 xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#recommended-handler-pattern[推荐 Handler 模式]，*处理器 (Handler)* 是负责启动 Saga、查询其状态以及xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[接收执行期间引擎分发的事务事件]的单一职责类。
+在本快速示例中，我们保持 Handler 最小化，仅用于接收事务状态变更事件；在实际应用中，它也是承载调用 `StackSagaKafkaTemplate` 发起 Saga 的理想场所。
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @Component//<1>
 public class PlaceOrderHandler implements KafkaTransactionEventListener<OrderDomainEntity> {//<2>
     @Override//<3>
@@ -382,21 +362,19 @@ public class PlaceOrderHandler implements KafkaTransactionEventListener<OrderDom
 }
 ----
 
-<1> Annotate the class with `@Component` to make it a Spring bean, so that it can be automatically detected and registered by the Spring container.
+<1> 为类添加 `@Component` 注解，声明为 Spring Bean，以便 Spring 容器自动检测并注册。
 
-<2> The `PlaceOrderHandler` class implements the `KafkaTransactionEventListener` interface, which lets it react to the transaction events the StackSaga engine emits during the flow. xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[read more] +
-NOTE: The listener comes in a blocking and a non-blocking flavour — use `KafkaTransactionEventListener` in a servlet (MVC) application and `ReactiveKafkaTransactionEventListener` in a reactive (WebFlux) application.
-See xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[Transaction State Change Listeners] for both.
+<2> `PlaceOrderHandler` 类实现了 `KafkaTransactionEventListener` 接口，用于监听事务执行流中由 StackSaga 引擎发出的状态变更事件。xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[了解更多] +
+NOTE: 监听器提供了阻塞与非阻塞版本——在 Servlet (MVC) 应用中使用 `KafkaTransactionEventListener`，在响应式 (WebFlux) 应用中使用 `ReactiveKafkaTransactionEventListener`。详情参阅 xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#event_listener_for_stage_change_events[事务状态变更监听器]。
 
-<3> The `onStateChanged` method is overridden to handle the transaction state changes. it receives the current state of the transaction as a parameter, which includes information such as the current status of the transaction, the execution history, the current domain entity state, and the timestamps. in this example, we simply log the current status of the transaction whenever it changes. you can implement any logic you need in this method based on your use case, such as sending notifications to users about the transaction status changes or updating other systems based on the transaction events.
+<3> 重写 `onStateChanged` 方法处理事务状态变更。它接收事务的当前状态作为参数，其中包含当前事务状态、执行历史、当前领域实体快照以及各阶段时间戳。本示例中仅在状态发生变化时打印日志。您可以根据实际业务场景扩展此方法，例如向用户推送通知或触发下游系统同步。
 
 [[creating-controller]]
-==== Creating the Controller to trigger the transaction accessing `StackSagaKafkaTemplate`
+==== 创建控制器以访问 `StackSagaKafkaTemplate` 触发事务 (Creating the Controller to trigger the transaction accessing StackSagaKafkaTemplate)
 
-Here we create a simple REST controller with an endpoint that triggers the saga by accessing the `StackSagaKafkaTemplate` — the main API for interacting with the StackSaga-Kafka engine. xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#stacksaga-kafka-template-usage[read more]
+在此我们创建一个简单的 REST 控制器，通过暴露端点注入并调用 `StackSagaKafkaTemplate`（与 StackSaga-Kafka 引擎交互的核心 API）来启动 Saga。xref:implementations:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc#stacksaga-kafka-template-usage[了解更多]
 
-It is an ordinary Spring REST controller with a POST endpoint to place an order.
-Inside the endpoint we use the `StackSagaKafkaTemplate` to start the flow — providing the initial domain-entity state and specifying the first topic together with its `EventManager`.
+这是一个普通的 Spring REST 控制器，包含一个用于下单的 POST 端点。在端点内部，我们使用 `StackSagaKafkaTemplate` 启动流程——提供初始领域实体状态，并指定首个主题及其所属的 `EventManager`。
 
 [source,java]
 ----
@@ -444,28 +422,26 @@ public class PlaceOrderController {
 }
 ----
 
-<1> Autowire the `StackSagaKafkaTemplate<DE, T>`, the main API for interacting with the StackSaga-Kafka engine.
-It exposes a fluent API to define and start a transaction.
-The two type parameters are the domain entity `DE` (`OrderDomainEntity`) and the topic class `T` (`PlaceOrderTopic`) — the same pair that parameterises the `EventManager`.
+<1> 自动装配 `StackSagaKafkaTemplate<DE, T>`，这是与 StackSaga-Kafka 引擎交互的核心 API。
+它提供了流畅的链式调用 API 来定义和启动事务。
+两个类型参数分别为领域实体 `DE` (`OrderDomainEntity`) 与主题类 `T` (`PlaceOrderTopic`)——与参数化 `EventManager` 的类型对完全一致。
 
-<2> The `init` method is called to initialize the transaction flow with the initial state of the domain entity. it takes a supplier function that returns the initial domain entity state, which is created based on the request data in this example.
+<2> 调用 `init` 方法，使用领域实体的初始状态初始化事务流程。它接收一个返回初始领域实体状态的 Supplier 函数，在本示例中根据请求体数据进行构建。
 
-<3> The `peek` method is an optional step that allows you to perform some local operations with the domain entity before the saga process starts. it also provides access to the unique transaction id generated by the engine, which can be useful for logging or tracking purposes.
+<3> `peek` 方法是一个可选步骤，允许您在 Saga 流程正式启动前对领域实体执行本地准备工作。同时也可以在此访问由引擎生成的全局唯一事务 ID，便于日志记录与链路追踪。
 
-<4> The `startWith` method specifies two things: the *first topic* to dispatch (`PlaceOrderTopic.DO_USER_VALIDATED`) and the `EventManager` class that owns the routing for this saga domain (`PlaceOrderEventManager`).
-From this point on, the `EventManager.onNext(...)` logic drives the rest of the flow topic by topic.
+<4> `startWith` 方法指定两项内容：首个分发的主题 (`PlaceOrderTopic.DO_USER_VALIDATED`) 以及负责该 Saga 领域路由调度的 `EventManager` 类 (`PlaceOrderEventManager`)。从此时起，`EventManager.onNext(...)` 逻辑将逐个主题驱动后续流程。
 
-<5> The `execute` method is called to execute the transaction flow with the defined configuration. it returns the unique transaction id generated by the engine for this transaction, which can be used for tracking and logging purposes.
+<5> 调用 `execute` 方法以既定配置启动事务流程。它返回由引擎为该事务生成的唯一事务 ID，可用于后续的追踪与状态查询。
 
-<6> The endpoint returns a response indicating that the order was placed successfully along with the transaction id.
+<6> 端点返回响应，包含下单成功的提示信息与该事务的唯一 ID。
 
-<7> The `PlaceOrderRequest` is a simple DTO class to represent the request body for placing an order, it contains the necessary fields such as `username`, `totalAmount`, and `items` to create the initial domain entity state for the transaction flow.
-It is not recommended to use the domain-entity class as the request body directly to avoid coupling the API layer with the domain layer, and to have better control over the API contract.
+<7> `PlaceOrderRequest` 是一个简单的 DTO 类，用于承载下单请求体，包含构建初始领域实体所需的 `username`、`totalAmount` 和 `items` 字段。不建议直接将领域实体类暴露为 HTTP 请求体，以避免 API 协议层与内部领域层产生强耦合，并确保 API 契约的清晰稳定。
 
 [[tuning-configuration]]
-==== Tune Configuration
+==== 调整配置 (Tune Configuration)
 
-To run the application, you need to configure the following properties in your `application.properties` or `application.yml` file.
+要运行该应用，请在 `application.properties` 或 `application.yml` 文件中配置以下属性。
 
 [source,properties]
 ----
@@ -490,25 +466,24 @@ stacksaga.mysql.jdbc.password=${MYSQL_PASSWORD:password}
 spring.kafka.bootstrap-servers=${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
 ----
 
-<1> The `stacksaga.instance` properties are used to configure the instance information for the StackSaga engine, such as the cluster, region, and zone. These properties are used to identify transactions for retry and re-storing purposes in distributed environments. Note that if you specify a custom region other than `default`, you must declare a custom xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring bean. In this example, `local-cluster`, `local-region`, and `local-zone` are used for demonstration.
+<1> `stacksaga.instance` 属性用于配置 StackSaga 引擎的实例拓扑信息，例如集群 (cluster)、区域 (region) 与可用区 (zone)。这些属性用于在分布式环境中精准标识事务，以便进行故障重试与宕机恢复。请注意，如果您指定了除 `default` 之外的自定义 region，则必须声明自定义 xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring Bean。在此示例中配置为 `local-cluster`、`local-region` 和 `local-zone` 仅供演示。
 
-<2> The `stacksaga.kafka.orchestrator.domain-entity-scan` property is used to specify the package where the domain entity classes are located. the StackSaga engine will scan this package to find the domain entity classes and register them for use in the transaction flow. it can be provided as a comma-separated list of packages if you have multiple packages containing domain entity classes.
+<2> `stacksaga.kafka.orchestrator.domain-entity-scan` 属性用于指定领域实体类所在的包路径。StackSaga 引擎将扫描该包并注册其中的领域实体类供事务流程使用。如果领域实体分布在多个包中，可以通过逗号分隔列出。
 
-<3> The `stacksaga.mysql.r2dbc` properties are used to configure the R2DBC connection for the StackSaga engine to connect to the MySQL database as the event-store. you need to provide the URL, database name, username, and password for the MySQL connection. the event-store should be a separate database schema dedicated for storing the transaction events and data, it should not be the same database schema used by your application for its regular data storage to avoid any potential conflicts and to have better separation of concerns.
+<3> `stacksaga.mysql.r2dbc` 属性配置 R2DBC 连接，供 StackSaga 引擎连接 MySQL 事件存储数据库。提供连接 URL、数据库名称、用户名和密码。事件存储应为专用于存储事务事件和状态的独立 Schema，避免与业务表混用以获得良好的关注点分离。
 
-<4> The `stacksaga.mysql.jdbc` properties are used to configure the JDBC connection.
-JDBC connection is used by internally Liquibase to database migration and schema creation.
+<4> `stacksaga.mysql.jdbc` 属性用于配置 JDBC 连接。内部由 Liquibase 使用该连接执行数据库版本迁移与 Schema 表结构初始化。
 
-<5> Configure Kafka connection details
+<5> 配置 Kafka 连接信息。
 
 [[configuring-user-service]]
-=== Configuring User-Service As Worker
+=== 配置用户服务作为工作节点 (Configuring User-Service As Worker)
 
-The next part is adding the StackSaga Kafka features to the target utility services. let's update the user-service.
-Add the following dependencies to your user-service.
+接下来是将 StackSaga Kafka 功能引入目标支撑服务。让我们对 user-service 进行配置。
+向 user-service 添加以下依赖项：
 
 [[configuring-user-service-dependencies]]
-==== Dependency Management
+==== 依赖管理 (Dependency Management)
 
 [source,xml,subs="attributes+"]
 ----
@@ -529,10 +504,10 @@ Add the following dependencies to your user-service.
 </dependency>
 ----
 
-Next, create the custom `UserValidationEndpoint` class that handles the _Validate User_ span on the worker side.
+接下来，创建自定义 `UserValidationEndpoint` 类，在工作节点端处理“验证用户”跨度。
 
 [[configuring-user-service-implementation]]
-==== Custom UserValidationEndpoint
+==== 自定义 UserValidationEndpoint
 
 [source,java]
 ----
@@ -562,19 +537,18 @@ public class UserValidationEndpoint extends QueryEndpoint { //<1>
 }
 ----
 
-<1> Create the custom `UserValidationEndpoint` by extending from `QueryEndpoint` abstract class.
-<2> Mark the @SagaEndpoint annotation to the class and configure the required properties. +
-* `topicNameSuffix`: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.validate-user` becomes the real topic `saga.user-service.validate-user` (if your suffix already starts with `saga.`, it is kept as-is). this is the topic the `EventManager` sends command messages to, to trigger the execution of this endpoint.
-* `listenerScope`: the container scope for consuming this endpoint's topic(s). `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container shared by all default endpoints instead of creating a dedicated one.
-* `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932, queue-style consumption); use `GroupType.CONSUMER` for the classic consumer-group protocol.
-* `autoStart`: not shown here since it defaults to `true`; controls whether this endpoint's listener container starts automatically on application startup. Every `@SagaEndpoint` sharing a `SHARED_GROUP` `containerId` must declare the *same* `autoStart`, or startup fails with a `ValidationException` — see xref:implementations:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_auto_start[].
-<3> Override `doProcess` to implement your user-validation logic.
-The `consumerRecord` carries everything about the transaction — the current domain-entity state, transaction id, idempotency key, and xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[much more].
+<1> 继承 `QueryEndpoint` 抽象类创建自定义 `UserValidationEndpoint`。
+<2> 为类添加 `@SagaEndpoint` 注解并配置必要属性： +
+* `topicNameSuffix`：提供该端点监听的主题名称后缀。框架会自动添加 `saga.` 前缀构建实际的主题名称——因此 `user-service.validate-user` 会对应真实主题 `saga.user-service.validate-user`（若您的后缀已包含 `saga.`，则保持原样）。这是 `EventManager` 发送命令消息以触发该端点执行的目标主题。
+* `listenerScope`：消费该端点主题的监听器容器作用域。此处使用 `WorkerListenerScope.SHARED_GLOBAL`，表示该端点共享由所有默认端点共用的单个全局监听器容器，而非创建专用容器。
+* `groupType`：该容器使用的 Kafka 组协议。此处为 `GroupType.SHARE`（Kafka 4 共享消费组协议 / KIP-932，队列式消费）；使用 `GroupType.CONSUMER` 则对应经典的传统消费者组协议。
+* `autoStart`：此处未展示，默认值为 `true`；控制该端点的监听容器是否在应用启动时自动启动。所有共享同一个 `SHARED_GROUP` `containerId` 的 `@SagaEndpoint` 必须声明*完全相同*的 `autoStart`，否则启动将失败并抛出 `ValidationException`——参见 xref:implementations:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_auto_start[]。
+<3> 重写 `doProcess` 方法实现用户校验逻辑。`consumerRecord` 携带了与该事务相关的全部上下文——当前领域实体状态、事务 ID、幂等键以及 xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[更多详细信息]。
 
-Read more about xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[more details]
+有关更多详细信息，请参阅 xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[工作节点端点说明]。
 
 [[configuring-user-service-configuration]]
-==== Configuration Properties
+==== 配置属性 (Configuration Properties)
 
 [source,properties]
 ----
@@ -587,22 +561,19 @@ stacksaga.instance.region=local-region
 stacksaga.instance.zone=local-zone
 ----
 
-<1> The worker connects to the *same* Kafka cluster as the orchestrator — that broker is how it receives commands and returns replies.
-A worker needs no database or event-store configuration; it is stateless with respect to the saga.
-<2> Declare the StackSaga instance coordinates.
-Every saga participant — orchestrator or worker — must share the same cluster / region / zone so the engine can correlate them.
+<1> 工作节点连接至与编排器*相同*的 Kafka 集群——该 Broker 是其接收命令与回发应答的唯一通道。工作节点无需配置数据库或事件存储；它相对于 Saga 是无状态的。
+<2> 声明 StackSaga 实例坐标。所有 Saga 参与方——无论是编排器还是工作节点——都必须共享相同的 cluster / region / zone，以便引擎能够正确关联它们。
 
 [[configuring-order-service]]
-=== Configuring Order-Service As a Worker
+=== 配置订单服务作为工作节点 (Configuring Order-Service As a Worker)
 
-The _Reserve Order_ span runs inside `order-service` itself — the very application that also acts as the orchestrator.
-So `order-service` is *both* the orchestrator *and* a worker for this saga.
+“预留订单”跨度在 `order-service` 自身内部执行——即同时承担编排器角色的同一个应用程序。
+因此，`order-service` 在此 Saga 中*既是*编排器，*又是*工作节点。
 
-There is nothing to add to its `pom.xml`: the `stacksaga-kafka-orchestrator-spring-boot-starter` added earlier already pulls in the worker capability transitively.
-We only need to create the endpoint that reserves the ordered items.
+其 `pom.xml` 中无需追加任何依赖：先前添加的 `stacksaga-kafka-orchestrator-spring-boot-starter` 已经通过传递依赖引入了完整的 Worker 功能。我们只需创建负责预留已购商品的端点类即可。
 
 [[configuring-order-service-implementation]]
-==== Custom ReserverOrderEndpoint
+==== 自定义 ReserverOrderEndpoint
 
 [source,java]
 ----
@@ -660,38 +631,31 @@ public class ReserverOrderEndpoint extends CommandEndpoint { //<1>
 }
 ----
 
-<1> Reserving an order is a state-changing action, so the endpoint extends the `CommandEndpoint` abstract class — which requires both a `doProcess` (forward) and an `undoProcess` (compensation) implementation.
-<2> Mark the class with `@SagaEndpoint` and configure its properties: +
-* `topicNameSuffix`: the suffix of the topic this endpoint listens on.
-The framework prefixes it to build the real topic name — here `order-service.reserve-order` becomes `saga.order-service.reserve-order` (the `saga.` prefix is added only if you don't already include it).
-This is the topic the `EventManager` dispatches the `DO_ORDER_RESERVED` command to.
-* `listenerScope`: the container scope used to consume this endpoint's `do`/`undo` topics. `WorkerListenerScope.SHARED_GLOBAL` (used here) pools the endpoint into the single global listener container instead of creating a dedicated one.
-* `groupType`: the Kafka group protocol for that container. `GroupType.SHARE` (used here) is the Kafka 4 share-group protocol (KIP-932); use `GroupType.CONSUMER` for the classic consumer-group protocol.
-* `autoStart`: not shown here since it defaults to `true`; controls whether this endpoint's listener container starts automatically on application startup — see xref:implementations:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_auto_start[].
-<3> Override `doProcess` to implement the forward reserve-order logic.
-The `consumerRecord` carries everything about the transaction — the current domain-entity state, transaction id, idempotency key, and xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[much more].
-<4> Override `undoProcess` to implement the *compensation* logic that releases the reservation.
-It exposes the last domain-entity state and the primary-execution exception that triggered the rollback, plus xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#non-reactive-command-endpoint[much more].
-<5> The `undoProcess` method also exposes the `HintStore` — a key-value scratchpad for the compensation process.
-Use it to carry flags or metadata between compensation steps (for example, recording that the reservation was successfully undone).
+<1> 预留订单属于状态变更操作，因此端点继承 `CommandEndpoint` 抽象类——要求同时提供正向业务 (`doProcess`) 与逆向补偿 (`undoProcess`) 实现。
+<2> 使用 `@SagaEndpoint` 标记该类并配置其属性： +
+* `topicNameSuffix`：该端点监听的主题后缀。框架添加前缀构建实际主题名——此处 `order-service.reserve-order` 变为 `saga.order-service.reserve-order`（仅在未包含 `saga.` 时添加）。这是 `EventManager` 分发 `DO_ORDER_RESERVED` 命令的目标主题。
+* `listenerScope`：用于消费该端点 `do`/`undo` 主题的容器作用域。此处使用 `WorkerListenerScope.SHARED_GLOBAL`，表示该端点共享全局监听器容器，而非创建专用容器。
+* `groupType`：该容器的 Kafka 消费协议。此处使用 `GroupType.SHARE`（Kafka 4 共享消费组协议 / KIP-932）；使用 `GroupType.CONSUMER` 对应传统消费者组协议。
+* `autoStart`：此处未展示，默认值为 `true`；控制该端点的监听容器是否在应用启动时自动启动——参见 xref:implementations:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_auto_start[]。
+<3> 重写 `doProcess` 方法实现正向订单预留逻辑。`consumerRecord` 携带了事务的全部信息——当前领域实体状态、事务 ID、幂等键以及 xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[更多信息]。
+<4> 重写 `undoProcess` 方法实现释放订单预留的*补偿*逻辑。它能够获取领域实体最终状态以及引发回滚的原始异常，详见 xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#non-reactive-command-endpoint[更多信息]。
+<5> `undoProcess` 方法还提供了 `HintStore`——用于补偿流程的键值暂存区。可使用它在各个补偿步骤之间传递标志或元数据（例如记录预留已成功回滚）。
 
-Read more about xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#non-reactive-command-endpoint[more details]
+有关更多细节，请参阅 xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#non-reactive-command-endpoint[工作节点端点说明]。
 
 [[configuring-order-service-configuration]]
-==== Configuration Properties
+==== 配置属性 (Configuration Properties)
 
-No additional configuration is required here.
-Because the worker role runs inside the *same* `order-service` application that drives the saga, it already has everything it needs — the instance properties, the event store, and the Kafka connection were all set earlier in xref:#tuning-configuration[Tune Configuration].
+此处无需追加额外配置。因为 Worker 角色直接运行在驱动 Saga 的*同一个* `order-service` 应用程序内部，之前在 xref:#tuning-configuration[调整配置] 中已经设置好了实例属性、事件存储与 Kafka 连接。
 
 [[configuring-payment-service]]
-=== Configuring Payment-Service As a Worker
+=== 配置支付服务作为工作节点 (Configuring Payment-Service As a Worker)
 
-Just as we did for the xref:#configuring-user-service[user-service], we configure the payment-service as a worker.
-Because it is a standalone service (not the orchestrator), it needs the worker starter added explicitly.
-Add the following dependencies to your payment-service.
+正如我们对 xref:#configuring-user-service[user-service] 所做的那样，我们将 payment-service 配置为工作节点。因为它是独立的服务（非编排器），所以需要显式添加 worker starter 依赖。
+向 payment-service 添加以下依赖：
 
 [[configuring-payment-service-dependencies]]
-==== Dependency Management
+==== 依赖管理 (Dependency Management)
 
 [source,xml,subs="attributes+"]
 ----
@@ -712,16 +676,16 @@ Add the following dependencies to your payment-service.
 </dependency>
 ----
 
-The next step is creating the custom `MakePaymentEndpoint` class to handle the _Make Payment_ span.
-Because making a payment is a state-changing (command) action, it extends the `CommandEndpoint` abstract class so it can provide both a forward action (`doProcess`) and a compensation action (`undoProcess`).
-To make the compensation flow observable, this endpoint deliberately *fails the payment at random* by throwing a `NonRetryableExecutorException` — exactly the kind of permanent business failure (for example, "insufficient balance") that should trigger a rollback rather than a retry.
+下一步是创建自定义 `MakePaymentEndpoint` 类来处理“执行支付”跨度。
+由于执行支付是状态变更（命令）操作，因此它继承 `CommandEndpoint` 抽象类，提供正向操作 (`doProcess`) 与逆向补偿操作 (`undoProcess`)。
+为了直观验证补偿流程，该端点故意通过抛出 `NonRetryableExecutorException` *随机模拟支付失败*——这正是应当直接触发回滚而非重试的永久性业务故障（例如“余额不足”）。
 
 [[configuring-payment-service-implementation]]
-==== Custom MakePaymentEndpoint
+==== 自定义 MakePaymentEndpoint
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @SagaEndpoint(topicNameSuffix = "payment-service.make-payment", listenerScope = WorkerListenerScope.SHARED_GLOBAL, groupType = GroupType.SHARE)
 public class MakePaymentEndpoint extends CommandEndpoint {
     @Override
@@ -775,15 +739,12 @@ public class MakePaymentEndpoint extends CommandEndpoint {
 }
 ----
 
-NOTE: The framework decides what to do based on the *type* of exception you throw.
-A `NonRetryableExecutorException` (used here) signals a *permanent* business failure and starts compensation immediately.
-For *transient* failures (timeouts, a broker blip), throw `JustRetryableExecutorException` / `RetryableExecutorException` instead, so the framework retries the span rather than rolling the saga back.
-See the xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#exception-handling-reference[Exception Handling Reference].
+NOTE: 框架根据抛出的*异常类型*决定后续行为。`NonRetryableExecutorException`（此处使用）表示*永久性*业务故障并立即启动逆向补偿。对于*瞬态*故障（超时、网络抖动），应抛出 `JustRetryableExecutorException` / `RetryableExecutorException`，以便框架重试该跨度而非回滚整个 Saga。参见 xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#exception-handling-reference[异常处理参考]。
 
-Read more about xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#non-reactive-command-endpoint[more details]
+有关更多详细信息，请参阅 xref:implementations:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#non-reactive-command-endpoint[工作节点端点说明]。
 
 [[configuring-payment-service-configuration]]
-==== Configuration Properties
+==== 配置属性 (Configuration Properties)
 
 [source,properties]
 ----
@@ -796,18 +757,15 @@ stacksaga.instance.region=local-region
 stacksaga.instance.zone=local-zone
 ----
 
-<1> The worker connects to the *same* Kafka cluster as the orchestrator — that broker is how it receives commands and returns replies.
-A worker needs no database or event-store configuration; it is stateless with respect to the saga.
-<2> Declare the StackSaga instance coordinates.
-Every saga participant — orchestrator or worker — must share the same cluster / region / zone so the engine can correlate them.
+<1> 工作节点连接至与编排器*相同*的 Kafka 集群——该 Broker 是其接收命令与回发应答的唯一通道。工作节点无需配置数据库或事件存储；它相对于 Saga 是无状态的。
+<2> 声明 StackSaga 实例坐标。所有 Saga 参与方——无论是编排器还是工作节点——都必须共享相同的 cluster / region / zone，以便引擎能够正确关联它们。
 
 [[running-application]]
-=== Running the Application and Testing the Transaction Flow
+=== 运行应用并测试事务流程 (Running the Application and Testing the Transaction Flow)
 
-Start all three services — *order-service*, *user-service*, and *payment-service* — with your Kafka broker and MySQL up.
-On first start-up the event-store schema is created (via Liquibase). The required Kafka topics must already exist — either created by the broker's auto-create behavior (`auto.create.topics.enable=true`) or provisioned ahead of time.
+在 Kafka Broker 和 MySQL 正常运行的前提下，启动所有三个服务——*order-service*、*user-service* 和 *payment-service*。在首次启动时，事件存储数据库 Schema 会被自动创建（通过 Liquibase）。所需的 Kafka 主题必须已存在——可以通过 Broker 的自动建主题行为 (`auto.create.topics.enable=true`) 创建，或者提前预先创建好。
 
-Trigger the saga with a `POST` request to the order-service's `/api/v1/order` endpoint:
+向 order-service 的 `/api/v1/order` 端点发送 `POST` 请求触发 Saga 流程：
 
 [source,bash]
 ----
@@ -820,10 +778,9 @@ curl -X POST http://localhost:8080/api/v1/order \
       }'
 ----
 
-Because `MakePaymentEndpoint` fails at random, repeat the request a few times to observe *both* outcomes.
-The `PlaceOrderHandler.onStateChanged(...)` callback logs every transition, so you can follow the saga in the *order-service* console.
+由于 `MakePaymentEndpoint` 会随机模拟失败，请重复发起数次请求以观察*两种*执行结果。`PlaceOrderHandler.onStateChanged(...)` 回调会打印每一次状态流转，您可以在 *order-service* 控制台中完整追踪 Saga 轨迹。
 
-* *Happy path* (payment succeeds) — the saga runs to completion:
+* *正常流程 (Happy Path)*（支付成功）—— Saga 顺利执行至终态：
 
 [source,bash]
 ----
@@ -833,7 +790,7 @@ The `PlaceOrderHandler.onStateChanged(...)` callback logs every transition, so y
 2026-06-21T23:57:42.527+05:30  INFO 19868 --- [order-service] [oundedElastic-3] o.e.o.handler.PlaceOrderHandler          : onStateChanged : PROCESS_COMPLETED
 ----
 
-* *Compensation path* (payment fails) — the engine reverts the previously reserved order, ending in `REVERT_COMPLETED`:
+* *补偿流程 (Compensation Path)*（支付失败）—— 引擎自动逆向回滚此前已完成的命令跨度 (`UNDO_ORDER_RESERVED`)，最终以 `REVERT_COMPLETED` 结束：
 
 [source,bash]
 ----

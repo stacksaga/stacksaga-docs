@@ -1,89 +1,89 @@
-:description: A step-by-step quick example that builds a complete order-placement saga on StackSaga's synchronous (blocking) orchestration engine with MySQL as the event store — progressing from a minimal happy-path implementation to retry and observability.
-:keywords: StackSaga, quick example, saga orchestration, synchronous, MySQL event store, orchestrator, executor, compensation, retry, trace window
+:description: 一个循序渐进的快速入门示例，演示如何在 StackSaga 同步（阻塞）编排引擎上构建完整的订单提交流程（以 MySQL 作为事件存储）——从最小可用 Happy-Path 实现，逐步进阶到故障补偿、重试机制与可观测性。
+:keywords: StackSaga, 快速入门示例, saga 编排, 同步编排, MySQL 事件存储, 编排器, 执行器, 补偿, 重试, 链路追踪窗口
 
-= Quick Example: StackSaga:Synchronous:MySQL
+= 快速入门示例：StackSaga:Synchronous:MySQL
 
-This quick example walks you through building a complete *order-placement* saga on StackSaga's *synchronous* (blocking) orchestration engine, using *MySQL* as the event store.
-We start with a minimal happy-path implementation and then incrementally layer on compensation, retrying, and observability.
+本快速入门示例将引导您在 StackSaga *同步*（阻塞式）编排引擎上构建一个完整的*下单 (order-placement)* Saga，并使用 *MySQL* 作为事件存储 (Event Store)。
+我们将从最小可用的正常流程 (Happy Path) 实现入手，随后逐步叠加补偿 (Compensation)、重试 (Retry) 以及可观测性 (Observability) 能力。
 
-In the synchronous model, a single *orchestrator service* runs the whole saga in-process — each executor calls its target service inline (HTTP, gRPC, or a local call) and blocks until it returns. This keeps the moving parts to a minimum. If you instead need fully event-driven, non-blocking execution over Kafka, see the xref:stacksaga-kafka-impl-examples/mysql/stacksaga-asynchronous-impl-mysql-quick-example.adoc[asynchronous (Kafka) quick example].
+在同步模型中，单个*编排器服务 (Orchestrator Service)* 在进程内运行整个 Saga 流程——每个执行器依次内联调用其目标服务（通过 HTTP、gRPC 或本地调用）并阻塞等待返回。这最大限度减少了系统活动组件。如果您需要基于 Kafka 的完全事件驱动、非阻塞式执行，请参阅 xref:stacksaga-kafka-impl-examples/mysql/stacksaga-asynchronous-impl-mysql-quick-example.adoc[异步 (Kafka) 快速入门示例]。
 
-== Overview
+== 概述 (Overview)
 
-The scenario we orchestrate is a simple *place-order* operation, modelled as a single long-running transaction (LRT) composed of three atomic steps (*executors*):
+我们编排的业务场景是一个简化的*下单 (place-order)* 操作，建模为由三个原子步骤（*执行器 (Executors)*）组成的单个长事务 (Long-Running Transaction, LRT)：
 
 [cols="1,2,2,3",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| # | Step (Executor) | Type | Compensation (`doRevert`)
+| # | 步骤 (执行器) | 类型 | 补偿 (`doRevert`)
 
 | 1
-| *Validate User* (`ValidateUserExecutor`)
-| Query (read-only)
-| — _(queries are never compensated)_
+| *验证用户* (`ValidateUserExecutor`)
+| 查询 (Query / 只读)
+| — _(查询操作从不补偿)_
 
 | 2
-| *Reserve Order* (`ReserveOrderExecutor`)
-| Command (state-changing)
-| Releases the reserved order
+| *预留订单* (`ReserveOrderExecutor`)
+| 命令 (Command / 状态变更)
+| 释放已预留的订单
 
 | 3
-| *Make Payment* (`MakePaymentExecutor`)
-| Command (state-changing)
-| — _(last step; nothing runs after it to trigger its revert)_
+| *执行支付* (`MakePaymentExecutor`)
+| 命令 (Command / 状态变更)
+| — _(最后一步；其后无后续步骤触发回滚)_
 |===
 
-If any step fails, StackSaga automatically *compensates* the previously completed *command* steps in reverse order — for example, releasing the reserved order when the payment fails — so the system is always left in a consistent state.
+如果任何步骤失败，StackSaga 会自动按倒序*补偿 (Compensate)* 此前已成功执行的*命令*步骤——例如在支付失败时释放已预留的订单——从而确保系统最终始终处于一致状态。
 
 [NOTE]
-.Architecture Reminder: Continuous vs. Pausable LRT
+.架构提醒：连续型长事务 vs. 可暂停长事务
 ====
-This quick example demonstrates a xref:implementations:stacksaga-sync/index.adoc#continuous-lrt[*Continuous Long-Running Transaction (Continuous LRT)*], where execution proceeds sequentially across microservices without stopping.
+本快速示例演示了 xref:implementations:stacksaga-sync/index.adoc#continuous-lrt[*连续型长事务 (Continuous Long-Running Transaction, Continuous LRT)*]，其中跨微服务的执行按顺序连续推进且不中断挂起。
 
-If your real-world business requirements involve **asynchronous callbacks, external payment webhooks, or Human-in-the-Loop (HITL) manual approvals** (e.g., waiting for a restaurant order confirmation or manager sign-off), StackSaga also natively supports xref:implementations:stacksaga-sync/index.adoc#pausable-lrt[*Pausable Long-Running Transactions (Pausable LRT)*].
-In those scenarios, executors call xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] to release compute threads until resumed via xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(...)`].
+如果您的实际业务场景涉及**异步回调、外部支付 Webhook 或人工介入 (Human-in-the-Loop, HITL) 审核**（例如等待餐厅接单确认或经理审批），StackSaga 还原生支持 xref:implementations:stacksaga-sync/index.adoc#pausable-lrt[*可暂停长事务 (Pausable Long-Running Transaction, Pausable LRT)*]。
+在这些场景中，执行器可调用 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] 挂起并释放计算线程，直至通过 xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(...)`] 恢复执行。
 ====
 
-We build this up across three progressive stages:
+我们将分三个渐进阶段进行构建：
 
-. xref:#stage-1[Stage-1 — Minimal Implementation]: create the domain-entity, the three executors, the event handler, and a REST controller to trigger the happy path together with compensation.
-. xref:#stage-2[Stage-2 — Adding Retry Capability]: make the flow resilient to transient failures by adding the Ring Coordinator application and the retry subsystem.
-. xref:#stage-3[Stage-3 — Observability]: connect the StackSaga Trace Window to visualize and monitor your transactions in real time.
+. xref:#stage-1[阶段一 —— 最小实现 (Stage-1 · Minimal Implementation)]：创建领域实体、三个执行器、事件处理器以及触发 Happy-Path 与补偿的 REST 控制器。
+. xref:#stage-2[阶段二 —— 添加重试能力 (Stage-2 · Adding Retry Capability)]：引入环形协调器 (Ring Coordinator) 应用与重试子系统，使流程能够应对瞬态故障。
+. xref:#stage-3[阶段三 —— 可观测性 (Stage-3 · Observability)]：接入 StackSaga 链路追踪窗口 (Trace Window)，实时可视化与监控事务。
 
 [[stage-1]]
-== Stage-1 [Minimal Implementation]
+== 阶段一 [最小实现] (Stage-1 [Minimal Implementation])
 
-Stage-1 builds a minimal but complete saga — the domain entity, three executors (with compensation), an event handler, and a REST controller — all backed by MySQL as the event store. We will build it in the following order:
+阶段一构建一个最小但完整的 Saga 流程——领域实体、三个执行器（包含补偿逻辑）、事件处理器以及 REST 控制器——全部以 MySQL 作为事件存储。我们将按以下顺序实现：
 
-. xref:#prerequisites[]
-. xref:#getting-started[]
-. xref:#creating-domain-entity[]
-. xref:#creating-executors[]
-. xref:#create-handler[]
-. xref:#creating-controller[]
-. xref:#tuning-configuration[]
-. xref:#running-application[]
+. xref:#prerequisites[前置准备]
+. xref:#getting-started[起步 - 初始项目搭建]
+. xref:#creating-domain-entity[创建领域实体]
+. xref:#creating-executors[创建执行器]
+. xref:#create-handler[创建事件处理器]
+. xref:#creating-controller[创建控制器以访问 SagaTemplate 触发事务]
+. xref:#tuning-configuration[调整配置]
+. xref:#running-application[运行应用并测试事务流程]
 
 [[prerequisites]]
-=== Prerequisites
+=== 前置准备 (Prerequisites)
 
-Make sure you have the following installed and running before getting started:
+在开始之前，请确保已安装并运行以下组件：
 
 . Java 21+
 . Spring Boot 4.x
-. MySQL 8+ — used by the orchestrator as the event store.
+. MySQL 8+ —— 由编排器用作事件存储 (Event Store)。
 . Maven
 
-TIP: The quickest way to get a local database up is Docker — e.g. a `mysql:8` container. Unlike the asynchronous (Kafka) example, the synchronous engine needs no message broker.
+TIP: 启动本地数据库最便捷的方式是 Docker——例如 `mysql:8` 容器。与异步 (Kafka) 示例不同，同步引擎不需要任何消息代理。
 
 [[getting-started]]
-=== Getting Started - Initial project setup
+=== 起步 - 初始项目搭建 (Getting Started - Initial project setup)
 
-In this demo we use Spring MVC as the web framework and MySQL as the primary database for the event-store.
+在本示例中，我们使用 Spring MVC 作为 Web 框架，并使用 MySQL 作为事件存储的主数据库。
 
-So, To get started, create a new Spring Boot application and include the following dependencies and plugin configuration in your `pom.xml`:
+因此，首先创建一个新的 Spring Boot 应用程序，并在 `pom.xml` 中添加以下依赖项与插件配置：
 
-IMPORTANT: It is recommended to use the http://init.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+IMPORTANT: 建议使用 http://init.stacksaga.org/[StackSaga Initializer] 为您的项目生成 StackSaga 依赖配置代码，以确保版本兼容性与初始配置正确无误。
 
 [source,xml,subs="attributes+"]
 ----
@@ -135,22 +135,20 @@ IMPORTANT: It is recommended to use the http://init.stacksaga.org/[StackSaga Ini
 </build>
 ----
 
-<1> This section imports the StackSaga BOM (Bill of Materials) which manages the versions of all StackSaga related dependencies, ensuring compatibility and simplifying dependency management.
+<1> 此部分导入 StackSaga BOM (物料清单)，统一管理所有 StackSaga 依赖项的版本，确保兼容性并简化版本控制。
 
-<2> This is the main StackSaga Spring Boot Starter dependency that includes the core functionalities of StackSaga, such as the orchestration engine, event handling, and transaction management.
-It provides the necessary components to implement the StackSaga pattern in your application.
+<2> 这是核心 StackSaga Spring Boot Starter 依赖项，包含了 StackSaga 的核心功能，例如编排引擎、事件处理和事务管理。它为在应用中实现 StackSaga 模式提供了必要的组件。
 
-<3> This dependency provides support for using MySQL as the event-store in a reactive manner.
-It includes the necessary components and configurations to integrate MySQL with StackSaga, allowing you to store and manage events in a MySQL database while leveraging reactive programming paradigms. xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[]
+<3> 该依赖项提供以响应式 (Reactive) 方式将 MySQL 作为事件存储的支持。它包含将 MySQL 与 StackSaga 集成所需的组件和配置，允许您在 MySQL 数据库中存储和管理事件，同时利用响应式编程范式。xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[]
 
-<4> Configuring the `spring-boot-maven-plugin` with the `build-info` goal generates `META-INF/build-info.properties` during the build. StackSaga uses this metadata to record the exact application version at which each transaction was started.
+<4> 为 `spring-boot-maven-plugin` 配置 `build-info` 目标会在构建时生成 `META-INF/build-info.properties`。StackSaga 利用此元数据记录每个事务启动时所处的确切应用程序版本。
 
-TIP: Adding the `build-info` goal helps you track which version the transaction was started at. If this is not configured, StackSaga cannot determine the application version and records the transaction application version as `unknown` in the event store.
+TIP: 添加 `build-info` 目标有助于追踪事务是在哪个应用版本下发起的。若未配置该插件目标，StackSaga 将无法识别应用程序版本，并在事件存储中将事务的应用版本记录为 `unknown`。
 
 [[creating-domain-entity]]
-=== Creating the Domain-Entity
+=== 创建领域实体 (Creating the Domain-Entity)
 
-Domain-Entity is the main entity that will be used in the transaction flow, it represents the main data structure that will be manipulated and processed throughout the transaction.  xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc[read more]
+领域实体 (Domain-Entity) 是事务流程中流转的核心实体，它代表在整个事务期间被操作和处理的主数据结构。xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc[了解更多]
 
 [source,java]
 ----
@@ -181,25 +179,22 @@ public class OrderDomainEntity extends DomainEntity { //<2>
 }
 ----
 
-<1> The `@SagaDomainEntity` annotation marks this class as a domain entity for StackSaga, which means it will be used to represent the state and data of the transaction as it flows through the different steps of the saga.
-xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#domain_entity_versioning[The version] attribute allows you to manage changes to the domain entity over time.
+<1> `@SagaDomainEntity` 注解将该类标记为 StackSaga 的领域实体，表示它将用于承载事务流经 Saga 各步骤时的状态与数据。xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#domain_entity_versioning[版本号]属性使您能够随着时间推移规范管理领域实体的版本演进。
 
-<2> The `OrderDomainEntity` class extends the `DomainEntity` base class provided by StackSaga, which includes common functionality and properties needed for domain entities.
+<2> `OrderDomainEntity` 类继承自 StackSaga 提供的 `DomainEntity` 基类，该基类包含了领域实体所需的通用功能与内置属性。
 
-<3> The constructor calls the superclass constructor with the class type, which is necessary for StackSaga to properly manage and serialize the domain entity during the transaction flow.
+<3> 构造函数通过传入自身类类型调用父类构造函数，这是 StackSaga 在事务流转期间正确管理与序列化领域实体所必需的。
 
 [[creating-executors]]
-=== Creating the Executors
+=== 创建执行器 (Creating the Executors)
 
-The next step is to create the executors for each span (atomic steps) of the LRT (long-running transaction).
-Executors are responsible for executing the business logic of each step in the transaction flow. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[read more]
+下一步是为长事务 (LRT) 的每个跨度（原子步骤）创建执行器。执行器负责执行事务流程中各个步骤的具体业务逻辑。xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[了解更多]
 
-In this quick example, we will create 3 executors, one for *validating the user*, *reserving order* and another for processing the *make payment*. (it is only for demonstration purposes, in a real-world application you would have more complex logic and more steps in the transaction flow).
+在此快速示例中，我们将创建 3 个执行器：分别用于*验证用户 (Validating User)*、*预留订单 (Reserving Order)* 以及*执行支付 (Make Payment)*。（本例仅用于演示，实际生产应用中业务逻辑与流转步骤会更为复杂）。
 
-==== Creating ValidateUserExecutor
+==== 创建 ValidateUserExecutor
 
-ValidateUserExecutor is responsible for validating the user information in the transaction flow.
-It checks if the user is valid and updates the domain entity accordingly.
+ValidateUserExecutor 负责在事务流程中验证用户信息。它检查用户是否有效，并相应地更新领域实体。
 
 [source,java]
 ----
@@ -227,22 +222,19 @@ public class ValidateUserExecutor implements QueryExecutor<OrderDomainEntity> { 
 }
 ----
 
-<1> The `@SagaExecutor` annotation marks this class as an executor for StackSaga, specifying the service it executes for (`user-service`) and the name of the executor (`ValidateUserExecutor`).
-<2> The `ValidateUserExecutor` class implements the `QueryExecutor` interface, which is used for executors that perform *read-only* operations or validations without modifying the domain entity state. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[read more]
+<1> `@SagaExecutor` 注解将此类标记为 StackSaga 执行器，指定其负责的服务名称 (`user-service`) 以及执行器名称 (`ValidateUserExecutor`)。
+<2> `ValidateUserExecutor` 类实现了 `QueryExecutor` 接口，该接口专用于执行*只读*操作或数据校验、且不改变系统外部持久状态的执行器。xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[了解更多]
 
-<3> The `doProcess` method is the main entry point for executing the primary logic of the executor.
-It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. This is where you would implement the logic to validate the user information, such as calling an external service or performing checks against a database.
+<3> `doProcess` 方法是执行执行器主干业务逻辑的统一入口。它接收领域实体的当前状态、用于管理流程的步骤管理器工具类 (ProcessStepManagerUtil)，以及用于确保操作在重试时安全防重的幂等键 (Idempotency Key)。在此处可实现验证用户信息的逻辑，例如调用外部服务或查询数据库。
 
-<4> The `stepManager.next` method is called to indicate that the next step in the transaction flow should be executed, which in this case is the `ReserveOrderExecutor`.
-The action event name (`"VALIDATED_USER"`) is passed directly as a string to be stored in the event store. +
-TIP: For action event naming conventions (past-tense verb first) and the recommended framework practice of maintaining a centralized enum implementing `SagaExecutionEventName`, see xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[Executor Architecture & Best Practices].
+<4> 调用 `stepManager.next` 方法声明事务流程应推进至下一个步骤，在本例中为 `ReserveOrderExecutor`。动作事件名称 (`"VALIDATED_USER"`) 作为字符串直接传递并持久化至事件存储中。 +
+TIP: 有关动作事件命名规范（动词过去分词优先）以及维护实现 `SagaExecutionEventName` 的集中枚举这一推荐实践，请参阅 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[执行器架构与最佳实践]。
 
-IMPORTANT: The 1st executor can be a `QueryExecutor` or a `CommandExecutor`. there is no restriction on the type of the 1st executor in the transaction flow.
+IMPORTANT: 第一个执行器既可以是 `QueryExecutor` 也可以是 `CommandExecutor`。框架对事务流程中第一个执行器的类型没有限制。
 
-==== Creating ReserveOrderExecutor
+==== 创建 ReserveOrderExecutor
 
-ReserveOrderExecutor is responsible for reserving the order in the transaction flow.
-It checks if the order can be reserved and do the necessary operations to reserve the order, updating the domain entity accordingly.
+ReserveOrderExecutor 负责在事务流程中预留订单。它检查订单是否可预留并执行相应的库存预扣操作，同时更新领域实体。
 
 [source,java]
 ----
@@ -289,25 +281,22 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
 }
 ----
 
-<1> The `@SagaExecutor` annotation marks this class as an executor for StackSaga, specifying the service it executes for (`order-service`) and the name of the executor (`ReserveOrderExecutor`).
+<1> `@SagaExecutor` 注解将此类标记为 StackSaga 执行器，指定其执行的服务名称 (`order-service`) 与执行器名称 (`ReserveOrderExecutor`)。
 
-<2> The `ReserveOrderExecutor` class implements the `CommandExecutor` interface, which is used for executors that perform *state-changing* operations on the domain entity. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[read more]
+<2> `ReserveOrderExecutor` 类实现了 `CommandExecutor` 接口，用于对领域实体执行*状态变更*操作的执行器。xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[了解更多]
 
-<3> The `doProcess` method is the main entry point for executing the primary logic of the executor.
-It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. this is where you would implement the logic to reserve the order, such as calling an external service or performing operations against a database to reserve the order. at this case the order service is the own service of the orchestrator application, so you can call the order service directly without any network call.
+<3> `doProcess` 方法是执行器主干业务逻辑的入口。它接收领域实体当前状态、步骤管理器工具类以及幂等键。在此处实现预留订单的逻辑，例如调用外部服务或执行数据库预扣操作。在此场景下，订单服务即为编排器应用自身，因此可直接进行内部调用而无需产生额外网络开销。
 
-<4> The `stepManager.next` method is called to indicate that the next step in the transaction flow should be executed, which in this case is the `MakePaymentExecutor`. The action event name (`"RESERVED_ORDER"`) is passed directly as a string. +
-TIP: In this continuous flow, `stepManager.next(...)` advances immediately to the next step. If your business logic instead required pausing to await an external webhook, async callback, or human approval before proceeding to payment, you would return xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] instead. See xref:implementations:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transactions].
+<4> 调用 `stepManager.next` 方法指示事务流程应执行下一步骤（即 `MakePaymentExecutor`）。动作事件名称 (`"RESERVED_ORDER"`) 作为字符串直接传入。 +
+TIP: 在该连续流中，`stepManager.next(...)` 会立即推进至下一步。如果您的业务逻辑需要在此暂停、等待外部 Webhook、异步回调或人工审批后再进入支付环节，您可以返回 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`]。详情请参阅 xref:implementations:stacksaga-sync/index.adoc#pausable-lrt[可暂停长事务 (Pausable LRT)]。
 
-<5> The `doRevert` method is called when the transaction flow needs to be rolled back due to a failure in a subsequent step.
-It takes the exception that caused the rollback, the final state of the domain entity, a revert hint store for storing any necessary information for the revert operation, and an idempotency key. this is where you would implement the logic to revert the reserve order action, such as calling service or performing operations against a database to undo the reservation. at this case the order service is the own service of the orchestrator application, so you can call the order service directly without any network call.
+<5> 当后续步骤发生失败导致事务流程需要回滚时，框架会自动调用 `doRevert` 方法执行补偿。它接收导致回滚的异常、领域实体的最终状态、用于暂存逆向补偿上下文的提示存储 (RevertHintStore)，以及幂等键。在此处实现撤销订单预留的补偿逻辑，例如调用服务或数据库操作解除库存冻结。在此场景下，订单服务为编排器应用自身的内联服务，可直接处理而无需网络调用。
 
-<6> `SagaExecutionEventName.of("REVERTED_ORDER")` provides the event-name indicating that the order reservation has been reverted. Alternatively, if maintaining a centralized enum implementing `SagaExecutionEventName` (such as `OrderExecutionEvent`), that enum value can be returned directly. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[Read more on event best practices].
+<6> `SagaExecutionEventName.of("REVERTED_ORDER")` 提供表示订单预留已成功回滚的事件名称。若维护了实现 `SagaExecutionEventName` 的集中枚举（例如 `OrderExecutionEvent`），可直接返回对应的枚举值。xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[了解更多事件最佳实践]。
 
-==== Creating MakePaymentExecutor
+==== 创建 MakePaymentExecutor
 
-MakePaymentExecutor is responsible for processing the payment in the transaction flow.
-It checks if the payment can be processed and do the necessary operations to process the payment, updating the domain entity accordingly.
+MakePaymentExecutor 负责在事务流程中处理支付。它校验支付资格并执行扣款操作，随后更新领域实体。
 
 [source,java]
 ----
@@ -353,24 +342,21 @@ public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
 }
 ----
 
-<1> The `@SagaExecutor` annotation marks this class as an executor for StackSaga, specifying the service it executes for (`payment-service`) and the name of the executor (`MakePaymentExecutor`).
-<2> The `MakePaymentExecutor` class implements the `CommandExecutor` interface, which is used for executors that perform *state-changing* operations on the domain entity. xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[read more]
+<1> `@SagaExecutor` 注解将此类声明为 StackSaga 执行器，指定执行服务 (`payment-service`) 与执行器名称 (`MakePaymentExecutor`)。
+<2> `MakePaymentExecutor` 类实现了 `CommandExecutor` 接口，用于执行*状态变更*的执行器。xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[了解更多]
 
-<3> The `doProcess` method is the main entry point for executing the primary logic of the executor.
-It takes the current state of the domain entity, a step manager utility for managing the flow, and an idempotency key to ensure that the operation can be retried safely if needed. this is where you would implement the logic to process the payment, such as calling an external payment service. in this example, we simulate a payment failure randomly to test the compensation mechanism of the StackSaga engine. if the payment processing fails, we throw a `NonRetryableExecutorException` with an event name indicating that the payment failed. if the payment processing succeeds, we call `stepManager.complete` to indicate that the transaction flow is complete, with an event name indicating that the payment was made. if the payment processing fails, the StackSaga engine will automatically trigger compensation by calling the `doRevert` method of the previous executors in reverse order, starting with the `ReserveOrderExecutor` to revert the order reservation. +
+<3> `doProcess` 方法是执行器主要逻辑的入口。它接收当前领域实体状态、步骤管理器以及幂等键。在此处实现扣款逻辑（例如调用第三方支付网关）。本示例中通过随机抛出异常模拟支付失败，以演示 StackSaga 引擎的故障补偿机制。若支付失败，抛出携带失败事件名称的 `NonRetryableExecutorException`。若支付成功，调用 `stepManager.complete` 标记事务流已顺利完成，并记录支付成功事件。若支付失败，StackSaga 引擎将按相反顺序自动触发先前已完成执行器的 `doRevert` 方法执行补偿，首先调用 `ReserveOrderExecutor` 撤销订单预留。 +
 +
-TIP: `RetryableExecutorException` is not simulated in this stage.
-RetryableExecutorException is used in next stage with retry-subsystem.
+TIP: 本阶段未模拟 `RetryableExecutorException`。该可重试异常将在下一阶段与重试子系统结合使用。
 
-<4> In `stepManager.complete("MADE_PAYMENT")`, the action event name indicating that the payment succeeded is passed directly as a string. If the payment fails, `NonRetryableExecutorException.buildWith(..., SagaExecutionEventName.of("FAILED_PAYMENT"))` signals a permanent failure with an event name to trigger compensation of previous steps.
+<4> 在 `stepManager.complete("MADE_PAYMENT")` 中，表示支付成功的动作事件名称作为字符串直接传入。若支付失败，`NonRetryableExecutorException.buildWith(..., SagaExecutionEventName.of("FAILED_PAYMENT"))` 发出不可重试的永久性失败信号并携带事件名，触发先前步骤的逆向补偿。
 
-<5> The `doRevert` method is called when the transaction flow needs to be rolled back due to a failure in a subsequent step.
-It takes the exception that caused the rollback, the final state of the domain entity, a revert hint store for storing any necessary information for the revert operation, and an idempotency key. in this example, since the `MakePaymentExecutor` is the last step in the transaction flow, there is no need to implement the revert logic for this executor, because if the payment processing fails, we want to trigger the compensation for the previous successful step, which is the order reservation, and we want to revert that action by calling the `doRevert` method of the `ReserveOrderExecutor`. so we can simply throw an `UnsupportedOperationException` in the `doRevert` method of the `MakePaymentExecutor` to indicate that this will not be executed until there is another executor after this executor in the flow. if there was another executor after this executor in the flow, then we would need to implement the revert logic for this executor as well, to handle the case where the subsequent step fails and triggers compensation. in real payment processing scenarios, you definitely need to implement the revert logic for the payment processing.
+<5> 当事务因后续步骤失败需要回滚时调用 `doRevert` 方法。由于 `MakePaymentExecutor` 是该事务流程中的最后一步，其后没有其他执行器，因此当本步骤自身失败时只需回滚之前的预留订单步骤，无需自身执行 `doRevert`。因此在 `doRevert` 中直接抛出 `UnsupportedOperationException`。若未来在支付步骤之后追加了发货等其他执行器，则必须在此实现支付的退款补偿逻辑。在真实的支付业务中，务必根据实际情况实现逆向退款或撤销逻辑。
 
 [[create-handler]]
-=== Creating the Handler
+=== 创建事件处理器 (Creating the Handler)
 
-Handler is responsible for handling the transaction and receiving the transaction events emitted by the StackSaga engine during the transaction flow. xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc[See more]
+事件处理器 (Handler) 负责在事务执行过程中接收 StackSaga 引擎分发的事务生命周期事件。xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc[了解更多]
 
 [source,java]
 ----
@@ -384,22 +370,22 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 }
 ----
 
-<1> Annotate the class with `@Component` to make it a Spring bean, so that it can be automatically detected and registered by the Spring container.
+<1> 为类添加 `@Component` 注解，声明为 Spring Bean，以便 Spring 容器自动扫描并注册。
 
-<2> The `PlaceOrderHandler` class implements the `TransactionEventListener` interface, which allows it to listen to transaction events emitted by the StackSaga engine during the transaction flow. xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[read more] +
-NOTE: `TransactionEventListener` has blocking and non-blocking versions. see the full details in xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[TransactionEventListener] and xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[ReactiveTransactionEventListener].
+<2> `PlaceOrderHandler` 类实现了 `TransactionEventListener` 接口，用于监听事务执行流中由 StackSaga 引擎发出的状态变更事件。xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[了解更多] +
+NOTE: `TransactionEventListener` 提供了阻塞与非阻塞版本。完整细节请参阅 xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[TransactionEventListener] 与 xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[ReactiveTransactionEventListener]。
 
-<3> The `onStateChanged` method is overridden to handle the transaction state changes. it receives the current state of the transaction as a parameter, which includes information such as the current status of the transaction, the execution history, the current domain entity state, and the timestamps. in this example, we simply log the current status of the transaction whenever it changes. you can implement any logic you need in this method based on your use case, such as sending notifications to users about the transaction status changes or updating other systems based on the transaction events.
+<3> 重写 `onStateChanged` 方法处理事务状态变更。它接收事务的当前状态作为参数，其中包含当前事务状态、执行历史、当前领域实体快照以及各阶段时间戳。本示例中仅在状态发生变化时打印日志。您可以根据实际业务场景扩展此方法，例如向用户推送通知或触发下游系统同步。
 
 [[creating-controller]]
-=== Creating the Controller to trigger the transaction accessing `SagaTemplate`
+=== 创建控制器以访问 `SagaTemplate` 触发事务 (Creating the Controller to trigger the transaction accessing SagaTemplate)
 
-Here we create a simple REST controller with endpoints that trigger the saga and query its execution state by accessing the `SagaTemplate` — the main API for interacting with the StackSaga engine. xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc[read more]
+在此我们创建一个简单的 REST 控制器，通过暴露端点注入并调用 `SagaTemplate`（与 StackSaga 引擎交互的核心 API）来触发 Saga 并按需查询其执行状态。xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc[了解更多]
 
-It is an ordinary Spring REST controller with two endpoints:
+这是一个普通的 Spring REST 控制器，包含两个端点：
 
-* `POST /api/v1/order` — triggers the saga flow by providing the initial domain-entity state and specifying the starting executor to run.
-* `GET /api/v1/order/status?order-id=\{id\}` — retrieves the current snapshot of the transaction state on demand from the event-store.
+* `POST /api/v1/order` —— 提供初始领域实体状态并指定起始执行器，从而启动 Saga 流程。
+* `GET /api/v1/order/status?order-id=\{id\}` —— 从事件存储中按需拉取指定事务当前的状态快照。
 
 [source,java]
 ----
@@ -414,27 +400,27 @@ public class PlaceOrderController {
     @PostMapping
     public String placeOrder(@RequestBody PlaceOrderRequest placeOrderRequest) {
         final String transactionId = this
-                .stacksagaTemplate
-                //<2>
-                .init(() -> {
-                    OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
-                    orderDomainEntity.setUsername(placeOrderRequest.getUsername());
-                    orderDomainEntity.setTotalAmount(placeOrderRequest.getTotalAmount());
-                    orderDomainEntity.setProductItems(Arrays.asList(placeOrderRequest.getItems()));
-                    return orderDomainEntity;
-                })
-                //<3>
-                .peek(orderDomainEntity -> {
-                    //you can do some local operation for the orderDomainEntity before the saga process.
-                    //and also here you can access the unique id for the transaction that provide by the engine.
-                    log.info("Transaction Id : {}", orderDomainEntity.getTransactionId());
-                })
-                //<4>
-                .startWith(ValidateUserExecutor.class)
-                //<5>
-                .fireAndForget()
-                //<6>
-                .execute();
+            .stacksagaTemplate
+            //<2>
+            .init(() -> {
+                OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
+                orderDomainEntity.setUsername(placeOrderRequest.getUsername());
+                orderDomainEntity.setTotalAmount(placeOrderRequest.getTotalAmount());
+                orderDomainEntity.setProductItems(Arrays.asList(placeOrderRequest.getItems()));
+                return orderDomainEntity;
+            })
+            //<3>
+            .peek(orderDomainEntity -> {
+                //you can do some local operation for the orderDomainEntity before the saga process.
+                //and also here you can access the unique id for the transaction that provide by the engine.
+                log.info("Transaction Id : {}", orderDomainEntity.getTransactionId());
+            })
+            //<4>
+            .startWith(ValidateUserExecutor.class)
+            //<5>
+            .fireAndForget()
+            //<6>
+            .execute();
         //<7>
         return "Order placed successfully with transaction id: " + transactionId;
     }
@@ -442,10 +428,10 @@ public class PlaceOrderController {
     @GetMapping("/status")
     public TransactionState<?, ?> orderStatus(@RequestParam("order-id") String orderId) {
         return this
-                .stacksagaTemplate
-                //<8>
-                .getCurrentState(orderId)
-                .fetch();
+            .stacksagaTemplate
+            //<8>
+            .getCurrentState(orderId)
+            .fetch();
     }
 
     //<9>
@@ -458,29 +444,28 @@ public class PlaceOrderController {
 }
 ----
 
-<1> Autowire the `SagaTemplate<DE>`, the main API for interacting with the StackSaga engine. It exposes a fluent API to define and execute the transaction flow. `DE` is the domain entity type — `OrderDomainEntity` here. +
-NOTE: `SagaTemplate` provides both blocking (`execute()`, `fetch()`) and reactive (`executeAsync()`, `fetchAsync()`) methods. In a reactive (WebFlux) application, use the reactive methods. xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc[read more]
+<1> 自动装配 `SagaTemplate<DE>`，这是与 StackSaga 引擎交互的核心 API。它提供了流畅的链式调用 API 来定义和执行事务流。`DE` 为领域实体类型——此处为 `OrderDomainEntity`。 +
+NOTE: `SagaTemplate` 提供了阻塞式（`execute()`, `fetch()`）与响应式（`executeAsync()`, `fetchAsync()`）两套方法。在响应式 (WebFlux) 应用中，请使用响应式方法。xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc[了解更多]
 
-<2> The `init` method is called to initialize the transaction flow with the initial state of the domain entity. it takes a supplier function that returns the initial domain entity state, which is created based on the request data in this example.
+<2> 调用 `init` 方法，使用领域实体的初始状态初始化事务流程。它接收一个返回初始领域实体状态的 Supplier 函数，在本示例中根据请求体数据进行构建。
 
-<3> The `peek` method is an optional step that allows you to perform some local operations with the domain entity before the saga process starts. it also provides access to the unique transaction id generated by the engine, which can be useful for logging or tracking purposes.
+<3> `peek` 方法是一个可选步骤，允许您在 Saga 流程正式启动前对领域实体执行本地准备工作。同时也可以在此访问由引擎生成的全局唯一事务 ID，便于日志记录与链路追踪。
 
-<4> The `startWith` method is called to specify the first executor to execute in the transaction flow, which is the `ValidateUserExecutor` in this example.
+<4> 调用 `startWith` 方法指定事务流程中首个执行的执行器，在本示例中为 `ValidateUserExecutor`。
 
-<5> The `fireAndForget` method is called to indicate that the transaction should be executed in a fire-and-forget manner, meaning that the caller does not need to wait for the transaction to complete and can continue with other operations. this is useful for scenarios where you want to trigger the transaction and do not need to wait for the result immediately. and also it is the recommended way to execute long-running transactions to avoid blocking the caller thread. you can get notified about the transaction status frequently by subscribing to the events emitted by the transaction flow via xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[`ReactiveTransactionEventListener`] or xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[`TransactionEventListener`] based on your application type (reactive or servlet).
+<5> 调用 `fireAndForget` 方法指示事务以“即发即弃”模式异步执行，即调用方无需阻塞等待事务全流程结束即可先行返回，继续处理其他请求。这在长事务场景下尤为推荐，能够避免占用和阻塞 Web 容器的工作线程。您可以根据应用类型（响应式或 Servlet）通过实现 xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[`ReactiveTransactionEventListener`] 或 xref:implementations:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[`TransactionEventListener`] 持续监听事务状态变更事件。
 
-<6> The `execute` method is called to execute the transaction flow with the defined configuration. it returns the unique transaction id generated by the engine for this transaction, which can be used for tracking and logging purposes.
-<7> The endpoint returns a response indicating that the order was placed successfully along with the transaction id.
+<6> 调用 `execute` 方法以既定配置启动事务流程。它返回由引擎为该事务生成的唯一事务 ID，可用于后续的追踪与状态查询。
+<7> 端点返回响应，包含下单成功的提示信息与该事务的唯一 ID。
 
-<8> The `orderStatus` endpoint queries the current state of a transaction on demand. Calling `.getCurrentState(orderId).fetch()` retrieves the `TransactionState` snapshot directly from the event-store for the given transaction ID, including completion status, execution history of each step, and domain entity state. xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#getcurrentstate-on-demand[read more]
+<8> `orderStatus` 端点按需查询事务的当前状态。调用 `.getCurrentState(orderId).fetch()` 直接从事件存储中检索指定事务 ID 的 `TransactionState` 状态快照，涵盖完成状态、每一步的执行历史以及领域实体最新数据。xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#getcurrentstate-on-demand[了解更多]
 
-<9> The `PlaceOrderRequest` is a simple DTO class to represent the request body for placing an order, it contains the necessary fields such as `username`, `totalAmount`, and `items` to create the initial domain entity state for the transaction flow.
-It is not recommended to use the domain-entity class as the request body directly to avoid coupling the API layer with the domain layer, and to have better control over the API contract.
+<9> `PlaceOrderRequest` 是一个简单的 DTO 类，用于承载下单请求体，包含构建初始领域实体所需的 `username`、`totalAmount` 和 `items` 字段。不建议直接将领域实体类暴露为 HTTP 请求体，以避免 API 协议层与内部领域层产生强耦合，并确保 API 契约的清晰稳定。
 
 [[tuning-configuration]]
-=== Tune Configuration
+=== 调整配置 (Tune Configuration)
 
-To run the application, you need to configure the following properties in your `application.properties` or `application.yml` file.
+要运行该应用，请在 `application.properties` 或 `application.yml` 文件中配置以下属性。
 
 [source,properties]
 ----
@@ -499,18 +484,18 @@ stacksaga.datasource.r2dbc.username=${MYSQL_USER:root}
 stacksaga.datasource.r2dbc.password=${MYSQL_PASSWORD:password}
 ----
 
-<1> The `stacksaga.instance` properties are used to configure the instance information for the StackSaga engine, such as the cluster, region, and zone. These properties are used to identify transactions for retry and re-storing purposes in distributed environments. Note that if you specify a custom region other than `default`, you must declare a custom xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring bean. In this example, `local-cluster`, `local-region`, and `local-zone` are used for demonstration.
+<1> `stacksaga.instance` 属性用于配置 StackSaga 引擎的实例拓扑信息，例如集群 (cluster)、区域 (region) 与可用区 (zone)。这些属性用于在分布式环境中精准标识事务，以便进行故障重试与宕机恢复。请注意，如果您指定了除 `default` 之外的自定义 region，则必须声明自定义 xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring Bean。在此示例中配置为 `local-cluster`、`local-region` 和 `local-zone` 仅供演示。
 
-<2> The `stacksaga.domain-entity-scan` property is used to specify the package where the domain entity classes are located. the StackSaga engine will scan this package to find the domain entity classes and register them for use in the transaction flow. it can be provided as a comma-separated list of packages if you have multiple packages containing domain entity classes.
+<2> `stacksaga.domain-entity-scan` 属性用于指定领域实体类所在的包路径。StackSaga 引擎将扫描该包并注册其中的领域实体类供事务流程使用。如果领域实体分布在多个包中，可以通过逗号分隔列出。
 
-<3> The `stacksaga.datasource.r2dbc.*` properties configure the reactive R2DBC connection used by the StackSaga engine to persist transaction checkpoints and execution tryout history in the MySQL event-store. Specify the connection URL, database name, username, and password. The event-store should be a dedicated database schema separate from regular application business tables to avoid thread and connection contention.
+<3> `stacksaga.datasource.r2dbc.*` 属性配置响应式 R2DBC 连接，供 StackSaga 引擎向 MySQL 事件存储中持久化事务检查点 (Checkpoint) 与执行尝试历史记录。指定连接 URL、数据库名称、用户名和密码。建议将事件存储配置为独立于应用业务库的专属 Schema，以避免数据库连接池与事务锁竞争。
 
 [[running-application]]
-=== Running the Application and Testing the Transaction Flow
+=== 运行应用并测试事务流程 (Running the Application and Testing the Transaction Flow)
 
-Start the *order-service* with your MySQL instance up. On first start-up the framework creates the event-store schema (via Liquibase).
+在 MySQL 实例运行的前提下启动 *order-service*。在首次启动时，框架会自动初始化事件存储数据库 Schema（通过 Liquibase）。
 
-Trigger the saga with a `POST` request to the `/api/v1/order` endpoint:
+向 `/api/v1/order` 端点发送 `POST` 请求触发 Saga 流程：
 
 [source,bash]
 ----
@@ -523,9 +508,9 @@ curl -X POST http://localhost:8080/api/v1/order \
       }'
 ----
 
-Because `MakePaymentExecutor` fails at random, repeat the request a few times to observe *both* outcomes. The `PlaceOrderHandler.onStateChanged(...)` callback logs every transition, so you can follow the saga in the console.
+由于 `MakePaymentExecutor` 会随机模拟失败，请多次重复发送请求以观察*两种*执行结果。`PlaceOrderHandler.onStateChanged(...)` 回调会实时打印每一次状态流转，您可以在控制台中观察 Saga 的完整轨迹。
 
-* *Happy path* (payment succeeds) — the saga runs to completion:
+* *正常流程 (Happy Path)*（支付成功）—— Saga 顺利执行至终态：
 
 [source,bash]
 ----
@@ -535,7 +520,7 @@ Because `MakePaymentExecutor` fails at random, repeat the request a few times to
 2026-09-17T23:49:34.083+05:30  INFO 10644 --- [stacksaga-framework-mysql-demo-servlet] [oundedElastic-4] c.d.s.saga.handler.PlaceOrderHandler     : onStateChanged : PROCESS_COMPLETED
 ----
 
-* *Compensation path* (payment fails) — the engine reverts the previously reserved order, ending in `REVERT_COMPLETED`:
+* *补偿流程 (Compensation Path)*（支付失败）—— 引擎自动逆向回滚先前已预留的订单，最终以 `REVERT_COMPLETED` 结束：
 
 [source,bash]
 ----
@@ -546,20 +531,18 @@ Because `MakePaymentExecutor` fails at random, repeat the request a few times to
 2026-09-17T23:46:13.212+05:30  INFO 10644 --- [stacksaga-framework-mysql-demo-servlet] [oundedElastic-2] c.d.s.saga.handler.PlaceOrderHandler     : onStateChanged : REVERT_COMPLETED
 ----
 
-==== Querying Transaction State On-Demand
+==== 按需查询事务状态 (Querying Transaction State On-Demand)
 
-While `PlaceOrderHandler.onStateChanged(...)` receives push notifications in real time as each executor runs, you can also query the current state and execution history on demand at any point in time using the `/api/v1/order/status` endpoint:
+除了 `PlaceOrderHandler.onStateChanged(...)` 在执行期间以推模式实时接收事件通知外，您还可以在任何时刻通过 `/api/v1/order/status` 端点主动拉取查询事务的当前状态与完整执行历史：
 
-
-The endpoint calls `sagaTemplate.getCurrentState(orderId).fetch()` to retrieve the `TransactionState` snapshot directly from the MySQL event-store:
+该端点调用 `sagaTemplate.getCurrentState(orderId).fetch()` 直接从 MySQL 事件存储中检索 `TransactionState` 快照：
 
 [source,bash]
 ----
 curl -X GET "http://localhost:8080/api/v1/order/status?order-id=orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2"
 ----
 
-
-* *Completed transaction* (happy path) — returns `PROCESS_COMPLETED` with the full sequence of forward steps in `executionHistory`:
+* *已成功完成的事务 (Happy Path)* —— 返回状态为 `PROCESS_COMPLETED`，且 `executionHistory` 中包含全部正向步骤：
 
 [source,json]
 ----
@@ -618,7 +601,7 @@ curl -X GET "http://localhost:8080/api/v1/order/status?order-id=orde-01a0b098-4e
 }
 ----
 
-* *Compensated transaction* (compensation path) — returns `REVERT_COMPLETED` with both forward executions and the `DO_REVERT_MAIN` compensation step:
+* *已补偿完成的事务 (Compensation Path)* —— 返回状态为 `REVERT_COMPLETED`，既包含正向执行记录，也包含类型为 `DO_REVERT_MAIN` 的逆向补偿步骤：
 
 [source,bash]
 ----
@@ -704,23 +687,22 @@ curl -X GET "http://localhost:8080/api/v1/order/status?order-id=orde-01a0b095-32
 }
 ----
 
-NOTE: In contrast to the real-time `onStateChanged` event listener callback which receives pushed in-memory events during execution, `getCurrentState(orderId).fetch()` is a pull-based lookup querying the event-store on demand.
+NOTE: 与在事务执行期间接收内存中推送事件的实时 `onStateChanged` 事件监听回调不同，`getCurrentState(orderId).fetch()` 是一种基于拉模式的主动查询，会按需从事件存储中检索持久化快照。
 
 [[stage-2]]
-== Stage-2 [Adding Retry Capability]
+== 阶段二 [添加重试能力] (Stage-2 [Adding Retry Capability])
 
-Stage-1 covered the happy path and compensation. In the real world, though, you will also hit *transient* failures that are worth retrying rather than rolling back — network blips, a temporarily unavailable downstream service, or a database deadlock. In this stage we make the flow resilient to those by adding StackSaga's retry subsystem, which automatically re-runs a failed step based on configurable retry policies.
+阶段一涵盖了正常流程与故障补偿。但在现实分布式生产环境中，您还会经常遇到值得通过重试而非立即回滚来解决的*瞬态故障 (Transient Failures)*——例如偶发网络抖动、下游服务短暂不可用或数据库死锁。在这一阶段，我们引入 StackSaga 重试子系统，该系统能够根据灵活配置的重试策略自动重新执行失败步骤，从而赋予事务弹韧性。
 
-Retrying is coordinated by a dedicated subsystem. There are two main steps to enable it:
+重试由专属子系统负责统一协调。启用该功能主要包含以下两个步骤：
 
-. Create the xref:stacksaga:retry-ring-coordinator:ring-coordinator.adoc[Ring Coordinator Application] by using the `stacksaga-ring-coordinator-spring-boot-starter` as a separate application that will run alongside your orchestrator application, and it will be responsible for coordinating the token ranges within the available orchestrator instances in the cluster.
+. 创建 xref:retry-ring-coordinator:ring-coordinator.adoc[环形协调器应用 (Ring Coordinator Application)]：使用 `stacksaga-ring-coordinator-spring-boot-starter` 构建一个与编排器应用并行的独立应用，负责在集群中各可用编排器实例之间动态协调与分配令牌区间 (Token Range)。
 
-. Adding the xref:stacksaga:retry-ring-coordinator:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] dependency to your orchestrator application to enable the integration with the Ring Coordinator, which is responsible for receiving the relevant token range that has been allocated for the instance by the Ring Coordinator (Slave).
+. 向编排器应用中添加 xref:retry-ring-coordinator:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] 依赖，以建立与环形协调器的集成。该连接器负责接收由环形协调器从节点 (Slave) 分配给本实例的专属令牌区间。
 
-=== Creating the Ring Coordinator Application (Master & Slave Hybrid)
+=== 创建环形协调器应用（主从一体模式）(Creating the Ring Coordinator Application (Master & Slave Hybrid))
 
-Just create a new Spring Boot application and add the following dependency in your `pom.xml` to enable the Ring Coordinator functionality.
-It is not necessary to have the web or any other dependencies. but you are totally free to add any other dependencies that you need for your application.
+创建一个新的 Spring Boot 应用，并在 `pom.xml` 中引入以下依赖以启用环形协调器功能。无需引入 Web 或其他非必要依赖，当然您也可以根据项目需要自由扩展其他依赖。
 
 [source,xml,subs="attributes+"]
 ----
@@ -741,9 +723,9 @@ It is not necessary to have the web or any other dependencies. but you are total
 </dependency>
 ----
 
-IMPORTANT: It is recommended to use the http://init.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+IMPORTANT: 建议使用 http://init.stacksaga.org/[StackSaga Initializer] 获取相关依赖配置，以确保版本与依赖组合的一致性。
 
-After adding the dependency, you need to configure the following properties in your `application.properties` or `application.yml` file to configure the Ring Coordinator server.
+添加依赖后，在 `application.properties` 或 `application.yml` 中配置以下属性以启动环形协调器服务：
 
 [source,properties]
 ----
@@ -763,15 +745,15 @@ stacksaga.coordinator.slave.target-master.port=4455
 stacksaga.coordinator.slave.target-master.host=localhost
 ----
 
-<1> The `spring.rsocket.server` properties are used to configure the RSocket server for the Ring Coordinator application. you need to provide the address and port for the RSocket server, which will be used by the slave instances to connect to the master instance.
-<2> The `stacksaga.coordinator.target-services` property is used to specify the target services that the Ring Coordinator will manage. in this example, we are specifying the `order-service` as the target service. the `stacksaga.coordinator.instance-type` property is used to specify the instance type for the Ring Coordinator application, which can be either `master`, `slave` both due to sample small size cluster. in a real-world scenario, you would typically have one master instance and multiple slave instances for better scalability and fault tolerance.
+<1> `spring.rsocket.server` 属性用于配置环形协调器应用的 RSocket 服务端。您需要提供 RSocket 服务的监听地址与端口，供 Slave 实例连接至 Master 实例。
+<2> `stacksaga.coordinator.target-services` 属性用于指定环形协调器所管理的目标微服务。在此示例中指定 `order-service` 为目标服务。`stacksaga.coordinator.instance-type` 用于指定当前环形协调器实例的角色类型，本例中针对本地单机测试将 `master,slave` 声明为同一实例。在生产环境中，通常部署一个独立的 Master 节点与多个 Slave 节点以获得更好的伸缩性与容灾高可用。
 
-<3> The `stacksaga.instance` properties are used to configure the instance information for the Ring Coordinator application. The *cluster* and the *region* should be the same as the ones configured in the orchestrator application to ensure that they are in the same cluster and region for proper coordination. For details on region resolution, see xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`].
-<4> Due to the instance acting as a slave as well, it needs to connect to the master instance to receive the token range information, so you need to provide the connection details of the master instance using the `stacksaga.coordinator.slave.target-master` properties.
+<3> `stacksaga.instance` 属性用于配置环形协调器应用的实例元数据。*cluster* 与 *region* 必须与编排器应用中配置的值完全一致，以确保二者处于相同的集群和区域以开展正常协作。有关区域解析规则，请参阅 xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`]。
+<4> 由于当前实例同时作为 Slave 运行，它需要连接至 Master 节点以接收令牌区间分配信息，因此通过 `stacksaga.coordinator.slave.target-master` 属性提供 Master 节点的连接配置。
 
-=== Adding `stacksaga-ring-coordinator-connector` in existing orchestrator
+=== 在现有编排器中添加 `stacksaga-ring-coordinator-connector`
 
-Go to the pom.xml of your existing orchestrator application and add the following dependency to enable the integration with the Ring Coordinator.
+进入现有编排器应用的 `pom.xml`，添加以下依赖以启用与环形协调器的连接支持：
 
 [source,xml]
 ----
@@ -781,7 +763,7 @@ Go to the pom.xml of your existing orchestrator application and add the followin
 </dependency>
 ----
 
-And the update the following properties in your `application.properties` or `application.yml` file to configure the Ring Coordinator connection.
+随后在 `application.properties` 或 `application.yml` 文件中配置环形协调器连接属性：
 
 [source,properties]
 ----
@@ -796,14 +778,14 @@ stacksaga.coordinator.connector.master.requester.port=4455
 #stacksaga.transaction.recovery-node.concurrency=8
 ----
 
-<1> The `stacksaga.sql.transaction.recovery.default.retry.delay` property sets the duration a stalled transaction is kept waiting before being exposed for retrying. As configured, the transaction will be exposed for retry after one minute. You can also configure per-domain overrides (e.g. `stacksaga.sql.transaction.recovery.order-domain.retry.delay=30s`), crash-restore delays, and transaction lifetime. See xref:stacksaga-database-support:sql-database-support/stacksaga-sql-configuration-properties.adoc[SQL Database Configuration Properties] for full details.
-<2> The `stacksaga.coordinator.connector.enabled` property is used to enable the Ring Coordinator Connector in the orchestrator application. Setting it to `true` turns the standard Orchestrator service into a `Retry Node` that receives token range allocations from the Ring Coordinator and processes retries. This also activates the `stacksaga.transaction.recovery-node.*` streaming pipeline.
+<1> `stacksaga.sql.transaction.recovery.default.retry.delay` 属性设置停滞事务在被暴露给重试系统之前需等待的时间跨度。在此配置下，停滞事务将在 1 分钟后进入可重试候选集。您还可以针对特定领域配置独立的覆盖时长（例如 `stacksaga.sql.transaction.recovery.order-domain.retry.delay=30s`）、宕机恢复延迟以及事务最大生存周期。完整细节请参阅 xref:stacksaga-database-support:sql-database-support/stacksaga-sql-configuration-properties.adoc[SQL 数据库配置属性]。
+<2> `stacksaga.coordinator.connector.enabled` 属性用于在编排器应用中激活环形协调器连接器。将其设置为 `true` 会将标准编排器实例升级为能够接收环形协调器分配的令牌区间并执行重试任务的 xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[重试节点 (Retry Node)]。同时激活 `stacksaga.transaction.recovery-node.*` 流水线。
 
-<3> Host and the port properties for connecting to the master instance. after connection is established, master will suggest an available slave node (at this time only one we have,) and internally it connects with the slave node and subscribe to the token range information.
+<3> 连接 Master 实例的主机名与端口。建立连接后，Master 会指派一个可用的 Slave 节点（当前单机测试下仅有 1 个），并在内部与该 Slave 节点建立通道并订阅分配的令牌区间信息。
 
-=== Simulating retry scenario
+=== 模拟重试场景 (Simulating retry scenario)
 
-Here we are going to update the `ReserveOrderExecutor` to simulate a transient failure that can be retried, such as a temporary unavailability of an external service. we will throw a `RetryableExecutorException` at the first attempt and the second attempt (by the retry) will be successful to demonstrate the retry mechanism in action.
+接下来我们改造 `ReserveOrderExecutor`，模拟一个可通过重试恢复的瞬态故障（例如外部服务临时不可用）。我们将在第一次执行尝试时主动抛出 `RetryableExecutorException`，而在重试系统发起的第二次尝试时顺利执行，以直观验证重试机制的运作效果。
 
 [source,java]
 ----
@@ -859,17 +841,17 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
 }
 ----
 
-<1> We are using an `AtomicReference` to hold a counter map that keeps track of the number of attempts for each transaction id. this is just for simulation purposes to determine when to throw the `RetryableExecutorException`. in a real-world scenario, you would typically have some actual logic to determine whether to throw a `RetryableExecutorException` based on the type of failure you encounter, such as catching specific exceptions from external service calls or checking certain conditions.
-<2> In the `doProcess` method, we check the counter for the current transaction id. if it is the first attempt (counter value is 1), we throw a `RetryableExecutorException` to simulate a transient failure that can be retried. if it is the second attempt (counter value is 2), we proceed with the normal flow and call `stepManager.next` to move to the next step in the transaction flow. this way, we can demonstrate the retry mechanism in action, where the first attempt fails and triggers a retry, and the second attempt succeeds.
+<1> 我们使用 `AtomicReference` 维护一个计数器 Map，记录每个事务 ID 的执行尝试次数。这仅用于测试模拟以确定何时抛出 `RetryableExecutorException`。在实际生产场景中，您通常会根据捕获的具体异常类型（如外部远程调用超时、临时连接拒绝）或业务状态来决定是否抛出 `RetryableExecutorException`。
+<2> 在 `doProcess` 方法中检查当前事务 ID 的执行计数。若为第 1 次尝试（计数为 1），主动抛出 `RetryableExecutorException` 以模拟可重试的瞬态故障。若为第 2 次尝试（计数为 2），则继续正常业务流程并调用 `stepManager.next` 推进至下一步。通过这种方式，我们清晰地验证了重试机制：第一次尝试失败触发重试等待，第二次重试尝试成功完成。
 
 [[stage-3]]
-== Stage-3 [Observability via trace window]
+== 阶段三 [通过链路追踪窗口实现可观测性] (Stage-3 [Observability via trace window])
 
-In the previous stages we implemented the transaction flow with compensation and retry. Now let's observe it. The xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] is a secure web portal that visualizes and monitors your transaction flows in real time — it renders each transaction as a graph of its steps, showing their statuses and the events emitted during execution, so you can spot bottlenecks and monitor the overall health of your sagas. In this stage we connect it to our running orchestrator.
+在前面的阶段中，我们成功实现了具备故障补偿与重试机制的事务流。现在让我们为其赋予可观测性。xref:trace-window:stacksaga-trace-window.adoc[StackSaga 链路追踪窗口 (Trace Window)] 是一个安全的可视化 Web 门户，能够实时监控与图形化展现您的事务流程——它将每个事务绘制为其流转步骤的有向图，直观展示各步骤的执行状态以及执行期间发出的事件，帮助您快速定位瓶颈并全方位监控 Saga 的健康状况。在本阶段中，我们将其接入正在运行的编排器。
 
-=== Adding Trace Window Connector
+=== 添加链路追踪窗口连接器 (Adding Trace Window Connector)
 
-To enable the integration with the trace window, you need to add the following dependency in your orchestrator application's `pom.xml` file.
+要启用与链路追踪窗口的集成，请在编排器应用的 `pom.xml` 中引入以下依赖：
 
 [source,xml]
 ----
@@ -879,7 +861,7 @@ To enable the integration with the trace window, you need to add the following d
 </dependency>
 ----
 
-And then configure the following properties in your `application.properties` or `application.yml` file to enable the trace window access.
+随后在 `application.properties` 或 `application.yml` 中配置以下属性以开放链路追踪窗口 API：
 
 [source,properties]
 ----
@@ -888,7 +870,7 @@ stacksaga.trace-window.secure-api=false //<1>
 stacksaga.trace-window.enable-api=true //<2>
 ----
 
-<1> The `stacksaga.trace-window.secure-api` property is used to configure whether the trace window API should be secured with authentication and authorization. setting it to `false` means that the trace window API will be accessible without any authentication, which can be useful for development and testing purposes. however, in a production environment, it is recommended to set this property to `true` and provide the access token. read xref:trace-window:stacksaga-trace-window.adoc[more]
-<2> The `stacksaga.trace-window.enable-api` property is used to enable the trace window API in the orchestrator application. by default api is disabled.
+<1> `stacksaga.trace-window.secure-api` 属性用于配置链路追踪窗口 API 是否需要鉴权与认证。设置为 `false` 表示链路追踪 API 无需认证即可直接访问，适合本地开发与调试。然而在生产环境中，强烈建议将其设置为 `true` 并配置访问令牌。xref:trace-window:stacksaga-trace-window.adoc[了解更多]
+<2> `stacksaga.trace-window.enable-api` 属性用于在编排器应用中启用链路追踪窗口 API。该 API 默认处于禁用状态。
 
-Now restart the server go to https://trace.stacksaga.org/[Trace-Window] and connect the local running server by providing the url `http://localhost:8080` and enter the transaction id that you received in the response of the `/api/v1/order` endpoint to visualize the transaction.
+重启应用服务器后，打开浏览器访问 https://trace.stacksaga.org/[Trace-Window 页面]，输入本地运行的服务地址 `http://localhost:8080`，并填入之前调用 `/api/v1/order` 接口所获取的事务 ID，即可实时图形化呈现与追踪该事务的完整执行轨迹。
