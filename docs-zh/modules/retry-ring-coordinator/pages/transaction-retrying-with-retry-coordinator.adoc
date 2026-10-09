@@ -1,128 +1,128 @@
-:description: Reference guide for the Transaction Retry Architecture of the StackSaga framework. Intended for architects, DevOps engineers, and developers who integrate, deploy, or operate StackSaga-based microservices.
+:description: StackSaga 框架事务重试架构参考指南。适用于集成、部署或运维基于 StackSaga 的微服务架构师、DevOps 工程师和开发人员。
 :keywords: stacksaga agent, transaction retry, microservices, event-store, consistent hashing, deployment
 :stem: latexmath
 
-= Transaction Retry Architecture With Retry Coordinator
+= 基于重试协调器的事务重试架构 (Transaction Retry Architecture With Retry Coordinator)
 
 [.lead]
-This article is the reference guide for the *Transaction Retry Architecture* of the StackSaga framework.
-It is intended for *architects*, *DevOps engineers*, and *developers* who integrate, deploy, or operate StackSaga-based microservices.
+本文档是 StackSaga 框架*事务重试架构 (Transaction Retry Architecture)* 的权威参考指南。
+专为集成、部署或运维基于 StackSaga 的微服务的*架构师*、*DevOps 工程师*和*开发人员*编写。
 
-== Introduction
+== 简介 (Introduction)
 
-In a distributed microservices architecture, transactions often span multiple services and databases, making them susceptible to failures, timeouts, and pauses.
-The StackSaga framework addresses this challenge with a robust *transaction retry subsystem* that ensures reliability and consistency without risking duplicate processing or conflicts.
+在分布式微服务架构中，事务通常跨越多个服务和数据库，这使得它们极易受到网络瞬态故障、超时和服务暂时不可用的影响。
+StackSaga 框架通过高可靠的*事务重试子系统 (Transaction Retry Subsystem)* 解决了这一严峻挑战，在确保可靠性和最终一致性的同时，杜绝了重复处理或并发冲突的风险。
 
-This subsystem detects paused transactions and re-invokes them safely across a cluster of microservice instances, using a combination of token ring partitioning, RSocket communication, and time-windowed publishing.
-The result is high availability and resilience even in the face of transient failures, while guaranteeing that transactions are processed exactly once.
+该子系统能够精准检测处于暂停状态的事务，并结合使用令牌环分区 (Token Ring Partitioning)、RSocket 响应式通信以及时间窗口发布机制，在微服务实例集群之间安全地重新触发这些事务。
+其结果是：即使面对瞬态故障也能实现高可用性与系统弹性，同时严格保证事务*恰好执行一次 (Exactly-Once)*。
 
-=== Scope of This Document
+=== 本文档范围 (Scope of This Document)
 
-This document focuses exclusively on the *transaction retry subsystem*.
+本文档专门聚焦于*事务重试子系统 (Transaction Retry Subsystem)*。
 
-Topics covered:
+涵盖的主题包括：
 
-* Identifying retryable vs non-retryable errors
-* Why instance-level retrying is insufficient
-* Orchestrator Deployment modes: Standard-Node vs Retry-Node
-* The three-component retry ecosystem: Orchestrator, Retry-Coordinator-Slave, and Retry-Coordinator-Master
-* Token ring partitioning using Murmur3
-* RSocket communication patterns between components
-* Time-windowed token publishing and conflict avoidance
-* Failure modes, reconnection behaviour, and deployment considerations
-* Multi-region deployments
-* Virtual cluster partitioning for massive-scale systems
+* 识别可重试错误与不可重试错误 (Retryable vs Non-Retryable Errors)
+* 为什么仅依靠实例级重试是不够的
+* 编排器部署模式：标准节点 (Standard-Node) 与重试节点 (Retry-Node)
+* 三组件重试生态系统：Orchestrator、Retry-Coordinator-Slave 与 Retry-Coordinator-Master
+* 基于 Murmur3 的令牌环分区机制 (Token Ring Partitioning)
+* 组件间的 RSocket 通信模式
+* 基于时间窗口的令牌发布与冲突规避 (Conflict Avoidance)
+* 故障模式、重连行为与部署考量
+* 多区域部署架构 (Multi-Region Deployments)
+* 适用于超大规模系统的虚拟集群分区 (Virtual Cluster Partitioning)
 
-== Foundational Concepts
+== 核心基础概念 (Foundational Concepts)
 
-Before diving into the architecture, two foundational concepts must be clear: what kinds of errors trigger retrying, and why retrying cannot simply be handled by the originating node.
+在深入研究架构之前，必须先明确两个核心概念：什么类型的错误会触发重试，以及为什么不能简单地由发起事务的原始节点来负责重试。
 
-=== Retryable vs Non-Retryable Errors
+=== 可重试错误与不可重试错误 (Retryable vs Non-Retryable Errors)
 
-StackSaga distinguishes two classes of errors:
+StackSaga 将错误划分为两大类别：
 
-*Non-retryable error* — a business logic failure or permanent error condition.
-These types of errors are not transient and cannot be resolved by retrying.
-Examples include validation failures, authorization errors, or any condition that indicates a fundamental issue with the transaction itself.
-These errors can occur in both the primary flow and the compensation flow.
-In the primary flow, a non-retryable error triggers compensation; if it occurs during compensation, the transaction is marked as permanently failed.
-In either case, the transaction *will not be retried*.
+*不可重试错误 (Non-retryable error)* —— 业务逻辑校验失败或永久性错误状态。
+此类错误不是瞬态故障，无法通过重试来解决。
+典型示例包括参数验证失败、权限认证失败，或任何表明事务本身存在根本性业务冲突的条件。
+这类错误在主流程（向前执行）和补偿流程（回滚）中都可能发生。
+在主流程中，不可重试错误会触发补偿回滚；如果发生在补偿流程中，该事务将被标记为永久失败 (Permanently Failed)。
+在这两种情况下，事务都*不会被重试*。
 
-*Retryable error* — a transient condition, such as a downstream service being unavailable, a database connection timeout, or a network partition.
-The transaction is paused and will be replayed automatically.
-Retryable errors can occur in both the primary flow and the compensation flow.
-This is precisely where the retry subsystem comes into play, ensuring that the transaction is retried safely without duplication or conflict.
+*可重试错误 (Retryable error)* —— 瞬态或临时性故障，例如下游微服务暂时不可用、数据库连接超时或瞬时网络分区。
+事务将被置于暂停状态 (Paused)，并由系统自动重播。
+可重试错误在主流程和补偿流程中都有可能发生。
+这正是重试子系统发挥核心作用的场景，确保事务在没有重复执行或并发冲突的情况下安全地完成重试。
 
-=== Why Instance-Level Retrying Is Insufficient
+=== 为什么实例级重试是不充分的 (Why Instance-Level Retrying Is Insufficient)
 
-At first glance it may seem easy to retry a transaction on the same node that originally processed it.
-However, this approach has a critical flaw.
+乍看之下，让最初处理该事务的同一节点负责重试似乎轻而易举。
+然而，这种方法存在致命的设计缺陷。
 
-Standard nodes are *ephemeral* — they are short-lived, temporary, and designed to be created, destroyed, or replaced on-demand based on traffic.
-This means that when the time comes to retry a transaction, the node that originally processed it may no longer be running.
-The transaction then remains paused indefinitely with no node to reclaim it.
+标准微服务节点是*瞬态的 (Ephemeral)* —— 它们的生命周期较短，旨在根据实时流量进行弹性伸缩、动态销毁或按需替换。
+这意味着，当重试时机到来时，最初处理该事务的节点可能早已下线或被销毁。
+这样一来，该事务将无限期处于暂停状态，没有任何节点能认领并继续执行它。
 
-To make this concrete: imagine 3 instances are running and each has saved some transactions for retrying due to network issues.
-If a scheduler is triggered on each instance to replay its own transactions, but one instance has since been terminated due to scale-down, the transactions it owned will never be picked up by the other instances.
+举个具体的例子：假设有 3 个正在运行的微服务实例，每个实例都因下游网络波动而暂存了一些待重试的事务。
+如果依赖每个实例自身的定时调度器来重播各自的事务，而其中一个实例因缩容策略被 Kubernetes 终止下线，那么它原本持有的事务将永远无法被其余实例接管重试。
 
-image:ROOT:stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt="why instance does not involve directly for retrying in StackSaga"]
+image:ROOT:stacksaga-diagram-transaction-direct-retry-by-instance.drawio.svg[alt="为什么 StackSaga 不允许实例直接进行本地重试"]
 
-StackSaga solves this by *decoupling transaction retrying from the originating node* entirely, using a three-component architecture described in the next sections.
+StackSaga 通过将*事务重试完全与原始发起节点解耦*解决了此问题，其核心正是下文所述的三组件架构。
 
 [[orchestrator-deployment-modes]]
-== Orchestrator Deployment Modes
+== 编排器部署模式 (Orchestrator Deployment Modes)
 
-Because orchestrator standard nodes are ephemeral, StackSaga defines two distinct deployment modes for an orchestrator service:
+由于标准的编排器节点具有瞬态性，StackSaga 为编排器服务定义了两种不同的部署模式：
 
-*Standard-Node*::
-The regular orchestrator service (with StackSaga enabled) that processes transactions and handles business logic.
-Standard nodes can be freely scaled up or down based on traffic.
+*标准节点 (Standard-Node)*::
+常规的编排器微服务（启用了 StackSaga），负责常规业务流量的事务处理与逻辑编排。
+标准节点可以根据系统流量自由进行水平扩容或缩容。
 
-*xref:#retry-node[Retry-Node]*::
-A specialised node that handles transaction retries in addition to regular transaction processing.
-Retry-Nodes are intended to be more stable and long-lived than Standard-Nodes, ensuring reliable retry management even as the rest of the cluster scales.
+*xref:#retry-node[重试节点 (Retry-Node)]*::
+在处理常规事务的基础之上，额外承担事务重试管理职责的专属节点。
+重试节点被设计为比标准节点更加稳定和长寿命 (Long-Lived)，以确保在集群其余节点动态伸缩时，重试管理始终平稳可靠。
 
 image::stacksaga-diagram-standard-node-vs-retry-node.svg[]
 
-In a typical deployment you might have 5–1000 Standard-Nodes handling regular traffic and 2 Retry-Nodes that remain stable to manage retries.
-There is no technical restriction on scaling Retry-Nodes up or down — the distinction is operational: they are simply the nodes you choose to keep stable.
+在典型的生产部署中，您可能会配置 5 到 1000 个标准节点来应对高并发流量，同时仅保持 2 个长期稳定的重试节点来专职管理重试任务。
+技术上并没有限制重试节点扩缩容的硬性规则——这种区分主要是运维层面的：重试节点就是您选择保持高稳定性的服务节点。
 
 [NOTE]
 ====
-Retrying is the *worst-case* scenario for a transaction, not the regular flow.
-See xref:foundations:proportional-analysis-of-long-running-transactions-in-saga.adoc[] for an analysis of retrying frequency and its weight relative to normal processing.
+重试是事务处理过程中的*最坏降级路径 (Worst-Case Scenario)*，而非正常主流程。
+有关重试发生的频率及其相对于常规流程的处理开销比重，请参阅 xref:foundations:proportional-analysis-of-long-running-transactions-in-saga.adoc[Saga 长事务比例分析]。
 ====
 
-The next challenge is how retry responsibility is safely distributed across the cluster of Retry-Nodes without any two nodes conflicting over the same transaction.
-This is where *Token Ring Partitioning* comes in.
+接下来的关键挑战在于：如何在重试节点集群中安全地分配重试职责，避免任意两个节点针对同一事务产生并发竞争冲突？
+这正是*令牌环分区 (Token Ring Partitioning)* 所解决的问题。
 
-== Token Ring Partitioning
+== 令牌环分区 (Token Ring Partitioning)
 
-=== Overview
+=== 概述 (Overview)
 
-StackSaga uses the *Murmur3 consistent hashing algorithm* to assign every transaction to a deterministic position in a 64-bit token ring.
-This token is computed when the transaction is *initialised* (by any Orchestrator) and stored alongside the transaction record in the database, together with the *cluster name* and *region* of the originating Orchestrator.
-The retry subsystem uses this stored token, cluster, and region to determine *which Orchestrator instance is responsible* for retrying a given transaction at any point in time.
+StackSaga 采用 **Murmur3 一致性哈希算法 (Murmur3 Consistent Hashing Algorithm)** 将每个事务确定性地映射到 64 位令牌环上的唯一位置。
+当事务*首次初始化*时（由任意 Orchestrator 发起），系统会计算该令牌值，并与事务记录一同持久化到数据库中，同时记录发起 Orchestrator 的*集群名称 (Cluster Name)* 与*区域 (Region)*。
+重试子系统利用持久化存储的令牌、集群和区域信息，在任意时间点确定*具体由哪一个 Orchestrator 实例全权负责*该事务的重试。
 
-The full token space spans from latexmath:[-2^{63}] to latexmath:[2^{63}-1]:
+完整的令牌空间范围从 latexmath:[-2^{63}] 到 latexmath:[2^{63}-1]：
 
 ----
 -9,223,372,036,854,775,808  →  9,223,372,036,854,775,807
 ----
 
-The diagram below illustrates how Retry-Nodes are assigned non-overlapping segments of the token ring.
-In this example there are 4 Retry-Nodes, each responsible for a distinct quarter of the token space:
+下图展示了重试节点如何分配互不重叠的令牌环分段。
+在此示例中有 4 个重试节点，每个节点各自负责令牌空间的四分之一：
 
 image::stacksaga-diagram-token-ring-partitioning-for-transaction-retrying-with-retry-nodes.svg[]
 
-* *Hash space:* `-9223372036854775808` → `9223372036854775807`
-* *Total range size:* `18446744073709551616`
-* *Partition size per node (4 nodes):* `4611686018427387904`
+* *哈希空间范围:* `-9223372036854775808` → `9223372036854775807`
+* *总哈希范围大小:* `18446744073709551616`
+* *每节点分区大小 (4 节点):* `4611686018427387904`
 
 [cols="<3,^1,<3,<3",options="header",width="100%"]
 [.google-anno-skip]
 |===
-| Node | Slot | Token Range Start | Token Range End
+| 节点 (Node) | 槽位 (Slot) | 起始令牌 (Token Range Start) | 结束令牌 (Token Range End)
 
 | `order-service-instance-1`
 | A
@@ -145,263 +145,262 @@ image::stacksaga-diagram-token-ring-partitioning-for-transaction-retrying-with-r
 | `9223372036854775807`
 |===
 
-=== Two-Level Partitioning
+=== 两级分区机制 (Two-Level Partitioning)
 
-The token ring is divided in *two levels*:
+令牌环通过*两级层级*进行切分：
 
-. *Master → Retry-Coordinator-Slave:* The Retry-Coordinator-Master divides the full ring equally across registered Retry-Coordinator-Slave nodes.
-. *Retry-Coordinator-Slave → Orchestrator:* Each Retry-Coordinator-Slave further divides its slice equally across its registered Orchestrator instances.
+. *Master → Retry-Coordinator-Slave:* Retry-Coordinator-Master 将完整的令牌环均分给所有已注册的 Retry-Coordinator-Slave 节点。
+. *Retry-Coordinator-Slave → Orchestrator:* 每个 Retry-Coordinator-Slave 进一步将自身分配到的令牌切片均分给连接到它的各个 Orchestrator 实例。
 
-.Ring partitioning: Node perspective
+.令牌环分区：节点视角
 image::stacksaga-diagram-ring-partitioning-overview.svg[]
 
-.Ring partitioning: Partitioning perspective
+.令牌环分区：分区视角
 image::stacksaga-diagram-token-ring-partitioning-for-transaction-retrying.svg[]
 
-==== Master → Retry-Coordinator-Slave Example (3 Retry-Coordinator-Slaves)
+==== Master → Retry-Coordinator-Slave 示例 (3 个 Retry-Coordinator-Slave)
 
 [cols="1,2,2",options="header",stripes=odd]
 [.google-anno-skip]
 |===
-| Retry-Coordinator-Slave Node | Start Token (Inclusive) | End Token (Inclusive)
+| 从重试协调器节点 (Slave Node) | 起始令牌 (Inclusive) | 结束令牌 (Inclusive)
 | Retry-Coordinator-Slave Node 1 | `-9,223,372,036,854,775,808` | `-3,074,457,345,618,258,603`
 | Retry-Coordinator-Slave Node 2 | `-3,074,457,345,618,258,602` | `3,074,457,345,618,258,602`
 | Retry-Coordinator-Slave Node 3 | `3,074,457,345,618,258,603` | `9,223,372,036,854,775,807`
 |===
 
-NOTE: Partition boundaries are recalculated automatically each time the number of registered Retry-Coordinator-Slaves changes (at the next 30-second publish cycle).
+NOTE: 每当已注册的 Retry-Coordinator-Slave 数量发生变动时，分区边界将在下一个 30 秒发布周期由系统自动重新计算。
 
-==== Retry-Coordinator-Slave → Orchestrator Example (Retry-Coordinator-Slave Node 1, 2 Orchestrators)
+==== Retry-Coordinator-Slave → Orchestrator 示例 (Slave Node 1 下挂 2 个 Orchestrator)
 
 [cols="1,2,2",options="header",stripes=odd]
 [.google-anno-skip]
 |===
-| Orchestrator Instance | Start Token (Inclusive) | End Token (Inclusive)
+| 编排器实例 (Orchestrator Instance) | 起始令牌 (Inclusive) | 结束令牌 (Inclusive)
 | Order Service Instance 1 | `-9,223,372,036,854,775,808` | `-6,148,914,691,236,517,206`
 | Order Service Instance 2 | `-6,148,914,691,236,517,205` | `-3,074,457,345,618,258,603`
 |===
 
-All other Retry-Coordinator-Slave nodes apply the same logic for their own registered Orchestrator instances.
+所有其他的 Retry-Coordinator-Slave 节点对其各自注册的 Orchestrator 实例遵循完全相同的划分逻辑。
 
 [IMPORTANT]
 ====
-It is not required to have multiple physical Ring-Coordinator machines to achieve partitioning.
-The `ring-coordinator-starter` module can be configured as either Master or Retry-Coordinator-Slave via properties.
-In a small deployment a single node can act as both Master and Retry-Coordinator-Slave simultaneously.
-In larger deployments these roles are separated across multiple nodes for fault isolation and scalability.
+并不强制要求多台物理机才能实现令牌环分区。
+`ring-coordinator-starter` 模块可以通过配置属性自由声明为 Master 或 Retry-Coordinator-Slave。
+在小型部署中，单个节点可以同时身兼 Master 和 Retry-Coordinator-Slave 两个角色。
+在大型生产部署中，通常将这两个角色拆分到不同的独立节点上，以实现故障隔离与水平扩展。
 ====
 
-== The Three-Component Retry Architecture
+== 三组件重试架构 (The Three-Component Retry Architecture)
 
-Token ring partitioning is managed collaboratively by three components.
-Here is a brief orientation before the detailed descriptions:
+令牌环分区是由三个组件通力协作管理的。
+在详细深入各组件之前，先进行整体职责速览：
 
 [cols="1,3",options="header"]
 [.google-anno-skip]
 |===
-| Component | Responsibility
+| 组件 (Component) | 核心职责 (Responsibility)
 
 | xref:#ring-coordinator-master[*Retry-Coordinator-Master*]
-| Single authority for the domain.
-Divides the full token ring equally across Retry-Coordinator-Slaves every 30 seconds.
-Tells new Orchestrators which Retry-Coordinator-Slave to connect to (Round Robin).
+| 领域的权威决策核心。
+每 30 秒将完整的令牌环均分给所有活跃的 Retry-Coordinator-Slave。
+通过轮询算法 (Round Robin) 指引新上线的 Orchestrator 应该连接哪一个 Retry-Coordinator-Slave。
 
 | xref:#ring-coordinator-slave[*Retry-Coordinator-Slave*]
-| Relay between Master and Orchestrators.
-Receives its ring slice from the Master and divides it further across its connected Orchestrators.
-Delivers each Orchestrator its personal sub-range every minute.
+| Master 与 Orchestrator 之间的中继枢纽。
+接收 Master 下发的令牌切片，并进一步将其细分给连接到它的各个 Orchestrator。
+每分钟将专属的子令牌范围下发给对应 Orchestrator。
 
 | xref:#retry-node[*Orchestrator (Retry-Node)*]
-| Holds its sub-range for the current minute.
-Polls the database for paused transactions whose token falls in that sub-range and re-invokes them — without ever conflicting with another instance.
+| 持有当前分钟内的子令牌范围。
+轮询数据库中令牌落入该子范围内的暂停事务并重新执行——绝不会与其他任何实例产生冲突。
 |===
 
-Each component does one small job cleanly.
-No component reaches into another's responsibility.
-The result is a retry system that scales horizontally, tolerates partial failures, and guarantees that every paused transaction is eventually retried — exactly once at a time.
+每个组件职责边界极其清晰，没有越权侵入。
+最终构建出一个支持水平扩展、容忍部分节点故障，并严格保证每个暂停事务*在任意时刻恰好被单一节点执行重试*的高可用系统。
 
 [[ring-coordinator-master]]
-=== Retry-Coordinator-Master
+=== Retry-Coordinator-Master (主重试协调器)
 
-==== What It Is
+==== 架构定位
 
-The Retry-Coordinator-Master is the *single authority* for retry coordination within a microservice domain.
-There is exactly *one Master per domain* (or per virtual cluster — see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[Horizontal Scaling via Virtual Clusters]).
+Retry-Coordinator-Master 是微服务领域内重试协调的*唯一权威实体 (Single Authority)*。
+每个业务领域内*有且仅有一个 Master*（或者每个虚拟集群一个 Master——参见 xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[通过虚拟集群进行水平扩展]）。
 
-The Master has no knowledge of your business logic and never touches the transaction database.
-Its entire responsibility is coordination: dividing the token ring, tracking which Retry-Coordinator-Slaves are alive, and pointing new Orchestrators to the right Retry-Coordinator-Slave when they start up.
+Master 完全不感知您的业务逻辑，并且绝不直接访问事务数据库。
+它的全部职责就是纯粹的协调调度：切分令牌环、跟踪各个 Retry-Coordinator-Slave 的存活状态，并在新的 Orchestrator 启动时为其指引正确的 Retry-Coordinator-Slave。
 
-It is built on a *fully non-blocking Netty stack* via RSocket, which means a single Master instance can comfortably handle *thousands of concurrent Retry-Coordinator-Slave connections* — far beyond what most deployments will ever need.
+它基于 RSocket 构建在*全非阻塞的 Netty 反应式堆栈*之上，这意味着单个 Master 实例即可轻松维持*数千个并发的 Retry-Coordinator-Slave 长连接*——远超绝大多数生产系统的需求。
 
-==== Three Responsibilities
+==== 三大核心职责
 
-*Responsibility 1 — Maintain the Retry-Coordinator-Slave registry.*
-Every Retry-Coordinator-Slave that starts up connects to the Master via a persistent RSocket `request-stream` and registers itself.
-The Master keeps a live registry of all connected Retry-Coordinator-Slaves.
-When a Retry-Coordinator-Slave disconnects (crashes, restarts), the Master notices immediately and updates its registry.
+*职责 1 — 维护 Retry-Coordinator-Slave 注册表。*
+每个启动的 Retry-Coordinator-Slave 通过持久的 RSocket `request-stream` 连接到 Master 并注册自身。
+Master 维护所有在线连接的 Slave 实时注册表。
+当某个 Slave 断开连接（崩溃、重启）时，Master 能够立即察觉并更新注册表。
 
-*Responsibility 2 — Publish token ring partitions every 30 seconds.*
-At the 30th second of every minute the Master fires a timer.
-It looks at the current list of registered Retry-Coordinator-Slaves, divides the full 64-bit token ring equally among them, and pushes each Retry-Coordinator-Slave its assigned range, tagged as valid for the *next* full minute.
-This 30-second lead gives the entire cluster time to receive and prepare the new assignments before they go live.
+*职责 2 — 每 30 秒发布一次令牌环分区。*
+在每分钟的第 30 秒，Master 触发定时器。
+它根据当前注册的 Slave 列表，将完整的 64 位令牌环均分，并将分配到的范围推送给每个 Slave，打上在*下一个整分钟*生效的时间戳标签。
+这 30 秒的提前量为整个集群提供了充足的时间，以便在正式生效前接收并就绪新分配的分区。
 
-*Responsibility 3 — Direct new Orchestrators to a Retry-Coordinator-Slave.*
-When a new Orchestrator instance starts up, it sends a one-shot `Request-Response` message to the Master asking: *"Which Retry-Coordinator-Slave should I connect to?"*
-The Master picks a Retry-Coordinator-Slave using a *Round Robin* strategy — spreading Orchestrators evenly across available Retry-Coordinator-Slaves — and responds with the Retry-Coordinator-Slave's host and port.
-After this single exchange the Orchestrator never contacts the Master again; all future communication goes through the Retry-Coordinator-Slave directly.
+*职责 3 — 指引新上线 Orchestrator 连接对应 Slave。*
+当新的 Orchestrator 实例启动时，它向 Master 发送单次 `Request-Response` 探测请求，询问：*“我应该连接哪一个 Retry-Coordinator-Slave？”*
+Master 采用*轮询算法 (Round Robin)* 从可用列表中挑选一个 Slave——将 Orchestrator 均匀打散到各个 Slave 上——并返回该 Slave 的主机名和端口。
+在此次交互之后，Orchestrator 不再与 Master 联系；后续的所有通信都直接通过 Slave 进行。
 
-==== What It Knows and Does Not Know
+==== 知识边界 (Knows and Does Not Know)
 
-Knows::
-* The registered Retry-Coordinator-Slave nodes and their connection status.
-* How to divide the 64-bit token ring equally using Murmur3 partitioning.
-* Which Retry-Coordinator-Slave to assign to each new Orchestrator (Round Robin).
+感知的信息 (Knows)::
+* 已注册的 Retry-Coordinator-Slave 节点及其连接存活状态。
+* 如何使用 Murmur3 分区算法均分 64 位令牌环。
+* 通过轮询算法为新上线的 Orchestrator 分配对应的 Slave。
 
-Does *not* know::
-* Individual Orchestrator instances after the initial lookup.
-* The transaction database.
-* Your business logic or transaction structure.
-* Other domain Masters — each Master is isolated to its own domain.
+*不*感知的信息 (Does not know)::
+* 初始寻址完成后的各个单独 Orchestrator 实例细节。
+* 事务数据库及其内容。
+* 具体的业务逻辑或事务结构。
+* 其他微服务领域的 Master——每个 Master 在其所属领域内高度自治隔离。
 
-==== Master Node Failure
+==== Master 节点故障处理 (Master Node Failure)
 
-When the Master fails:
+当 Master 节点发生故障宕机时：
 
-. All registered Retry-Coordinator-Slaves lose their connection to the Master.
-. Retry-Coordinator-Slaves stop receiving token range updates.
-Their *last known range remains cached* but expires at the next minute boundary.
-. Orchestrators continue retrying using their last received sub-range until it expires.
-. New Orchestrator instances starting up will fail to obtain a Retry-Coordinator-Slave assignment.
+. 所有已注册的 Retry-Coordinator-Slave 失去与 Master 的长连接。
+. Retry-Coordinator-Slave 停止接收新的令牌范围更新。
+其*最后已知的缓存范围将保留*，但会在下一个分钟边界到达时过期。
+. Orchestrator 继续使用最后接收到的子范围执行重试，直到该范围自然过期。
+. 新上线的 Orchestrator 实例由于无法从 Master 获取 Slave 分配，初始化重试连接将失败。
 
 [NOTE]
 ====
-A Master failure affects *only that domain's retry subsystem*.
-Other microservice domains continue operating normally.
-Primary transaction execution (new transactions) is unaffected by Master availability.
+Master 故障*仅影响该领域的重试子系统*。
+其他微服务领域的运行完全不受影响。
+最重要的是，新事务的常规主执行流程（业务流量）完全不受 Master 存活状态的影响。
 
-For systems where even this scoped failure window is unacceptable, see <<Virtual Clusters>>.
+对于即使是这种局部故障窗口也无法容忍的超高可用系统，请参阅<<虚拟集群 (Virtual Clusters)>>。
 ====
 
 [[ring-coordinator-slave]]
-=== Retry-Coordinator-Slave
+=== Retry-Coordinator-Slave (从重试协调器)
 
-==== What It Is
+==== 架构定位
 
-The Retry-Coordinator-Slave is a *dedicated infrastructure service* — a small, lightweight process deployed alongside your microservice.
-It has no awareness of your business logic whatsoever.
-It does not touch the transaction database.
-It does not execute transactions.
+Retry-Coordinator-Slave 是一个*专用的基础设施轻量级服务*，通常与您的微服务伴生部署。
+它完全不感知任何业务逻辑。
+它不触碰事务数据库。
+它不执行任何业务事务。
 
-Its entire purpose is to act as a *distribution bridge* between the Retry-Coordinator-Master and the Orchestrator instances: it receives a large token range from the Master and breaks it into smaller, non-overlapping sub-ranges, one for each connected Orchestrator.
+它的核心目的在于充当 Retry-Coordinator-Master 与 Orchestrator 实例之间的*分发网桥 (Distribution Bridge)*：从 Master 接收较大的令牌切片，并将其进一步细分成更小且互不重叠的子范围，分别下发给连接到它的各个 Orchestrator。
 
-==== Four-Step Routine
+==== 四步日常流程 (Four-Step Routine)
 
-*Step 1 — Register with the Master.*
-On startup, the Retry-Coordinator-Slave opens a persistent RSocket `request-stream` connection to the Master, announces itself, and waits for token range updates.
+*步骤 1 — 向 Master 注册。*
+启动时，Retry-Coordinator-Slave 向 Master 打开一条持久的 RSocket `request-stream` 连接，宣告自身上线，并静默等待令牌范围更新。
 
-*Step 2 — Receive a token range slice.*
-Every 30 seconds the Master publishes updated ranges.
-The Retry-Coordinator-Slave receives its slice — a contiguous portion of the full 64-bit ring — and is told which minute that slice is valid for.
+*步骤 2 — 接收令牌范围切片。*
+每 30 秒 Master 发布更新的范围。
+Slave 接收其分配到的切片（完整 64 位环的一段连续区间），并获取该切片在哪个自然分钟内生效的元数据。
 
-*Step 3 — Accept Orchestrator registrations.*
-When an Orchestrator starts up and connects, the Retry-Coordinator-Slave records it in its local registry.
+*步骤 3 — 接受 Orchestrator 注册。*
+当 Orchestrator 启动并连接时，Slave 在其本地注册表中记录该实例。
 
-*Step 4 — Divide and deliver.*
-With its slice in hand and a list of connected Orchestrators, the Retry-Coordinator-Slave divides the slice equally — one non-overlapping sub-range per Orchestrator — and pushes each sub-range to the respective Orchestrator over the persistent stream.
+*步骤 4 — 细分并下发。*
+凭借手中的令牌切片和连接的 Orchestrator 列表，Slave 将切片等额细分——每个 Orchestrator 独占一段互不重叠的子范围——并通过持久流推送到各自对应的 Orchestrator。
 
-This cycle repeats every minute, keeping every connected Orchestrator informed of its current retry ownership window.
+此循环每分钟重复一次，使每个连接的 Orchestrator 实时掌握其当前所拥有的重试权限窗口。
 
-==== Why Have a Retry-Coordinator-Slave Layer At All?
+==== 为什么需要 Slave 这一中间层？
 
-Your service pods (Orchestrators) come and go frequently — they restart on deployments, scale up under load, scale down at night.
-If the Master had to track every individual pod, it would be overwhelmed with registration and deregistration events and would constantly be recalculating the entire ring.
+微服务 Pod（即 Orchestrator）的变动极其频繁——频繁发布部署、高并发自动扩容、夜间自动缩容。
+如果由 Master 直接跟踪每个业务 Pod，频繁的注册和注销事件将使 Master 不堪重负，陷入持续全量重新计算令牌环的泥潭。
 
-The Retry-Coordinator-Slave acts as a *buffer*.
-The Master only needs to track a small, stable set of Retry-Coordinator-Slave nodes.
-All the volatility of your application pods is absorbed by the Retry-Coordinator-Slave, which quietly adjusts its sub-range distribution whenever an Orchestrator joins or leaves — without disturbing the Master at all.
+Retry-Coordinator-Slave 在此起到了关键的*缓冲区 (Buffer)* 作用。
+Master 只需要感知极少数且极其稳定的 Slave 节点。
+底层应用 Pod 的一切伸缩波动全部由 Slave 在本地静默吸收与消化，由其在 Orchestrator 变动时自行微调子范围分配——完全不会打扰 Master 的稳定性。
 
-==== What It Knows and Does Not Know
+==== 知识边界 (Knows and Does Not Know)
 
-Knows::
-* The Master it is registered with (`stacksaga.agent.slave.target-master.host` / `.port`).
-* The Orchestrator instances currently connected to it.
-* The token range it has been assigned and how to divide it.
+感知的信息 (Knows)::
+* 自身所注册的 Master 地址（`stacksaga.agent.slave.target-master.host` / `.port`）。
+* 当前连接到自身的 Orchestrator 实例。
+* 分配给自身的令牌切片以及如何细分该切片。
 
-Does *not* know::
-* Your business logic or transaction structure.
-* The transaction database.
-* Other Retry-Coordinator-Slave nodes — each Retry-Coordinator-Slave works independently.
+*不*感知的信息 (Does not know)::
+* 业务逻辑或事务执行图。
+* 事务数据库。
+* 其他 Slave 节点——各个 Slave 之间完全独立无感知。
 
-==== Retry-Coordinator-Slave Node Failure
+==== Slave 节点故障处理 (Slave Node Failure)
 
-When a Retry-Coordinator-Slave crashes or becomes unreachable:
+当某个 Retry-Coordinator-Slave 崩溃或网络不可达时：
 
-. All Orchestrators connected to that Retry-Coordinator-Slave lose their stream.
-Their sub-ranges become stale; retry polling pauses for those instances.
-. The Master detects the lost connection and applies a *lazy rebalance strategy*:
-** If the lost Retry-Coordinator-Slave is *not the last index* in the registry, the Master assumes it will recover shortly (especially true in Kubernetes) and does *not* immediately rebalance.
-** The Master continues sending cached token ranges to the remaining Retry-Coordinator-Slaves.
-** The crashed Retry-Coordinator-Slave's token range is *frozen* — no Orchestrator covers it during the outage.
-. When the Retry-Coordinator-Slave restarts it reconnects to the Master and is treated as a *new registration*.
-. At the next 30-second publish cycle the Master recalculates and redistributes ranges across all currently registered Retry-Coordinator-Slaves, including the restarted one.
+. 连接到该 Slave 的所有 Orchestrator 丢失数据流。
+它们的子范围失效，这些实例的重试轮询将暂时挂起。
+. Master 察觉连接断开并执行*惰性再平衡策略 (Lazy Rebalance Strategy)*：
+** 如果丢失的 Slave *不是注册表中的最后一个索引*，Master 假定其很快会自愈恢复（在 Kubernetes 环境中尤为常见），*不会立即*重新全量打散分区。
+** Master 继续向其余 Slave 下发缓存的原有分区。
+** 崩溃 Slave 对应的令牌范围暂时*冻结 (Frozen)*——在此故障窗口期内没有 Orchestrator 会认领该范围。
+. 当该 Slave 重启后，重新连入 Master 并作为*新注册节点*处理。
+. 在下一个 30 秒发布周期，Master 重新计算并将范围下发给所有当前在线的 Slave（包含重启完成的 Slave）。
 
 [IMPORTANT]
 ====
-During a Retry-Coordinator-Slave outage, transactions whose tokens fall within the frozen range are *not retried* until the range is covered again.
-These transactions remain safely stored in the database with status `FAILED_WITH_RETRYABLE_ERROR` and are not lost.
+在 Slave 故障期间，哈希令牌落入该冻结范围内的事务*暂时不会被重试*，直到该范围重新被节点认领覆盖。
+这些事务安全保存在数据库中，状态维持为 `FAILED_WITH_RETRYABLE_ERROR`，绝不会丢失。
 ====
 
 [[retry-node]]
-=== Orchestrator With Ring-Coordinator connector (Retry-Node)
+=== 具备重试连接器的编排器 (Orchestrator With Ring-Coordinator connector, Retry-Node)
 
-Retry-Node stands for an Orchestrator instance that is deployed with the StackSaga xref:ring-coordinator-connector.adoc[] enabled to participate in the transaction retry ecosystem.
-It is specialised node that handles transaction retries in addition to regular transaction processing.
-Retry-Nodes are intended to be more stable and *long-lived* than Standard-Nodes, ensuring reliable retry management even as the rest of the cluster scales.
+重试节点 (Retry-Node) 是指启用了 StackSaga xref:ring-coordinator-connector.adoc[重试环连接器] 的 Orchestrator 实例，专门参与分布式事务重试生态系统。
+它是在执行常规事务流程之外，额外承担事务重试调度职责的专属节点。
+重试节点被设计为比普通标准节点更加稳定和*长寿命 (Long-Lived)*，以确保在集群其他节点弹性伸缩时，重试调度平稳连续。
 
-* To make a Standard-Node into a Retry-Node, simply add the `stacksaga-ring-coordinator-connector` dependency to the existing Orchestrator service and configure the connection properties.
-* There is no technical restriction on scaling Retry-Nodes up or down — the distinction is operational: they are simply the nodes you choose to keep stable.
-* Once configured as a Retry-Node, the Orchestrator automatically participates in the retry ecosystem. initially it connects to the Master to look up a Retry-Coordinator-Slave to be registered with, then it receives token sub-ranger(respective partition of the node) from the assigned Retry-Coordinator-Slave and starts retrying transactions that fall into the sub-range.
+* 要将标准节点升级为重试节点，只需在现有 Orchestrator 服务中引入 `stacksaga-ring-coordinator-connector` 依赖并配置连接参数。
+* 技术上对重试节点的伸缩没有任何限制——区分纯粹是运维维度的：它们就是您团队选择保持高稳定性的微服务实例。
+* 一旦配置为重试节点，Orchestrator 会自动加入重试体系：初始连接 Master 寻址 Slave，随后从被分配的 Slave 接收分配给本节点的令牌子分区，并开始主动拉取并重试落入该分区的所有暂停事务。
 
-It runs two jobs side by side at all times.
+它在内部始终并行运行两项核心作业。
 
-==== Two Concurrent Jobs
+==== 两项并发作业 (Two Concurrent Jobs)
 
-*Job 1 — Execute transactions (regular orchestrator role).*
-When a new business operation arrives (a customer places an order, for example), the Orchestrator creates a transaction, breaks it into *spans*, and executes them one by one — calling downstream services, updating databases, firing events.
-If a span fails with a permanent error, it starts a *compensation* sequence to undo what was already done.
+*作业 1 — 执行常规事务 (标准编排器职责)。*
+当新的业务请求到达时（例如用户下单），Orchestrator 创建事务，将其分解为各个*跨度 (Spans)* 并依次执行——调用下游服务、更新数据库、发布事件。
+如果某个跨度发生不可逆的永久性错误，它将触发*补偿 (Compensation)* 回滚流程，逆向撤销已执行的操作。
 
-*Job 2 — Retry paused transactions.*
-Some spans fail not because of a business error but because a resource was temporarily unavailable.
-StackSaga does not discard these transactions — it marks them as paused and saves them in the database.
-The Orchestrator periodically checks the database for these paused transactions and re-invokes them.
-Crucially, it only checks the transactions it is currently *responsible for*, based on the token sub-range it holds for the current time window.
-This is how StackSaga guarantees that multiple running instances never accidentally retry the same transaction twice.
+*作业 2 — 重试暂停的事务 (重试调度职责)。*
+某些跨度失败并非由于业务冲突，而是由于底层资源瞬时不可用。
+StackSaga 不会抛弃这些事务——而是将其标记为暂停状态并持久化到数据库中。
+Orchestrator 周期性地检查数据库中的暂停事务并重新执行。
+关键在于：根据当前时间窗口持有的令牌子范围，它仅检查并认领自身*全权负责*的那部分事务。
+这正是 StackSaga 确保即使有海量运行节点，也绝不会出现两个节点同时重复重试同一事务的核心保障。
 
-==== What It Knows and Does Not Know
+==== 知识边界 (Knows and Does Not Know)
 
-Knows::
-* Its own business logic and transaction spans.
-* The token sub-range it currently holds (delivered by its Retry-Coordinator-Slave).
-* The transaction database — it reads and writes transaction records directly.
+感知的信息 (Knows)::
+* 自身的业务逻辑与事务跨度定义。
+* 当前由对应 Slave 下发的独占令牌子范围。
+* 事务数据库——直接对事务表进行读写。
 
-Does *not* know::
-* Other Orchestrator instances — there is no peer-to-peer communication between service instances.
-* The Retry-Coordinator-Master — after the initial startup handshake, the Orchestrator never contacts the Master again (unless the Retry-Coordinator-Slave connection is lost and must be re-established).
-* How the token ring works internally — it simply receives a range and uses it.
+*不*感知的信息 (Does not know)::
+* 其他 Orchestrator 实例——实例之间完全没有 P2P 对等通信。
+* Retry-Coordinator-Master——在初始启动握手之后，Orchestrator 绝不会再次联系 Master（除非与 Slave 的长连接永久断开需要重新寻址）。
+* 令牌环在底层的全局计算逻辑——它只负责使用分配给自己的范围。
 
-==== Orchestrator (Retry-Node) Failure
+==== Orchestrator (Retry-Node) 故障处理
 
-When an Orchestrator instance fails and restarts:
+当 Orchestrator 实例崩溃并重启时：
 
-. It performs a fresh `Request-Response` lookup to the Master for an available Retry-Coordinator-Slave (potentially receiving a *different Retry-Coordinator-Slave* due to Round Robin).
-. It opens a new persistent stream to the newly assigned Retry-Coordinator-Slave.
-. It receives the current sub-range at the next 30-second cycle and resumes retrying.
+. 向 Master 发起全新的 `Request-Response` 单次请求以获取可用 Slave（由于轮询机制，可能会被分配到*不同的 Slave*）。
+. 与新分配的 Slave 建立持久的 RSocket 流。
+. 在下一个 30 秒周期接收当前子范围并恢复重试轮询。
 
-Any transactions being actively retried at the moment of failure will be re-attempted in the next window by whichever Orchestrator instance acquires that token range.
+在崩溃瞬间正在活跃重试中的任何事务，都将在下一个时间窗口内由接管该令牌范围的 Orchestrator 实例自动重新执行。
 
-== Registration & Token Distribution Flow
+== 注册与令牌分发时序流程 (Registration & Token Distribution Flow)
 
-The sequence diagram below ties the three components together, showing the full lifecycle from startup to active retry execution.
+下方的时序图将这三大组件有机串联在一起，完整展示了从启动注册到活跃重试执行的全生命周期。
 
 [plantuml,target=registration-sequence,format=svg]
 ----
@@ -426,166 +425,164 @@ skinparam sequence {
   NoteBorderColor #E0A800
 }
 
-title <b>StackSaga — Registration & Token Distribution Sequence</b>
+title <b>StackSaga — 注册与令牌分发全流程时序图</b>
 
-participant "Order Service\n(Orchestrator)" as orc
-participant "Retry-Coordinator-Master\nService" as master
-participant "Retry-Coordinator-Slave\n(assigned)" as slave
-participant "Transaction\nStore (DB)" as db
+participant "订单服务\n(Orchestrator)" as orc
+participant "Retry-Coordinator-Master\n服务" as master
+participant "Retry-Coordinator-Slave\n(分配的从节点)" as slave
+participant "事务事件存储\n(DB)" as db
 
-== Retry-Coordinator-Slave Registration ==
+== 从协调器 (Slave) 注册流程 ==
 slave -> master : RSocket request-stream\nregister(slaveId, host, port)
-master -> slave : ACK — connection established\n(persistent stream open)
+master -> slave : ACK — 连接建立\n(打开持久流通道)
 note right of master
-  Master records slave in
-  Retry-Coordinator-Slave Registry. Waits for
-  30th-second publish cycle.
+  Master 在 Slave 注册表中
+  记录该节点。等待第 30 秒的
+  定期发布周期。
 end note
 
-== Orchestrator Registration ==
+== 编排器 (Orchestrator) 寻址与注册流程 ==
 orc -> master : RSocket Request-Response\nlookupAvailableSlave()
-master -> orc : response: SlaveNodeInfo\n(host, port) — Round Robin selection
+master -> orc : 响应: SlaveNodeInfo\n(host, port) — 轮询算法选定
 note right of master
-  Master balances orchestrator
-  nodes across available slaves
-  using Round Robin strategy.
+  Master 采用 Round Robin 策略
+  将编排器节点均匀分配到
+  各可用 Slave 上。
 end note
 
 orc -> slave : RSocket request-stream\nsubscribe(orchestratorId)
-slave -> orc : ACK — connection established\n(persistent stream open)
+slave -> orc : ACK — 连接建立\n(打开持久流通道)
 note right of slave
-  Retry-Coordinator-Slave registers orchestrator
-  in its local registry. Awaits
-  token range from master.
+  Slave 在本地注册表中记录
+  该 Orchestrator。静默等待
+  Master 下发令牌范围。
 end note
 
-== Token Range Distribution (30th second of every minute) ==
-master -> master : timer triggers at 30th second\nrecalculate ring partitions
-master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
-slave -> slave : sub-divide received range\namong registered orchestrators
-slave -> orc : push SubTokenRangeUpdate\n(subRangeStart, subRangeEnd, validForMinute=T+1)
+== 令牌范围定期分发 (每分钟第 30 秒) ==
+master -> master : 第 30 秒定时器触发\n重新计算令牌环分区
+master -> slave : 发布 TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
+slave -> slave : 将收到的令牌切片\n均分给本地注册的编排器
+slave -> orc : 推送 SubTokenRangeUpdate\n(subRangeStart, subRangeEnd, validForMinute=T+1)
 
 note over orc
-  Orchestrator stores the
-  sub-range. Range becomes
-  active at minute T+1.
+  编排器在本地缓存该子范围。
+  该分区在第 T+1 分钟正式生效。
 end note
 
-== Retry Execution Loop (Minute T+1) ==
-loop polling window active (token range valid)
-  orc -> db : SELECT transactions WHERE\ntoken BETWEEN subRangeStart AND subRangeEnd\nAND cluster = 'us-central-c1'\nAND region  = 'us-central'\nAND status  = 'FAILED_WITH_RETRYABLE_ERROR'
-  db -> orc : list of retryable transactions
-  orc -> orc : re-invoke each transaction's\nnext pending span
+== 重试执行轮询循环 (第 T+1 分钟整) ==
+loop 轮询时间窗口生效中 (令牌范围有效)
+  orc -> db : SELECT 事务 WHERE\ntoken BETWEEN subRangeStart AND subRangeEnd\nAND cluster = 'us-central-c1'\nAND region  = 'us-central'\nAND status  = 'FAILED_WITH_RETRYABLE_ERROR'
+  db -> orc : 返回待重试事务列表
+  orc -> orc : 重新执行该事务的\n下一个待处理跨度 (Span)
 end
 
 @enduml
 ----
 
-=== Step-by-Step Description
+=== 逐步详解 (Step-by-Step Description)
 
-==== Phase 1 — Retry-Coordinator-Slave Registration
+==== 阶段 1 — Retry-Coordinator-Slave 注册
 
-. On startup, each Retry-Coordinator-Slave opens a persistent *RSocket `request-stream`* connection to the Retry-Coordinator-Master.
-. The Master records the Retry-Coordinator-Slave in its registry.
-. The Retry-Coordinator-Slave remains connected and passively waits for token range updates.
+. 启动时，每个 Retry-Coordinator-Slave 向 Master 打开一条持久的 *RSocket `request-stream`* 长连接。
+. Master 将该 Slave 记录到其实时注册表中。
+. Slave 保持连接畅通，被动等待令牌范围更新。
 
-==== Phase 2 — Orchestrator Registration
+==== 阶段 2 — Orchestrator 注册
 
-. On startup, each Orchestrator sends a *RSocket `Request-Response`* message to the Master requesting an available Retry-Coordinator-Slave assignment.
-. The Master applies *Round Robin* to select a Retry-Coordinator-Slave and returns the Retry-Coordinator-Slave's host and port.
+. 启动时，每个 Orchestrator 向 Master 发送一条单次的 *RSocket `Request-Response`* 探测消息，申请分配一个可用的 Slave。
+. Master 采用*轮询算法 (Round Robin)* 选择一个健康的 Slave，并返回该 Slave 的主机地址和端口号。
 +
-NOTE: If the same Orchestrator instance restarts, it may receive a *different* Retry-Coordinator-Slave assignment, as the Round Robin pointer advances.
-This ensures balanced Orchestrator distribution across Retry-Coordinator-Slaves over time.
-. The Orchestrator opens a persistent *RSocket `request-stream`* connection to its assigned Retry-Coordinator-Slave and begins listening for sub-range updates.
+NOTE: 如果同一个 Orchestrator 实例重启，随着轮询指针的前移，它可能会被分配到*不同的* Slave。这确保了在长时间运行中各个 Slave 上的负载保持均衡。
+. Orchestrator 向其分配到的 Slave 打开持久的 *RSocket `request-stream`* 连接，开始监听子范围更新。
 
-==== Phase 3 — Token Range Distribution
+==== 阶段 3 — 令牌范围分发
 
-. At the 30th second of every minute the Master fires its publish timer.
-. The Master partitions the full token ring equally among all registered Retry-Coordinator-Slaves and sends each Retry-Coordinator-Slave its range, tagged with `validForMinute = T+1`.
-. Each Retry-Coordinator-Slave divides its range equally among its registered Orchestrators and pushes sub-range updates downstream.
-. Each Orchestrator stores the received sub-range and activates it at the start of minute `T+1`.
+. 在每分钟的第 30 秒，Master 触发其内部发布定时器。
+. Master 将完整的令牌环在所有已注册的 Slave 之间均分，并将带有 `validForMinute = T+1` 生效标识的范围推送到各个 Slave。
+. 每个 Slave 将自身负责的范围在注册到它的 Orchestrator 之间均分，并将子范围推送给下游。
+. 每个 Orchestrator 存储接收到的子范围，并在第 `T+1` 分钟起始时刻将其无缝激活。
 
-==== Phase 4 — Retry Execution Loop
+==== 阶段 4 — 重试执行循环
 
-Once the time window is active, each Orchestrator enters its retry polling loop:
+一旦时间窗口进入生效期，每个 Orchestrator 即刻启动其重试轮询循环：
 
-. Query the transaction store for records where:
-** `token` is within `[subRangeStart, subRangeEnd]`
-** `cluster` matches the Orchestrator's configured cluster name
-** `region` matches the Orchestrator's configured region
-** `status = FAILED_WITH_RETRYABLE_ERROR`
-. For each matching transaction, re-invoke the next pending span.
-. Repeat until the time window expires (sub-range is superseded by the next update).
+. 从事务存储中查询满足以下条件的记录：
+** `token` 介于 `[subRangeStart, subRangeEnd]` 闭区间内
+** `cluster` 严格匹配 Orchestrator 配置的集群标识
+** `region` 严格匹配 Orchestrator 配置的物理区域
+** `status = FAILED_WITH_RETRYABLE_ERROR` (因可重试错误而失败)
+. 针对查询出的每笔事务，重新调用其下一个挂起的待执行跨度 (Span)。
+. 循环执行直至该时间窗口结束（被下一个周期的子范围平滑取代）。
 
-=== RSocket Communication Patterns
+=== RSocket 通信模式 (RSocket Communication Patterns)
 
-StackSaga uses https://rsocket.io[RSocket] for all inter-component communication, chosen for its support for persistent, reactive, bidirectional streams backed by a non-blocking Netty transport.
+StackSaga 选用 https://rsocket.io[RSocket] 作为所有组件间通信的骨干协议，主要是因为其在非阻塞 Netty 传输层之上提供了出色的持久性、反应式双向数据流支持。
 
 [cols="2,1,2",options="header"]
 [.google-anno-skip]
 |===
-| Connection | Interaction Model | Description
+| 连接链路 (Connection) | 交互模型 (Interaction Model) | 描述说明 (Description)
 
 | Retry-Coordinator-Slave → Master
 | `Request-Stream`
-| Persistent subscription. Retry-Coordinator-Slave registers with Master and keeps the stream open to receive token range updates.
+| 持久流订阅。Slave 在 Master 上完成注册并保持长连接通道，用于持续接收令牌范围更新。
 
 | Orchestrator → Master
 | `Request-Response`
-| One-shot lookup. Orchestrator requests an available Retry-Coordinator-Slave node assignment from Master on startup.
+| 一次性单次寻址。Orchestrator 在启动时向 Master 请求分配一个可用的 Slave 节点。
 
 | Orchestrator → Retry-Coordinator-Slave
 | `Request-Stream`
-| Persistent subscription. Orchestrator subscribes to its assigned Retry-Coordinator-Slave and keeps the stream open to receive sub-range updates.
+| 持久流订阅。Orchestrator 订阅分配给它的 Slave 并保持长连接通道，用于接收其专属的子令牌范围更新。
 |===
 
-== Token Time Window & Conflict Avoidance
+== 令牌时间窗口与冲突规避 (Token Time Window & Conflict Avoidance)
 
-=== The Publish Cycle
+=== 发布周期 (The Publish Cycle)
 
-The Retry-Coordinator-Master runs a repeating timer that fires at the *30th second of every minute*.
-At each trigger the Master:
+Retry-Coordinator-Master 运行一个在*每分钟第 30 秒*触发的循环定时器。
+在每次触发时，Master：
 
-. Recalculates the token ring partition based on currently registered Retry-Coordinator-Slaves.
-. Publishes the new token range to each Retry-Coordinator-Slave.
-. Each Retry-Coordinator-Slave recalculates its sub-ranges and pushes updates to its registered Orchestrators.
+. 根据当前活跃注册的 Slave 重新计算令牌环分区。
+. 将最新计算出的令牌范围下发给每个 Slave。
+. 每个 Slave 重新计算其子范围并将更新推送到其注册的各个 Orchestrator。
 
-The published range is labelled as valid for the *next full minute* (`T+1`), not the current minute.
+所发布的令牌范围被明确标记为在*下一个完整自然分钟*（`T+1`）生效，而非当前分钟。
 
-=== Why the 30-Second Offset?
+=== 为什么采用 30 秒的时间偏移量？
 
-Publishing at the 30th second and marking the range as valid for the *next* minute creates a *30-second preparation window*.
-This window accounts for worst-case communication delays: Retry-Coordinator-Slave distribution, Orchestrator updates, and network latency in large clusters.
+在第 30 秒发布并标记在*下一分钟*生效，构建了一个整整 **30 秒的缓冲就绪窗口 (30-second Preparation Window)**。
+该时间窗口充分考虑了各种极端网络延迟：Slave 层层分发开销、Orchestrator 处理开销以及超大型集群中的跨节点网络抖动。
 
-By the time minute `T+1` begins, all Orchestrators are guaranteed to have received their new sub-ranges and are ready to start polling.
+当第 `T+1` 分钟开始的瞬间，所有 Orchestrator 均已绝对可靠地在本地就绪了最新的子范围，可以立即无缝启动新一轮事务轮询。
 
 ----
-Timeline example:
+时间线示例 (Timeline Example):
 
-  Minute T, second 30 → Master publishes ranges (valid for T+1)
-  Minute T, second 31–59 → Retry-Coordinator-Slaves and Orchestrators receive and cache new ranges
-  Minute T+1, second 0  → Orchestrators begin polling with new ranges
-  Minute T+1, second 30 → Master publishes ranges for T+2
+  第 T 分钟第 30 秒 → Master 发布令牌分区 (标记 T+1 分钟生效)
+  第 T 分钟第 31–59 秒 → Slave 与 Orchestrator 陆续接收并本地缓存新分区
+  第 T+1 分钟第 0 秒 → 各 Orchestrator 基于新分区准时启动重试轮询
+  第 T+1 分钟第 30 秒 → Master 发布适用于 T+2 分钟的新分区
   ...
 ----
 
-=== Conflict Avoidance
+=== 冲突规避保证 (Conflict Avoidance)
 
-Because each Orchestrator holds a *non-overlapping sub-range* for a *defined time window*, two Orchestrator instances can never claim responsibility for the same transaction simultaneously.
-This eliminates the need for distributed locking when retrying transactions.
+由于每个 Orchestrator 在*确定的时间窗口*内持有*互不重叠的子范围*，两个 Orchestrator 实例绝不可能在同一时间对同一笔事务声称认领责任。
+这在分布式架构层面从根本上**消除了事务重试对分布式锁 (Distributed Locking) 的依赖**。
 
 [[multi-region-deployment]]
-== Multi-Region Deployment
+== 多区域部署架构 (Multi-Region Deployment)
 
-For systems deployed across multiple geographic regions, StackSaga uses the `region` property to scope retry ownership.
-Every component — Master, Retry-Coordinator-Slave, and Orchestrator — is stamped with the region it belongs to.
+对于跨多个地理区域部署的系统，StackSaga 通过 `region` 属性界定重试归属权。
+每个组件——Master、Retry-Coordinator-Slave 以及 Orchestrator——都打上了其所属区域的烙印。
 
-=== How Region Scoping Works
+=== 区域隔离的工作原理 (How Region Scoping Works)
 
-When a transaction is created it inherits the region of the Orchestrator that created it.
-That region value is stored in the transaction record in the database.
+当一笔事务创建时，它自动继承发起该事务的 Orchestrator 的区域属性。
+该区域值被持久化到数据库的事务记录中。
 
-During the retry polling loop, each Orchestrator adds `region` as a mandatory filter alongside the token range:
+在重试轮询期间，每个 Orchestrator 在令牌范围过滤之外，将 `region` 作为强制约束条件：
 
 [source,sql]
 ----
@@ -597,242 +594,235 @@ AND    cluster = :cluster
 AND    status  = 'FAILED_WITH_RETRYABLE_ERROR';
 ----
 
-This guarantees that an Orchestrator in `us-central` never picks up and retries a transaction that was originally created by an Orchestrator in `asia-south` — even if both regions share the same database (e.g., a globally replicated Cassandra cluster).
+这确保了位于 `us-central` 区域的 Orchestrator 绝不会尝试拉取并重试由 `asia-south` 区域发起的事务——即使两个区域共享同一个底层分布式数据库（例如全球多活的 Cassandra 集群）。
 
-== Virtual Clusters
+== 虚拟集群 (Virtual Clusters)
 
-=== Why Virtual Clusters?
+=== 为什么需要虚拟集群？
 
-In very large deployments the single-master-per-domain model presents two concerns as the system grows:
+在超大规模部署中，随着系统体量的激增，单领域单 Master 架构会面临两大挑战：
 
-. *Scale* — a single Master must manage all Retry-Coordinator-Slave connections for the domain.
-Although the Master's non-blocking Netty stack via RSocket can handle thousands of concurrent Retry-Coordinator-Slave connections, some extreme-scale deployments may want to distribute this coordination load further.
+. *吞吐扩展 (Scale)* — 单个 Master 必须维持该领域的所有 Slave 连接。
+尽管 Master 基于 RSocket 的反应式非阻塞 Netty 堆栈能够承载数千个长连接，但在极端规模场景下，平台架构师可能希望进一步分流协调负载。
 
-. *Fault isolation* — if the domain's single Master goes down, the entire domain's retry subsystem pauses until it recovers.
-Some systems require that a partial infrastructure failure never affects more than a defined fraction of retry capacity.
+. *故障隔离 (Fault Isolation)* — 如果该领域的唯一 Master 发生故障，该领域的重试子系统将暂停，直到其自愈恢复。
+某些对可用性极其严苛的核心系统要求：部分基础设施故障所波及的重试能力绝不能超过设定的安全比例。
 
-Virtual clusters address both concerns by dividing a single physical deployment into *multiple independent master-slave groups*, each operating as a completely separate retry coordination unit within the same region.
+虚拟集群 (Virtual Clusters) 通过将单一物理部署划分为*多个完全独立的 Master-Slave 组*，完美解决了上述问题。每个组在同一物理区域内作为完全独立的重试协调单元运行。
 
 [[virtual-cluster]]
-=== What Is a Virtual Cluster?
+=== 什么是虚拟集群？
 
-A virtual cluster is a named group of Retry-Coordinator-Master, Retry-Coordinator-Slave, and Orchestrator instances that operate in full isolation from other groups.
-The group identity is declared via the `stacksaga.instance.cluster` property.
+虚拟集群是由特定名称标识的 Retry-Coordinator-Master、Retry-Coordinator-Slave 和 Orchestrator 实例集合，与其他组完全物理隔离运行。
+组标识通过 `stacksaga.instance.cluster` 属性进行声明。
 
-All three components sharing the same cluster name form one logical retry cluster:
+共享相同集群名称的三类组件共同构成一个逻辑重试集群：
 
-* The Master only accepts registrations from Retry-Coordinator-Slaves with a matching cluster name.
-* The Retry-Coordinator-Slave connects only to the Master of its cluster (`stacksaga.agent.slave.target-master.host` / `.port`).
-* The Orchestrator connects only to the Master of its cluster for the initial Retry-Coordinator-Slave lookup, and subsequently to the Retry-Coordinator-Slave assigned by that Master.
-* Retry queries are filtered by cluster name in addition to token range and region.
+* Master 仅接受具有匹配集群名称的 Slave 注册。
+* Slave 仅连接属于自身集群的 Master（`stacksaga.agent.slave.target-master.host` / `.port`）。
+* Orchestrator 在初始寻址时仅连接自身集群的 Master，并随后连接该 Master 分配的 Slave。
+* 重试 SQL 查询在令牌范围和区域之外，将集群名称作为强制过滤条件。
 
-Two virtual clusters running in the same physical Kubernetes cluster are *completely isolated* — they share no state, no connections, and no retry responsibility.
+运行在同一物理 Kubernetes 集群内的两个虚拟集群是*完全隔离的*——它们不共享任何状态、不共享任何网络连接，重试职责也完全独立。
 
-=== Deployment Topologies
+=== 部署拓扑 (Deployment Topologies)
 
-*Multi-Region Single-Cluster*::
-The simplest multi-region setup — one virtual cluster per region.
-This is the baseline configuration for geographic distribution.
+*多区域单集群 (Multi-Region Single-Cluster)*::
+最基础的多区域方案——每个物理区域配置一个虚拟集群。
+这是地理分布式部署的基准标准。
 
-*Multi-Region Multi-Virtual-Cluster*::
-For the highest levels of scale and fault isolation, each physical region can host *multiple virtual clusters*.
-If any single Master fails, only the fraction of transactions belonging to that virtual cluster is affected — the remaining virtual clusters in the same region continue retrying normally.
+*多区域多虚拟集群 (Multi-Region Multi-Virtual-Cluster)*::
+为了实现极致的扩展性与故障隔离，每个物理区域内部署*多个虚拟集群*。
+如果任何单个 Master 发生故障，仅仅波及属于该特定虚拟集群的事务比例——同一区域内的其余虚拟集群继续完全正常运作。
 
-=== Transaction Ownership Across Virtual Clusters
+=== 跨虚拟集群的事务归属权 (Transaction Ownership Across Virtual Clusters)
 
-A transaction is permanently bound to the region and cluster of the Orchestrator that created it.
-No other virtual cluster — even within the same region — will ever attempt to retry it.
+事务永久绑定到创建它的 Orchestrator 所在的区域和虚拟集群。
+其他任何虚拟集群——即使位于相同的物理区域内——都绝不会尝试接管重试。
 
-The retry query always includes both `region` and `cluster` as mandatory filters:
+重试查询语句始终强制包含 `region` 和 `cluster`：
 
 [source,sql]
 ----
 SELECT *
 FROM   transactions
 WHERE  token   BETWEEN :subRangeStart AND :subRangeEnd
-AND    region  = 'us-central'        -- physical region
-AND    cluster = 'us-central-c1'     -- virtual cluster
+AND    region  = 'us-central'        -- 物理区域
+AND    cluster = 'us-central-c1'     -- 虚拟集群
 AND    status  = 'FAILED_WITH_RETRYABLE_ERROR';
 ----
 
-This makes the system particularly well-suited to Apache Cassandra deployments where `region` and `cluster` form part of the partition key, enabling the database to route queries directly to the correct nodes with zero full-table scans.
+这种设计尤其契合 Apache Cassandra 等分布式数据库，在 Cassandra 中可以将 `region` 和 `cluster` 作为复合分区键 (Partition Key) 的一部分，从而使数据库能够将查询精确路由到特定的数据节点，完全规避全表扫描。
 
-== Glossary
+== 专业术语表 (Glossary)
 
 [cols="1,3",options="header"]
 [.google-anno-skip]
 |===
-| Term | Definition
+| 术语 (Term) | 术语定义 (Definition)
 
-| *Span*
-| A single, trackable unit of work within a distributed transaction.
-A transaction is composed of one or more sequential spans.
+| *跨度 (Span)*
+| 分布式事务中单一且可独立追踪的工作执行单元。一个完整的事务由一个或多个按序执行的跨度组成。
 
-| *Token*
-| A 64-bit integer derived from the Murmur3 hash of a transaction ID.
-Used to deterministically assign the transaction to a retry owner.
+| *令牌 (Token)*
+| 从事务 ID 经 Murmur3 哈希算法计算得到的 64 位整数。用于将事务确定性地映射给特定的重试责任人。
 
-| *Token Ring*
-| The full 64-bit integer space divided into contiguous, non-overlapping ranges.
-StackSaga uses the Murmur3Partitioner model, identical in principle to Apache Cassandra's token ring.
+| *令牌环 (Token Ring)*
+| 切分为互不重叠连续区间的完整 64 位整数哈希空间。StackSaga 采用 Murmur3Partitioner 模型，原理与 Apache Cassandra 的令牌环完全一致。
 
-| *Token Range*
-| A contiguous subset of the token ring, assigned to a Retry-Coordinator-Slave or Orchestrator for a given time window.
+| *令牌范围 (Token Range)*
+| 令牌环上的连续子集区间，在特定的时间窗口内由 Master 授予特定的 Slave 或 Orchestrator 独占负责。
 
-| *Time Window*
-| A one-minute interval during which an Orchestrator holds exclusive ownership of a sub-token range.
+| *时间窗口 (Time Window)*
+| 一个自然分钟的时间周期，在此期间 Orchestrator 对其分配的子令牌范围拥有排他性的重试所有权。
 
-| *Publish Cycle*
-| The repeating event at the 30th second of every minute in which the Master redistributes token ranges.
+| *发布周期 (Publish Cycle)*
+| 每分钟第 30 秒触发的周期性事件，Master 在此期间重新计算并分发令牌范围。
 
-| *Compensation*
-| The rollback sequence executed when a non-retryable error occurs in the primary transaction flow.
+| *补偿回滚 (Compensation)*
+| 当事务主执行流程遇到不可重试错误时触发的反向回滚撤销序列。
 
-| *Murmur3Partitioner*
-| A consistent hashing scheme using the MurmurHash3 algorithm to evenly distribute keys across the token ring.
+| *Murmur3 分区器 (Murmur3Partitioner)*
+| 一种采用 MurmurHash3 算法的一致性哈希方案，用于在令牌环上均匀分布哈希键。
 
-| *Region*
-| A physical deployment boundary (e.g., `default`, `us-central`, `asia-south`).
-Declared via `stacksaga.instance.region`. Stored on transactions (encoded as a 12-bit code in `SagaUUID`) and used as a mandatory retry query filter. See xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`].
+| *物理区域 (Region)*
+| 物理机房或云部署边界（例如 `default`、`us-central`、`asia-south`）。通过 `stacksaga.instance.region` 声明，记录于事务中（编码为 `SagaUUID` 中的 12 位代码），并作为强制的重试过滤条件。参见 xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`]。
 
-| *Virtual Cluster*
-| A named logical group of Master, Retry-Coordinator-Slave, and Orchestrator instances that operate in complete isolation from other groups.
-Declared via `stacksaga.instance.cluster`. Allows multiple independent retry units within the same physical region.
+| *虚拟集群 (Virtual Cluster)*
+| 命名逻辑组，包含完全物理隔离的 Master、Slave 和 Orchestrator 实例。通过 `stacksaga.instance.cluster` 声明，支持在同一物理区域内划分多个独立的重试单元。
 
 | *RSocket*
-| A binary application-level protocol supporting multiple interaction models: `request-response`, `Request-Response`, `request-stream`, and `channel`. StackSaga uses `request-stream` and `Request-Response`.
+| 一种支持多种交互模式（`request-response`、`Request-Response`、`request-stream` 和 `channel`）的二进制应用层协议。StackSaga 采用其中的 `request-stream` 和 `Request-Response`。
 
-| *Lazy Rebalance*
-| The Master's strategy of deferring token ring recalculation until the next scheduled publish cycle,
-rather than reacting immediately to Retry-Coordinator-Slave disconnections.
+| *惰性再平衡 (Lazy Rebalance)*
+| Master 的弹性策略：在 Slave 意外断开时推迟令牌环的重新切分计算直到下一个预定发布周期，避免对临时网络波动做出过激的瞬时再平衡反应。
 
-| *Standard-Node*
-| An ephemeral Orchestrator instance that handles transaction processing and is scaled freely based on traffic.
+| *标准节点 (Standard-Node)*
+| 负责常规业务事务处理的瞬态 Orchestrator 实例，可根据业务流量自由水平伸缩。
 
-| *Retry-Node*
-| A stable, long-lived Orchestrator instance that handles both transaction processing and transaction retry management.
+| *重试节点 (Retry-Node)*
+| 长期稳定运行的 Orchestrator 实例，同时承担常规事务处理与事务重试管理两项职责。
 |===
 
-== StackSaga Module Interaction for Transaction Re-Invocation
+== 事务重播调用的模块交互架构 (StackSaga Module Interaction for Transaction Re-Invocation)
 
-Below diagram shows how the StackSaga Modules interact with each other for transaction re-invocation in high level.
-The diagram is simplified to show only the relevant modules and components for transaction re-invocation, and does not include all the details of the interactions.
+下图从高层架构视角展示了 StackSaga 各模块之间如何协作完成事务的重新调用。
+该图经过了适当简化，仅突出与事务重播直接相关的核心模块，略去了部分底层实现细节。
 
 image::stacksaga-diagram-module-interaction-for-invocation.svg[]
 
-1. `stacksaga-ring-coordinator` (Slave) publishes the Orchestrator's assigned token sub-range to the Orchestrator over a persistent RSocket stream to the xref:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] module.
-2. `ReInvokeTaskManager` in one of `stacksaga-\{database\}-support` implementatons long polls the event-store looking for transactions that should be re-invoked based on the assigned token sub-range.
-3. The transactions which is eligible for re-invocation are handed over to the `TransactionReInvokeManager` in to one of the `stacksaga-\{impl\}-support` modules.
-4. `TransactionReInvokeManager` rebuilds the transaction snapshot to the point of failure by requesting data via the `event-store service` from the `stacksaga-\{database\}-support`.
-5. Once the transaction snapshot is rebuilt, `TransactionReInvokeManager` sends the snapshot to the `ExecutionManager` within the same module.
-6. Finally, the transaction is executed by the engine as usual.
+1. `stacksaga-ring-coordinator` (Slave) 通过持久的 RSocket 流向 Orchestrator 上的 xref:ring-coordinator-connector.adoc[`stacksaga-ring-coordinator-connector`] 模块发布分配给它的令牌子范围。
+2. 对应 `stacksaga-\{database\}-support` 数据库实现中的 `ReInvokeTaskManager` 任务管理器基于分配到的令牌子范围长轮询事件存储，查找需要被重新调用的事务。
+3. 符合重试条件的事务被移交给对应 `stacksaga-\{impl\}-support` 实现模块中的 `TransactionReInvokeManager`。
+4. `TransactionReInvokeManager` 通过 `stacksaga-\{database\}-support` 提供的 `event-store service` 请求历史事件数据，将事务快照 (Snapshot) 重建到发生故障的断点状态。
+5. 事务快照重建完毕后，`TransactionReInvokeManager` 将快照发送给同模块内的 `ExecutionManager` (执行管理器)。
+6. 最终，引擎像处理常规流程一样重新执行该事务。
 
-NOTE: Even though `stacksaga-env-\{impl\}-support` is not shown in the diagram, it is responsible for providing the deployment environment specific metadata.
+NOTE: 虽然架构图中未直接画出 `stacksaga-env-\{impl\}-support`，但该模块专门负责提供具体部署环境的元数据解析。
 
 [[ring-coordinator-deployment-topologies]]
-== Ring-Coordinator Deployment Topologies
+== 重试环协调器部署拓扑 (Ring-Coordinator Deployment Topologies)
 
-It can be deployed in various topologies depending on the scale and performance requirements of the system.
-Here are some common deployment topologies:
+根据系统的规模和性能 SLA 要求，重试环协调器支持多种灵活的部署拓扑结构：
 
-* Embedded Ring-Coordinator Deployment
-** xref:#shared-embedded-ring-coordinator-deployment[Shared Mode]
-** xref:#dedicated-embedded-ring-coordinator-deployment[Dedicated Mode]
-** xref:#hybrid-embedded-ring-coordinator-deployment[Hybrid Mode]
+* 内嵌式部署拓扑 (Embedded Ring-Coordinator Deployment)
+** xref:#shared-embedded-ring-coordinator-deployment[共享模式 (Shared Mode)]
+** xref:#dedicated-embedded-ring-coordinator-deployment[独立专用模式 (Dedicated Mode)]
+** xref:#hybrid-embedded-ring-coordinator-deployment[混合模式 (Hybrid Mode)]
 
-* Clustered Ring-Coordinator Deployment
-** xref:#shared-clustered-ring-coordinator-deployment[Shared Mode]
-** xref:#dedicated-clustered-ring-coordinator-deployment[Dedicated Mode]
-** xref:#hybrid-clustered-ring-coordinator-deployment[Hybrid Mode]
-** xref:#kubernetes-statefulset-clustered-deployment[Kubernetes StatefulSet Deployment]
+* 集群化部署拓扑 (Clustered Ring-Coordinator Deployment)
+** xref:#shared-clustered-ring-coordinator-deployment[共享模式 (Shared Mode)]
+** xref:#dedicated-clustered-ring-coordinator-deployment[独立专用模式 (Dedicated Mode)]
+** xref:#hybrid-clustered-ring-coordinator-deployment[混合模式 (Hybrid Mode)]
+** xref:#kubernetes-statefulset-clustered-deployment[Kubernetes StatefulSet 部署]
 
-=== Embedded Ring-Coordinator Deployment
+=== 内嵌式部署拓扑 (Embedded Ring-Coordinator Deployment)
 
-In this topology, the Ring-Coordinator Master and Slave are embedded within the same physical service instance.
-it can be used in smaller and mid-sized deployments. but still the instance can handle a big number of Orchestrator instances due to the non-blocking Netty stack via RSocket.
+在此拓扑中，Ring-Coordinator 的 Master 和 Slave 均内嵌在同一个物理服务实例内部运行。
+非常适合中小型规模的部署。即便如此，由于底层基于 RSocket 非阻塞 Netty 反应式架构，单实例依然能轻松应对海量的 Orchestrator 实例。
 
 [[shared-embedded-ring-coordinator-deployment]]
-==== Shared Mode Of Embedded Ring-Coordinator Deployment
+==== 内嵌共享模式 (Shared Mode Of Embedded Ring-Coordinator Deployment)
 
-In this mode, a single service instance hosts a shared embedded Ring-Coordinator Master and Slave that serves multiple microservice domains within the same physical region.
-This is more resource efficient, but it may introduce some coupling between the domains, as they share the same Ring-Coordinator.
-For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be one shared service instance (Shared-Service) with a shared embedded Ring-Coordinator Master and Slave serving all three domains.
+在此模式下，单个服务实例运行一组内嵌共享的 Ring-Coordinator Master 和 Slave，为同一物理区域内的多个微服务领域提供统一服务。
+这种模式资源利用率最高，但各个领域之间存在一定的耦合度。
+例如在 `us-central` 区域内有三个微服务领域（订单 Order、支付 Payment、库存 Inventory），系统部署单个共享服务实例 (Shared-Service)，内嵌的 Master 和 Slave 同时为这三个业务领域提供服务。
 
-See the diagram below,
+架构图如下：
 
 image::stacksaga-diagram-embedded-ring-coordinator-shared-mode.svg[]
 
 [[dedicated-embedded-ring-coordinator-deployment]]
-==== Dedicated Mode Of Embedded Ring-Coordinator Deployment
+==== 内嵌独立专用模式 (Dedicated Mode Of Embedded Ring-Coordinator Deployment)
 
-In this mode, each microservice domain has its own embedded Ring-Coordinator Master and Slave within the same service instance.
-This provides a high level of isolation and fault tolerance, as each domain has its own dedicated Ring-Coordinator.
-For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be three separate service instances (Order-Service, Payment-Service, Inventory-Service), each with its own embedded Ring-Coordinator Master and Slave.
+在此模式下，每个微服务领域在自身的服务实例内部独立运行其专属的内嵌 Master 和 Slave。
+这提供了极高的隔离性与故障容忍度，因为每个领域都拥有完全私有的协调器。
+例如在 `us-central` 区域内有三个微服务领域（Order、Payment、Inventory），系统部署三个独立的服务实例（Order-Service、Payment-Service、Inventory-Service），各自内嵌专属的 Master 和 Slave。
 
-See the diagram below,
+架构图如下：
 
 image::stacksaga-diagram-embedded-ring-coordinator-dedicated-mode.svg[]
 
 [[hybrid-embedded-ring-coordinator-deployment]]
-==== Hybrid Mode Of Embedded Ring-Coordinator Deployment
+==== 内嵌混合模式 (Hybrid Mode Of Embedded Ring-Coordinator Deployment)
 
-In this mode, some microservice domains have their own embedded Ring-Coordinator Master and Slave within the same service instance, while others share a common embedded Ring-Coordinator Master and Slave.
-This provides flexibility in deployment, allowing domains with higher isolation requirements to have their own Ring-Coordinator, while others can share resources.
-For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, the Order domain may have its own embedded Ring-Coordinator Master and Slave within the Order-Service instance, while the Payment and Inventory domains share a common embedded Ring-Coordinator Master and Slave within the Shared-Service instance.
+在此模式下，部分核心微服务领域拥有自身专属的内嵌协调器实例，而其余领域则共享一组公共内嵌协调器。
+这在运维部署中提供了极佳的灵活性：对隔离度要求高的核心业务独享资源，其余业务共享资源降低成本。
+例如在 `us-central` 区域内，订单领域在 Order-Service 中独享内嵌协调器，而支付和库存领域则共享 Shared-Service 中的内嵌协调器。
 
-See the diagram below,
+架构图如下：
 
 image::stacksaga-diagram-embedded-ring-coordinator-hybrid-mode.svg[]
 
-=== Clustered Ring-Coordinator Deployment
+=== 集群化部署拓扑 (Clustered Ring-Coordinator Deployment)
 
-In this topology, the master and slave instances are deployed as separate services(instances) for scalability and fault tolerance.
-it can be further categorized into three modes.
+在此拓扑中，Master 和 Slave 实例作为独立的微服务分别独立部署，以实现更高的伸缩性与故障隔离。
+该拓扑同样进一步细分为三种模式：
 
 [[shared-clustered-ring-coordinator-deployment]]
-==== Shared Mode Of Clustered Ring-Coordinator Deployment
+==== 集群化共享模式 (Shared Mode Of Clustered Ring-Coordinator Deployment)
 
-This is a bit more resource efficient deployment topology where a single Ring-Coordinator Cluster (one Master and multiple Slaves) is shared across multiple microservice domains within the same physical region.
-For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be one shared Ring-Coordinator Cluster (Shared-RC-Cluster) with one Master and multiple Slaves serving all three domains.
+这是一种性价比更高的部署拓扑：在同一物理区域内，由一个统一的 Ring-Coordinator 集群（一个 Master 和多个 Slave）为多个微服务领域提供共享服务。
+例如在 `us-central` 区域内，单个共享的协调器集群 (Shared-RC-Cluster) 同时服务于订单、支付和库存三个领域。
 
-See the diagram below,
+架构图如下：
 
 image::stacksaga-diagram-clustered-ring-coordinator-shared-mode.svg[]
 
 [[dedicated-clustered-ring-coordinator-deployment]]
-==== Dedicated Mode Of Clustered Ring-Coordinator Deployment
+==== 集群化独立专用模式 (Dedicated Mode Of Clustered Ring-Coordinator Deployment)
 
-This is the maximally decoupled deployment topology where the Ring-Coordinator Master and Slave are deployed as separate services for each microservice domain separately.
-This mode provides the highest level of isolation and fault tolerance, as each domain has its own dedicated Ring-Coordinator Cluster withing the same physical region.
-For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, there will be three separate Ring-Coordinator Clusters (Order-RC-Cluster, Payment-RC-Cluster, Inventory-RC-Cluster), each with its own Master and Slaves.
+这是解耦最为彻底的顶级生产拓扑：每个微服务领域在同一物理区域内都拥有完全独立的专属 Ring-Coordinator 集群。
+这提供了最高等级的业务隔离与容灾能力。
+例如在 `us-central` 区域内，订单、支付和库存三个领域各自拥有完全独立的集群（Order-RC-Cluster、Payment-RC-Cluster、Inventory-RC-Cluster），各自配备独立的 Master 和 Slave 节点。
 
-See the diagram below,
+架构图如下：
 
 image::stacksaga-diagram-clustered-ring-coordinator-dedicated-mode.svg[]
 
 [[hybrid-clustered-ring-coordinator-deployment]]
-==== Hybrid Mode Of Clustered Ring-Coordinator Deployment
+==== 集群化混合模式 (Hybrid Mode Of Clustered Ring-Coordinator Deployment)
 
-This is a flexible deployment topology where some microservice domains have their own dedicated Ring-Coordinator Cluster, while others share a common Ring-Coordinator Cluster.
-For instance, if there are three microservice domains (Order, Payment, Inventory) in the `us-central` region, the Order domain may have its own dedicated Ring-Coordinator Cluster (Order-RC-Cluster), while the Payment and Inventory domains share a common Ring-Coordinator Cluster (Shared-RC-Cluster).
+这是一种兼顾隔离性与资源成本的灵活拓扑：某些核心领域拥有专属集群，其余领域共享公共集群。
+例如，高频核心的订单领域独享 Order-RC-Cluster，而支付与库存领域则共享 Shared-RC-Cluster。
 
-See the diagram below,
+架构图如下：
 
 image::stacksaga-diagram-clustered-ring-coordinator-hybrid-mode.svg[]
 
 [[kubernetes-statefulset-clustered-deployment]]
-==== Kubernetes StatefulSet Deployment for Clustered Coordinators
+==== Kubernetes StatefulSet 集群化部署
 
-In containerized Kubernetes environments, a Clustered Ring-Coordinator is recommended to run as a **StatefulSet**.
+在云原生容器化的 Kubernetes 环境中，官方强烈推荐将 Clustered Ring-Coordinator 作为 **StatefulSet** 运行。
 
-StatefulSets provide stable network identities and predictable ordinal indexing for each replica (`coordinator-0`, `coordinator-1`, `coordinator-2`, etc.).
-StackSaga Ring-Coordinator natively leverages this through index-based deployment (`stacksaga.coordinator.deploy.index-based=true`):
+StatefulSet 为每个副本提供了稳定的网络标识和确定性的递增序号索引（`coordinator-0`、`coordinator-1`、`coordinator-2` 等）。
+StackSaga 原生利用这一特性实现了基于索引的自动化角色识别（`stacksaga.coordinator.deploy.index-based=true`）：
 
-* The replica with index **`0`** (`coordinator-0`) automatically boots as the **Master** node.
-* All replicas with index **`> 0`** (`coordinator-1`, `coordinator-2`, etc.) automatically boot as **Slave** nodes.
+* 索引为 **`0`** 的副本（`coordinator-0`）自动作为 **Master** 节点引导启动。
+* 所有索引 **`> 0`** 的副本（`coordinator-1`、`coordinator-2` 等）自动作为 **Slave** 节点引导启动。
 
-This design enables operations teams to maintain a single unified StatefulSet manifest and ConfigMap for the entire coordinator cluster, eliminating the need to maintain separate deployment configurations for Master and Slave instances.
+这一精妙设计使运维团队只需维护单一的 StatefulSet 清单和 ConfigMap 即可搞定整个协调器集群，免除了为 Master 和 Slave 分别编写并维护多套部署配置的繁琐开销。
 
-For full configuration guidelines and properties, see xref:ring-coordinator.adoc#kubernetes-statefulset-deployment[Automated Role Detection via Kubernetes StatefulSet in the Ring-Coordinator guide].
+完整的配置指南与属性详解，请参阅 xref:ring-coordinator.adoc#kubernetes-statefulset-deployment[Ring-Coordinator 指南中的基于 Kubernetes StatefulSet 的自动化角色识别]。
 
 include::disabled-and-terminated-transaction.adoc[leveloffset=+2]

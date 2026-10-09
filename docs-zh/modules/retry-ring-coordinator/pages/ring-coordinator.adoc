@@ -1,20 +1,20 @@
-= Ring-Coordinator
+= 重试环协调器 (Ring-Coordinator)
 
-== Overview
+== 概述 (Overview)
 
-As mentioned in the xref:transaction-retrying-with-retry-coordinator.adoc[previous section], the retry ring-coordinator is a separate service — distinct from your utility microservices — that runs as either a `master` or a `slave`, depending on how it is configured.
-This section walks through how the retry ring-coordinator is set up and how it works.
+正如 xref:transaction-retrying-with-retry-coordinator.adoc[上一章节] 中所述，重试环协调器 (Retry Ring-Coordinator) 是一个独立于业务微服务的专门服务。根据配置，它以 `master` (主) 或 `slave` (从) 角色运行。
+本章节将详细介绍重试环协调器的搭建步骤与运行机制。
 
-IMPORTANT: The `Master` and `Slave` retry ring-coordinator instances can also be deployed within the same service instance.
-Refer to the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section for more details.
+IMPORTANT: `Master` 和 `Slave` 重试环协调器实例也可以部署在同一个服务实例中。
+详情请参阅 xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[部署拓扑 (Deployment Topologies)] 章节。
 
-IMPORTANT: After adding the `stacksaga-ring-coordinator-spring-boot-starter` dependency to your project and configuring the retry ring-coordinator as `master` or `slave`, you can run the retry ring-coordinator as a Spring Boot application.
+IMPORTANT: 在项目中添加 `stacksaga-ring-coordinator-spring-boot-starter` 依赖并将重试环协调器配置为 `master` 或 `slave` 之后，即可将其作为标准的 Spring Boot 应用程序运行。
 
-=== How Master and Slave Connect
+=== Master 与 Slave 如何建立连接
 
-Before configuring each role, it helps to see how a Master and a Slave find each other.
-On startup, a Slave opens a persistent `RSocket` connection to the Master using the host and port configured via `stacksaga.coordinator.slave.target-master.*`.
-The Master accepts the connection and adds the Slave to its registry — from its next 30-second publish cycle onward, the Master starts sending that Slave its token-range updates.
+在深入配置各角色之前，先了解 Master 与 Slave 之间如何互相发现与建连。
+在启动时，Slave 会根据 `stacksaga.coordinator.slave.target-master.*` 配置的主机名和端口，向 Master 发起持久的 `RSocket` 连接。
+Master 接受该连接并将该 Slave 添加到其实时注册表中——从接下来的 30 秒发布周期开始，Master 会定期向该 Slave 发送其分配的令牌范围更新 (Token-Range Updates)。
 
 [plantuml,target=ring-coordinator-master-slave-handshake,format=svg]
 ----
@@ -39,49 +39,48 @@ skinparam sequence {
   NoteBorderColor #E0A800
 }
 
-title <b>Ring-Coordinator — Master/Slave Connection</b>
+title <b>Ring-Coordinator — Master/Slave 连接握手</b>
 
 participant "Ring-Coordinator\n(Master)" as master
 participant "Ring-Coordinator\n(Slave)" as slave
 
-slave -> master : RSocket request-stream\nconnect to target-master.host:target-master.port
-master -> slave : ACK — connection established\n(persistent stream open)
+slave -> master : RSocket request-stream\n连接至 target-master.host:target-master.port
+master -> slave : ACK — 连接已建立\n(持久流通道已打开)
 
 note right of master
-  Master adds the Slave to its
-  live registry. Waits for the
-  30th-second publish cycle.
+  Master 将该 Slave 添加到
+  实时注册表。等待第 30 秒的
+  定期发布周期。
 end note
 
-== Every 30 seconds ==
-master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
+== 每 30 秒执行一次 ==
+master -> slave : 发布 TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
 
 note right of slave
-  Slave sub-divides its range
-  across connected Orchestrators
-  (see the Ring-Coordinator
-  Connector page).
+  Slave 将其负责的令牌范围
+  进一步细分并下发给相连的
+  Orchestrators (详见连接器说明页)。
 end note
 
 @enduml
 ----
 
-The xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[Retry-Coordinator-Slave section] of the architecture guide covers what happens next — how the Slave divides its range across Orchestrator instances.
+架构指南中的 xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[Retry-Coordinator-Slave 章节] 详细介绍了后续工作流程——即 Slave 如何将其令牌范围进一步切分并下发给各个 Orchestrator 实例。
 
 [[ring-coordinator-master]]
-== Ring-Coordinator As `Master`
+== 以 `Master` 角色运行 Ring-Coordinator
 
-If the retry ring-coordinator is configured as `master`, it is responsible for managing the entire token ring and sharing partitions of it with every `slave` retry ring-coordinator connected to it within the same region and cluster.
-Read more about the Master's responsibilities xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-master[here].
+如果将重试环协调器配置为 `master`，它负责管理整个令牌环 (Token Ring)，并将令牌环的分区分配给同一区域 (Region) 和集群 (Cluster) 内连接到它的每个 `slave` 重试环协调器。
+阅读更多关于 Master 职责的说明请参阅 xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-master[此处]。
 
-Add the `stacksaga-ring-coordinator-spring-boot-starter` dependency to your project as follows:
+在项目中添加 `stacksaga-ring-coordinator-spring-boot-starter` 依赖，如下所示：
 
 .pom.xml
 [source,xml,subs="attributes+"]
 ----
 <dependencyManagement>
     <dependencies>
-        <dependency> <!--Only for stacksaga dependencies version management-->
+        <dependency> <!--仅用于 stacksaga 依赖项版本管理-->
             <groupId>org.stacksaga</groupId>
             <artifactId>stacksaga-bom</artifactId>
             <version>{stacksaga-version}</version>
@@ -101,302 +100,289 @@ Add the `stacksaga-ring-coordinator-spring-boot-starter` dependency to your proj
 
 [IMPORTANT]
 ====
-To run the retry ring-coordinator as a Spring application, you do not need any web-related dependencies such as `spring-boot-starter-web` or `spring-boot-starter-webflux` — the retry ring-coordinator exposes no HTTP endpoints of its own, only `RSocket` endpoints for `slave` instances to connect to.
-It can therefore run as a non-web application.
+要将重试环协调器作为 Spring 应用程序运行，您*不需要*引入任何 Web 相关依赖（如 `spring-boot-starter-web` 或 `spring-boot-starter-webflux`）——重试环协调器自身不暴露任何 HTTP 端点，仅暴露供 `slave` 实例连接的 `RSocket` 端点。
+因此，它可以作为非 Web 应用程序（Non-web Application）高效运行。
 
-In production, however, you will usually want visibility into its metrics and other monitoring data.
-Add the `spring-boot-starter-actuator` dependency to expose those endpoints, and additionally add one of the web starters only if you need the actuator endpoints reachable over `HTTP`.
+但在生产环境中，通常需要监控其指标（Metrics）和其他健康数据。您可以添加 `spring-boot-starter-actuator` 依赖来暴露这些监控端点；仅当您需要通过 `HTTP` 访问 Actuator 端点时，才需要额外添加 Web starter。
 ====
 
-=== Configuration
+=== 配置 (Configuration)
 
-The retry ring-coordinator can be configured via `application.properties` or `application.yml`.
-Below is a minimal configuration for the retry ring-coordinator as `master`:
+重试环协调器可以通过 `application.properties` 或 `application.yml` 进行配置。
+以下是作为 `master` 运行的重试环协调器的最小配置示例：
 
 .application.properties
 [source,properties]
 ----
-#stacksaga-master coordinator configuration
+#stacksaga-master 协调器配置
 stacksaga.coordinator.instance-type=master #<1>
 stacksaga.coordinator.target-services=order-service #<2>
 
-#stacksaga-instance configuration
+#stacksaga-instance 元数据配置
 stacksaga.instance.cluster=cluster1 #<3>
 stacksaga.instance.region=us-east-1 #<4>
 stacksaga.instance.zone=us-east-1a #<5>
 
-#rsocket server configuration
+#rsocket 服务端配置
 spring.rsocket.server.port=1000 #<6>
 spring.rsocket.server.address=localhost #<7>
 spring.rsocket.server.transport=tcp #<8>
 
 ----
 
-<1> Set `stacksaga.coordinator.instance-type` to `master`, since this instance runs as the Master.
+<1> 将 `stacksaga.coordinator.instance-type` 设置为 `master`，声明该实例作为 Master 运行。
 
-<2> The target service(s) this Master coordinates retries for — `order-service` in this example.
-This can be a comma-separated list when a single Master manages multiple services; see the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
+<2> 该 Master 协调重试的目标服务名称——本例中为 `order-service`。当单个 Master 同时管理多个微服务时，可以使用逗号分隔的服务列表；详见 xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[部署拓扑] 章节。
 
-<3> The `cluster` this instance belongs to.
-Only `slave` retry ring-coordinator instances and Orchestrators in the same cluster can connect to this Master — see the xref:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Cluster] section.
+<3> 该实例所属的集群标识 (`cluster`)。只有位于同一集群内的 `slave` 重试环协调器实例和 Orchestrator 才能连接到该 Master——详见 xref:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[虚拟集群 (Virtual Cluster)] 章节。
 
-<4> The `region` this instance belongs to.
-Only `slave` retry ring-coordinator instances and Orchestrators in the same region can connect to this Master — see the xref:transaction-retrying-with-retry-coordinator.adoc#multi-region-deployment[Regional Deployment] section.
+<4> 该实例所属的区域标识 (`region`)。只有位于同一区域内的 `slave` 重试环协调器实例和 Orchestrator 才能连接到该 Master——详见 xref:transaction-retrying-with-retry-coordinator.adoc#multi-region-deployment[区域化部署 (Regional Deployment)] 章节。
 
-<5> The `zone` this instance belongs to.
-It has no functional impact here, but should be set as per the StackSaga core specification.
+<5> 该实例所属的可用区标识 (`zone`)。在此处对重试没有功能性影响，但应按照 StackSaga 核心规范进行配置。
 
-<6> The `RSocket` server port. `slave` retry ring-coordinator instances connect to the Master over `RSocket` — backed by the default RSocket server provided by `spring-boot-starter-rsocket` — and Orchestrators use the same port to look up which `slave` instance to connect to.
+<6> `RSocket` 服务端端口。`slave` 重试环协调器实例通过 `RSocket` 连接到 Master（底层由 `spring-boot-starter-rsocket` 提供的默认 RSocket 服务器支撑），Orchestrator 也使用该端口查找应连接哪一个 `slave` 实例。
 
-<7> The `RSocket` network address that the server binds to.
+<7> RSocket 服务端绑定的网络地址。
 
-<8> The `RSocket` transport protocol.
-It must be `tcp` for retry ring-coordinator services.
+<8> RSocket 传输层协议。对于重试环协调器服务，必须为 `tcp`。
 
 [[ring-coordinator-slave]]
-== Ring-Coordinator As `Slave`
+== 以 `Slave` 角色运行 Ring-Coordinator
 
-If the retry ring-coordinator is configured as `slave`, it is responsible for connecting to the `master` retry ring-coordinator, subscribing to receive its assigned ring portion, and publishing sub-ring portions to the Orchestrator instances subscribed to it within the same region and cluster.
-Read more about the Slave's responsibilities xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[here].
+如果将重试环协调器配置为 `slave`，它负责连接到 `master` 重试环协调器，订阅并接收分配给它的令牌环分区，并将细分的子令牌环分区发布给同一区域和集群内订阅它的各个 Orchestrator 实例。
+阅读更多关于 Slave 职责的说明请参阅 xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[此处]。
 
-Adding the `stacksaga-ring-coordinator-spring-boot-starter` dependency is exactly the same as for the xref:#ring-coordinator-master[Master] — both roles use the same starter.
-Only the configuration differs, as shown below.
+添加 `stacksaga-ring-coordinator-spring-boot-starter` 依赖的方式与 xref:#ring-coordinator-master[Master] 完全相同——两个角色共享同一个 Starter 依赖。
+唯一的区别在于配置参数，如下所示：
 
-=== Configuration
+=== 配置 (Configuration)
 
 .application.properties
 [source,properties]
 ----
-#stacksaga-slave coordinator configuration
+#stacksaga-slave 协调器配置
 stacksaga.coordinator.instance-type=slave #<1>
 stacksaga.coordinator.target-services=order-service #<2>
 
-#stacksaga-instance configuration
+#stacksaga-instance 元数据配置
 stacksaga.instance.cluster=cluster1 #<3>
 stacksaga.instance.region=us-east-1 #<4>
 stacksaga.instance.zone=us-east-1a #<5>
 
-#rsocket server configuration
+#rsocket 服务端配置
 spring.rsocket.server.port=1001 #<6>
 spring.rsocket.server.address=localhost #<7>
 spring.rsocket.server.transport=tcp #<8>
 
-#connecting to the master retry ring-coordinator
+#连接目标 Master 重试环协调器
 stacksaga.coordinator.slave.target-master.port=1000 #<9>
 stacksaga.coordinator.slave.target-master.host=localhost #<10>
 
 ----
 
-<1> Set `stacksaga.coordinator.instance-type` to `slave`, since this instance runs as a Slave.
+<1> 将 `stacksaga.coordinator.instance-type` 设置为 `slave`，声明该实例作为 Slave 运行。
 
-<2> The target service(s) this Slave subscribes to on the Master, receiving their ring portion and publishing sub-ring portions to the subscribed Orchestrator instances.
-This can be a comma-separated list when a single Slave subscribes for multiple services; see the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
+<2> 该 Slave 向 Master 订阅的目标服务名称，接收对应服务的环分区并将子分区发布给订阅的 Orchestrator 实例。当单个 Slave 订阅多个服务时，可以使用逗号分隔列表；详见 xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[部署拓扑] 章节。
 +
-IMPORTANT: If a Slave supports multiple services, all of those services must also be supported by the Master.
-Otherwise, the connection between the Master and Slave will not be established.
+IMPORTANT: 如果 Slave 支持多个服务，则所有这些服务也必须包含在 Master 的支持列表中。否则 Master 与 Slave 之间的连接将无法建立。
 
-<3> The `cluster` this instance belongs to — same semantics as for the xref:#ring-coordinator-master[Master].
-The Master, and any Orchestrator instances that want to subscribe to this Slave, must share this cluster name for the connection to succeed.
+<3> 该实例所属的集群标识 (`cluster`)——语义与 xref:#ring-coordinator-master[Master] 一致。Master 以及所有希望订阅该 Slave 的 Orchestrator 实例必须具有相同的集群名称，连接才能成功建立。
 
-<4> The `region` this instance belongs to — same semantics as for the xref:#ring-coordinator-master[Master].
-The Master, and any subscribing Orchestrator instances, must share this region for the connection to succeed.
+<4> 该实例所属的区域标识 (`region`)——语义与 xref:#ring-coordinator-master[Master] 一致。Master 与所有订阅它的 Orchestrator 必须位于同一区域。
 
-<5> The `zone` this instance belongs to.
-It has no functional impact here, but should be set as per the StackSaga core specification.
+<5> 该实例所属的可用区标识 (`zone`)。在此处对重试没有功能性影响，但应按照规范配置。
 
-<6> The `RSocket` server port.
-Orchestrator instances connect to this Slave over `RSocket` to receive their sub-range updates.
+<6> `RSocket` 服务端端口。Orchestrator 实例通过此端口连接到该 Slave 以接收其细分令牌范围更新。
 
-<7> The `RSocket` network address that the server binds to.
+<7> RSocket 服务端绑定的网络地址。
 
-<8> The `RSocket` transport protocol.
-It must be `tcp` for retry ring-coordinator services.
+<8> RSocket 传输层协议，对于重试环协调器服务必须为 `tcp`。
 
-<9> The `RSocket` server port of the Master this Slave connects to, in the same region and cluster.
+<9> 该 Slave 连接的位于同一区域和集群中的 Master 的 `RSocket` 服务端端口。
 
-<10> The `RSocket` server host of the Master this Slave connects to, in the same region and cluster.
+<10> 该 Slave 连接的位于同一区域和集群中的 Master 的 `RSocket` 服务端主机地址。
 
 [[kubernetes-statefulset-deployment]]
-== Automated Role Detection via Kubernetes StatefulSet
+== 基于 Kubernetes StatefulSet 的自动化角色识别
 
-When deploying a Clustered Ring-Coordinator on Kubernetes, configuring separate Deployments for Master (`stacksaga.coordinator.instance-type=master`) and Slaves (`stacksaga.coordinator.instance-type=slave`) adds unnecessary operational overhead.
-Instead, it is recommended to run the Ring-Coordinator cluster as a **Kubernetes StatefulSet**.
+在 Kubernetes 上部署集群化 Ring-Coordinator 时，为 Master（`stacksaga.coordinator.instance-type=master`）和 Slave（`stacksaga.coordinator.instance-type=slave`）分别配置独立的 Deployment 会增加额外的运维负担。
+因此，官方推荐将 Ring-Coordinator 集群部署为 **Kubernetes StatefulSet**。
 
-In a StatefulSet, each pod receives a deterministic, ordinal-indexed hostname:
+在 StatefulSet 中，每个 Pod 会获得一个确定性的、带序号索引的主机名：
 ----
-<statefulset-name>-0  (e.g., ring-coordinator-0)
-<statefulset-name>-1  (e.g., ring-coordinator-1)
-<statefulset-name>-2  (e.g., ring-coordinator-2)
+<statefulset-name>-0  (例如：ring-coordinator-0)
+<statefulset-name>-1  (例如：ring-coordinator-1)
+<statefulset-name>-2  (例如：ring-coordinator-2)
 ----
 
-StackSaga can automatically determine the coordinator's role directly from this ordinal index using the `stacksaga.coordinator.deploy.index-based` property:
+StackSaga 通过 `stacksaga.coordinator.deploy.index-based` 配置属性，能够直接根据该序号索引自动判定协调器的角色：
 
-* **Pod Index `0`** is automatically designated as the **`master`** node.
-* **Pod Index `> 0`** (e.g. index 1, 2, ...) are automatically designated as **`slave`** nodes.
+* **Pod 索引为 `0`**：自动指定为 **`master`** 节点。
+* **Pod 索引 `> 0`**（例如索引 1, 2, ...）：自动指定为 **`slave`** 节点。
 
-=== Enabling Index-Based Role Resolution
+=== 开启基于索引的角色判定
 
-To enable automatic role detection, set `stacksaga.coordinator.deploy.index-based=true`:
+要启用自动角色识别，只需设置 `stacksaga.coordinator.deploy.index-based=true`：
 
 .application.properties
 [source,properties]
 ----
-# Enable index-based role detection for Kubernetes StatefulSet
+# 为 Kubernetes StatefulSet 启用基于索引的角色自动识别
 stacksaga.coordinator.deploy.index-based=true #<1>
 
-# Optional: instance-type does not need to be set; it is derived automatically #<2>
+# 可选项：无需显式设置 instance-type，系统会自动推导 #<2>
 
-# Target service(s) coordinated by this cluster
+# 该集群协调的目标服务列表
 stacksaga.coordinator.target-services=order-service,payment-service #<3>
 
-# RSocket server settings
+# RSocket 服务端配置
 spring.rsocket.server.port=7777 #<4>
 spring.rsocket.server.transport=tcp
 
-# Target master connection (used by Slave pods when index > 0)
+# 目标 Master 连接配置（当索引 > 0 时供 Slave Pod 使用）
 stacksaga.coordinator.slave.target-master.host=ring-coordinator-0.ring-coordinator-headless #<5>
 stacksaga.coordinator.slave.target-master.port=7777 #<6>
 
-# Cluster and region metadata
+# 集群与区域元数据
 stacksaga.instance.cluster=cluster1
 stacksaga.instance.region=us-east-1
 stacksaga.instance.zone=us-east-1a
 ----
 
-<1> Enables automated index-based role detection.
-<2> `stacksaga.coordinator.instance-type` becomes optional. Pod `0` automatically runs as `master`, while pods `1..N` run as `slave`.
-<3> The services coordinated by this ring-coordinator cluster.
-<4> RSocket port used for communication.
-<5> The hostname of the Master pod (pod `0`). In Kubernetes, this typically points to the headless service DNS of the Master pod (e.g., `<statefulset-name>-0.<headless-service-name>`). When pod `0` starts as Master, it ignores this property; when pods `1..N` start as Slaves, they use it to connect to pod `0`.
-<6> The port of the Master pod.
+<1> 开启基于序号索引的自动化角色识别。
+<2> `stacksaga.coordinator.instance-type` 变为可选。Pod `0` 自动作为 `master` 运行，而 Pod `1..N` 自动作为 `slave` 运行。
+<3> 该环协调器集群负责协调的微服务。
+<4> 用于节点通信的 RSocket 端口。
+<5> Master Pod（即 Pod `0`）的主机名。在 Kubernetes 中，通常指向 Master Pod 的 Headless Service DNS（例如 `<statefulset-name>-0.<headless-service-name>`）。当 Pod `0` 作为 Master 启动时会忽略此属性；当 Pod `1..N` 作为 Slave 启动时，会通过此地址连接到 Pod `0`。
+<6> Master Pod 的端口。
 
-=== Pod Identifier Resolution Order
+=== Pod 标识符解析优先级顺序
 
-When `stacksaga.coordinator.deploy.index-based=true` is set, StackSaga determines the pod index by inspecting the following sources in order:
+当配置了 `stacksaga.coordinator.deploy.index-based=true` 时，StackSaga 会按以下顺序依次检查数据源以提取 Pod 序号索引：
 
-1. `stacksaga.coordinator.instance-id` (explicit override if specified in configuration)
-2. `POD_NAME` (standard Kubernetes downward API environment variable)
-3. `HOSTNAME` (standard Kubernetes pod hostname environment variable)
+1. `stacksaga.coordinator.instance-id`（在配置中显式指定的覆盖值）
+2. `POD_NAME`（标准的 Kubernetes Downward API 环境变量）
+3. `HOSTNAME`（标准的 Kubernetes Pod 主机名环境变量）
 
-The numeric index is extracted from the suffix after the last hyphen (`-`), ignoring any FQDN domain suffixes (e.g., `ring-coordinator-0.ring-coordinator-headless.default.svc.cluster.local` resolves index `0`).
+数字索引从最后一个连字符 (`-`) 之后的后缀中提取，并自动忽略任何 FQDN 域名后缀（例如 `ring-coordinator-0.ring-coordinator-headless.default.svc.cluster.local` 会准确解析出索引 `0`）。
 
 [NOTE]
 ====
-In standard Docker containers and standalone Linux environments, `stacksaga.coordinator.deploy.index-based` should remain `false` (the default).
-When disabled, StackSaga will not attempt to parse container IDs or hostnames as StatefulSet ordinals, and will use the explicitly configured `stacksaga.coordinator.instance-type`.
+在标准的 Docker 容器和独立的 Linux 环境中，`stacksaga.coordinator.deploy.index-based` 应保持为 `false`（默认值）。
+禁用时，StackSaga 不会尝试将容器 ID 或主机名解析为 StatefulSet 序号，而是严格采用显式配置的 `stacksaga.coordinator.instance-type`。
 ====
 
 [[configuration-properties]]
-== Configuration Properties Reference
+== 配置属性参考手册 (Configuration Properties Reference)
 
-The following table summarizes all the configuration properties for the retry ring-coordinator. The first group applies to both `master` and `slave` instances; the second group applies only to `slave` instances.
+下表汇总了重试环协调器的所有配置属性。第一组适用于 `master` 和 `slave` 实例；第二组仅适用于 `slave` 实例。
 
-NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory and have no default — you must set them explicitly.
+NOTE: *默认值 (Default)* 列中显示连字符 (`-`) 的属性为必填项且无默认值，必须显式指定。
 
 [cols="3,1,1,5", options="header"]
 [.properties-table.google-anno-skip]
 |===
-|Property Name|Default|Type|Description
+|属性名称 (Property Name)|默认值 (Default)|类型 (Type)|描述 (Description)
 
-4+s| Common — applies to both Master and Slave instances
+4+s| 通用配置 — 适用于 Master 和 Slave 实例
 
 |`stacksaga.coordinator.deploy.index-based`
 |`false`
 |`boolean`
-|Whether the coordinator instance role (`master` or `slave`) is determined automatically based on the pod ordinal index (e.g., in a Kubernetes StatefulSet). When `true`, pod index `0` runs as `master` and indices `>0` run as `slave`, and `stacksaga.coordinator.instance-type` becomes optional.
+|协调器实例角色（`master` 或 `slave`）是否根据 Pod 序号索引自动判定（例如在 Kubernetes StatefulSet 中）。当设置为 `true` 时，Pod 索引 `0` 作为 `master` 运行，索引 `>0` 作为 `slave` 运行，`stacksaga.coordinator.instance-type` 变为可选。
 
 |`stacksaga.coordinator.instance-type`
 |-
 |`InstanceType` (Enum)
-|The role this instance runs as — `master` or `slave`. Required when `stacksaga.coordinator.deploy.index-based` is `false`. When index-based deployment is enabled, this property is derived automatically from the pod index.
+|该实例运行的角色——`master` 或 `slave`。当 `stacksaga.coordinator.deploy.index-based` 为 `false` 时必填。开启基于索引的部署时，该属性会根据 Pod 索引自动推导。
 
 |`stacksaga.coordinator.target-services`
 |-
 |`String`
-|A comma-separated list of the service(s) this instance handles. The Master uses it to decide which Slaves may connect to it; a Slave uses it to decide which Master to connect to. Every service supported by a Slave must also be supported by its Master, otherwise the connection is rejected — but a Master may support more services than any single Slave.
+|该实例负责处理的服务名称（逗号分隔列表）。Master 用它来判断哪些 Slave 可以连接；Slave 用它来决定连接哪一个 Master。Slave 支持的每个服务都必须包含在对应 Master 的支持列表中，否则连接将被拒绝；但 Master 支持的服务集可以多于任何单个 Slave。
 
 |`spring.rsocket.server.port`
 |-
 |`int`
-|The port the embedded RSocket server binds to. Slaves connect to the Master on this port, and Orchestrators connect to a Slave on this port, so it serves both connection types.
+|内嵌 RSocket 服务端绑定的端口。Slave 在该端口上连接 Master，Orchestrator 也在该端口上连接 Slave，因此该端口同时服务这两种连接类型。
 
 |`spring.rsocket.server.address`
 |-
 |`String`
-|The network address the embedded RSocket server binds to.
+|内嵌 RSocket 服务端绑定的网络地址。
 
 |`spring.rsocket.server.transport`
 |-
 |`String`
-|The transport protocol for the embedded RSocket server. Must be `tcp` for retry ring-coordinator services.
+|内嵌 RSocket 服务端的传输层协议。对于重试环协调器服务必须为 `tcp`。
 
 |`stacksaga.instance.cluster`
 |-
 |`String`
-|The cluster this instance belongs to. Components only connect to one another when their `cluster` values match, so it must be identical across every Master, Slave, and Orchestrator that needs to connect.
-For multi-cluster topologies and cell isolation in Cassandra, see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[Horizontal Scaling via Virtual Clusters].
+|该实例所属的集群标识。仅当组件的 `cluster` 值完全匹配时才能相互连接，因此需要互联的所有 Master、Slave 和 Orchestrator 之间的该值必须完全一致。
+关于 Cassandra 中的多集群拓扑与单元隔离，请参阅 xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[通过虚拟集群进行水平扩展]。
 
 |`stacksaga.instance.region`
 |`default`
 |`String`
-|The region this instance belongs to. Master and Slave instances reject connections if their `region` values do not match.
+|该实例所属的区域标识。若 `region` 值不匹配，Master 和 Slave 实例将拒绝连接。
 +
-NOTE: Defaults to `default` (region code `0`). For multi-region topologies, configure a custom xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] bean across all coordinator and orchestrator services.
+NOTE: 默认值为 `default`（区域代码 `0`）。对于多区域拓扑，请在所有协调器与编排器服务中配置自定义的 xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Bean。
 
 |`stacksaga.instance.zone`
 |-
 |`String`
-|The zone this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
+|该实例所属的可用区标识。在此处对重试功能没有实际影响，但应按照 StackSaga 规范进行设置。
 
-4+s| Slave-only — applies to `slave` instances
+4+s| Slave 独有配置 — 仅适用于 `slave` 实例
 
 |`stacksaga.coordinator.slave.target-master.host`
 |-
 |`String`
-|The host of the Master this Slave connects to (in the same region and cluster). Used to establish the RSocket connection from the Slave to the Master.
+|该 Slave 连接的 Master 主机地址（位于同一区域和集群内）。用于建立从 Slave 到 Master 的 RSocket 连接。
 
 |`stacksaga.coordinator.slave.target-master.port`
 |-
 |`int`
-|The port of the Master this Slave connects to (in the same region and cluster). Used to establish the RSocket connection from the Slave to the Master.
+|该 Slave 连接的 Master 端口号（位于同一区域和集群内）。用于建立从 Slave 到 Master 的 RSocket 连接。
 
 |`stacksaga.coordinator.slave.target-master.reconnect.max-retries`
 |`10`
 |`int`
-|Maximum number of TCP reconnect attempts when establishing the connection to the Master. If the Slave still cannot connect after this many attempts, the instance shuts down.
+|与 Master 建立连接时 TCP 重连尝试的最大次数。如果在达到此重试上限后 Slave 仍无法连通，实例将自行终止退出。
 
 |`stacksaga.coordinator.slave.target-master.reconnect.backoff-duration`
 |`2s`
 |`Duration`
-|The initial backoff between TCP reconnect attempts. After a failed attempt the Slave waits this long before retrying, growing on each subsequent attempt up to `max-backoff-duration`.
+|TCP 重连尝试之间的初始退避时间。尝试失败后，Slave 等待该时长再重试，后续每次尝试将递增，直到达到 `max-backoff-duration`。
 
 |`stacksaga.coordinator.slave.target-master.reconnect.max-backoff-duration`
 |`6s`
 |`Duration`
-|The upper bound on the TCP reconnect backoff. The growing backoff between reconnect attempts never exceeds this value.
+|TCP 重连退避时间的上限值。两次重连尝试之间递增的等待时间绝不会超过该值。
 
 |`stacksaga.coordinator.slave.target-master.retry.max-retries`
 |`Long.MAX_VALUE`
 |`long`
-|Maximum number of RSocket stream retry attempts before giving up. This governs recovery of the RSocket stream itself, and is distinct from the TCP `reconnect` attempts above. Defaults to `Long.MAX_VALUE` (effectively infinite), which is recommended in production so the stream is always eventually recovered.
+|放弃前 RSocket 流重试尝试的最大次数。该参数控制 RSocket 数据流本身的恢复，与上方的 TCP `reconnect` 物理连接重试相互独立。默认值为 `Long.MAX_VALUE`（实质上无限重试），在生产环境中强烈推荐此设置以保证数据流最终总能自愈恢复。
 
 |`stacksaga.coordinator.slave.target-master.retry.backoff-duration`
 |`2s`
 |`Duration`
-|The initial backoff between RSocket stream retry attempts. After a failed attempt the Slave waits this long before retrying, growing on each subsequent attempt up to `max-backoff-duration`.
+|RSocket 流重试尝试之间的初始退避时间。尝试失败后，Slave 等待该时长再重试，后续每次尝试将递增，直到达到 `max-backoff-duration`。
 
 |`stacksaga.coordinator.slave.target-master.retry.max-backoff-duration`
 |`6s`
 |`Duration`
-|The upper bound on the RSocket stream retry backoff. The growing backoff between retry attempts never exceeds this value.
+|RSocket 流重试退避时间的上限值。两次重试尝试之间递增的等待时间绝不会超过该值。
 
 |`stacksaga.coordinator.slave.target-master.retry.jitter`
 |`0.5`
 |`double`
-|The jitter factor applied to the RSocket stream retry backoff. Randomizing the backoff avoids a thundering-herd problem when many Slaves reconnect to the Master at once. Must be between `0` (no jitter) and `1` (full jitter — a random value between 0 and the backoff duration).
+|应用于 RSocket 流重试退避时间的抖动因子 (Jitter)。对退避时间进行随机化抖动可以有效防止大量 Slave 同时向 Master 发起重连时引发的惊群效应 (Thundering-Herd Problem)。取值必须在 `0`（无抖动）到 `1`（完全抖动，即 0 到退避时长之间的随机值）之间。
 
 |`stacksaga.coordinator.slave.lookup.ip-prefer`
 |`false`
 |`boolean`
-|Controls what the Master hands back to Orchestrators when they look up the available Slaves to connect to. When `true`, the Master returns Slave IP addresses; when `false` (the default), it returns Slave hostnames.
+|控制当 Orchestrator 向 Master 查询可用 Slave 时，Master 返回的地址类型。设置为 `true` 时，Master 返回 Slave 的 IP 地址；设置为 `false`（默认值）时，返回 Slave 的主机名 (Hostname)。
 |===

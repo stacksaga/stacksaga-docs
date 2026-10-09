@@ -1,21 +1,21 @@
-= Ring-Coordinator Connector
+= 重试环连接器 (Ring-Coordinator Connector)
 
-== Overview
+== 概述 (Overview)
 
-The Ring-Coordinator Connector is the supporting module that turns a standard Orchestrator service into a `Retry Node` in the retry ring architecture.
-It connects to the configured Master Ring-Coordinator, looks up an available Slave Ring-Coordinator, connects to that Slave, and keeps the connection alive to receive the ring-partition information needed to execute retry tasks.
-Read more in the xref:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry-Node] section for a better understanding.
+重试环连接器 (Ring-Coordinator Connector) 是一个辅助模块，用于在重试环架构中将标准的编排器 (Orchestrator) 服务转变为*重试节点 (Retry Node)*。
+它连接到已配置的主重试协调器 (Master Ring-Coordinator)，查找可用的从重试协调器 (Slave Ring-Coordinator)，并与该 Slave 建立连接并保持长连接活跃，以接收执行重试任务所需的环分区信息 (Ring-Partition Information)。
+如需深入了解，请阅读 xref:transaction-retrying-with-retry-coordinator.adoc#retry-node[重试节点 (Retry-Node)] 章节。
 
-To turn a standard Orchestrator service into a `Retry Node`, add the `stacksaga-ring-coordinator-connector` dependency to the Orchestrator service and configure the connection details of the Master Ring-Coordinator.
-The Orchestrator service then connects to the Master Ring-Coordinator automatically and starts receiving the ring-partition information to execute retry tasks.
+要将标准 Orchestrator 服务转变为重试节点，请在 Orchestrator 服务中添加 `stacksaga-ring-coordinator-connector` 依赖，并配置 Master Ring-Coordinator 的连接详情。
+随后，Orchestrator 服务将自动连接到 Master Ring-Coordinator，并开始接收环分区信息以执行重试任务。
 
-== Dependency Management
+== 依赖管理 (Dependency Management)
 
 [source,xml,subs="attributes+"]
 ----
 <dependencyManagement>
     <dependencies>
-        <dependency> <!--Only for stacksaga dependencies version management-->
+        <dependency> <!--仅用于 stacksaga 依赖项版本管理-->
             <groupId>org.stacksaga</groupId>
             <artifactId>stacksaga-bom</artifactId>
             <version>{stacksaga-version}</version>
@@ -33,100 +33,97 @@ The Orchestrator service then connects to the Master Ring-Coordinator automatica
 </dependencies>
 ----
 
-IMPORTANT: It is recommended to http://init.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+IMPORTANT: 推荐使用 http://init.stacksaga.org/[StackSaga Initializer (初始化器)] 获取项目所需的 StackSaga 依赖配置代码段，以确保您的项目拥有正确的版本和依赖组合。
 
-After adding the dependency, configure the connection details of the Master Ring-Coordinator in your application configuration file (`application.yml` or `application.properties`).
+添加依赖项后，请在应用程序配置文件（`application.yml` 或 `application.properties`）中配置 Master Ring-Coordinator 的连接详情。
 
 [[common_configuration_properties]]
-== Configuration Properties
+== 配置属性 (Configuration Properties)
 
-Configure the following properties in your application configuration file (`application.yml` or `application.properties`) so the Connector can reach the Master Ring-Coordinator and receive ring-partition information.
+请在应用程序配置文件（`application.yml` 或 `application.properties`）中配置以下属性，以便 Connector 能够连通 Master Ring-Coordinator 并接收环分区信息。
 
-NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory and have no default — you must set them explicitly.
+NOTE: *默认值 (Default)* 列中显示连字符 (`-`) 的属性为必填项且无默认值，必须显式指定。
 
 [cols="3,1,1,5",options="header"]
 [.properties-table.google-anno-skip]
 |===
-|Property Name|Default|Type|Description
+|属性名称 (Property Name)|默认值 (Default)|类型 (Type)|描述 (Description)
 
-4+s| General
+4+s| 通用配置 (General)
 
 |`stacksaga.coordinator.connector.enabled`
 |`false`
 |`boolean`
-|Whether the Ring-Coordinator Connector module is enabled. Set it to `true` to turn the standard Orchestrator service into a `Retry Node`. It is disabled by default so the same Orchestrator service can run unchanged when you do not need the retry ring architecture — avoiding the need to build and deploy two separate Orchestrator services, one with the connector and one without.
+|是否启用 Ring-Coordinator Connector 模块。设置为 `true` 可将标准 Orchestrator 服务转变为*重试节点 (Retry Node)*。默认处于禁用状态，以便同一 Orchestrator 服务在不需要重试环架构时无需修改即可运行——避免了为同一业务构建和部署两套 Orchestrator 服务（一套带 connector，一套不带）的繁琐操作。
 
-4+s| Master connection — initial lookup of an available Slave
+4+s| Master 连接配置 — 首次查找可用 Slave
 
 |`stacksaga.coordinator.connector.master.requester.host`
 |-
 |`String`
-|The host of the Master Ring-Coordinator that the Connector contacts to look up an available Slave Ring-Coordinator.
+|Connector 连接的主重试协调器 (Master Ring-Coordinator) 主机地址，用于查找可用的从重试协调器 (Slave Ring-Coordinator)。
 
 |`stacksaga.coordinator.connector.master.requester.port`
 |-
 |`int`
-|The port of the Master Ring-Coordinator that the Connector contacts to look up an available Slave Ring-Coordinator.
+|Connector 连接的 Master Ring-Coordinator 端口号。
 
 |`stacksaga.coordinator.connector.master.requester.connect-timeout`
 |`5s`
 |`Duration`
-|How long the client waits to establish the TCP connection to the Master before failing.
+|客户端在宣告失败前尝试与 Master 建立 TCP 连接的超时等待时间。
 
 |`stacksaga.coordinator.connector.master.requester.max-retries`
 |`10`
 |`int`
-|Maximum number of reconnection attempts on the *current* connection to the Master after a connection loss. Once this limit is reached, the Connector discards that connection and establishes a brand-new one from the configured host and port — it does not shut down. Building a new connection re-resolves the host, so even though there is a single Master in the cluster, the Connector can pick up a new IP address (working around JVM DNS caching) if the Master was restarted or rescheduled, instead of retrying a stale address indefinitely.
+|连接断开后，在与 Master 的*当前*连接上进行重新连接尝试的最大次数。一旦达到此限制，Connector 将丢弃该连接，并根据配置的主机和端口重新建立全新连接——它不会停止运行。新建连接会重新解析主机名，因此即使集群中只有一个 Master，如果 Master 重启或被重新调度到新 IP，Connector 也能获取最新 IP 地址（绕过 JVM DNS 缓存问题），而不会无休止地重试陈旧失效的地址。
 
 |`stacksaga.coordinator.connector.master.requester.backoff-duration`
 |`2s`
 |`Duration`
-|Initial backoff before the first reconnection attempt after a connection loss. A short delay lets transient issues resolve without causing excessive downtime.
+|连接断开后首次重试前的初始退避时间 (Initial Backoff)。较短的延迟有助于瞬态问题自动恢复，而不会造成过长的停机时间。
 
 |`stacksaga.coordinator.connector.master.requester.max-backoff-duration`
 |`5s`
 |`Duration`
-|Upper bound on the reconnection backoff. The growing backoff between attempts never exceeds this value.
+|重连退避时间的上限值。两次尝试之间递增的退避时间绝不会超过该值。
 
-4+s| Master connection — retry when no Slave is available in the registry
+4+s| Master 连接配置 — 注册表中暂无可用 Slave 时的重试策略
 
 |`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.max-attempts`
 |`Integer.MAX_VALUE`
 |`int`
-|Maximum number of retry attempts when the connection to the Master is already successful but its cache currently holds no Slave to serve the request. Here the Master connection stays up — there is nothing to reconnect — so the Connector simply re-requests Slave details from the Master on each attempt until one becomes available, and only then connects to that Slave (governed by the `slave.requester.*` properties below). Defaults to `Integer.MAX_VALUE` (retry indefinitely) for maximum resilience; lower it if you would rather cap the attempts during prolonged outages.
+|当与 Master 成功建立连接但 Master 缓存中当前没有可用 Slave 提供服务时的最大重试次数。此时与 Master 的连接保持正常，无需重新建连，Connector 仅在每次尝试时向 Master 重新请求 Slave 详情，直到有可用 Slave 为止，随后再连接到该 Slave（受下方的 `slave.requester.*` 属性管控）。默认值为 `Integer.MAX_VALUE`（无限重试）以提供最大的弹性韧性；如果您希望在长时间故障期间限制重试次数，可以调低该值。
 
 |`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.backoff-duration`
 |`2s`
 |`Duration`
-|Initial backoff before the first retry when no Slave is available. A short delay lets transient issues resolve without causing excessive downtime.
+|暂无可用 Slave 时首次重试前的初始退避时间。
 
 |`stacksaga.coordinator.connector.master.requester.retry-on-no-slave.max-backoff-duration`
 |`5s`
 |`Duration`
-|Upper bound on the no-Slave retry backoff. The growing backoff between attempts never exceeds this value.
+|无可用 Slave 重试退避时间的上限值。
 
-4+s| Slave connection — once an available Slave has been looked up
+4+s| Slave 连接配置 — 查找到可用 Slave 后的连接参数
 
 |`stacksaga.coordinator.connector.slave.requester.connect-timeout`
 |`5s`
 |`Duration`
-|How long the client waits to establish the TCP connection to the looked-up Slave before failing.
+|客户端在宣告失败前尝试与查找到的 Slave 建立 TCP 连接的超时等待时间。
 
 |`stacksaga.coordinator.connector.slave.requester.max-retries`
 |`10`
 |`int`
-|Maximum number of reconnection attempts on the *current* Slave connection after a connection loss. Once this limit is reached, the Connector stops retrying that Slave and goes back to the Master to look up a *different* Slave — the Master itself is healthy; only this Slave connection has failed. If the Slave is down or unhealthy it has very likely already been dropped from the Master's registry too, since the Master keeps that registry updated as Slave connections come and go, so the lookup returns a fresh, healthy Slave.
+|连接断开后，在与*当前* Slave 的连接上进行重新连接尝试的最大次数。一旦达到此限制，Connector 将停止重试该 Slave，并返回 Master 查找*另一个* Slave——因为 Master 本身是健康的，仅当前 Slave 连接失效。如果该 Slave 已宕机或处于不健康状态，它极大概率已经被从 Master 的注册表中剔除（Master 会随着 Slave 连接的变化实时维护该注册表），因此重新查找将返回一个全新的健康 Slave。
 
 |`stacksaga.coordinator.connector.slave.requester.backoff-duration`
 |`2s`
 |`Duration`
-|Initial backoff before the first reconnection attempt after a connection loss. A short delay lets transient issues resolve without causing excessive downtime.
+|与 Slave 断开后首次重连尝试前的初始退避时间。
 
 |`stacksaga.coordinator.connector.slave.requester.max-backoff-duration`
 |`5s`
 |`Duration`
-|Upper bound on the reconnection backoff. The growing backoff between attempts never exceeds this value.
+|与 Slave 重连退避时间的上限值。
 |===
-
-
-

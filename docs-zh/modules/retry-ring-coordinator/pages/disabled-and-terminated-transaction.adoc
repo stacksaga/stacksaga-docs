@@ -1,42 +1,42 @@
-= Disabled Transactions VS Terminated Transactions
+= 禁用事务 (Disabled Transactions) 与终止事务 (Terminated Transactions)
 
-== Disabled Transactions
+== 禁用事务 (Disabled Transactions)
 
-If some transactions are expired after retrying withing the transaction lifetime these transactions are disabled transactions.
+如果某些事务在事务生命周期 (Transaction Lifetime) 内经过多次重试后仍然超时过期，这些事务将被标记为*禁用事务 (Disabled Transactions)*。
 
-What are the reasons for expiring transactions without completing?
+导致事务未能完成并最终过期的原因有哪些？
 
-. *Some executors may have been changed during the transaction execution period.* +
-For instance, Just imagine that a transaction is initiated at service version 1.0.0, and it keeps some time for retrying due to the target service not available and if a new version is deployed during the time without the executor that transaction can not be executed.
-even if the transaction is passed for retrying the transaction is not executed due to the executor not existing.
-Even if the executor is not found at that moment the transaction is re-scheduled again for retrying again and again until reaching the end of the transaction lifetime.
-After the end of the lifetime, the transaction is marked as a disabled transaction. +
+. *在事务执行期间某些执行器 (Executors) 发生了变更。* +
+例如，假设某个事务在服务版本 1.0.0 中发起，由于目标服务不可用而在重试队列中保持了一段时间；在此期间如果部署了新版本，而新版本中删除了该执行器，那么该事务将无法被执行。
+即使该事务被传递去重试，由于执行器不存在，事务也无法执行。
+即使此时未找到执行器，系统仍会一次又一次地重新调度该事务进行重试，直到达到事务生命周期的终点。
+生命周期结束后，该事务将被标记为禁用事务。 +
 +
-NOTE: The reason for rescheduling the transaction even if the executor is not found is that the team can recognise the issue and fix them before reaching the lifetime.
-Because if there is this kind of error, Stacksaga framework notifies the issue into the StackSaga Trace Window. +
+NOTE: 即使未找到执行器仍重新调度事务的原因是，开发和运维团队能够识别问题并在生命周期结束前进行修复。
+发生此类错误时，StackSaga 框架会在 StackSaga Trace Window (链路追踪窗口) 中发出问题通知。 +
 
-. *The target service host is not found*. +
-If the target host is not found again and again until the lifetime is exceeded the transaction is marked as a disabled transaction after the end of the lifetime.
+. *未找到目标服务主机 (Target Service Host)。* +
+如果目标主机持续未找到，直到超出生命周期，该事务在生命周期结束后将被标记为禁用事务。
 +
-NOTE: At this moment the system doesn't warn you through the StackSaga Trace Window because resources unavailable are accepted by the framework.
+NOTE: 此时系统不会通过 StackSaga Trace Window 发出警告，因为底层资源暂时不可用属于框架允许并处理的正常瞬态故障。
 
-== Terminated Transactions
+== 终止事务 (Terminated Transactions)
 
-If a transaction is failed while reverting, the transaction is marked as a terminated transaction. because revert process cannot be failed except a RetryableException in StackSaga.
-The difference between a terminated transaction and a disabled transaction is that the transaction is stopped without reaching the lifetime.
+如果事务在回滚补偿 (Revert) 过程中失败，该事务将被标记为*终止事务 (Terminated Transactions)*。因为在 StackSaga 中，回滚补偿流程除抛出 `RetryableException` (可重试异常) 之外不允许失败。
+终止事务与禁用事务的区别在于：终止事务会在未耗尽生命周期时就立即停止重试。
 
-== How to restore the Disabled Transactions and Terminated Transactions?
+== 如何恢复禁用事务与终止事务？
 
-The bugs of the Disabled transactions and Terminated Transactions should be discovered manually by the team.
-and after readying for execute that transactions you can restore the transaction for retrying.
+禁用事务和终止事务的根本问题应由团队人工排查和定位。
+修复缺陷并准备好重新执行这些事务后，您可以恢复事务以进行重试。
 
-There are 2 endpoints for handle the Disabled Transactions and Terminated Transactions.
+系统提供了 2 个端点用于处理禁用事务和终止事务：
 
-. *Fetching the Disabled Transactions and Terminated Transactions.* +
-You can collect the Disabled Transactions and Terminated Transactions through this endpoint for analyzing the errors or issues.
+. *获取禁用事务与终止事务 (Fetching the Disabled Transactions and Terminated Transactions)。* +
+您可以通过此端点拉取禁用事务和终止事务，用于分析错误和定位问题。
 
-. *Restoring the Disabled Transactions and Terminated Transactions.* +
-You can restore the Disabled Transactions and Terminated Transactions through this endpoint by extending the transaction lifetime.
+. *恢复禁用事务与终止事务 (Restoring the Disabled Transactions and Terminated Transactions)。* +
+您可以通过此端点延长事务的生命周期，从而恢复并重新触发这些事务的重试。
 
 // todo add the endpoints links
-NOTE: The endpoints are different from each implementation. and find the relevant endpoint here as per the implementation that you are using.
+NOTE: 不同实现方式 (Implementation) 下的端点可能有所不同，请根据您所使用的具体实现查找对应的端点。
