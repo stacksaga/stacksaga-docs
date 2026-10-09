@@ -267,13 +267,15 @@ In container orchestration environments such as **Kubernetes (k8s)**, maintainin
 To optimize cluster resource utilization, you can deploy the partition runner as a **Kubernetes `CronJob`** (or container task on AWS ECS / GCP Cloud Run Jobs):
 
 * **How It Operates**:
-1. Kubernetes triggers the CronJob pod at the desired schedule (e.g. daily at 12:00 PM).
-2. The pod starts up, Spring Boot initializes, and with `run-on-startup=true`, it immediately validates all datasources and creates upcoming partitions across all databases concurrently.
-3. The internal Spring cron scheduler is disabled by setting `stacksaga.partitioning.sql.cron=none` (or `-`).
-4. Enabling `stacksaga.partitioning.sql.exit-on-completion=true` commands the runner to automatically terminate the Spring Boot application and JVM once partition creation finishes:
-   * If all datasources succeed -> exits cleanly with code `0` (`Completed`).
-   * If any datasource fails -> exits with code `1` (`Error`/`Failed`), which causes Kubernetes to alert or retry according to your `restartPolicy`.
-5. Kubernetes releases all pod memory and CPU resources until the next scheduled interval.
+. Kubernetes triggers the CronJob pod at the desired schedule (e.g. daily at 12:00 PM).
+. The pod starts up, Spring Boot initializes, and with `run-on-startup=true`, it immediately validates all datasources and creates upcoming partitions across all databases concurrently.
+. The internal Spring cron scheduler is disabled by setting `stacksaga.partitioning.sql.cron=none` (or `-`).
+. Enabling `stacksaga.partitioning.sql.exit-on-completion=true` commands the runner to automatically terminate the Spring Boot application and JVM once partition creation finishes:
++
+* If all datasources succeed -> exits cleanly with code `0` (`Completed`).
+* If any datasource fails -> exits with code `1` (`Error`/`Failed`), which causes Kubernetes to alert or retry according to your `restartPolicy`.
++
+. Kubernetes releases all pod memory and CPU resources until the next scheduled interval.
 
 *Example Kubernetes CronJob Manifest*:
 

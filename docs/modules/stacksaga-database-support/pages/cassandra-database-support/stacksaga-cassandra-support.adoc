@@ -21,9 +21,9 @@ image::stacksaga-database-support:cassandra/stacksaga-ecosystem-overview.svg[alt
 
 The system operates across three interconnected environments:
 
-<1> **Microservice Application Pod:** Live Spring Boot microservices (such as `order-service`) integrating `stacksaga-spring-boot-starter` and `stacksaga-cassandra-reactive-support`.
-<2> **Apache Cassandra Cluster:** Distributed data tier storing both the Core Event Store (`es_transaction`, `es_transaction_tryout`) and the 5-Tier Recovery Directory.
-<3> **StackSaga Trace Window:** Central web observability console connected via the StackSaga Agent sidecar for real-time visualization of saga execution state (see xref:trace-window:stacksaga-trace-window.adoc[]).
+. **Microservice Application Pod:** Live Spring Boot microservices (such as `order-service`) integrating `stacksaga-spring-boot-starter` and `stacksaga-cassandra-reactive-support`.
+. **Apache Cassandra Cluster:** Distributed data tier storing both the Core Event Store (`es_transaction`, `es_transaction_tryout`) and the 5-Tier Recovery Directory.
+. **StackSaga Trace Window:** Central web observability console connected via the StackSaga Agent sidecar for real-time visualization of saga execution state (see xref:trace-window:stacksaga-trace-window.adoc[]).
 
 [IMPORTANT]
 ====
@@ -204,9 +204,9 @@ Even under bursts of 100,000 concurrent writes, rows land uniformly across physi
 .Managing High Write Throughput via Uniform Murmur3 Partitioning
 image::stacksaga-database-support:cassandra/stacksaga-transaction-throughput.svg[alt="Managing High Write Throughput via Uniform Murmur3 Partitioning"]
 
-<1> **High Inflow Requests:** Over 100,000 concurrent saga transactions initiated simultaneously across horizontally scaled application nodes.
-<2> **Murmur3 Partitioner:** Cassandra's 64-bit Murmur3 hash uniformly scatters `transaction_id` across the token space with zero coordination and zero lock contention.
-<3> **Even Cluster Scattering:** Writes land uniformly across physical nodes, ensuring CPU, memory, and disk I/O remain balanced without hot spots.
+. **High Inflow Requests:** Over 100,000 concurrent saga transactions initiated simultaneously across horizontally scaled application nodes.
+. **Murmur3 Partitioner:** Cassandra's 64-bit Murmur3 hash uniformly scatters `transaction_id` across the token space with zero coordination and zero lock contention.
+. **Even Cluster Scattering:** Writes land uniformly across physical nodes, ensuring CPU, memory, and disk I/O remain balanced without hot spots.
 
 === `es_transaction_tryout` — Step Execution History
 
@@ -219,9 +219,9 @@ Because `es_transaction` and `es_transaction_tryout` share the **identical compo
 .Colocated Transaction Step History (`es_transaction_tryout`)
 image::stacksaga-database-support:cassandra/stacksaga-tryout-colocation.svg[alt="Colocated Transaction Step History"]
 
-<1> **Physical Cassandra Node Colocation:** Because `es_transaction` and `es_transaction_tryout` share the identical composite partition key `((region, cluster, service_name, transaction_id))`, all records for a given transaction reside on the exact same physical node.
-<2> **Step Execution Clustering Rows:** Individual saga step attempts append as ordered clustering rows (`tryout_index ASC`) within the partition.
-<3> **Zero-Hop Colocated Read:** Fetching a transaction and its full step history is always a single-node, zero-hop local read operation, maximizing performance.
+. **Physical Cassandra Node Colocation:** Because `es_transaction` and `es_transaction_tryout` share the identical composite partition key `((region, cluster, service_name, transaction_id))`, all records for a given transaction reside on the exact same physical node.
+. **Step Execution Clustering Rows:** Individual saga step attempts append as ordered clustering rows (`tryout_index ASC`) within the partition.
+. **Zero-Hop Colocated Read:** Fetching a transaction and its full step history is always a single-node, zero-hop local read operation, maximizing performance.
 
 === `es_frozen_transaction` — The Quarantine Table
 
@@ -292,11 +292,11 @@ If a pod crashes between Step 1 and Step 3, the temporary lease expires when its
 .STRICT Mode Write Protection Flow
 image::stacksaga-database-support:cassandra/stacksaga-write-protection-strict.svg[alt="STRICT Mode Write Protection Flow"]
 
-<1> **Kafka Event Inflow:** A saga step execution event arrives from Kafka with potential at-least-once duplicate delivery.
-<2> **Paxos LWT Lease Acquisition:** The pod executes an atomic `INSERT ... IF NOT EXISTS USING TTL 5s` into `es_execution_markers`.
+. **Kafka Event Inflow:** A saga step execution event arrives from Kafka with potential at-least-once duplicate delivery.
+. **Paxos LWT Lease Acquisition:** The pod executes an atomic `INSERT ... IF NOT EXISTS USING TTL 5s` into `es_execution_markers`.
 If a lease exists with `TTL > 0`, the pod backs off; if `TTL = 0`, it skips.
-<3> **Mutual Exclusive Execution:** The single pod holding the active lease executes the saga business logic.
-<4> **Permanent Marker Commit:** On success, the marker is committed with `TTL = 0`, conferring permanent duplicate immunity.
+. **Mutual Exclusive Execution:** The single pod holding the active lease executes the saga business logic.
+. **Permanent Marker Commit:** On success, the marker is committed with `TTL = 0`, conferring permanent duplicate immunity.
 
 === RELAXED_WITH_DEDUP Mode — Lightweight Read Check
 
@@ -308,10 +308,10 @@ This mode avoids Cassandra LWT round-trips, maximizing throughput.
 .RELAXED_WITH_DEDUP Mode Execution Flow
 image::stacksaga-database-support:cassandra/stacksaga-write-protection-relaxed.svg[alt="RELAXED_WITH_DEDUP Mode Execution Flow"]
 
-<1> **Kafka Event Inflow:** Event received on high-throughput streaming pipelines where operations are inherently idempotent.
-<2> **Non-Blocking Read Check:** Executes a fast read against `es_execution_markers` without Paxos consensus overhead.
+. **Kafka Event Inflow:** Event received on high-throughput streaming pipelines where operations are inherently idempotent.
+. **Non-Blocking Read Check:** Executes a fast read against `es_execution_markers` without Paxos consensus overhead.
 If a marker exists, execution terminates immediately.
-<3> **Atomic Batch Write:** Step results and execution markers are committed together in a single logged batch write.
+. **Atomic Batch Write:** Step results and execution markers are committed together in a single logged batch write.
 
 *When to use `RELAXED_WITH_DEDUP`:*
 * When downstream operations are naturally idempotent (e.g. setting an absolute value, updating a cache, writing to an audit log).
@@ -458,12 +458,12 @@ image::stacksaga-database-support:cassandra/stacksaga-5tier-recovery-hierarchy.s
 
 The active directory tree operates through five coordinated tiers:
 
-<1> **Tier 1 (`es_days_by_year`):** Tracks which calendar dates contain pending recovery transactions for a given service, preventing empty table scans.
-<2> **Tier 2 (`es_recovery_windows_by_day`):** Divides each 24-hour day into discrete UTC minute windows (`0` to `1439`) processed in ascending chronological order (`minute_of_day ASC`).
-<3> **Tier 3 (`es_instances_by_recovery_window`):** Pod instance markers clustered by Murmur3 token hash (`token(instance_id)`) for spatial worker slicing.
-<4> **Tier 4 (`es_buckets_by_instance`):** Sequential bucket allocation directory (even = Retry, odd = Restore).
-<5> **Tier 5 (`es_recovery_transactions_by_instance`):** Bounded recovery metadata partitions (< 50,000 rows, ~3–5MB) dropped via single partition tombstones in O(1) time.
-<6> **Primary Event Store (`es_transaction`):** Decoupled heavy state hydrated lazily by `transaction_id`.
+. **Tier 1 (`es_days_by_year`):** Tracks which calendar dates contain pending recovery transactions for a given service, preventing empty table scans.
+. **Tier 2 (`es_recovery_windows_by_day`):** Divides each 24-hour day into discrete UTC minute windows (`0` to `1439`) processed in ascending chronological order (`minute_of_day ASC`).
+. **Tier 3 (`es_instances_by_recovery_window`):** Pod instance markers clustered by Murmur3 token hash (`token(instance_id)`) for spatial worker slicing.
+. **Tier 4 (`es_buckets_by_instance`):** Sequential bucket allocation directory (even = Retry, odd = Restore).
+. **Tier 5 (`es_recovery_transactions_by_instance`):** Bounded recovery metadata partitions (< 50,000 rows, ~3–5MB) dropped via single partition tombstones in O(1) time.
+. **Primary Event Store (`es_transaction`):** Decoupled heavy state hydrated lazily by `transaction_id`.
 
 [NOTE]
 ====
@@ -513,12 +513,12 @@ image::stacksaga-database-support:cassandra/stacksaga-instance-local-bucketing.s
 
 The mechanics operate through five stages:
 
-<1> **Thousands of Ephemeral Orchestrator Pods (Live Writers):** Every live application pod maintains an in-memory `AtomicLong` counter per write window.
+. **Thousands of Ephemeral Orchestrator Pods (Live Writers):** Every live application pod maintains an in-memory `AtomicLong` counter per write window.
 Incrementing takes ~2 nanoseconds without database locks.
-<2> **Isolated Bounded Partitions (Tier 5 Metadata Store):** Partitions are strictly bounded to a maximum of 50,000 rows (~3MB to 5MB on disk), far below Cassandra's 100MB threshold.
-<3> **Deterministic Spatial Mapping (`instance_id_token = token(instance_id)`):** Pods register their token hash in Tier 3, uniformly scattered across the continuous 64-bit token ring (`-2^63` to `2^63 - 1`).
-<4> **Autonomous Worker Discovery & Re-Distribution:** Retry-Nodes sweep assigned token sector leases, claiming instances deterministically without cross-worker locking and purging completed partitions via O(1) partition tombstones.
-<5> **Ephemeral Lifecycle Decoupling (Terminated Pod Recovery Guarantee):** Live pods can scale down, restart, or terminate immediately after writing failure records; 100% of pending retries are guaranteed to be recovered.
+. **Isolated Bounded Partitions (Tier 5 Metadata Store):** Partitions are strictly bounded to a maximum of 50,000 rows (~3MB to 5MB on disk), far below Cassandra's 100MB threshold.
+. **Deterministic Spatial Mapping (`instance_id_token = token(instance_id)`):** Pods register their token hash in Tier 3, uniformly scattered across the continuous 64-bit token ring (`-2^63` to `2^63 - 1`).
+. **Autonomous Worker Discovery & Re-Distribution:** Retry-Nodes sweep assigned token sector leases, claiming instances deterministically without cross-worker locking and purging completed partitions via O(1) partition tombstones.
+. **Ephemeral Lifecycle Decoupling (Terminated Pod Recovery Guarantee):** Live pods can scale down, restart, or terminate immediately after writing failure records; 100% of pending retries are guaranteed to be recovered.
 
 [NOTE]
 ====
@@ -556,13 +556,13 @@ Zero phantom reads, zero row locks.
 .Ternary-Window Synchronization Timeline: Writer, Reader, and Watchdog Isolation
 image::stacksaga-database-support:cassandra/stacksaga-dual-window-timeline.svg[alt="Ternary-Window Synchronization Timeline"]
 
-<1> **Active Write Window (W+1, Retry Horizon):** Standard-Nodes write transient failures into the immediate future window (Even buckets: `0, 2, 4`), completely isolated from active reader queries.
-<2> **Sealed Read Windows (<= W, Reader Horizon):** Retry-Nodes read only completed, sealed windows.
+. **Active Write Window (W+1, Retry Horizon):** Standard-Nodes write transient failures into the immediate future window (Even buckets: `0, 2, 4`), completely isolated from active reader queries.
+. **Sealed Read Windows (<= W, Reader Horizon):** Retry-Nodes read only completed, sealed windows.
 Sweeps both expired retries and overdue watchdogs without phantom reads or lock contention.
-<3> **Far-Future Watchdog Window (W+K, Restore Horizon):** Dead-man's switch watchdog row placed far ahead (e.g. W + 600 min) in Odd buckets (`1, 3, 5`).
+. **Far-Future Watchdog Window (W+K, Restore Horizon):** Dead-man's switch watchdog row placed far ahead (e.g. W + 600 min) in Odd buckets (`1, 3, 5`).
 Cancelled on normal transaction finish; survives only on ungraceful pod crash.
-<4> **Automatic Cooldown Buffer:** Writing to W+1 provides an automatic cooldown buffer of 10 to 70 seconds before the first retry attempt, preventing workers from hammering a restarting service.
-<5> **Midnight UTC Rollover:** Window 1439 wraps smoothly to minute 0 of the next calendar day (`date_of_year + 1`).
+. **Automatic Cooldown Buffer:** Writing to W+1 provides an automatic cooldown buffer of 10 to 70 seconds before the first retry attempt, preventing workers from hammering a restarting service.
+. **Midnight UTC Rollover:** Window 1439 wraps smoothly to minute 0 of the next calendar day (`date_of_year + 1`).
 
 .Pseudocode: Ternary-Window Calculation & Midnight Rollover
 [source,text]
@@ -618,10 +618,10 @@ Every query verifies that the current timestamp is within the lease validity win
 .Murmur3 Token Ring Slicing & Spatial Worker Isolation
 image::stacksaga-database-support:cassandra/stacksaga-spatial-token-ring.svg[alt="Murmur3 Token Ring Slicing & Spatial Worker Isolation"]
 
-<1> **64-bit Murmur3 Token Ring:** Spans `-2^63` to `+2^63 - 1`.
-<2> **Ring Coordinator:** Divides the token ring into non-overlapping sectors and issues time-bounded leases.
-<3> **Worker Leases:** Each Retry-Node queries Tier 3 using its leased sector bounds (`WHERE token >= min AND token < max`).
-<4> **Autonomous Slicing:** Linear horizontal scaling with zero duplicate processing and zero database row locks.
+. **64-bit Murmur3 Token Ring:** Spans `-2^63` to `+2^63 - 1`.
+. **Ring Coordinator:** Divides the token ring into non-overlapping sectors and issues time-bounded leases.
+. **Worker Leases:** Each Retry-Node queries Tier 3 using its leased sector bounds (`WHERE token >= min AND token < max`).
+. **Autonomous Slicing:** Linear horizontal scaling with zero duplicate processing and zero database row locks.
 
 ==== Processing a Retry Bucket: Step-by-Step
 
@@ -681,11 +681,11 @@ Execution markers (`es_execution_markers`) ensure that already-completed saga st
 .Top-Down Traversal & Compaction Lifecycle Pipeline
 image::stacksaga-database-support:cassandra/stacksaga-traversal-pipeline.svg[alt="Top-Down Traversal & Compaction Lifecycle Pipeline"]
 
-<1> **Discovery:** Top-down sweep from Tier 1 down to Tier 4 without empty table scans.
-<2> **Hydration:** Stream lightweight pointers from Tier 5 and lazily fetch payloads from `es_transaction`.
-<3> **Dispatch:** Concurrent re-invocation up to `recovery.concurrency` (default: 100).
-<4> **Safe Shutdown Barrier:** If a pod is killed mid-bucket, the partition is preserved in Cassandra; completed steps are skipped upon restart.
-<5> **O(1) Compaction Drop:** When 100% dispatched, the entire bucket partition is dropped with a single partition tombstone.
+. **Discovery:** Top-down sweep from Tier 1 down to Tier 4 without empty table scans.
+. **Hydration:** Stream lightweight pointers from Tier 5 and lazily fetch payloads from `es_transaction`.
+. **Dispatch:** Concurrent re-invocation up to `recovery.concurrency` (default: 100).
+. **Safe Shutdown Barrier:** If a pod is killed mid-bucket, the partition is preserved in Cassandra; completed steps are skipped upon restart.
+. **O(1) Compaction Drop:** When 100% dispatched, the entire bucket partition is dropped with a single partition tombstone.
 
 [#deep-historical-recovery]
 ==== Deep Historical Recovery
@@ -698,9 +698,9 @@ Workers traverse Tier 1 in ascending order (`date_of_year ASC`) and Tier 2 in as
 .Deep Historical Lookback Across Calendar Days
 image::stacksaga-database-support:cassandra/stacksaga-deep-historical-recovery.svg[alt="Deep Historical Lookback Across Calendar Days"]
 
-<1> **Lookback Range Calculation:** On startup, workers calculate candidate dates based on `recovery.lookback-days`.
-<2> **Ascending Day Sweep:** Workers traverse Tier 1 in ascending order (`date_of_year ASC`), recovering older backlog first.
-<3> **Live Transition:** Once historical windows are processed, workers transition smoothly to the live minute stream (W).
+. **Lookback Range Calculation:** On startup, workers calculate candidate dates based on `recovery.lookback-days`.
+. **Ascending Day Sweep:** Workers traverse Tier 1 in ascending order (`date_of_year ASC`), recovering older backlog first.
+. **Live Transition:** Once historical windows are processed, workers transition smoothly to the live minute stream (W).
 
 '''
 
@@ -745,11 +745,11 @@ Example:
 .The Restore Feature: Dead-Man's Switch Lifecycle
 image::stacksaga-database-support:cassandra/stacksaga-restore-dead-mans-switch.svg[alt="The Restore Feature: Dead-Man's Switch Lifecycle"]
 
-<1> **Transaction Start:** Standard-Node registers watchdog row at far-future window W + delay (e.g. +600 min).
-<2> **Watchdog in Odd Bucket:** Written into Tier 5 odd bucket partition.
-<3> **Path Stored in Ledger:** Partition path stored in `es_transaction` for targeted deletion.
-<4> **Path A (Normal Completion):** Targeted O(1) delete removes watchdog row; window stays clean.
-<5> **Path B (Pod Crash):** Watchdog row persists in Cassandra.
+. **Transaction Start:** Standard-Node registers watchdog row at far-future window W + delay (e.g. +600 min).
+. **Watchdog in Odd Bucket:** Written into Tier 5 odd bucket partition.
+. **Path Stored in Ledger:** Partition path stored in `es_transaction` for targeted deletion.
+. **Path A (Normal Completion):** Targeted O(1) delete removes watchdog row; window stays clean.
+. **Path B (Pod Crash):** Watchdog row persists in Cassandra.
 When window arrives, Retry-Node checks status and automatically re-invokes.
 
 [cols="1,3",options="header"]
@@ -798,11 +798,11 @@ Written on every transaction start.
 .Odd vs. Even Bucket Segregation & Tombstone Isolation
 image::stacksaga-database-support:cassandra/stacksaga-odd-even-bucket-segregation.svg[alt="Odd vs. Even Bucket Segregation & Tombstone Isolation"]
 
-<1> **Dual In-Memory Counters:** Independent `AtomicLong` counters for retry (even) and restore (odd).
-<2> **Even Buckets (Pure Retry):** 0% cell tombstones.
+. **Dual In-Memory Counters:** Independent `AtomicLong` counters for retry (even) and restore (odd).
+. **Even Buckets (Pure Retry):** 0% cell tombstones.
 High read performance, dropped via single partition tombstones.
-<3> **Odd Buckets (Restore Watchdog):** Quarantines high-frequency cell tombstones from completed transactions away from retry reads, eliminating `ReadFailureException`.
-<4> **O(1) Partition Tombstone:** Entire even bucket dropped in one metadata operation upon completion; retry workers never scan deleted rows.
+. **Odd Buckets (Restore Watchdog):** Quarantines high-frequency cell tombstones from completed transactions away from retry reads, eliminating `ReadFailureException`.
+. **O(1) Partition Tombstone:** Entire even bucket dropped in one metadata operation upon completion; retry workers never scan deleted rows.
 
 *Why odd/even segregation is structurally essential:*
 1. **Tombstone Isolation:** Restore rows are written for *every* transaction and deleted minutes later on success.
@@ -895,16 +895,16 @@ For hyper-scale enterprise deployments that *do* operate 50,000+ replicas of a s
 .Horizontal Scaling via Virtual Clusters & Regional Cell Isolation
 image::stacksaga-database-support:cassandra/stacksaga-virtual-clusters.svg[alt="Horizontal Scaling via Virtual Clusters & Regional Cell Isolation"]
 
-<1> **Virtual Cluster Cell Isolation (`stacksaga.instance.cluster`):** Each virtual cluster forms a completely self-contained, autonomous processing cell.
+. **Virtual Cluster Cell Isolation (`stacksaga.instance.cluster`):** Each virtual cluster forms a completely self-contained, autonomous processing cell.
 Failures, network partitions, or high traffic spikes in `us-central-cluster-1` have zero operational impact on `us-central-cluster-2`.
-<2> **Standard-Nodes (Live Traffic Writers):** The majority of orchestrator pods (e.g. 9,000 pods per cluster) handle live user-facing transactions.
+. **Standard-Nodes (Live Traffic Writers):** The majority of orchestrator pods (e.g. 9,000 pods per cluster) handle live user-facing transactions.
 On transient failure, they write forward into window W+1 of their assigned cluster partition using their local in-memory `AtomicLong` counter — no cross-cluster coordination required.
-<3> **Strict 1:1 Ring Coordinator Mapping:** Each virtual cluster runs its **own dedicated Ring Coordinator cluster** (Master and Slaves).
+. **Strict 1:1 Ring Coordinator Mapping:** Each virtual cluster runs its **own dedicated Ring Coordinator cluster** (Master and Slaves).
 There is **no cross-cluster coordinator traffic or shared state**.
 The Ring Coordinator for `us-central-cluster-1` serves exclusively the Retry-Nodes configured with `cluster = us-central-cluster-1`, ensuring zero cross-cluster coordination overhead.
-<4> **Retry-Nodes (Dual-Role: Readers & Forward Writers):** Retry-Nodes lease non-overlapping token sectors from their cluster's Ring Coordinator and scan sealed read windows (<= W).
+. **Retry-Nodes (Dual-Role: Readers & Forward Writers):** Retry-Nodes lease non-overlapping token sectors from their cluster's Ring Coordinator and scan sealed read windows (<= W).
 Importantly, **Retry-Nodes are also forward writers**: when a retry attempt itself fails again, the Retry-Node atomically increments its local `AtomicLong` and re-registers the transaction into window W+1 of its own cluster — same write path as Standard-Nodes.
-<5> **Shared Cassandra Keyspace (Physical Partition Separation):** All virtual clusters within the region connect to the **same Cassandra keyspace**.
+. **Shared Cassandra Keyspace (Physical Partition Separation):** All virtual clusters within the region connect to the **same Cassandra keyspace**.
 Because Cassandra hashes the composite partition key `((region, cluster, service_name, date_of_year, minute_of_day))`, data from `us-central-cluster-1` and `us-central-cluster-2` lands in completely independent physical partitions.
 Even with 50,000+ total pods active in the region, each virtual cluster's Tier 3 partition stays well under 10,000 rows — preserving optimal read latency and compaction efficiency.
 
@@ -1006,11 +1006,11 @@ Only when **both gates pass** does Node-0 safely remove the minute window from T
 .Directory Compaction: Node-0 Compactor Overseer Two-Gate Verification Protocol
 image::stacksaga-database-support:cassandra/stacksaga-node0-compaction-gates.svg[alt="Node-0 Compactor Overseer Two-Gate Verification Protocol"]
 
-<1> **Premature Deletion Hazard:** Uncoordinated worker deletion causes peer active transactions to be orphaned.
-<2> **Node-0 Compactor Overseer:** Sole authority to delete shared upper tiers (Tier 2 and Tier 1).
-<3> **Gate 1 (Cluster-Wide Quorum):** Full cluster query on Tier 3 must return 0 rows.
-<4> **Gate 2 (Wall-Clock Check):** Verifies current UTC time has progressed past window end.
-<5> **Safe Upper Pruning:** Safely deletes Tier 2 minute window and Tier 1 calendar date.
+. **Premature Deletion Hazard:** Uncoordinated worker deletion causes peer active transactions to be orphaned.
+. **Node-0 Compactor Overseer:** Sole authority to delete shared upper tiers (Tier 2 and Tier 1).
+. **Gate 1 (Cluster-Wide Quorum):** Full cluster query on Tier 3 must return 0 rows.
+. **Gate 2 (Wall-Clock Check):** Verifies current UTC time has progressed past window end.
+. **Safe Upper Pruning:** Safely deletes Tier 2 minute window and Tier 1 calendar date.
 
 [#tier-3-tombstone-behavior]
 ==== Tier 3 Tombstone Behavior & Risk Profile
