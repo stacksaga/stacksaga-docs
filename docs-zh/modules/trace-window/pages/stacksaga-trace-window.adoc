@@ -1,264 +1,263 @@
-= StackSaga TraceWindow Dashboard
+= StackSaga TraceWindow 链路追踪控制台 (Dashboard)
 
-== Overview
+== 概述 (Overview)
 
-*StackSaga TraceWindow* is the dedicated monitoring and transaction tracing dashboard of the StackSaga framework.
-It provides developers, architects, and operators with real-time visual observability into distributed saga transaction execution flows, step states, execution timelines, exception stack traces, and compensation paths.
+*StackSaga TraceWindow* 是 StackSaga 框架专用的监控与分布式事务追踪可视化控制台。
+它为开发人员、架构师和运维工程师提供对分布式 Saga 事务执行流程、步骤状态、时间线、异常堆栈轨迹和补偿路径的实时可视化可观测性能力。
 
-image:stack-saga-high-level-diagram.svg[alt="StackSaga TraceWindow in the StackSaga ecosystem"]
+image:stack-saga-high-level-diagram.svg[alt="StackSaga TraceWindow 在生态系统中的定位"]
 
-=== Core Capabilities
+=== 核心能力 (Core Capabilities)
 
-* **Interactive Transaction Visualization:** Trace every orchestrator action, execution order, state transition, and compensation routine in a rich graphical timeline.
-* **Dual Operational Modes:** Seamless *Local Development Mode* for local testing without authentication tokens, and enterprise *Production Mode* backed by GitHub OAuth and fine-grained access control.
-* **Flexible Topologies:** Native support for both standalone direct service connections (*Direct Mode*) and enterprise reverse-proxied clusters (*Gateway Mode*).
-* **Data Privacy by Design:** All transaction trace data, business payloads, and database records **remain entirely inside your private infrastructure**.
-The StackSaga Central cloud service operates strictly as an identity and authorization plane — it never stores, mirrors, or processes your business transactions.
+* **交互式事务可视化 (Interactive Transaction Visualization)：** 在图形化时间线中完整追踪每个编排器动作、执行顺序、状态变迁与补偿回滚。
+* **双运行模式 (Dual Operational Modes)：** 无缝支持无需认证 Token 的*本地开发模式 (Local Development Mode)*，以及基于 GitHub OAuth 与细粒度访问控制的企业级*生产模式 (Production Mode)*。
+* **灵活拓扑 (Flexible Topologies)：** 原生支持微服务直连 (*Direct Mode，直连模式*) 与企业级反向代理集群 (*Gateway Mode，网关模式*)。
+* **原生数据隐私保护 (Data Privacy by Design)：** 所有的事务追踪数据、业务载荷和数据库记录**完全保留在您的私有基础设施内部**。
+StackSaga Central 云服务仅作为身份验证与权限控制平面运作——绝不存储、镜像或处理您的任何业务事务数据。
 
 '''
 
-== Operational & Security Modes
+== 运行与安全模式 (Operational & Security Modes)
 
-TraceWindow operates in one of two modes, determined by the security configuration in your target microservice:
+TraceWindow 支持以下两种运行模式之一，具体由目标微服务中的安全配置决定：
 
 [cols="1,2,2",options="header"]
 |===
-| Feature | Local Development Mode | Production Mode
+| 特性 (Feature) | 本地开发模式 (Local Development Mode) | 生产模式 (Production Mode)
 
-| *Connector Property*
+| *连接器配置属性*
 | `stacksaga.trace-window.secure-api=false`
 | `stacksaga.trace-window.secure-api=true`
 
-| *Service Access Token*
-| Not required
-| Required (`stacksaga.trace-window.access-token`)
+| *服务访问令牌 (Access Token)*
+| 不需要
+| 必须配置 (`stacksaga.trace-window.access-token`)
 
-| *GitHub Login & Projects*
-| Not required
-| Required (GitHub OAuth + Project/Service registration)
+| *GitHub 登录与项目注册*
+| 不需要
+| 必须配置 (GitHub OAuth 登录 + 注册项目与服务)
 
-| *Authorization Engine*
-| Bypassed (instant local database access)
-| Validated by StackSaga Central (Dual-Token check)
+| *鉴权引擎 (Authorization Engine)*
+| 自动跳过 (直接访问本地数据)
+| 由 StackSaga Central 进行校验 (双令牌 Dual-Token 检查)
 
-| *Ideal For*
-| Local developer machines, offline testing, CI environments
-| Staging, QA, and Production microservice clusters
+| *适用场景*
+| 本地开发机、离线测试、CI 测试环境
+| 预发 (Staging)、QA 与生产微服务集群
 |===
 
-=== 1. Local Development Mode (`secure-api=false`)
+=== 1. 本地开发模式 (`secure-api=false`)
 
-When developing locally on your workstation (e.g., `http://localhost:8080`), you can connect directly without creating a project or generating tokens:
+在本地工作站（例如 `http://localhost:8080`）进行开发时，您可以直接连接微服务，无需创建项目或生成 Token：
 
-* Enable the local trace connector endpoints in your service (`stacksaga.trace-window.enable-api=true`).
-* Disable security checks (`stacksaga.trace-window.secure-api=false`).
-* Open TraceWindow, provide your service URL, and immediately inspect transaction data.
+* 在服务中启用本地链路追踪端点 (`stacksaga.trace-window.enable-api=true`)。
+* 禁用安全检查 (`stacksaga.trace-window.secure-api=false`)。
+* 打开 TraceWindow，填入本地服务 URL，即可立即开始检查和调试事务数据。
 
-=== 2. Production Mode (`secure-api=true`)
+=== 2. 生产模式 (`secure-api=true`)
 
-In production environments, access to sensitive transaction traces is protected by StackSaga's **Dual-Token Authorization Model**:
+在生产环境中，敏感事务追踪数据的访问受 StackSaga **双令牌授权模型 (Dual-Token Authorization Model)** 严格保护：
 
-1. **User Session Token (JWT):** Identifies the operator logged into TraceWindow via GitHub OAuth.
-2. **Service Access Token:** A unique secret generated inside TraceWindow and configured in the microservice (`stacksaga.trace-window.access-token`).
-3. **Dual Verification via StackSaga Central:** When a trace request is dispatched, the target service forwards both tokens to **StackSaga Central**.
-StackSaga Central validates that the service token is valid and active, and that the authenticated operator has read permissions for that project.
+1. **用户会话令牌 (User Session Token, JWT)：** 标识通过 GitHub OAuth 登录 TraceWindow 的操作人员身份。
+2. **服务访问令牌 (Service Access Token)：** 在 TraceWindow 内部生成的唯一密钥，配置在微服务中 (`stacksaga.trace-window.access-token`)。
+3. **通过 StackSaga Central 的双向校验：** 当发起追踪请求时，目标微服务将两个令牌转发给 **StackSaga Central**。
+StackSaga Central 验证服务令牌有效且处于激活状态，并确认该登录用户拥有访问该项目的读取权限。
 
 '''
 
-== Production Setup & Project Management
+== 生产环境搭建与项目管理 (Production Setup & Project Management)
 
-Follow these steps to register your application in TraceWindow and obtain credentials for Production Mode:
+按照以下步骤在 TraceWindow 中注册应用程序并获取生产模式凭据：
 
-=== Step 1: Sign in with GitHub
+=== 步骤 1：通过 GitHub 登录
 
-Navigate to https://trace.stacksaga.org/[StackSaga TraceWindow] and sign in using your GitHub account.
+访问 https://trace.stacksaga.org/[StackSaga TraceWindow]，使用您的 GitHub 账号完成登录。
 
-=== Step 2: Create a Project
+=== 步骤 2：创建项目 (Create a Project)
 
-Create a project to logically group your microservices and manage team permissions:
+创建一个项目，用于逻辑分组您的微服务并管理团队权限：
 
-image:stacksaga-trace-window-create-new-project.png[alt="Create New Project"]
+image:stacksaga-trace-window-create-new-project.png[alt="创建新项目"]
 
-Once created, your project will appear on your TraceWindow dashboard:
+创建完成后，项目将显示在您的 TraceWindow 控制台看板中：
 
-image:stacksaga-trace-window-after-creating-new-project.png[alt="After Creating Project"]
+image:stacksaga-trace-window-after-creating-new-project.png[alt="创建项目后的看板"]
 
 [[manage_operators]]
 [TIP]
 ====
-*Team Collaboration & RBAC:* You can invite other team members to act as **service operators** under your project.
-Go to *Manage Operators*, enter their GitHub username, and assign roles.
-You can grant or revoke operator permissions at any time without changing application secrets.
+*团队协作与 RBAC 权限控制：* 您可以邀请其他团队成员作为项目下的**服务运维操作员 (Service Operators)**。
+进入 *Manage Operators*，输入其 GitHub 用户名并分配角色。
+您可以随时授予或吊销操作员权限，无需重启或修改应用程序密钥。
 ====
 
-=== Step 3: Register a Service
+=== 步骤 3：注册微服务 (Register a Service)
 
-Create a service under your newly created project.
-Use a clean identifier matching your microservice name (e.g., `order-service`):
+在新建的项目下注册微服务。
+使用与您的微服务名称一致的清晰标识符（例如 `order-service`）：
 
-image:stacksaga-trace-window-creating-new-service.png[alt="Creating New Service"]
+image:stacksaga-trace-window-creating-new-service.png[alt="创建新服务"]
 
-The registered service will be listed under your project dashboard:
+注册后的微服务将列在项目看板下方：
 
-image:stacksaga-trace-window-after-creating-new-service.png[alt="After Creating Service"]
+image:stacksaga-trace-window-after-creating-new-service.png[alt="创建服务后的列表"]
 
-=== Step 4: Generate a Service Access Token
+=== 步骤 4：生成服务访问令牌 (Generate a Service Access Token)
 
-Generate a Service Access Token for the target service:
+为目标微服务生成服务访问令牌 (Service Access Token)：
 
-image:stacksaga-trace-window-creating-new-service-token.png[alt="Create Service Token"]
+image:stacksaga-trace-window-creating-new-service-token.png[alt="生成服务令牌"]
 
-You can optionally configure an expiration period.
-Copy the generated token immediately and store it securely:
+您可以按需配置令牌过期时间。
+生成后请立即复制该令牌并妥善保管：
 
-image:stacksaga-trace-window-copy-created-service-token.png[alt="Copy Service Token"]
+image:stacksaga-trace-window-copy-created-service-token.png[alt="复制生成的服务令牌"]
 
-=== Step 5: Configure Application Properties
+=== 步骤 5：配置应用属性 (Configure Application Properties)
 
-Add the generated access token to your service configuration:
+将生成的访问令牌添加到您的微服务配置文件中：
 
 [source,properties]
-.application.properties (Production Setup)
+.application.properties (生产环境配置)
 ----
 spring.application.name=order-service
 
-# Expose the local /stacksaga/* endpoints
+# 暴露本地 /stacksaga/* 端点
 stacksaga.trace-window.enable-api=true
 
-# Enforce access token security
+# 强制开启访问令牌安全鉴权
 stacksaga.trace-window.secure-api=true
 
-# Service access token generated from TraceWindow UI
+# 在 TraceWindow 控制台生成的服务访问令牌
 stacksaga.trace-window.access-token=04949811-7be5-427f-8a80-57a26592493f
 ----
 
-TIP: In production, supply the token via environment variables (e.g., `STACKSAGA_ACCESS_TOKEN`) or a secret manager rather than committing plain text into version control.
+TIP: 在生产环境中，推荐通过环境变量（例如 `STACKSAGA_ACCESS_TOKEN`）或密钥管理系统注入令牌，切勿将明文密钥提交到版本控制仓库中。
 
 [NOTE]
 ====
-To learn how to include the connector dependency in Maven/Gradle, configure secondary port isolation, or tune reactive Netty threads, refer to the companion xref:stacksaga-trace-window-connector-overview.adoc[StackSaga TraceWindow Connector Guide].
+若需了解如何在 Maven/Gradle 中引入连接器依赖、配置独立端口隔离或调优 Netty 反应式线程，请参阅配套的 xref:stacksaga-trace-window-connector-overview.adoc[StackSaga TraceWindow 连接器参考指南]。
 ====
 
 '''
 
 [[connection_topologies]]
-== Connection Topologies: Direct Mode vs Gateway Mode
+== 连接拓扑：直连模式 (Direct Mode) 与网关模式 (Gateway Mode)
 
-TraceWindow communicates directly from the operator's browser session to the target backend URL.
-Depending on how your infrastructure exposes services, you can connect using **Direct Mode** or **Gateway Mode**.
+TraceWindow 直接从操作员的浏览器会话与目标后端 URL 通信。
+根据您的基础设施暴露微服务的方式，您可以选择采用**直连模式 (Direct Mode)** 或**网关模式 (Gateway Mode)** 进行连接。
 
 [cols="1,2,2",options="header"]
 |===
-| Architecture | Direct Mode | Gateway Mode
+| 架构维度 | 直连模式 (Direct Mode) | 网关模式 (Gateway Mode)
 
-| *Intermediary*
-| None (direct connection to microservice)
-| Reverse Proxy / API Gateway (Spring Cloud Gateway, Nginx, Kubernetes Ingress)
+| *中介代理*
+| 无（直接连接至目标微服务）
+| 反向代理 / API 网关 (Spring Cloud Gateway, Nginx, Kubernetes Ingress)
 
-| *Target URL Pattern*
+| *目标 URL 规范*
 | `+{host:port}/{api-path}+`
 | `+{host:port}/{service-name \| URL-alias}/{api-path}+`
 
-| *Typical Environments*
-| Local workstation, standalone container, direct VM.
-| Production Kubernetes/VPC microservice clusters.
+| *典型运行环境*
+| 本地开发机、独立容器、直连虚拟机
+| 生产级 Kubernetes / 私有网络 (VPC) 微服务集群
 
-| *Example Target URL*
+| *目标 URL 示例*
 | `http://localhost:8081/stacksaga/api/v1/welcome`
 | `https://api.mycompany.com/order-service/stacksaga/api/v1/welcome`
 
 |===
 
 [[direct_mode]]
-=== 1. Direct Mode
+=== 1. 直连模式 (Direct Mode)
 
-In **Direct Mode**, there is no intermediate gateway.
-TraceWindow dispatches trace requests directly to the microservice host and port.
+在**直连模式**下，中间没有网关层。
+TraceWindow 直接将追踪请求派发至微服务所在的主机和端口。
 
-image:stacksaga-direct-mode.svg[alt="StackSaga TraceWindow Direct Mode Architecture"]
+image:stacksaga-direct-mode.svg[alt="StackSaga TraceWindow 直连模式架构"]
 
-*Target URL Pattern:*
+*目标 URL 规范：*
 
 [source,text]
 ----
 {host:port}/{api-path}
 ----
 
-*Examples:*
+*示例：*
 * `http://localhost:8081/stacksaga/api/v1/welcome`
 * `http://localhost:8081/stacksaga/api/v1/transaction?transactionId=OS-1724153095843`
 * `https://order-service.internal.corp:8443/stacksaga/api/v1/welcome`
 
-*Direct Mode Execution Flow:*
-1. **Developer Access:** The operator opens TraceWindow in their browser and enters the target service address (e.g., `http://localhost:8081`).
-2. **Direct Dispatch:** TraceWindow makes an HTTP call directly to `order-service` with the `Bearer User_Token` header.
-3. **Security Interception:** The connector interceptor inside `order-service` extracts the user token and its configured `stacksaga.trace-window.access-token`, forwarding both to **StackSaga Central**.
-4. **Validation:** StackSaga Central verifies token validity, project membership, and operator permissions against the Central DB.
-5. **Trace Data Stream:** Upon authorization, `order-service` queries its local `Event-Store` database and streams transaction execution records back to TraceWindow.
+*直连模式执行流程：*
+1. **开发者访问：** 操作员在浏览器中打开 TraceWindow 并输入目标服务地址（例如 `http://localhost:8081`）。
+2. **直接请求：** TraceWindow 携带 `Bearer User_Token` 请求头直接向 `order-service` 发起 HTTP 调用。
+3. **安全拦截：** `order-service` 内部的连接器拦截器提取用户令牌及本地配置的 `stacksaga.trace-window.access-token`，将二者一同转发给 **StackSaga Central**。
+4. **鉴权校验：** StackSaga Central 对照中心数据库校验令牌有效性、项目归属关系及操作员权限。
+5. **数据回传：** 鉴权通过后，`order-service` 查询本地 `Event-Store` 数据库，并将事务执行记录流式回传给 TraceWindow。
 
 [[gateway_mode]]
-=== 2. Gateway Mode
+=== 2. 网关模式 (Gateway Mode)
 
-In **Gateway Mode**, internal microservices are shielded behind a reverse proxy or API Gateway (such as Spring Cloud Gateway, Nginx, or Kubernetes Ingress).
+在**网关模式**下，内部微服务受反向代理或 API 网关（如 Spring Cloud Gateway、Nginx 或 Kubernetes Ingress）屏蔽保护。
 
-image:stacksaga-gateway-mode.svg[alt="StackSaga TraceWindow Gateway Mode Architecture"]
+image:stacksaga-gateway-mode.svg[alt="StackSaga TraceWindow 网关模式架构"]
 
-*Target URL Pattern:*
+*目标 URL 规范：*
 
 [source,text]
 ----
 {host:port}/{service-name | URL-alias}/{api-path}
 ----
 
-*Examples:*
+*示例：*
 * `https://api.mycompany.com/order-service/stacksaga/api/v1/welcome`
 * `https://api.mycompany.com/payment-service/stacksaga/api/v1/transaction?transactionId=PS-1724153095843`
 * `http://localhost:8080/order-service/stacksaga/api/v1/welcome`
 
-The `{service-name | URL-alias}` prefix instructs the Gateway which internal microservice to route the request to.
+前缀 `{service-name | URL-alias}` 指引网关将请求准确路由到具体的内部微服务。
 
 [TIP]
 ====
-For complete technical routing configuration files (Spring Cloud Gateway, Nginx reverse proxy, and Kubernetes Ingress), refer to the xref:stacksaga-trace-window-connector-overview.adoc#gateway-routing-examples[Gateway Routing Examples in the Connector Reference Guide].
+完整的网关技术路由配置示例文件（涵盖 Spring Cloud Gateway、Nginx 反向代理和 Kubernetes Ingress），请参阅 xref:stacksaga-trace-window-connector-overview.adoc#gateway-routing-examples[连接器参考指南中的网关路由示例]。
 ====
 
 '''
 
-== Connecting & Validating in TraceWindow
+== 在 TraceWindow 中建立连接与探活校验
 
-Before transaction trace data is queried, TraceWindow performs a handshake probe with the target service.
+在查询具体事务追踪数据之前，TraceWindow 会与目标服务执行一次探活握手 (Handshake Probe)：
 
-1. Open the **Connect Service** modal in TraceWindow.
-2. Enter the **Root URL** of the service (or Gateway) and provide the **Service Name / Alias** if operating in Gateway Mode.
-3. TraceWindow calls the `GET /stacksaga/api/v1/welcome` handshake endpoint on the target service.
-4. If authentication and permissions succeed, a success confirmation is displayed:
+1. 打开 TraceWindow 中的 **Connect Service** 弹窗。
+2. 输入微服务（或网关）的 **Root URL**；若运行在网关模式，提供对应的 **Service Name / Alias**。
+3. TraceWindow 调用目标服务上的 `GET /stacksaga/api/v1/welcome` 探活端点。
+4. 若身份认证和权限校验成功，界面将显示成功连接确认：
 +
-image:stacksaga-admin-login-successful.png[alt="Connection Successful"]
+image:stacksaga-admin-login-successful.png[alt="连接成功"]
 
-5. If the service token is invalid, missing, or your user account has not been added to the project, an HTTP `403 Forbidden` response is returned:
+5. 若服务令牌无效、缺失，或者您的用户账号尚未加入该项目，服务端将返回 HTTP `403 Forbidden` 响应。
 
-NOTE: The `/stacksaga/api/v1/welcome` endpoint acts as a lightweight handshake probe.
-Once validated, TraceWindow saves the connection settings for your active session.
+NOTE: `/stacksaga/api/v1/welcome` 端点充当轻量级探活探针。一旦校验成功，TraceWindow 会在当前活动会话中保存该连接配置。
 
-=== Resolving Mixed Content Errors
+=== 解决混合内容 (Mixed Content) 浏览器拦截问题
 
-When accessing a target service running over plain HTTP (e.g., `http://localhost:8080` or an internal IP) from the secure TraceWindow dashboard (`https://trace.stacksaga.org`), modern web browsers will block the cross-origin request due to **Mixed Content Security Restrictions**:
+当从安全的 TraceWindow 控制台（`https://trace.stacksaga.org`）访问运行在普通 HTTP 上的目标服务（例如 `http://localhost:8080` 或内网 IP）时，现代浏览器会由于**混合内容安全限制 (Mixed Content Security Restrictions)** 拦截跨域请求：
 
-==== Solution: Browser Insecure Origins Flag
+==== 解决方案：配置浏览器不安全来源标志 (Insecure Origins Flag)
 
-To bypass this restriction during local development and testing on non-SSL endpoints:
+在本地开发及测试非 SSL 端点时，可通过以下步骤放行限制：
 
-1. In your browser (Chrome, Edge, Brave), navigate to `chrome://flags` or `edge://flags`.
-2. Search for **Insecure origins treated as secure**.
-3. Add your target service domain or IP address and port (e.g., `http://192.168.1.50:8080`), and select **Enabled**:
+1. 在浏览器（Chrome、Edge、Brave）地址栏中访问 `chrome://flags` 或 `edge://flags`。
+2. 搜索 **Insecure origins treated as secure**。
+3. 添加您的目标微服务域名或 IP 与端口（例如 `http://192.168.1.50:8080`），并将状态切换为 **Enabled**：
 +
-image:mixed-content/stacksaga-demo-k8s-mixed-content-error-solution.png[alt="Bypass Mixed Content via Flags"]
+image:mixed-content/stacksaga-demo-k8s-mixed-content-error-solution.png[alt="通过 Flags 绕过 Mixed Content 限制"]
 
-4. Relaunch the browser.
-TraceWindow can now communicate with your non-SSL backend successfully:
+4. 重启浏览器。
+此时 TraceWindow 即可顺利连通您的非 SSL 后端服务：
 
 [TIP]
 ====
-*Private Network Access (PNA) Support:* In addition to mixed content flags, modern Chromium browsers enforce Private Network Access preflights when a public website (`https://trace.stacksaga.org`) contacts private IP addresses.
-The StackSaga Connector automatically handles this by returning `Access-Control-Allow-Private-Network: true` (controlled via `stacksaga.trace-window.allow-private-network=true`, which is enabled by default).
+*私有网络访问 (Private Network Access, PNA) 支持：* 除了混合内容标志之外，现代 Chromium 浏览器在公网网站（`https://trace.stacksaga.org`）请求私有内网 IP 地址时还会强制进行 PNA 预检。
+StackSaga 连接器通过自动响应 `Access-Control-Allow-Private-Network: true` 原生处理了此限制（由 `stacksaga.trace-window.allow-private-network=true` 控制，默认已开启）。
 ====
