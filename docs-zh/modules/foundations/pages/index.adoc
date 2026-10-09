@@ -1,119 +1,117 @@
-:keywords: stacksaga, stacksaga doc, stacksaga framework, stacksaga introduction, spring boot microservices, distributed transactions, saga pattern
-:description: An introduction to microservice architecture, distributed transactions, and the challenges the StackSaga framework is built to solve.
+:keywords: stacksaga, stacksaga 文档, stacksaga 框架, 微服务架构, 分布式事务, saga 模式, spring boot, 最终一致性, CAP 定理
+:description: 微服务架构、分布式事务以及 StackSaga 框架致力于解决的核心技术挑战的架构背景与基础介绍。
 
-= Introduction to Microservices
+= 微服务架构基础 (Introduction to Microservices)
 
-This page lays the architectural groundwork before diving into the framework itself.
-It covers what a microservice architecture is, why splitting a database per service introduces distributed-transaction problems, and why those problems demand a pattern like Saga — which StackSaga implements for Spring Boot applications.
+本章在深入探讨 StackSaga 框架本身之前，首先介绍其底层的微服务架构基础。
+内容涵盖什么是微服务架构、为什么采用“单服务单数据库 (Database Per Service)”模式会引发分布式事务 (Distributed Transaction) 难题，以及为什么此类问题必须借助 Saga 模式 —— 这正是 StackSaga 为 Spring Boot 应用程序所解决的核心问题。
 
-== Microservice Architecture
+== 微服务架构 (Microservice Architecture)
 
-A microservice architecture structures an application as a collection of small, autonomous services, each independently deployable and owned by a single team.
-Every service is self-contained and implements a single business capability within a *bounded context* — a natural division within the business domain that defines an explicit boundary around a domain model, its data, and its behavior.
-Services communicate over lightweight, technology-agnostic protocols (typically HTTP/REST, gRPC, or asynchronous messaging), rather than sharing code or a database at the process level.
+微服务架构将一个大型应用程序构建为一组小型、自治的服务集合，每个服务都可以独立部署，并由独立的团队负责开发维护。
+每个微服务都是自包含的，并在明确的*有界上下文 (Bounded Context)* 内实现单一业务能力 —— 有界上下文是业务领域内的自然划分，围绕领域模型、数据及其业务行为定义了显式边界。
+各个服务之间通过轻量级、跨语言的技术中立协议（通常为 HTTP/REST、gRPC 或异步消息队列）进行通信，而不是在进程级别共享代码库或共用同一个数据库。
 
-image:stacksaga-diagram-Microservice-architecture-style.drawio.svg[alt="stacksaga diagram  microservice architecture style"]
+image:stacksaga-diagram-Microservice-architecture-style.drawio.svg[alt="StackSaga 微服务架构风格示意图"]
 
-https://spring.io/microservices[Read more through spring microservices.]
+https://spring.io/microservices[通过 Spring 官方微服务指南了解更多内容。]
 
-=== Key characteristics of microservices
+=== 微服务核心特性 (Key Characteristics of Microservices)
 
 [arabic]
-. *Modularity*: Each microservice is a self-contained unit that can be developed, tested, deployed, and scaled independently of the rest of the system.
-This decoupling reduces the blast radius of change and makes complex systems easier to reason about and maintain.
-. *Scalability*: Because services are independent, each can be scaled horizontally (more instances) or vertically (more resources) according to its own load profile, rather than scaling the entire monolith uniformly.
-. *Resilience*: Microservices are designed for fault isolation. A failure in one service degrades or removes only the capability it owns, rather than bringing down the entire application, provided failures are contained with patterns such as timeouts, retries, and circuit breakers.
-. *Polyglot Flexibility*: Each service can adopt the programming language, framework, or persistence technology best suited to its own workload, rather than being constrained by a single stack-wide decision.
-. *Decentralized Data Management*: Rather than a single shared database, each microservice owns its own database or data store. This enforces data encapsulation and isolates one service's schema evolution and failures from the others.
-. *Continuous Deployment*: Because each service has an independent build and deployment pipeline, teams can ship changes to one service without coordinating a release across the entire system, enabling faster and lower-risk delivery.
+. *模块化 (Modularity)*：每个微服务都是一个自包含单元，可以独立于系统其余部分进行开发、测试、部署和横向扩展。这种解耦降低了变更的“爆炸半径 (Blast Radius)”，使复杂系统更容易理解与维护。
+. *可伸缩性 (Scalability)*：由于各个服务彼此独立，因此每个服务可以根据其自身的流量特征进行水平扩展（增加实例数）或垂直扩展（增加硬件资源），无需像单体应用那样整体按比例缩放。
+. *高韧性与容错隔离 (Resilience)*：微服务专为故障隔离而设计。只要通过超时机制 (Timeouts)、重试 (Retries) 和断路器 (Circuit Breakers) 等设计模式控制故障扩散，单个服务的异常只会降级或影响其自身负责的功能，而不会导致整个系统崩溃。
+. *技术选型灵活性 (Polyglot Flexibility)*：每个服务都可以自由选择最适合其业务场景的编程语言、开发框架或持久化存储技术，而不受统一技术栈的强行限制。
+. *去中心化数据管理 (Decentralized Data Management)*：微服务不再依赖单一共享数据库，而是由每个服务独立管理各自的数据库或数据存储。这强化了数据封装性，并将一个服务的数据模型变更与故障彻底与其他服务隔离。
+. *持续交付与部署 (Continuous Deployment)*：由于每个服务都拥有独立的构建与部署流水线，研发团队可以频繁上线单个服务的变更，无需进行跨系统的全量发版协同，从而实现更快、风险更低的交付节奏。
 
-== Database Per Service Pattern
+== 单服务单数据库模式 (Database Per Service Pattern)
 
-The database-per-service pattern is what makes the decentralized data management characteristic above possible in practice.
-It lets each service select the persistence technology that best fits its own data shape and access patterns — for example, a relational database for an `order-service` with strongly relational data, and a document or key-value store for a `catalog-service` with flexible, read-heavy data.
-This isolation also means a service can scale or migrate its datastore independently, without being affected by, or affecting, the failure modes of other services' databases.
+单服务单数据库模式是在工程实践中实现上述“去中心化数据管理”特性的关键基石。
+它允许每个微服务选用与其数据结构和访问特征最匹配的持久化存储技术 —— 例如，包含高度结构化事务数据的 `order-service` 可以选用关系型数据库 (RDBMS)，而读取吞吐量高、数据格式灵活的 `catalog-service` 则可采用文档型或键值型 NoSQL 存储。
+这种隔离还意味着每个服务可以独立对其数据库进行扩容、调优或迁移，完全不会受到其他服务数据库故障模式的影响。
 
-The trade-off is consistency: once each service owns its own database, there is no longer a single ACID transaction boundary that spans the whole business operation.
-Any workflow that touches more than one service's data now has to coordinate consistency *across* database boundaries instead of relying on one.
+然而，这种设计带来的核心代价是**一致性挑战**：一旦每个服务拥有独立的数据库，就再也不存在能够跨越整个业务操作的全局单一 ACID 事务边界。
+任何触及多个服务数据的业务流程，都必须*跨越数据库物理边界*协调数据一致性，而无法再依赖底层数据库引擎的本地事务保障。
 
-image:stacksaga-diagram-Microservice-architecture-style-database-per-service.drawio.svg[alt="stacksaga diagram  microservice architecture style database per service"]
+image:stacksaga-diagram-Microservice-architecture-style-database-per-service.drawio.svg[alt="StackSaga 单服务单数据库架构模式示意图"]
 
-== Migration to Microservices Architecture
+== 向微服务架构迁移 (Migration to Microservices Architecture)
 
-image:stacksaga-diagram-monolithic-architecture-vs-microservices-architecture.drawio.svg[alt="stacksaga diagram monolithic architecture vs microservices architecture"]
+image:stacksaga-diagram-monolithic-architecture-vs-microservices-architecture.drawio.svg[alt="单体架构与微服务架构对比示意图"]
 
-The diagram above illustrates how a system's data and responsibilities are decomposed when migrating from a single monolithic database and codebase to independently owned services, each with its own data store.
+上图展示了当企业系统从传统的单体数据库与单一代码库，拆分并演进为拥有独立数据存储与自治团队的微服务架构时，其数据和业务职责是如何被解耦与重组的。
 
-== Distributed Transactions
+== 分布式事务 (Distributed Transactions)
 
-In a microservices architecture, a *distributed transaction* is a business process that spans multiple microservices, each typically managing its own database or data store.
-Unlike monolithic applications, which rely on a single-database ACID (Atomicity, Consistency, Isolation, Durability) transaction, microservices must coordinate data consistency across service boundaries — without the benefit of a shared transaction manager or a two-phase commit across independently owned datastores.
+在微服务架构中，*分布式事务 (Distributed Transaction)* 是指一个业务流程跨越了多个微服务，且每个微服务通常管理着各自独立的数据库或数据存储。
+单体应用依赖单一数据库的原生 ACID（原子性 Atomicity、一致性 Consistency、隔离性 Isolation、持久性 Durability）事务保证，而微服务必须在完全没有共享事务管理器、也无法在自治存储之间使用传统两阶段提交 (2PC) 的前提下，跨越服务边界协同保证数据一致性。
 
-Consider an e-commerce application implemented using microservices.
-The order placement workflow may involve the following services:
+以典型的微服务电商应用为例，用户发起“创建订单 (place-order)”流程通常涉及以下服务：
 
-* order-service
-** Initializes the order
-** Updates the order status
-* payment-service
-** Processes the payment
-* inventory-service
-** Updates inventory levels
+* order-service (订单服务)
+** 初始化订单记录
+** 更新订单状态
+* payment-service (支付服务)
+** 处理资金支付扣款
+* inventory-service (库存服务)
+** 扣减商品库存份额
 
-Although the overall operation is a single business transaction (`place-order`), it is decomposed into several distributed, service-local transactions (*atomic transactions*).
-Each microservice executes its own local transaction — typically its own local ACID transaction against its own database — to fulfill its part of the workflow.
+虽然在业务视角上这是一个统一的业务事务 (`place-order`)，但在技术实现上，它被分解为多个局部的、跨服务的本地事务（*原子事务 / Atomic Transactions*）。
+每个微服务分别在自己的数据库上执行本地事务（通常为其本地 ACID 事务），以完成其负责的分支逻辑。
 
-image:stacksaga-diagram-distributed-transaction.svg[alt="distributed transaction"]
+image:stacksaga-diagram-distributed-transaction.svg[alt="分布式事务执行流示意图"]
 
-For the overall business transaction to be considered successful, every atomic transaction across the involved microservices must succeed.
-If any microservice fails to complete its local transaction, all previously committed operations must be *compensated*, i.e. rolled back through explicit, semantically reversing actions, to keep the system in a consistent state.
+为了使整体业务事务被认定为成功，所涉及的所有微服务的原子事务都必须全部成功执行。
+如果任何一个微服务未能完成其本地事务，所有先前已经提交的操作都必须被*补偿 (Compensated)* —— 即通过执行显式的、具有语义反转作用的操作进行回滚，以确保整个系统最终恢复到一致状态。
 
-For example, in the diagram above, if the *make-payment* atomic transaction (transaction-4) fails, compensating actions must be triggered against `order-service` and `inventory-service` to revert the effects of transactions 1–3, ensuring the overall workflow does not leave the system with an order that was never actually paid for.
+例如在上图中，如果*执行支付 (make-payment)* 原子事务（事务-4）失败，系统必须向 `order-service` 和 `inventory-service` 发起逆向补偿调用，撤销事务 1–3 所产生的业务影响，确保系统中绝不会残留“用户未成功付款却已被创建并占用了库存的孤立订单”。
 
-== Challenges of Distributed Transactions
+== 分布式事务的核心挑战 (Challenges of Distributed Transactions)
 
-Distributed transactions in a microservice architecture pose two key challenges: maintaining ACID guarantees across service boundaries, and managing transaction isolation between concurrent operations.
+微服务架构中的分布式事务面临两大核心技术瓶颈：如何在跨越多个服务边界时维持 ACID 语义保证，以及如何在并发执行之间管理事务隔离级别 (Isolation Level)。
 
-* *Atomicity across services* (maintaining ACID)
+* *跨服务原子性保障 (Atomicity across services / 维持 ACID)*
 +
-To ensure the correctness of a transaction, it must be Atomic, Consistent, Isolated, and Durable (ACID).
-*Atomicity* ensures that all or none of the steps of a transaction complete.
-*Consistency* takes data from one valid state to another valid state.
-*Isolation* guarantees that concurrent transactions produce the same result that strictly sequential execution would have produced.
-*Durability* means that once a transaction commits, it remains committed regardless of subsequent system failures.
-A single-database transaction gets all four guarantees from the database engine for free.
-Once a transaction spans several services and databases, there is no single engine enforcing them anymore — atomicity in particular has to be reconstructed manually, which is exactly the problem the Saga pattern exists to solve.
+为了保证事务处理的正确性，系统必须满足 ACID 原则：
+*原子性 (Atomicity)* 确保事务中的所有步骤要么全部成功，要么全部不执行。
+*一致性 (Consistency)* 确保数据从一个合法的业务状态迁移到另一个合法的业务状态。
+*隔离性 (Isolation)* 保证并发执行的事务与按严格串行顺序执行的结果相同。
+*持久性 (Durability)* 保证事务一旦提交，其结果在遭遇系统宕机故障时仍然持久有效。
+在单个数据库中，数据库引擎底层原生免费提供了上述全部四项保证。
+然而一旦事务横跨多个服务和不同数据库，就不再存在统一的引擎来强制维系这些约束 —— 尤其是原子性，必须由应用程序架构层面显式重构。这正是 Saga 模式诞生的核心原因。
 
-* *Managing the transaction isolation level*
+* *事务隔离级别管理 (Managing the transaction isolation level)*
 +
-Isolation level specifies how much of an in-flight change is visible to other transactions reading the same data concurrently.
-In a distributed transaction, this becomes: if one service has persisted a change as part of a still-in-progress saga, and another request reads that same data before the saga completes (or compensates), should it see the old value or the new, possibly-to-be-reverted, value?
-Without a shared transaction manager, this has to be addressed explicitly at the application level, for example, through anti-dirty-reads strategies or intent-marking with the framework.
+隔离级别定义了一个正在进行中的事务在并发读取相同数据时的可见程度。
+在分布式事务中，这个问题表现为：如果某个服务已经持久化了一条变更作为正在执行中的 Saga 的一部分，而此时另一个并发请求在 Saga 最终成功（或触发补偿）之前读取了相同的数据，它到底应该看到旧数据，还是看到可能即将在未来被撤销回滚的新数据？
+由于缺乏全局跨库事务管理器，脏读 (Dirty Read) 问题必须在应用架构层面通过防脏读策略或意图标记 (Intent Marking) 机制予以解决。
 
-=== Why Not Just Use a Distributed Transaction Coordinator?
+=== 为什么不能直接使用分布式事务协调器？(Why Not Just Use a Distributed Transaction Coordinator?)
 
-The obvious instinct is to reach for a distributed transaction coordinator, e.g. two-phase commit (2PC) via XA, and get ACID back across services the same way a single database gives it to you.
-In practice this rarely works for microservices: a 2PC coordinator holds locks on every participating resource until *all* participants have voted to commit, so one slow or unreachable service blocks and holds locks in every other service.
-It also assumes every participant speaks the same transaction protocol, which breaks down the moment services use heterogeneous datastores (SQL, NoSQL, message brokers) — one of the very reasons microservices adopted database-per-service in the first place.
+开发者最自然的直觉是直接引入传统的分布式事务协调器（例如基于 XA 规范的两阶段提交 / 2PC），试图以此在多个微服务之间找回单库 ACID 体验。
+但在现代云原生微服务中，两阶段提交在实践中几乎不可行：
+2PC 协调器在*所有*参与节点完成表决并提交之前，必须对所有参与资源持有物理行锁或表锁。因此，只要下游某一个服务出现网络延迟、GC 暂停或宕机，锁就会长时间阻塞其他所有正常服务，迅速导致数据库连接池枯竭与级联雪崩。
+此外，2PC 假定所有参与者都遵循相同的 XA 事务协议，而微服务架构推崇针对场景选用异构存储（MySQL、PostgreSQL、Cassandra、Kafka 等），根本无法跨异构引擎统一执行 XA 协议。
 
 [[cap_theorem]]
-== CAP Theorem
+== CAP 定理 (CAP Theorem)
 
-The CAP theorem states that a distributed data system can only guarantee two of the following three properties at once:
+CAP 定理指明：在任何分布式数据系统中，以下三项特性最多只能同时满足两项：
 
-* *Consistency (C)*: every read receives the most recent write or an error — all nodes see the same data at the same time.
-* *Availability (A)*: every request receives a (non-error) response, without the guarantee that it contains the most recent write.
-* *Partition Tolerance (P)*: the system continues to operate despite an arbitrary number of messages being dropped or delayed by the network between nodes.
+* *一致性 (Consistency, C)*：每一次读操作都能获取到最新的写结果，或者返回错误 —— 所有节点在同一时刻看到完全相同的数据。
+* *可用性 (Availability, A)*：每一次请求都能获得非报错的正常响应，但无法保证返回的是否为最新写入的数据。
+* *分区容错性 (Partition Tolerance, P)*：在网络节点之间发生任意数量的消息丢包或网络延迟时，系统仍然能够继续正常对外提供服务。
 
-Because network partitions are a fact of life in any distributed system, partition tolerance is not really optional — a microservice architecture is a distributed system whether or not you choose *P*.
-That leaves a real choice only between *C* and *A* when a partition occurs: block/fail requests until the system is provably consistent (*CP*), or keep serving requests and let data converge afterward (*AP*).
+由于现实世界中的网络分区与通信抖动是不可避免的客观事实，分区容错性 *P* 在分布式系统中并不是一个可选项 —— 无论你是否愿意，微服务架构本质上就是一个分布式系统。
+因此，当网络发生故障分区时，真正的工程抉择只能在 *C* 与 *A* 之间权衡：是要阻塞或拒绝请求直至数据达成强一致 (*CP*)，还是继续对外提供响应并允许数据在稍后时间逐步收敛收敛收敛收敛收敛收敛 (*AP*)。
 
-A 2PC-style distributed transaction coordinator is fundamentally a *CP* choice: it favors strong consistency by blocking (and holding locks) rather than responding when a participant is unreachable.
-That is precisely why it degrades availability so badly under microservice-scale network conditions, where partitions and slow participants are routine rather than exceptional.
+传统的 2PC 分布式事务协调器本质上是典型的 *CP* 架构：当参与节点不可达时，它宁愿阻塞线程并持有资源锁也不愿返回未决响应。这就是为什么在网络波动属于家常便饭的微服务规模下，2PC 会导致系统可用性急剧恶化。
 
-The Saga pattern makes the opposite trade-off. It is an *AP*-oriented design: each local transaction commits and becomes visible immediately, availability is preserved, and consistency across services is achieved *eventually*, through ordered steps and compensating transactions rather than a blocking coordinator.
-In other words, Saga does not avoid the CAP trade-off — it deliberately picks the side of it that fits how microservices actually fail and scale.
+相比之下，Saga 模式做出了截然相反的权衡。它是一种面向 *AP* 的架构设计：每个分支本地事务执行完毕后立即提交并释放锁，对外保持高可用；而跨服务的一致性则通过有序的执行链路和逆向补偿事务在稍后实现**最终一致性 (Eventual Consistency)**，彻底摆脱了全局锁与阻塞协调器的束缚。
+换句话说，Saga 模式并非规避了 CAP 定理，而是主动选择了最契合微服务弹性伸缩与故障容忍规律的那一侧。
 
-In the next section, let's look at the Saga design pattern in detail and see how it turns this AP trade-off into a concrete, implementable solution.
+在下一章中，我们将深入剖析 Saga 设计模式的具体运作机制，了解它是如何将这种面向 AP 的架构权衡转化为坚固可落地的工程实现的。
 
-xref:introduction-to-saga-design-pattern.adoc[Continue to the Saga Design Pattern &#8594;]
+xref:introduction-to-saga-design-pattern.adoc[继续阅读 Saga 设计模式 (Saga Design Pattern) &#8594;]

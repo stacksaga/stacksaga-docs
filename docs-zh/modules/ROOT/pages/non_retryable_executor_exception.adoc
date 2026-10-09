@@ -1,44 +1,41 @@
-= NonRetryableExecutorException [[non_retryable_executor_exception]]
+= 非可重试执行器异常 (NonRetryableExecutorException) [[non_retryable_executor_exception]]
 
-If you are having an exception while processing the executor that is not temporally occurred (The exceptions that have not any point of executing again), you can throw a `NonRetryableExecutorException`.
-Then the StackSaga engine will stop the execution forward, and start reverting back, according to the configuration.
+如果您在执行器执行过程中遭遇了并非暂时性的物理故障（即无论重试多少次也绝不可能成功执行的错误，如参数非法、用户不存在、账户余额不足、风控拦截等），您应当主动抛出 `NonRetryableExecutorException`。
+收到该异常后，StackSaga 引擎将立即终止正向执行流，并根据工作流配置从当前故障点启动全链路的逆向补偿回滚流程。
 
-IF you were unable to catch the exception properly, the execution might throw `RuntimeException` s.
-That kind of unhandled exception will be caught as *non-retryable* exception by the StackSaga engine as well.
-But if you want to have proper error handling, you have to catch exceptions properly.
+如果您未在代码中显式捕获底层异常，业务逻辑抛出的任何未受控 `RuntimeException` 也会被 StackSaga 引擎捕获并默认视为*非可重试异常*。
+但为了实现严谨的生产级错误治理与元数据可观测性，强烈建议开发者显式捕获并结构化包装此类业务异常。
 
-*Non-Retryable Executor Exceptions* are allowed for the following executors.
+*非可重试执行器异常 (NonRetryableExecutorException)* 允许在以下执行器的方法中抛出：
 
 [cols="*,*,*"]
 [.google-anno-skip]
 |===
-|Executor |DoProcess() Method|doRevert() Method
+|执行器类型 |doProcess() 方法|doRevert() 方法
 
-|Query Executor
+|Query Executor (查询执行器)
 |✔
 |✖
 
-|Command Executor
+|Command Executor (指令执行器)
 |✔
 |✖
 
-|Revert Before Executor
+|Revert Before Executor (前置回滚执行器)
 |✖
 |
 
-|Revert After Executor
+|Revert After Executor (后置回滚执行器)
 |✖
 |
 
 |===
 
-NOTE: You can see in the summary table, all the revert executions are not allowed `NonRetryableExecutorException` s.
-The reason for that is according to the StackSaga architecture, any *command-execution* can have revert execution (Compensating execution).
-But all the *revert-executions* can have retryable-exception only.
-Because, even though the process can be failed, the revert execution cannot be failed at all.
-If the process is failed, there is a revert execution to have a Compensating.
-But if the revert is failed, there are any other executions to have Compensating for the reverting fail. +
-*The summary is that only forward execution can have non-retryable-exception.*
+NOTE: 如上表所示，**所有逆向补偿方法 (`doRevert`) 均不允许抛出 `NonRetryableExecutorException`**。
+其根本原因根植于 StackSaga 的核心架构设计：任何指令执行器 (`CommandExecutor`) 都有对应的逆向补偿执行；但逆向补偿执行自身**只允许抛出可重试异常**。
+因为正向业务步骤哪怕执行失败，还有逆向补偿机制可以作为兜底挽回数据一致性。
+但如果逆向补偿本身被允许永久失败，系统中将再无任何手段可以补偿“补偿本身的失败”。 +
+*简而言之：只有正向业务推进流程才允许抛出非可重试异常，逆向补偿必须确保最终必定能够成功执行。*
 
 [source,java]
 ----
@@ -77,23 +74,17 @@ public class CheckUserExecutor implements QueryExecutor<OrderDomainEntity> {
     }
 
 }
-
 ----
 
-<1> *NonRetryableExecutorException* is thrown due to the exception is a `BadRequest`. specially `NonRetryableExecutorException` provides a way to add the metadata regarding the exception.
-<2> Put the metadata regarding exception as a key and value. [[stacksaga_exception_wrapping]]
+<1> 遇到 `BadRequest` 业务入参错误时抛出 `NonRetryableExecutorException`。该类提供了便捷的链式调用，允许向异常中挂载丰富的诊断元数据。
+<2> 通过 Key-Value 键值对的形式将上下文元数据附加到异常中。 [[stacksaga_exception_wrapping]]
 
-NOTE: In java, we usually pass the data regarding the exception with the exception object.
-But in the StackSaga it is *not recommended*.
-Because, any time any object can be serialized (even Exceptions) for saving to the event-store.
-Serializing an exception object (like Json or XML) is not easy, and it might be a performance issue without any benefit.
-And also most of the time if you pass a complex exception, it might throw an exception when it is serialized.
-Therefore, StackSaga engine just saves your exception as a string in the event-store(Only for seeing through the Admin-Dashboard).
-If you want to put some metadata to the backward regarding the exception,
-*NonRetryableExecutorException* has a method to put the data as key and value pare called `put(key, value)`.
-You can put any number of key/value pare into that by using the put method.
+NOTE: 在标准 Java 开发中，我们习惯于在自定义 Exception 对象中挂载复杂的业务实体。
+但在 StackSaga 中，我们**极力不推荐**这种做法。
+因为在分布式环境中，事务发生的任何上下文和异常随时可能被序列化持久化至事件存储 (Event Store) 中。
+对复杂的异常对象进行 JSON 或 XML 序列化不仅代价高昂，而且经常会因循环引用引发新的运行时异常。
+因此，StackSaga 引擎仅将底层异常以纯字符串摘要的形式持久化至事件存储（供 Trace Window 运维看板查看）。
+如果您希望向逆向补偿流程或审计日志透传结构化元数据，请使用 `NonRetryableExecutorException.put(key, value)` 方法，挂载轻量级的键值对。
 
-IMPORTANT: There is nothing like you can throw an exception when some exception is occurred.
-If you don't want to continue the execution of the transaction to forward, and if you decide that the transaction should be stopped at some point, due to a condition is not met, you can throw a *NonRetryableExecutorException* exception as well.
-<<usage_of_exceptions,See the full implementation>>
-
+IMPORTANT: 抛出非可重试异常不仅限于底层接口报错。
+如果您在校验当前业务实体时，发现前置业务条件不满足（例如库存数小于购买数），并决定该分布式长事务不应再继续向下推进时，同样可以直接主动构造并抛出 `NonRetryableExecutorException` 以触发逆向回滚。

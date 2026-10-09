@@ -1,250 +1,249 @@
-:description: Atomic transactions and idempotency in microservices — the foundational building blocks for safe retries and compensation in Saga-based long-running transactions.
-:keywords: atomic transaction, atomic operation, idempotency, idempotency key, saga pattern, long-running transaction, microservices, distributed transactions, retries, compensation, kafka, eventual consistency, stacksaga
+:description: 微服务长事务架构中的原子事务与幂等性解析 —— 构建高韧性、安全重试与补偿机制的基石。
+:keywords: 原子事务, 原子操作, 幂等性, 幂等键, saga 模式, 长事务, 微服务架构, 分布式事务, 重试机制, 补偿事务, kafka, 最终一致性, stacksaga
 
-= Atomic Transactions & Idempotency in LRT
+= 长事务中的原子事务与幂等性 (Atomic Transactions & Idempotency in LRT)
 
-== Overview
+== 概述 (Overview)
 
-In xref:introduction-to-saga-design-pattern.adoc[the previous section], we explored how the Saga pattern manages distributed business workflows as a *Long-Running Transaction (LRT)* — breaking a global transaction into a sequence of smaller, locally committed steps.
+在 xref:introduction-to-saga-design-pattern.adoc[前一章节] 中，我们探讨了 Saga 模式如何将分布式业务流作为**长事务 (Long-Running Transaction, LRT)** 进行治理 —— 即把跨服务的全局事务分解为一系列按序推进、在各微服务本地独立提交的分支步骤。
 
-To understand how a Saga works in practice, developers need to understand:
+要在工程落地中彻底掌握 Saga 的工作原理，开发者必须深入理解以下三大核心问题：
 
-. *What is the discrete unit of work executed at each step?* — An *Atomic Operation* or *Atomic Transaction*.
-. *What happens when a network call or service fails?* — The ambiguous outcome dilemma and the necessity of *Retries*.
-. *What prevents a retried step from corrupting data?* — *Idempotency*.
+. *每一个分支步骤中执行的最小离散工作单元是什么？* —— 即**原子操作 (Atomic Operation)** 与**原子事务 (Atomic Transaction)**。
+. *当下游微服务发生网络抖动或服务停机时会发生什么？* —— 即分布式网络调用的状态未决困境，以及为什么必须引入**重试机制 (Retries)**。
+. *是什么机制在防止重试导致的数据重复与账目错乱？* —— 即**幂等性 (Idempotency)**。
 
-This page covers the foundational relationship between atomic transactions and idempotency, providing the architectural foundation for building resilient, failure-tolerant microservice workflows.
+本章详细解析原子事务与幂等性之间的内在共生关系，为构建高可用、容错韧性极强的微服务业务流提供深厚的架构认知支撑。
 
 [[atomic-operations]]
-== Understanding Atomic Operations and Atomic Transactions
+== 理解原子操作与原子事务 (Understanding Atomic Operations and Atomic Transactions)
 
-In monolithic systems, a transaction is governed by database-level ACID guarantees: multiple operations across multiple tables either all commit or all rollback as a single unit.
-In a microservices architecture with a database-per-service pattern, an LRT cannot span multiple databases in a single ACID transaction. Instead, the LRT is composed of discrete, service-local units of execution.
+在传统的单体架构中，事务完全由底层数据库引擎的 ACID 机制统一托管：跨越多个数据表的增删改查要么全部物理提交，要么作为一个整体全部物理回滚。
+而在采用“单服务单数据库 (Database Per Service)”模式的微服务架构中，长事务 (LRT) 无法再依靠跨库物理锁在一个单一的 ACID 事务内完成。取而代之的是，长事务由一系列离散的、微服务本地的作用域执行单元编织而成。
 
-An *atomic execution* is an all-or-nothing unit of work executed within the boundary of a single service.
-However, not every atomic execution is the same. There is a critical distinction between a *read-only atomic operation* and a *state-changing atomic transaction*.
+*原子执行 (Atomic Execution)* 是指在单个微服务物理边界内执行的、要么全做要么全不做的离散工作单元。
+然而，并非所有原子执行的性质都是相同的。在业务语义上，**只读原子操作 (Read-Only Atomic Operation)** 与**状态变更原子事务 (State-Changing Atomic Transaction)** 之间存在着本质差异。
 
-image:implementations:executor/stacksaga-diagram-atomic-transaction.svg[alt="atomic operations of the place-order long-running transaction"]
+image:implementations:executor/stacksaga-diagram-atomic-transaction.svg[alt="创建订单长事务中的原子执行步骤图解"]
 
-Consider the `place-order` scenario illustrated above:
+以如图所示的典型 `place-order`（创建订单）长事务为例：
 
-. *Fetching User Details (`user-service`)*:
-This is a *read-only query operation*. It retrieves customer information to validate whether the order can proceed. It does not alter any data in the `user-service` database.
-Therefore, it is an *atomic operation*, but it is *not an atomic transaction*.
+. *查询用户详情 (`user-service`)*：
+这是一个*只读查询操作 (Read-only query operation)*。其目的仅是拉取客户基础信息，以校验该用户是否具备下单资格。它不会修改 `user-service` 数据库中的任何持久化数据。
+因此，它是一个**原子操作 (Atomic Operation)**，但**不是原子事务 (Not an Atomic Transaction)**。
 
-. *Creating the Order (`order-service`)*:
-Inserts the order record in a pending state. This modifies database state.
+. *创建订单记录 (`order-service`)*：
+插入一条处于“待处理 (PENDING)”状态的订单数据。此操作会直接改变底层数据库的持久化状态。
 
-. *Checking and Reserving Inventory (`inventory-service`)*:
-Decrements product stock. This modifies database state.
+. *校验并锁定商品库存 (`inventory-service`)*：
+扣减商品的可售库存份额。此操作会直接改变底层数据库状态。
 
-. *Processing Payment (`payment-service`)*:
-Debits the user's account or charges their card. This modifies database state.
+. *执行资金扣款 (`payment-service`)*：
+从用户账户中扣除余额或向银行卡发起扣款。此操作会直接改变底层数据库状态。
 
-Steps 2, 3, and 4 are *atomic transactions*: each performs a state-changing operation governed by a local ACID transaction within its service's database.
+上述步骤 2、3 和 4 属于典型的**原子事务 (Atomic Transactions)**：它们各自在所属微服务的数据库内部执行有状态的变更操作，并在本地 ACID 事务的保护下独立提交。
 
 [cols="1,2,2", options="header"]
 |===
-| Characteristic | Read-Only Atomic Operation | State-Changing Atomic Transaction
-| *Purpose* | Queries data needed for the workflow | Modifies data within a service boundary
-| *Database Effect* | None (read-only) | Mutates state (INSERT, UPDATE, DELETE)
-| *Transactional Nature* | Read consistency | Service-local ACID transaction
-| *Requires Compensation?* | No (nothing to reverse) | Yes (must have a compensating transaction)
-| *Natural Idempotency* | Naturally idempotent | Must be designed to be idempotent
-| *StackSaga Component* | `QueryExecutor` | `CommandExecutor`
+| 核心特征 | 只读原子操作 (Read-Only Atomic Operation) | 状态变更原子事务 (State-Changing Atomic Transaction)
+| *业务目的* | 查询工作流所需的上下文数据 | 在微服务边界内修改持久化状态
+| *数据库影响* | 无（纯只读，不产生脏数据） | 变更数据状态（执行 INSERT、UPDATE、DELETE）
+| *事务属性* | 单次查询的读取一致性 | 微服务本地独立的 ACID 物理事务
+| *是否需要补偿？* | **不需要**（无副作用，无需逆向撤销） | **必须具备**（必须绑定对应的补偿事务）
+| *天然幂等性* | 天然具备绝对幂等性 | 必须经过专门架构设计才能达成幂等性
+| *StackSaga 映射组件* | `QueryExecutor` | `CommandExecutor`
 |===
 
-=== The Local Commit Boundary (The Point of No Return)
+=== 本地提交边界（不可逆转点 / The Point of No Return）
 
-The most important takeaway for developers new to microservices is this:
+对于刚接触微服务分布式架构的开发者而言，最至关重要的一条认知法则是：
 
-*Once an atomic transaction commits to its local database, it stays committed.*
+*分支原子事务一旦在其本地数据库提交，便在物理上永久生效。*
 
-There is no external distributed transaction coordinator holding a global lock or issuing a database-level `ROLLBACK` across services.
-If step 4 (`make-payment`) fails, step 2 (`create-order`) and step 3 (`reserve-inventory`) are already permanent in their respective databases.
-The only way to undo them is by executing *compensating transactions* (e.g. `cancel-order` and `release-inventory`) that semantically reverse the previous changes.
+系统中并不存在任何能够跨越各个微服务持有物理行锁、或能向各个异构数据库统一下发底层 `ROLLBACK` 指令的全局分布式锁管理器。
+如果步骤 4（`make-payment` 支付扣款）失败，步骤 2（`create-order`）和步骤 3（`reserve-inventory`）此时已经在各自的数据库中持久化落盘。
+撤销这些操作的唯一途径，是依靠执行**补偿事务 (Compensating Transactions)**（例如调用 `cancel-order` 取消订单与 `release-inventory` 释放库存锁），在业务语义层面反向消除先前的状态影响。
 
 [[network_timeouts_and_ambiguity]]
-== The Distributed Challenge: Network Timeouts and Ambiguous Failures
+== 分布式核心挑战：网络超时与未决故障 (Network Timeouts and Ambiguous Failures)
 
-Because microservices communicate over an unreliable network (a reality formalized by the *Fallacies of Distributed Computing*), executing atomic transactions across service boundaries introduces failure modes that do not exist in monolithic applications.
+由于微服务之间是通过不可靠的计算机网络进行通信的（这已被著名的*分布式计算谬论 / Fallacies of Distributed Computing* 所严谨形式化），跨越服务边界执行原子事务会引入在单体应用中根本不存在的特殊故障模式。
 
-=== The Ambiguous Outcome Dilemma (Network Timeouts & Dropped Packets)
+=== 状态未决困境（网络超时与丢包 / The Ambiguous Outcome Dilemma）
 
-When a coordinator (or an upstream service) invokes an atomic transaction over HTTP/REST or via messaging, three outcomes are possible:
+当编排协调器（或上游服务）通过 HTTP/REST 或消息中间件调用某个下游原子事务时，在网络通信层存在三种可能的结果：
 
-. *Success*: The request arrives, the service executes the transaction, and the success response is received.
-. *Deterministic Failure*: The request arrives, the service rejects the transaction (e.g., insufficient balance), and returns an error response.
-. *Ambiguous State (Timeout / Network Drop)*: The caller sends the request, but the connection drops, times out, or the target instance crashes.
+. *明确成功 (Success)*：请求顺利抵达，下游服务成功执行事务，调用方成功接收到返回结果。
+. *明确失败 (Deterministic Failure)*：请求顺利抵达，下游服务由于业务校验不通过（如余额不足）拒绝了事务，并明确返回了业务异常响应。
+. *状态未决 (Ambiguous State / 网络超时或丢包)*：调用方发送了网络请求，但在等待应答时遭遇了网络断连、Socket 读取超时或下游容器瞬间崩溃。
 
-image::stacksaga-diagram-distributed-transaction.svg[alt="distributed transaction network boundary"]
+image::stacksaga-diagram-distributed-transaction.svg[alt="分布式事务跨服务网络边界示意图"]
 
-In the third case, the caller faces an unsolvable ambiguity from the network alone:
+在第三种“状态未决”情况下，仅从网络层面来看，调用方将面临一个完全无法自证的逻辑死局：
 
-* Did the request drop *before* reaching the service (meaning the atomic transaction never ran)?
-* Or did the service execute the transaction successfully, but the network failed *afterwards* while returning the response?
+* 到底是请求在*抵达下游微服务之前*就被网络丢弃了（意味着远程原子事务根本未曾运行）？
+* 还是下游微服务其实已经*成功执行了本地事务并完成了扣款*，只是在*向调用方返回应答的网络链路上*发生了断连？
 
-Because the caller cannot tell whether the remote state was modified or not, the outcome is completely ambiguous.
+因为调用方仅从超时异常中无法获知远程服务的数据库状态是否已被修改，该调用的实际结果完全处于“未决状态 (Ambiguous)”。
 
-=== Why Retries Are Mandatory
+=== 为什么重试机制不可或缺 (Why Retries Are Mandatory)
 
-To recover from transient network drops, socket timeouts, or momentary service restarts, the coordinator *must retry* the invocation:
+面对瞬时的网络丢包、连接抖动或目标实例瞬时滚动重启，为了不让业务流程无限期挂起，协调器**必须实施自动重试 (Retries)**：
 
-* *Forward Recovery*: If a transient network glitch occurs while invoking `reserve-inventory`, the coordinator retries the step until confirmation is received.
-* *Backward Recovery*: If a step fails permanently and compensation begins, compensating transactions (e.g., `release-inventory`) must also be retried if they encounter network blips.
+* *正向恢复重试 (Forward Recovery)*：如果在调用 `reserve-inventory`（锁定库存）时遇到网络超时，协调器必须继续发起重试，直到拿到明确的确认结果。
+* *逆向恢复重试 (Backward Recovery)*：如果流程发生不可恢复错误并启动补偿，逆向补偿事务（如 `release-inventory` 释放库存）在遭遇网络抖动时也必须坚决重试，绝不能中途放弃而留下悬挂的脏数据。
 
-=== The Hazard: Duplicate Execution
+=== 重试伴生的致命危险：重复执行 (Duplicate Execution)
 
-Retrying an operation across an unreliable network solves the problem of dropped connections, but it introduces a far more dangerous hazard: *duplicate execution*.
+跨越不可靠的网络进行自动重试虽然解决了连接断开的恢复问题，但随之带来了一个更为致命的风险：**重复执行 (Duplicate Execution)**。
 
-Suppose `make-payment` was actually processed successfully on the first attempt, but the response was lost due to a timeout:
+假设在第一次调用 `make-payment`（扣款）时，下游支付系统其实已经成功完成了扣款，只是返回响应时发生了超时丢包：
 
-* If the caller blindly retries `POST /payments/charge`, the service may charge the customer's credit card a second time!
-* If `inventory-service` blindly retries `POST /stock/decrement`, stock levels will be decremented twice for a single order.
-* If a message broker redelivers a `create-order` message due to an unacknowledged message (at-least-once delivery), multiple duplicate orders will be created.
+* 如果调用方在未加防护的情况下盲目重试 `POST /payments/charge`，下游系统可能会对用户的银行卡发起**第二次重复扣款**！
+* 如果库存服务盲目重试 `POST /stock/decrement`，同一个订单可能会导致库存被**扣减两次**！
+* 如果消息中间件由于网络 ACK 丢失而根据“至少一次投递 (at-least-once delivery)”协议重新投递了一条 `create-order` 消息，系统可能会**创建出两条重复订单**！
 
-This leads directly to the core requirement of distributed systems: *every retried atomic operation and compensating transaction must be idempotent*.
+这就直接推导出了分布式架构中的第一铁律：**所有可能被重试的正向原子操作与逆向补偿事务，都必须具备严格的幂等性 (Idempotency)**。
 
 [[what_is_idempotency]]
-== What is Idempotency?
+== 什么是幂等性？(What is Idempotency?)
 
-*Idempotency* in a microservices architecture means that processing the *same operation multiple times* has the *same effect* as processing it once — whether that operation arrives as a repeated synchronous request (e.g. over HTTP/REST) or as a redelivered message from a broker (e.g. a Kafka record).
+在微服务架构中，**幂等性 (Idempotency)** 指的是：对同一操作执行**多次**所产生的系统状态变更与业务影响，与仅执行**一次**所产生的结果**完全相同** —— 无论该操作是通过重复的同步 RPC 请求（如 HTTP/REST）到达，还是作为消息代理重投的消息记录（如 Kafka Record）被再次消费。
 
-In practice:
+在工程实际中：
 
-* Whether an atomic transaction or compensation request arrives once, twice, or ten times — due to retries, network re-transmissions, or broker redeliveries — *the system state changes only once*.
-* Subsequent duplicate requests are recognized, safely handled, and return the same deterministic result without repeating the underlying mutation.
+* 无论某个原子事务或补偿请求由于重试、网络重传还是消息积压重投而到达 1 次、2 次还是 10 次，**系统的持久化业务状态只发生唯一一次改变**。
+* 后续到达的重复请求会被服务精准识别、安全短路，并直接返回与首次执行完全一致的确定性响应，而绝不重复执行底层的增删改数据变更。
 
 [[idempotency-and-atomic-transactions]]
-=== The Relationship: Granularity vs. Repeatability
+=== 原子性与幂等性的内在关系：粒度 vs 可重复性 (Granularity vs. Repeatability)
 
-Atomic transactions and idempotency are two complementary concepts that solve different aspects of distributed reliability:
+原子事务与幂等性是一对相辅相成、缺一不可的孪生架构概念，分别解决了分布式系统可靠性的两个不同维度：
 
 [quote]
 ____
-*Atomicity* defines the *unit of execution* (an all-or-nothing step within a service boundary). +
-*Idempotency* defines the *safety of repeating that execution* across a network.
+*原子性 (Atomicity)* 定义了**执行的独立单元**（即单个微服务物理边界内要么全做、要么全不做的离散步骤）。 +
+*幂等性 (Idempotency)* 定义了**跨网络重复执行该单元时的安全性**。
 ____
 
-* The *Atomic Transaction* gives the Saga engine a clean, bounded step to advance or compensate.
-* *Idempotency* ensures that when the Saga engine retries that step — or when it executes its compensation — it is completely safe from double-execution side effects.
+* **原子事务 (Atomic Transaction)** 为 Saga 引擎提供了一个边界清晰、可独立推进或实施补偿的确定性步骤。
+* **幂等性 (Idempotency)** 则确保当 Saga 引擎由于网络异常重试该步骤 —— 或重试执行其逆向补偿时 —— 绝对不会引发二次扣款或数据污染等灾难性副作用。
 
-== Examples: Idempotent vs. Non-Idempotent Operations
+== 示例对比：幂等操作 vs 非幂等操作 (Idempotent vs. Non-Idempotent Operations)
 
-Idempotency is an inherent characteristic of how an operation modifies data — it is not tied to any single communication protocol. It applies equally to synchronous REST calls and asynchronous message consumers (Kafka, RabbitMQ).
+幂等性是操作如何变更数据的**本质语义属性** —— 它与具体的通信协议无关。它同样适用于同步 REST 接口与异步消息消费者（Kafka、RabbitMQ 等）。
 
-=== Naturally Idempotent Operations
+=== 天然具备幂等性的操作 (Naturally Idempotent Operations)
 
-. *Read-Only Queries*:
+. *只读查询操作 (Read-Only Queries)*：
 * REST: `GET /users/456`
-* Messaging: Querying a read-model from a topic
-* *Effect*: Reading data does not alter system state. Calling it 1 time or 100 times produces no side effects.
+* 消息: 从 Topic 查询只读物化视图
+* *效果*：纯读取数据绝对不改变系统持久化状态。调用 1 次与调用 100 次产生的业务副作用完全为零。
 
-. *Absolute State-Setting (Upsert / Fixed Value)*:
-* REST: `PUT /orders/123/status` with payload `{"status": "CONFIRMED"}`
-* Messaging: An `OrderConfirmedEvent` with explicit target state
-* *Effect*: Setting an absolute value repeatedly results in the exact same state.
+. *绝对状态重写 (Upsert / Fixed Value)*：
+* REST: `PUT /orders/123/status` 携带报文 `{"status": "CONFIRMED"}`
+* 消息: 携带目标绝对状态的 `OrderConfirmedEvent`
+* *效果*：多次将某条记录的状态赋值为绝对目标值，最终结果完全相同。
 
-. *Deletions*:
+. *绝对删除操作 (Deletions)*：
 * REST: `DELETE /orders/123`
-* Messaging: An `OrderCancelled` tombstone message
-* *Effect*: Deleting an entity once removes it; subsequent delete attempts leave it removed.
+* 消息: `OrderCancelled` 墓碑消息 (Tombstone)
+* *效果*：删除一次实体将其移除；后续针对已删除实体的重复删除操作仍保持其移除状态。
 
-=== Non-Idempotent Operations
+=== 非幂等操作 (Non-Idempotent Operations)
 
-. *Blind Resource Creation*:
-* REST: `POST /orders` (without an idempotency key)
-* Messaging: Consuming a `CreateOrderCommand` without deduplication
-* *Effect*: Every delivery creates a new database record, producing duplicates.
+. *盲目新增资源 (Blind Resource Creation)*：
+* REST: `POST /orders`（未携带幂等键）
+* 消息: 在缺乏去重机制的情况下消费 `CreateOrderCommand`
+* *效果*：每一次请求到达都会插入一条自增主键的新数据，产生大量重复订单。
 
-. *Relative State Changes*:
-* REST: `POST /accounts/123/adjust-balance` with payload `{"delta": -50}`
-* Messaging: An `AdjustBalanceCommand` with relative offset
-* *Effect*: If delivered twice, the balance is deducted twice ($100 -> $50 -> $0).
+. *相对增量变更 (Relative State Changes)*：
+* REST: `POST /accounts/123/adjust-balance` 携带报文 `{"delta": -50}`
+* 消息: 包含相对位移的 `AdjustBalanceCommand`
+* *效果*：如果重复投递两次，账户余额会被扣减两次（\$100 $\rightarrow$ \$50 $\rightarrow$ \$0），造成严重资损。
 
-These non-idempotent operations are precisely the operations that *must* be fortified with an idempotency mechanism before they can participate safely in a Long-Running Transaction.
+上述非幂等操作，正是我们在将其接入分布式长事务 (LRT) 之前，**必须通过技术手段强化幂等防护**的关键所在。
 
-== How to Implement Idempotency in Practice
+== 落地实现幂等性的核心工程策略 (How to Implement Idempotency in Practice)
 
-To ensure that retried atomic transactions and compensations do not produce duplicate mutations, developers use several proven implementation strategies:
+为了确保重试的原子事务与补偿操作不会引发重复变更，业界通常采用以下四种成熟策略：
 
-=== 1. Use Idempotency Keys (Correlation Identifiers)
+=== 1. 使用幂等键 / 关联标识符 (Idempotency Keys / Correlation Identifiers)
 
-The caller attaches a unique, deterministic identifier to each operation:
+调用方在发起操作时，显式附带一个全局唯一且确定性的标识符：
 
-* In REST APIs, this is typically sent as an HTTP header: `Idempotency-Key: <saga-id>-<step-id>`.
-* In event-driven systems (Kafka/RabbitMQ), this is placed in the record header (e.g. `correlationId` or `messageId`), or used as the message key.
+* 在 REST API 中，通常作为 HTTP 标头传递：`Idempotency-Key: <saga-id>-<step-id>`。
+* 在事件驱动系统（Kafka/RabbitMQ）中，通常置于消息头属性中（如 `correlationId` 或 `messageId`），或直接作为消息的 Message Key。
 
-When the service receives the request, it checks whether an execution with that key has already completed.
+当服务接收到请求时，首先根据该键判断是否已经处理过该次执行。
 
-=== 2. Check-Before-Processing (The Idempotency Store Pattern)
+=== 2. 执行前拦截校验模式 (The Idempotency Store Pattern)
 
-The service maintains a record of processed idempotency keys (typically in a dedicated database table or fast distributed store):
+服务在专用存储或业务库中维护一张已处理幂等键的记录表：
 
 [arabic]
-. When a request arrives with an idempotency key, start a local database transaction.
-. Query the idempotency table for the key:
-* *If the key exists and status is COMPLETED*: Return the previously saved response immediately without re-executing the business logic.
-* *If the key exists and status is IN_PROGRESS*: A concurrent request with the same key is currently running. Return a conflict (`409 Conflict`) or wait.
-* *If the key does not exist*: Insert a new record with status `IN_PROGRESS`, execute the atomic transaction, save the response in the idempotency record, update status to `COMPLETED`, and commit the local transaction.
+. 当携带幂等键的请求到达时，开启本地数据库事务。
+. 查询幂等记录表：
+* *如果该键已存在且状态为 COMPLETED（已完成）*：立即直接返回此前保存的执行结果，**完全不重复执行底层业务代码**。
+* *如果该键已存在且状态为 IN_PROGRESS（进行中）*：说明此时有并发请求正在处理中。直接返回冲突提示 (`409 Conflict`) 或让客户端退避等待。
+* *如果该键不存在*：向幂等表插入一条状态为 `IN_PROGRESS` 的记录，执行原子事务业务代码，将执行结果保存至幂等表并将状态更新为 `COMPLETED`，最后提交本地事务。
 
-This guarantees that even if a network timeout causes the client to retry, the second attempt receives the cached result of the first attempt without re-running payment or stock deduction.
+该模式确保即便网络超时导致客户端重试，第二次请求也只会拿到首次执行的缓存响应，而绝不会二次触发扣款或发货。
 
-=== 3. Database Constraints (Unique Business Keys)
+=== 3. 利用数据库唯一约束 (Unique Business Constraints)
 
-Leverage the database engine's unique constraints to prevent duplicates at the storage level:
+直接利用数据库底层的唯一索引（Unique Constraint）在持久化层扼杀重复数据：
 
-* For orders: Place a unique constraint on `(customer_id, client_request_token)`.
-* For payments: Place a unique constraint on `order_id` in the payment ledger table.
+* 订单表：在 `(customer_id, client_request_token)` 复合字段上建立唯一约束。
+* 账单流水表：在 `(order_id, transaction_type)` 上建立唯一索引。
 
-If a retried operation attempts to insert a second payment record for the same order, the database rejects the write with a unique key violation, preventing data corruption.
+当重试操作试图为同一笔订单插入第二条支付流水时，数据库底层会直接抛出唯一键冲突异常（如 MySQL Error 1062），从物理存储层彻底切断脏数据的产生。
 
-=== 4. Prefer Absolute State Transitions Over Relative Offsets
+=== 4. 优先采用绝对状态跃迁而非相对数值偏移 (Absolute State Transitions)
 
-Whenever possible, design atomic transactions to be state-driven rather than relative:
+在架构设计原子事务时，尽可能将其设计为状态机驱动，而非相对累加/累减：
 
-* *Instead of*: `UPDATE accounts SET balance = balance - 100 WHERE id = 123`
-* *Prefer*: Recording an immutable ledger entry with a unique transaction ID (`INSERT INTO ledger_entries (id, account_id, amount) VALUES ('tx-123', 123, -100)`), and calculating the current balance from the ledger or updating balance only if the transaction ID has not been processed.
+* *应避免*：`UPDATE accounts SET balance = balance - 100 WHERE id = 123`
+* *推荐做法*：记录一条带有唯一交易流水号的不可变账目凭证 (`INSERT INTO ledger_entries (id, account_id, amount) VALUES ('tx-123', 123, -100)`)，当前可用余额由不可变流水汇总计算得出，或者仅在未记录该流水号时才允许执行更新。
 
-== How StackSaga Applies These Principles
+== StackSaga 如何开箱即用践行上述原则 (How StackSaga Applies These Principles)
 
-StackSaga translates these distributed concepts into clean, object-oriented abstractions in Spring Boot:
+StackSaga 框架将这些复杂的分布式理论，抽象封装为 Spring Boot 中清晰、优雅的面向对象编程范式：
 
-. *Executors Map to Atomic Units*:
+. *执行器严格映射微观原子单元*：
+* `CommandExecutor`：封装**状态变更原子事务 (Atomic Transaction)**。它强制开发者显式实现正向主执行逻辑 (`doProcess`) 及其对应的逆向补偿逻辑 (`doRevert`)。
+* `QueryExecutor`：封装**只读原子操作 (Read-Only Atomic Operation)** (`doProcess`)，确保纯查询步骤绝不会生成多余的反向补偿代码。
 
-* `CommandExecutor`: Encapsulates an **Atomic Transaction**. It defines both the *primary execution* (`doProcess`) and its corresponding *compensating execution* (`doRevert`).
-* `QueryExecutor`: Encapsulates a **Read-Only Atomic Operation** (`doProcess`), ensuring no unnecessary rollback logic is generated for non-mutating steps.
+. *自动化状态跟踪与关联上下文*：
+* 每一个 Saga 执行实例都被分配一个唯一的 `SagaId` 和全局状态机关联上下文。
+* StackSaga 的事件存储 (Event Store) 逐帧精确记录每一个执行器步骤的执行快照与跃迁结果。当发生网络瞬断并触发重试时，StackSaga 确保以完全一致的上下文重新调度该步骤。
 
-. *Automatic State Tracking & Correlation*:
-* Every saga execution instance is assigned a unique `SagaId` and state machine correlation context.
-* StackSaga's event store tracks the outcome of each executor step by step. If a network fault causes a step to retry, StackSaga ensures the step is re-dispatched with consistent context.
-
-. *Safe Retries & Self-Healing*:
-* When a transient failure occurs, StackSaga's retry subsystem re-executes the executor.
-* Because your executors implement idempotency keys and state checks, retries advance the workflow forward safely without double-processing risks.
+. *安全重试与自愈协同*：
+* 当发生瞬时故障时，StackSaga 重试子系统会自动接管并重试执行器。
+* 结合执行器中的幂等键传递机制，重试机制能够安全推动业务工作流正向收敛，彻底杜绝双重扣款风险。
 
 [TIP]
 ====
-*StackSaga Provides the Idempotency Key Automatically:* +
-In traditional microservices development, generating and maintaining unique idempotency keys across distributed retries is cumbersome and error-prone.
-StackSaga takes this responsibility completely off your shoulders: the orchestrator automatically generates a deterministic, collision-resistant `idempotencyKey` for every atomic step (both primary execution and compensation) and injects it directly into your executor methods (`doProcess` and `doRevert`).
+*StackSaga 自动为您生成并传递幂等键：* +
+在传统微服务开发中，在分布式重试链路中手动生成、维护并透传全局唯一的幂等键不仅繁琐，而且极易出现逻辑漏洞。
+StackSaga 将这一重担全权接管：编排引擎会自动为每一个原子步骤（包括正向执行与逆向补偿）计算出确定性、防碰撞的 `idempotencyKey`，并将其直接注入到执行器的方法参数中（`doProcess` 和 `doRevert`）。
 
-All you need to do is forward that `idempotencyKey` to the downstream service (e.g., via an HTTP header such as `Idempotency-Key` or a messaging header) to ensure safe, duplicate-proof execution across retries.
+您唯一需要做的，就是在向外部下游服务发起调用时，将该 `idempotencyKey` 作为 HTTP 标头（如 `Idempotency-Key`）或消息头透传下去，即可轻松收获百分之百防重放的安全保障。
 
-* To see how executors receive and use this key in code, refer to xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[Saga Command Executors].
-* To learn how the key is calculated or how to customize the generator, see xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[Generating Idempotency Keys in Domain Entity].
+* 欲了解执行器如何在代码中接收和使用此幂等键，请参阅 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[Saga 指令执行器 (Command Executors)]。
+* 欲深入理解该幂等键的算法构成或如何自定义生成策略，请参阅 xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[在领域实体中生成幂等键]。
 ====
 
-== Summary: Mental Model for Developers
+== 核心总结：面向开发者的认知模型 (Summary: Mental Model for Developers)
 
 [cols="1,2,2", options="header"]
 |===
-| Concept | Role in Microservices | Key Rule
-| *Atomic Operation* | The discrete execution step in an LRT | May be read-only (query) or state-changing (transaction).
-| *Atomic Transaction* | A state-changing step committing locally to a service database | Commits permanently; cannot be rolled back by 2PC — must be compensated.
-| *Compensating Transaction* | The semantic reversal of an atomic transaction | Must be idempotent and retryable until consistent.
-| *Idempotency* | The safety guarantee for repeating operations | Ensures retrying an atomic transaction or compensation never produces duplicate side effects.
+| 核心概念 | 在微服务架构中的角色 | 必须遵守的关键设计法则
+| *原子操作 (Atomic Operation)* | 长事务 (LRT) 中的离散执行单元 | 可以是只读操作（查询），也可以是有状态变更（事务）。
+| *原子事务 (Atomic Transaction)* | 向微服务本地数据库持久化提交的有状态步骤 | 一旦提交便永久生效；无法通过 2PC 物理回滚，必须通过补偿事务在业务层撤销。
+| *补偿事务 (Compensating Transaction)* | 对原子事务业务效果的语义级反转操作 | 必须严格具备幂等性与可重试性，直至数据最终收敛。
+| *幂等性 (Idempotency)* | 跨网络重复执行操作的安全防线 | 确保因网络抖动重试原子事务或补偿时，绝不产生二次变更或数据污染。
 |===
 
-Next, explore how to implement these atomic steps in code using StackSaga Executors:
-xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[Explore Saga Executors in StackSaga &#8594;]
+接下来，让我们探索如何在代码中使用 StackSaga 执行器实现这些原子步骤：
+xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[探索 StackSaga 执行器架构 &#8594;]

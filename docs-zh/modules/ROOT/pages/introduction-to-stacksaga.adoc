@@ -1,95 +1,95 @@
-:description: Comprehensive introduction to StackSaga — an enterprise Saga orchestration ecosystem for Spring Boot microservices. Solve distributed transaction consistency in Banking, Fintech, and Enterprise systems with Event Sourcing, Continuous STP and Pausable HITL workflows, zero-dependency utility services, automated compensations, distributed retries, and real-time observability.
-:keywords: StackSaga, saga orchestration, distributed transactions, microservices architecture, Spring Boot, Java, event sourcing, banking microservices, fintech transactions, straight-through processing, STP, human-in-the-loop, HITL, saga pattern, 2PC alternative, transaction compensation, rollback, idempotency, fault tolerance, transaction tracing, cloud-native
+:description: StackSaga 全景介绍 —— 专为 Spring Boot 微服务量身定制的企业级 Saga 分布式事务编排生态系统。通过事件溯源、直通式处理 (STP) 与人机协同 (HITL) 暂停工作流、下游服务零依赖侵入、自动化补偿与分布式重试、以及实时链路可视化，彻底解决银行、金融科技与大型企业分布式系统中的数据一致性难题。
+:keywords: StackSaga, saga 编排, 分布式事务, 微服务架构, Spring Boot, Java, 事件溯源, 金融级微服务, 最终一致性, STP 直通处理, 人机协同, HITL, saga 模式, 2PC 替代方案, 事务补偿, 回滚, 幂等性, 容错韧性, 链路追踪, 云原生
 :robots: index,follow
 :page-priority: 1.0
 
-= Introduction to StackSaga
+= StackSaga 框架介绍 (Introduction to StackSaga)
 
-== Overview
+== 概述 (Overview)
 
-StackSaga is an enterprise-grade, orchestrator-based Saga ecosystem designed to solve distributed transaction consistency across microservice architectures.
+StackSaga 是一个企业级、基于编排模式 (Orchestrator-based) 的完整 Saga 框架生态系统，专为解决现代云原生微服务架构中的跨库分布式事务一致性挑战而设计。
 
-In distributed systems, traditional single-database transactions (ACID / 2-Phase Commit) cannot scale across autonomous microservices.
-StackSaga provides the architectural foundation to execute **Long-Running Transactions (LRT)** reliably through orchestrated primary executions and their automated compensating (rollback) actions.
-Beyond basic orchestration, StackSaga delivers a comprehensive cloud-native platform encompassing **Event Sourcing**, **distributed retry scheduling**, and **real-time transaction observability**.
+在分布式系统中，传统的单库事务规范（ACID 或两阶段提交 2PC）由于强物理锁与单点协调瓶颈，根本无法在自治的微服务之间弹性伸缩。
+StackSaga 提供了坚实的架构基石，通过编排正向主执行逻辑及其自动化的逆向补偿回滚机制，高度可靠地运行**长事务 (Long-Running Transactions, LRT)**。
+除基础的 Saga 编排之外，StackSaga 还开箱即用集成了**事件溯源 (Event Sourcing)**、**分布式重试调度**以及**实时事务全链路可观测性 (Real-Time Observability)**，构成了一站式云原生事务治理平台。
 
-== What is StackSaga?
+== 什么是 StackSaga？(What is StackSaga?)
 
-StackSaga is an entire ecosystem rather than just a single library, engineered to implement, observe, and maintain Saga-based distributed transactions in production environments:
+StackSaga 远不仅是一个轻量的开发工具包，而是一套专为在生产严苛环境中落地、监控与维护基于 Saga 模式的分布式事务而精心打造的完备生态系统：
 
-. *xref:implementations:engine-overview.adoc[Multi-Transport Orchestration Engines]* +
-Pluggable orchestration engines supporting both synchronous request/response (REST, gRPC, GraphQL) and asynchronous event-driven (Apache Kafka) communication styles.
-. *xref:stacksaga-database-support:overview/database-support-overview.adoc[Zero-Infrastructure Event Sourcing]* +
-Built-in event-sourcing capabilities that use your existing relational database (MySQL, PostgreSQL, Oracle) as the event store—eliminating the need to deploy and manage a dedicated event-store cluster.
-. *xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Distributed Retry Subsystem]* +
-A resilient transaction retry subsystem utilizing Murmur3 token ring partitioning and the Ring Coordinator to schedule and self-heal stalled transactions without cluster race conditions.
-. *xref:trace-window:stacksaga-trace-window.adoc[Visual Transaction Tracing (Trace Window)]* +
-A developer and operator dashboard to visualize every transaction span in real time, inspect domain snapshots, trace execution timelines, and trigger manual operational interventions.
+. *xref:implementations:engine-overview.adoc[多通信协议编排引擎 (Multi-Transport Orchestration Engines)]* +
+提供高度可插拔的编排引擎，无缝兼容同步请求/响应模式（REST、gRPC、GraphQL）以及异步事件驱动模式（Apache Kafka）。
+. *xref:stacksaga-database-support:overview/database-support-overview.adoc[零额外中间件的事件溯源 (Zero-Infrastructure Event Sourcing)]* +
+原生内置事件溯源能力，直接复用您现有的关系型数据库（MySQL、PostgreSQL、Oracle）作为持久化事件存储 (Event Store) —— 彻底告别单独部署和运维复杂专用事件存储集群的沉重负担。
+. *xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[分布式重试子系统 (Distributed Retry Subsystem)]* +
+基于 64 位 Murmur3 虚拟哈希环分区与重试环协调器 (Ring Coordinator) 的容错重试子系统，在集群多实例并发下调度与自愈在途停滞事务，零锁竞争、零集群竞态条件。
+. *xref:trace-window:stacksaga-trace-window.adoc[可视化事务全链路追踪控制台 (Trace Window)]* +
+专为开发者与运维团队打造的可视化看板，支持毫秒级实时监控分布式事务的各个执行 Span、审查领域实体快照、追溯时间轴并在异常时发起人工运维干预。
 
-== Why Choose StackSaga?
+== 为什么选择 StackSaga？(Why Choose StackSaga?)
 
-When transitioning to microservices, organizations encounter the **Distributed Consistency Dilemma**: how to maintain business integrity across independent service databases without introducing fragile ad-hoc plumbing or distributed deadlocks.
+当企业全面拥抱微服务架构时，无一例外会撞上**分布式一致性两难困境 (Distributed Consistency Dilemma)**：如何在保持各个服务数据库独立解耦的前提下维护全局业务完整性，同时避免引入脆弱的面条式胶水代码或分布式死锁。
 
-StackSaga provides distinct advantages over DIY solutions and traditional workflow engines:
+相较于自研轮子或传统的重型工作流引擎，StackSaga 展现了极其显著的架构优势：
 
-=== 1. Domain-Centric Orchestration (No Dedicated Orchestrator Infrastructure)
-Traditional orchestration systems often require deploying a heavy, centralized external server or dedicated "orchestrator service" that acts as an enterprise bottleneck and single point of failure.
+=== 1. 领域内嵌式编排（无需单独部署编排服务器）
+传统的流程编排中间件往往强制要求部署重型的集中式外部服务器或独立的“流程编排中枢应用”，这种架构极易演变为全公司的性能瓶颈、网络跳数黑洞与全局单点故障 (SPOF)。
 
-StackSaga eliminates this anti-pattern completely through **Domain-Centric (Service-Embedded) Orchestration**:
+StackSaga 通过**领域内嵌式编排 (Domain-Centric / Service-Embedded Orchestration)** 彻底根除了这一架构反模式：
 
-* **No Dedicated Orchestration Servers**: You do not build or deploy standalone orchestration servers. Instead, any standard microservice simply adds `stacksaga-spring-boot-starter` to become the orchestrator for its own business domain.
-* **Per-Domain Centralization**: For example, `order-service` embeds StackSaga to orchestrate the "Place Order" saga across downstream services. If `payment-service` has its own complex multi-step clearing or settlement workflow, `payment-service` independently embeds StackSaga to orchestrate that payment domain. A single microservice can orchestrate one or multiple business domains.
-* **Zero-Dependency Downstream Utility Services**: Only the microservice acting as the domain orchestrator carries the StackSaga framework dependency. Downstream participating services (e.g., `inventory-service`, `user-service`) remain standard microservices exposing ordinary REST, gRPC, or GraphQL APIs without a single line of StackSaga code. Adoption is clean, incremental, and non-invasive.
+* **无需独立编排服务器**：您无需搭建或部署任何独立运行的流程编排中间件。任何标准 Spring Boot 微服务只需引入 `stacksaga-spring-boot-starter` 依赖，即可直接成为自身所属业务领域的编排器 (Orchestrator)。
+* **按业务领域去中心化自治**：例如，`order-service` 引入 StackSaga 内嵌编排下单长事务流程；若 `payment-service` 自身拥有复杂的多渠道清算对账流程，`payment-service` 同样独立内嵌 StackSaga 编排其支付领域。一个微服务可以独立治理一个或多个业务领域。
+* **下游业务服务零侵入、零依赖 (Zero-Dependency Downstream Utility Services)**：只有担任领域编排器的微服务需要引入 StackSaga 依赖。所有被调用的下游参与服务（如 `inventory-service`、`user-service`）依然是普通的纯粹微服务，对外暴露标准的 REST、gRPC 或 GraphQL 接口，**无需编写任何一行 StackSaga 框架代码，亦无需引入任何 JAR 包**。系统技术改造平滑、渐进且零污染。
 
-=== 2. Dual Long-Running Transaction (LRT) Models
-Real-world enterprise processes require different execution dynamics:
-* *Continuous LRT (Straight-Through Processing - STP)*: For fully automated, high-throughput workflows that run unbroken from start to finish (e.g. e-commerce checkout, financial payment processing).
-* *Pausable LRT (Wait-States & Human-in-the-Loop - HITL)*: Intentionally pauses transactions at business milestones—such as waiting for external asynchronous payment webhooks, restaurant physical order confirmations, or manager/KYC manual approvals—releasing 100% of CPU worker threads while safely sleeping in the Event Store.
+=== 2. 双重长事务 (LRT) 运行模型
+现实世界中的企业级业务流程存在截然不同的执行动力学特征：
+* *连续长事务 (Continuous LRT / 直通式处理 Straight-Through Processing, STP)*：面向完全自动化、高并发、瞬时从头跑到尾的极速流水线（如电商即时下单结算、秒级金融支付）。
+* *可暂停长事务 (Pausable LRT / 业务等待态与人机协同 Human-in-the-Loop, HITL)*：允许事务在特定里程碑处主动安全暂停挂起 —— 例如等待外部异步支付回调通知 (Webhook)、等待门店前台人工确认出餐、或等待主管风控/KYC 人工审核签批。在等待期间，事务安全休眠在事件存储中，**释放 100% 的 CPU 工作线程与内存**。
 
-NOTE: Both Continuous LRT (STP) and Pausable LRT (HITL) execution models are first-class capabilities across *both* the *Synchronous (REST/HTTP)* and *StackSaga-Kafka (Event-Driven)* implementations.
+NOTE: 连续长事务 (STP) 与可暂停长事务 (HITL) 两种执行模型，在*同步实现 (REST/HTTP)*与*异步实现 (StackSaga-Kafka)*中均属于原生一等公民支持的核心能力。
 
-=== 3. Durable Event Sourcing & Pristine State Restoration
-Every state transition of the `SagaDomainEntity` is immutably recorded in the Event Store.
-If an orchestrator node crashes or is redeployed mid-transaction, execution is resumed with zero data loss.
-Furthermore, if a paused executor re-executes after a timeout, the engine discards uncommitted in-memory mutations and restores the domain entity to its pristine original snapshot, guaranteeing deterministic idempotency.
+=== 3. 持久化事件溯源与无损状态还原
+`SagaDomainEntity`（领域实体）的每一次微小状态演进都会以不可变事件的形式追加落盘至事件存储 (Event Store) 中。
+即使编排器物理节点在事务执行中途发生宕机崩溃、重启或被 Kubernetes 抢占迁移，新节点接管后能够以零数据丢失的确定性继续恢复执行。
+此外，若已暂停的执行器在超时重试时重新执行，引擎会自动丢弃堆内存中未提交的脏变更，将领域实体精准还原为上一个合法物理快照，从而为业务代码提供天然的幂等性保护。
 
-=== 4. Self-Healing Distributed Retries
-Transient network blips and downstream service downtime are handled automatically.
-The Ring Coordinator partition topology coordinates retry schedules across all active orchestrator nodes, ensuring that stalled spans are self-healed without duplicate execution or thread starvation.
+=== 4. 自愈型分布式重试机制
+瞬时的网络抖动、网络分区或下游服务的短暂停机全部由框架自动接管。
+基于 Murmur3 虚拟哈希环的重试协调拓扑负责将重试任务均匀调度至所有存活的编排器实例，确保停滞的事务能够自愈收敛，绝不发生重复执行或线程饥饿。
 
-=== 5. Spring Boot Native (Imperative & Reactive)
-StackSaga is purpose-built for the Spring Boot ecosystem.
-It offers first-class support for both imperative (Spring MVC / blocking) and reactive (Spring WebFlux / Project Reactor `Mono`/`Flux`) paradigms through unified, fluent APIs (`SagaTemplate`).
+=== 5. Spring Boot 原生血统（命令式与响应式全栈支持）
+StackSaga 专为 Spring Boot 生态深度量身定制。
+它通过高度流畅的流式 API (`SagaTemplate`)，为传统的命令式阻塞模型（Spring MVC / Servlet 线程池）与现代响应式非阻塞模型（Spring WebFlux / Project Reactor `Mono`/`Flux`）提供完全对等的原生支持。
 
-=== 6. Enterprise Observability & Compliance
-Every transaction carries a complete audit trail: which service was invoked, what payload was sent, exact timestamps, and compensation logs.
-With the built-in Trace Window dashboard, operations and support teams gain instant visibility into live distributed transactions.
+=== 6. 金融级可审计性与合规可观测性
+每一笔分布式事务都保留有不可篡改的完整审计全景图：在哪个微秒调用了哪个微服务、请求与响应报文详情、执行耗时、以及逆向补偿日志。
+借助开箱即用的 Trace Window 控制台，技术支持与运维团队能够实时透视所有进行中的分布式事务，告别盲人摸象。
 
-== Summary: StackSaga at a Glance
+== 核心总结：StackSaga 全景一览 (StackSaga at a Glance)
 
 [cols="1,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Dimension | StackSaga Advantage
+| 核心维度 | StackSaga 独特架构优势
 
-| *Architecture*
-| Domain-Centric Orchestration: Embedded directly in standard domain microservices without dedicated orchestration servers; downstream services remain zero-dependency.
+| *架构拓扑*
+| 领域内嵌式编排 (Domain-Centric)：直接内嵌于业务微服务中，无需独立集中编排服务器；下游被调服务完全零侵入、零依赖。
 
-| *Execution Models*
-| Supports both Continuous LRT (STP) and Pausable LRT (Human-in-the-Loop / Webhooks) natively across both Synchronous and Kafka implementations.
+| *执行模型*
+| 原生支持连续直通长事务 (STP) 与可暂停人机协同长事务 (HITL / 异步 Webhook)，全面覆盖同步与 Kafka 架构。
 
-| *State Management*
-| Native Event Sourcing using existing relational databases (MySQL, PostgreSQL, Oracle).
+| *状态管理*
+| 原生事件溯源 (Event Sourcing)，直接复用企业现有的关系型数据库（MySQL、PostgreSQL、Oracle）作为事件存储。
 
-| *Fault Tolerance*
-| Automatic backward compensation (`doRevert`) and forward self-healing retries.
+| *容错韧性*
+| 全自动逆向补偿 (`doRevert`) 与正向自愈重试，彻底消除分布式事务悬挂。
 
-| *Cluster Resiliency*
-| Token ring partitioning ensures conflict-free retry execution across orchestrator instances.
+| *集群协调*
+| 虚拟哈希令牌环无锁分区，确保在多实例高并发重试调度时无竞态条件、无单点锁竞争。
 
-| *Developer Experience*
-| Spring Boot starter with type-safe `CommandExecutor` and `QueryExecutor` abstractions.
+| *开发体验*
+| 深度集成 Spring Boot，提供强类型 `CommandExecutor` 与 `QueryExecutor` 面向对象高级抽象。
 
-| *Observability*
-| Real-time visual tracing, timeline inspection, and manual operator interventions via Trace Window.
+| *可观测性*
+| 依托 Trace Window 控制台实现毫秒级实时链路透视、状态快照审计与运维人工兜底恢复。
 |===

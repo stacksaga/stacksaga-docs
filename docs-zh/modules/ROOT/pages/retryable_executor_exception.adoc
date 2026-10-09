@@ -1,40 +1,41 @@
-= RetryableExecutorException [[retryable_executor_exception]]
+= 可重试执行器异常 (RetryableExecutorException) [[retryable_executor_exception]]
 
-If you are having an exception while processing the executor due to a connection issue or that kind of re-invokable error (The exceptions that can be occurred temporarily), you can throw a `RetryableExecutorException`.
-Then the StackSaga engine will temporarily pause the execution, and the transaction does expose to the next scheduler.
-Because, the engine knows that even though the executor has an exception at this moment, the execution can be retried and run again successfully due to the retractable error.
-IF you were unable to catch the exception properly, the execution might throw `RuntimeException` s.
-That kind of unhandled exception will be caught as non-retryable exception by the StackSaga engine.
-IF the exception is a *non-retryable* error, you can throw it by warping with xref:non_retryable_executor_exception.adoc[].
+如果您在执行器执行过程中遭遇了网络连接抖动、下游服务暂时不可用或类似的可重试瞬时错误（即稍后再次调用便有大概率成功恢复的瞬态异常），您可以主动抛出 `RetryableExecutorException`。
+此时，StackSaga 引擎将暂时挂起当前正向推进，并将该事务暴露给下一次分布式调度窗口进行自动重试。
+因为引擎通过该异常语义明确知晓：尽管执行器在当前这一毫秒发生了失败，但该错误属于暂时性波动，通过稍后重试完全可以安全自愈。
 
-*Retryable Executor Exceptions* are allowed for the following executors.
+如果您未在代码中妥善捕获此类网络异常，方法可能会直接向上抛出未经处理的 `RuntimeException`。
+所有未受控的运行时异常将被 StackSaga 引擎默认捕获并视为**非可重试异常**，进而直接触发逆向回滚。
+因此，如果错误属于不可重试的业务硬性失败，您应当显式将其包装为 xref:non_retryable_executor_exception.adoc[NonRetryableExecutorException] 抛出。
+
+*可重试执行器异常 (RetryableExecutorException)* 允许在以下执行器的具体方法中抛出：
 
 [cols="*,*,*"]
 [.google-anno-skip]
 |===
-|Executor |DoProcess() Method|doRevert() Method
+|执行器类型 |doProcess() 方法|doRevert() 方法
 
-|Query Executor
-|✔
-|✔
-
-|Command Executor
+|Query Executor (查询执行器)
 |✔
 |✔
 
-|Revert Before Executor
+|Command Executor (指令执行器)
+|✔
+|✔
+
+|Revert Before Executor (前置回滚执行器)
 |✔
 |
 
-|Revert After Executor
+|Revert After Executor (后置回滚执行器)
 |✔
 |
 
 |===
 
-IMPORTANT: It is very important to identify whether the exception is a retryable exception or not.
-If you don't identify the exceptions that are thrown when the execution is executed every time that an exception is thrown, the transaction will be stopped to forward.
-Therefore, it is necessary to capture and identify all the exceptions that are thrown inside the `doProcess()` method.
+IMPORTANT: 精准识别异常是否具备可重试性至关重要。
+如果在执行业务调用时未对抛出的瞬态异常进行区分捕获，任何一次偶发的网络超时都会导致整个分布式事务过早放弃正向推进并触发不必要的全链路回滚。
+因此，强烈建议在 `doProcess()` 方法内部妥善捕获下游客户端（如 Feign、WebClient）抛出的连接级异常并包装为 `RetryableExecutorException`。
 
 [source,java]
 ----
@@ -59,6 +60,7 @@ public class CheckUserExecutor implements QueryExecutor<OrderDomainEntity> {
             ResponseEntity<UserDetailDto> userDetail = this.userService.getUserDetail(domainEntity.getUsername());
             ...
         } catch (FeignException.ServiceUnavailable unavailableException) {
+            // 捕获下游服务暂时不可用（503）异常，包装为可重试异常抛出
             throw RetryableExecutorException.of(unavailableException);
         }
     }

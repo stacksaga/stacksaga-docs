@@ -1,66 +1,61 @@
 [[classification_of_saga_transactions]]
-== Classification of SAGA transactions
+== Saga 事务分类 (Classification of SAGA transactions)
 
-According to the behaviors of the transaction, we can mainly identify 3 transaction types that can be happened when we use saga.
+根据事务的运行时行为与最终结果，在使用 Saga 设计模式时，我们主要可以识别出 3 种典型的事务执行场景：
 
-* *Success transactions*
-* *Compensating/Revert success transactions*
-* *Compensating/Revert failed transactions*
-
+* *完全成功事务 (Successful transactions)*
+* *补偿成功事务 (Compensating/Revert success transactions)*
+* *补偿失败事务 (Compensating/Revert failed transactions)*
 
 [[success_transaction]]
-=== icon:circle[role=green,1x] Successful Transactions (Primary Execution Success Transactions)
+=== icon:circle[role=green,1x] 完全成功事务 (Primary Execution Success Transactions)
 
-image:stacksaga-diagram-fully-successfull-transaction.svg[alt="stacksaga diagram successfull transaction"]
+image:stacksaga-diagram-fully-successfull-transaction.svg[alt="StackSaga 成功事务执行流程图"]
 
-NOTE: `GET_USER_DETAIL` is not considered as an atomic transaction.
-It's just a query operation to get the user information. refer to xref:query-operation[Query Operation] for more details.
+NOTE: `GET_USER_DETAIL` 不被视为原子事务 (Atomic Transaction)。它仅是一个获取用户信息的只读查询操作。详情请参阅查询操作说明。
 
-Here we have 4 executions (3 atomic transactions) with 4 microservices.
-The entire transaction(Business transaction) will be completed after successfully executing the 4th atomic execution.
-All the primary executions are done successfully as we accepted those kind of transactions are called as *Successful transactions*.
+在上图中，业务流程涉及 4 个微服务并包含 4 次执行（其中 3 个为写入型原子事务）。
+整个业务事务（Business Transaction）在成功执行完第 4 个原子步骤后宣告完成。
+当所有正向主执行逻辑全部按预期成功执行时，这类事务被称为*完全成功事务 (Successful transactions)*。
 
-Here is the summarized diagram for Success transaction.
+完全成功事务的架构摘要图如下所示：
 
-image:fully-success-transaction-summary.svg[alt="Successful Transaction Summary",height=300]
+image:fully-success-transaction-summary.svg[alt="完全成功事务架构摘要图",height=300]
 
 [[revert_success_transaction]]
-=== icon:circle[role=yellow,1x] Compensating Success Transaction
+=== icon:circle[role=yellow,1x] 补偿成功事务 (Compensating Success Transaction)
 
-image:stacksaga-diagram-revert-successfull-transaction.svg[alt="stacksaga diagram revert successfull transaction"]
+image:stacksaga-diagram-revert-successfull-transaction.svg[alt="StackSaga 补偿成功事务执行流程图"]
 
-At this time, An exception occurred when make payment execution is executed.
-Then the primary executions process is stopped due to the error, and the compensating process is started to undo the successfully executed executions so far.
-And finally, the compensating process is also completed.
+在该场景中，当执行到支付扣款步骤 (`MAKE_PAYMENT`) 时发生了异常。
+正向主执行流程随即因错误中断，Saga 引擎立即触发逆向补偿流程，按反向顺序撤销此前所有已经成功执行的步骤。
+最终，逆向补偿流程全部顺利执行完毕。
 
-Even though this is a failed transaction from the business perspective, this is one of the successful transaction types from the Saga perspective.
-Because we have managed to keep the eventually consistent state by compensating the successfully executed transactions.
+从业务视角来看，这虽然是一笔失败的业务操作；但从 Saga 架构与数据一致性的视角来看，它属于**架构上的成功事务**。
+因为系统通过对先前已提交的局部事务进行精准补偿，成功维护了分布式环境下的**最终一致性 (Eventual Consistency)**，没有任何脏数据残留。
 
-Here is the summarized diagram for compensating successful transaction.
+补偿成功事务的架构摘要图如下所示：
 
-image:revert-success-transaction-summary.svg[alt="Revert Success Transaction Summary",height=300]
+image:revert-success-transaction-summary.svg[alt="补偿成功事务架构摘要图",height=300]
 
 '''
 
 [[revert_failed_transaction]]
-=== icon:circle[role=red,1x] Compensating Failed Transaction
+=== icon:circle[role=red,1x] 补偿失败事务 (Compensating Failed Transaction)
 
-image:stacksaga-diagram-revert-failed-transaction.svg[alt="stacksaga diagram revert failed transaction"]
+image:stacksaga-diagram-revert-failed-transaction.svg[alt="StackSaga 补偿失败事务执行流程图"]
 
-At this time, An exception occurred when make payment execution is executed.
-Then the primary executions process is stopped due to the error, and the compensating process is started to undo the successfully executed executions so far.
-While then, unfortunately, an error occurred in compensating the process called *CANCEL_ORDER*.
+在该场景中，正向执行到支付扣款 (`MAKE_PAYMENT`) 时发生了异常。
+正向流程终止并启动逆向补偿流程以回滚前面的操作。
+然而，在执行取消订单 (`CANCEL_ORDER`) 的补偿逻辑时，补偿动作本身不幸发生了故障。
 
-IMPORTANT: This scenario represents a theoretical edge case in distributed systems, developers should implement robust error handling to prevent compensating transaction failures.
-Compensating transactions must maintain idempotency and should only fail due to transient infrastructure issues such as xref:ROOT:[Resource Unavailability problem].
-When encountering resource unavailability, implement exponential backoff retry mechanisms with circuit breakers to ensure eventual consistency is achieved once resources become available.
+IMPORTANT: 此场景代表了分布式系统中的理论边缘情况 (Edge Case)。开发者应实现健全的错误处理与防错设计，最大限度避免补偿事务本身的业务失败。
+补偿事务必须严格保持**幂等性 (Idempotency)**，且理论上仅应因瞬时基础设施故障（如资源不可用问题 / Resource Unavailability）而失败。
+当遭遇下游服务暂时不可用或网络抖动时，应结合指数退避重试机制 (Exponential Backoff Retry) 与断路器 (Circuit Breakers)，确保在基础设施恢复后最终达成一致性。
 
-TIP: Don't worry about handling those complex situations.
-Stacksaga provides the way that you can manage them easily.
+TIP: 不必担心如何手动处理这些复杂的异常状态。
+StackSaga 提供了开箱即用的重试协调机制与隔离存储，使您可以轻松管理这些异常情况。
 
-Here is the summarized diagram for compensating failed transaction.
+补偿失败事务的架构摘要图如下所示：
 
-image:revert-failed-transaction-summary.svg[alt="Revert Failed Transaction Summary",height=300]
-
-
-
+image:revert-failed-transaction-summary.svg[alt="补偿失败事务架构摘要图",height=300]

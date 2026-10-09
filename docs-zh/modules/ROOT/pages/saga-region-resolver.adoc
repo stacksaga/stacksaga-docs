@@ -1,76 +1,76 @@
-:description: Comprehensive guide to instance region configuration and SagaRegionResolver in StackSaga. Covers 12-bit UUIDv7 region embedding, static name confirmation vs. properties, default fallback, and multi-region custom implementations.
-:keywords: stacksaga, SagaRegionResolver, stacksaga.instance.region, UUIDv7, multi-region, region code, architecture, fail-fast, ValidationException
+:description: StackSaga 实例地域配置与 SagaRegionResolver 全景指南。涵盖 UUIDv7 12-bit 地域嵌入、静态名称校验 vs 动态配置、默认回退策略以及多地域自定义实现。
+:keywords: stacksaga, SagaRegionResolver, stacksaga.instance.region, UUIDv7, 多地域, 区域代码, 架构设计, 快速失败, ValidationException
 
-= Instance Region Resolution & SagaRegionResolver
+= 实例地域解析与 SagaRegionResolver (Instance Region Resolution & SagaRegionResolver)
 
 [.lead]
-In the StackSaga distributed ecosystem, every instance—whether an Orchestrator (Synchronous or Kafka), Worker, Ring-Coordinator Master, Ring-Coordinator Slave, or Trace-Window Connector—declares its operational locality via the `stacksaga.instance.region` configuration property.
+在 StackSaga 分布式生态系统中，每一个实例节点 —— 无论它是同步编排器 (Synchronous Orchestrator)、Kafka 编排器、Worker 算子节点、重试环协调器主节点 (Master)、从节点 (Slave)，还是 Trace-Window 连接器 —— 均通过 `stacksaga.instance.region` 配置属性显式声明其所属的物理/逻辑运行地域。
 
-Far from being an inert metadata label, the region is an active, fundamental architectural boundary:
-it isolates token-ring retry topologies, governs database keyspace partitions, determines cluster membership handshakes, and is directly encoded into every transaction identifier (`SagaUUID`) across your distributed systems.
+地域绝非仅仅是一个静态的元数据标签，而是系统底层最基础、最关键的架构物理边界：
+它负责隔离虚拟哈希令牌环重试拓扑、划分数据库底层 Keyspace/表物理分区、裁定集群成员间握手协议，并且直接硬编码嵌入到分布式系统中每一笔事务的全局唯一标识符 (`SagaUUID`) 之中。
 
-To guarantee safety, zero configuration drift, and bidirectional reverse resolution, StackSaga enforces the `SagaRegionResolver` contract across all instance types in the ecosystem.
+为了保证绝对的运行期安全性、杜绝环境配置漂移，并实现 O(1) 的双向双射逆向解析，StackSaga 在全生态所有实例类型上强制推行了 `SagaRegionResolver` 契约规范。
 
 '''
 
 [[why-static-name-confirmation]]
-== Why Static Name Confirmation Instead of Dynamic Properties?
+== 为什么采用静态代码双向确认而非动态配置属性？(Why Static Name Confirmation Instead of Dynamic Properties?)
 
-A common question is: _"Why does StackSaga require a compiled `SagaRegionResolver` interface and static name confirmation, instead of simply allowing developers to provide arbitrary region strings and codes via `application.yml`?"_
+开发者经常提出的一个疑问是：_“为什么 StackSaga 强制要求实现编译期的 `SagaRegionResolver` 接口并进行静态双向确认，而不是直接允许在 `application.yml` 中随意配置任意地域字符串和数字代号？”_
 
-StackSaga intentionally rejects free-form, unvalidated property definitions for regions due to three architectural guarantees:
+StackSaga 在架构设计上有意拒绝了完全动态、未经验证的自由字符串配置，这是基于以下三项硬核架构保障考量：
 
-=== 1. Enforcing a Single Source of Truth Across Microservices
-In a distributed enterprise with dozens of microservices deployed across independent codebases, configuration files (`application.yml`, Helm charts, Kubernetes ConfigMaps, environment variables) are managed by different teams.
+=== 1. 在大规模微服务集群中强制维系“单一可信源 (Single Source of Truth)”
+在大型企业级分布式系统中，数十个微服务分布在不同的独立代码库中，配置文件（`application.yml`、Helm Charts、Kubernetes ConfigMaps、环境变量）由不同的团队分别维护。
 
-If region mappings were configured via ad-hoc strings in properties files:
+如果地域映射仅仅通过分散在配置文件中的自由字符串来约定：
 
-* *Typos and naming variations* — One team defines `region: us-east-1`, another writes `useast-1`, a third specifies `us_east_1`, and a fourth uses `US-EAST-1`.
-* *Code collisions* — One team assigns `region-code: 1` to `us-east-1`, while another team assigns `region-code: 1` to `eu-west-1`.
+* *拼写笔误与命名风格冲突* —— 一个团队写 `region: us-east-1`，另一个团队写 `useast-1`，第三个团队写 `us_east_1`，第四个团队写 `US-EAST-1`。
+* *数字代号冲突* —— 某个团队将 `region-code: 1` 分配给 `us-east-1`，而另一个团队误将 `region-code: 1` 分配给了 `eu-west-1`。
 
-By requiring an implementation of the Java contract `SagaRegionResolver`, an enterprise can publish a centralized shared library (or shared enum) containing all approved corporate regions and their assigned integer codes.
-Every microservice imports this library and registers the resolver bean.
-If any deployment manifest contains a typo (such as `region: us-eat-1`), the application fails fast at startup before processing any transactions.
+通过强制要求实现 Java 强类型契约 `SagaRegionResolver`，企业可以发布一个共享的基础库（或共享 Enum），统一定义公司所有批准的法定数据中心地域及其分配的唯一整型代号。
+所有微服务统一引入该基础库并注入 Resolver Bean。
+如果任何部署清单中出现哪怕一个字符的拼写错误（例如 `region: us-eat-1`），应用程序将在 Spring Boot 启动阶段**立即快速失败 (Fail-Fast)**，在造成任何账目污染前中止启动。
 
-=== 2. Transaction ID Permanence & Reverse Resolution
-StackSaga transactions persist in event stores (Cassandra, MySQL, PostgreSQL), Kafka topics, and log aggregators.
-The numeric region code is permanently encoded into the 12-bit payload of the transaction's `UUIDv7` (see xref:#uuidv7-region-encoding[]).
+=== 2. 事务 ID 的永久自解释性与逆向解析 (Reverse Resolution)
+StackSaga 事务会持久化保存在事件存储（Cassandra、MySQL、PostgreSQL）、Kafka Topics 以及海量日志数据湖中。
+数值型的地域代码会被永久嵌入到每笔事务的 `UUIDv7` 的 12-bit 载荷中（参见 xref:#uuidv7-region-encoding[UUIDv7 12-Bit 地域编码]）。
 
-When an operator, monitoring tool, or the StackSaga Trace-Window inspects a historical transaction ID (even years later):
+当运维团队、监控平台或 StackSaga Trace-Window 在多年后排查一笔历史事务 ID 时：
 
-* The system extracts the 12-bit integer from the UUID: `SagaUUID.regionOf(uuid)`.
-* It calls `sagaRegionResolver.getRegionNameByCode(code)` to immediately restore the human-readable region name (`"us-east-1"`).
-* This lookup runs in O(1) time in memory without requiring a database query or an external lookup service.
+* 系统直接从 UUID 中提取 12-bit 整数：`SagaUUID.regionOf(uuid)`。
+* 直接在内存中调用 `sagaRegionResolver.getRegionNameByCode(code)`，毫秒级还原出人类可读的法定地域名称（`"us-east-1"`）。
+* 该查找直接在内存中以 O(1) 时间复杂度完成，完全不需要查询远程数据库或依赖外部注册中心服务。
 
-If region definitions were loose strings in properties files that changed over time, historical transaction IDs would lose their geographical identity.
+如果地域定义只是随时间漂移的散乱配置文件字符串，历史长河中的事务 ID 将彻底失去其地理溯源标识。
 
-=== 3. Symmetrical Bijective Invariant (Fail-Fast Verification)
-The framework enforces that the resolver is strictly bijective (a 1-to-1 two-way mapping).
-During Spring Boot startup, the framework executes a round-trip test:
+=== 3. 对称双射不变量校验（启动期快速失败防御）
+框架强制校验 Resolver 必须是一个严格的双射映射（Bijective Mapping，即 1-to-1 的确定性双向映射）。
+在 Spring Boot 应用启动时，框架会自动执行一次双向回环断言测试：
 
 [source,text]
 ----
-Name -> getRegionCodeByName(Name) -> Code -> getRegionNameByCode(Code) -> Confirmed Name
+地域名称 -> getRegionCodeByName(名称) -> 地域代号 -> getRegionNameByCode(代号) -> 确认名称
 ----
 
-If `Confirmed Name` does not equal `Name`, or if two different names produce the same code, startup aborts immediately with a `ValidationException`.
+如果校验得出的 `确认名称` 与原 `地域名称` 不相等，或者有两个不同的名称映射到了同一个代号，系统启动将直接中止并抛出 `ValidationException`。
 
 '''
 
 [[uuidv7-region-encoding]]
-== Self-Describing Transaction IDs: 12-Bit Region Encoding in UUIDv7
+== 自解释型事务 ID：UUIDv7 中的 12-Bit 地域编码 (UUIDv7 Region Encoding)
 
-StackSaga generates canonical transaction identifiers via `SagaUUID`, formatted as `<prefix>-<UUIDv7>` (for example, `ordr-0195655a-350f-786d-96eb-63c1dfc6e9ba`).
+StackSaga 通过 `SagaUUID` 生成标准事务标识符，标准格式为 `<前缀>-<UUIDv7>`（例如 `ordr-0195655a-350f-786d-96eb-63c1dfc6e9ba`）。
 
-Under RFC 9562, a time-ordered `UUIDv7` structure consists of:
+在 RFC 9562 规范中，按时间有序递增的 `UUIDv7` 内部结构如下：
 
-* *48 bits* — Unix epoch timestamp in milliseconds.
-* *4 bits* — Version indicator (`0111` for version 7).
-* *12 bits* — `rand_a` field.
-* *2 bits* — Variant indicator (`10`).
-* *62 bits* — Random entropy (`rand_b`).
+* *48 bits* — 毫秒精度的 Unix Epoch 时间戳。
+* *4 bits* — 版本标识位（版本 7 为 `0111`）。
+* *12 bits* — `rand_a` 字段。
+* *2 bits* — 变体指示位（`10`）。
+* *62 bits* — 随机熵位 (`rand_b`)。
 
-StackSaga utilizes the 12-bit `rand_a` space (4,096 values, from `0` to `4095` / `0x000` to `0xFFF`) to embed the numeric region code:
+StackSaga 创造性地利用了其 12-bit 的 `rand_a` 空间（共 4,096 个可用数值，范围从 `0` 到 `4095` / `0x000` 到 `0xFFF`）来直接嵌入数值型地域代码：
 
 [source,text]
 ----
@@ -79,7 +79,7 @@ StackSaga utilizes the 12-bit `rand_a` space (4,096 values, from `0` to `4095` /
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                           unix_ts_ms                          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|          unix_ts_ms           |  ver  |      region_code      | <- 12-bit region (0..4095)
+|          unix_ts_ms           |  ver  |      region_code      | <- 12-bit 地域代号 (0..4095)
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |var|                         rand_b                            |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -87,19 +87,19 @@ StackSaga utilizes the 12-bit `rand_a` space (4,096 values, from `0` to `4095` /
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ----
 
-Whenever a transaction is initiated (`SagaTemplate.init(...)`), the engine resolves the current node's region code via `SagaRegionResolver` and writes it into the low 12 bits of the UUID's Most Significant Bits (MSB).
+每当通过 `SagaTemplate.init(...)` 初始化一笔新事务时，引擎通过 `SagaRegionResolver` 获取当前节点的地域代码，并将其直接写入 UUID 高半区最高有效位 (MSB) 的低 12 位中。
 
-Consequently:
+因此带来如下巨大收益：
 
-* Any node or utility can invoke `SagaUUID.regionOf(UUID id)` or `sagaUUID.getRegionCode()` to extract the exact region code without database overhead.
-* Routing rules, cell isolation boundaries, and cross-datacenter event streams can filter and dispatch transactions based on their embedded region code.
+* 任何节点或第三方工具均可通过 `SagaUUID.regionOf(UUID id)` 或 `sagaUUID.getRegionCode()` 直接提取地域代号，零数据库开销。
+* 路由分流网关、单元化隔离边界以及跨机房消息流，可以直接根据事务 ID 内部自带的地域代码执行精准分流与过滤。
 
 '''
 
 [[the-saga-region-resolver-contract]]
-== The `SagaRegionResolver` Interface Contract
+== `SagaRegionResolver` 接口契约规范
 
-The contract is defined in `org.stacksaga.api.SagaRegionResolver`:
+该核心接口定义位于 `org.stacksaga.api.SagaRegionResolver`：
 
 [source,java]
 ----
@@ -108,44 +108,44 @@ package org.stacksaga.api;
 public interface SagaRegionResolver {
 
     /**
-     * Resolves a human-readable region name to its numeric 12-bit code (0..4095).
+     * 将人类可读的地域名称解析为其对应的 12-bit 整数代码 (0..4095)。
      *
-     * @param regionName the region name string (e.g., "default", "us-east-1")
-     * @return the unique integer region code
+     * @param regionName 地域名称字符串 (例如 "default", "us-east-1")
+     * @return 唯一的整型地域代码
      */
     int getRegionCodeByName(String regionName);
 
     /**
-     * Resolves a numeric region code back to its canonical region name string.
+     * 将 12-bit 整型地域代码还原为其规范的地域名称字符串。
      *
-     * @param regionCode the 12-bit integer region code (0..4095)
-     * @return the canonical region name string
+     * @param regionCode 12-bit 整型地域代码 (0..4095)
+     * @return 规范的地域名称字符串
      */
     String getRegionNameByCode(int regionCode);
 }
 ----
 
-=== Strict Contract Rules
+=== 必须遵守的严格契约法则
 
-1. *Bijective Mapping* — Every supported `regionName` must map to one unique `regionCode`, and every `regionCode` must map back to the identical `regionName`.
-2. *Code 0 is Reserved* — Region code `0` is strictly reserved for the `"default"` region. Custom regions must never return `0`.
-3. *Valid Code Range* — All custom region codes must fall strictly in the range 1 to 4095 (`0x001` through `0xFFF`).
-4. *Consistency* — All participating nodes in a cluster (Orchestrators, Ring Coordinators, Workers) must share identical resolver mappings.
+1. *严格双射映射 (Bijective Mapping)* — 每一个支持的 `regionName` 必须映射到一个唯一的 `regionCode`，且该 `regionCode` 必须能完全逆向还原出完全相同的 `regionName`。
+2. *代码 0 保留保留* — 代码 `0` 是框架专门保留给 `"default"` 默认单地域的保留值。任何自定义地域绝不可返回 `0`。
+3. *合法数值区间* — 所有自定义地域代码必须严格位于 1 到 4095 之间（`0x001` 至 `0xFFF`）。
+4. *全集群一致性* — 在同一集群或跨服务通信网络中的所有节点（编排器、协调器、Worker），必须完全共享相同的 Resolver 映射规则。
 
 '''
 
 [[default-auto-configuration]]
-== Default Auto-Configuration Behavior
+== 默认自动装配行为 (Default Auto-Configuration Behavior)
 
-StackSaga provides out-of-the-box support for single-region and development deployments without requiring manual resolver registration.
+为了方便本地快速开发或单地域场景，StackSaga 提供了开箱即用的默认自动配置，无需手动注入 Resolver。
 
-In `StackSagaStarterAutoConfiguration`:
+在 `StackSagaStarterAutoConfiguration` 中：
 
-* A fallback bean named `defaultSagaRegionResolver` is registered with `@ConditionalOnMissingBean(SagaRegionResolver.class)`.
-* By default, it maps `"default"` (case-insensitive) to code `0`:
-  - `getRegionCodeByName("default")` -> `0`
-  - `getRegionNameByCode(0)` -> `"default"`
-* If any region name other than `"default"` is encountered, the default resolver throws a `RuntimeException`:
+* 框架通过 `@ConditionalOnMissingBean(SagaRegionResolver.class)` 默认注册了一个兜底 Bean `defaultSagaRegionResolver`。
+* 默认情况下，它将 `"default"`（不区分大小写）映射至代码 `0`：
+  - `getRegionCodeByName("default")` $\rightarrow$ `0`
+  - `getRegionNameByCode(0)` $\rightarrow$ `"default"`
+* 如果在配置中遇到了除 `"default"` 以外的任意未声明地域名，默认解析器会直接抛出明确的异常阻断启动：
 +
 [source,text]
 ----
@@ -155,17 +155,17 @@ Please provide a custom SagaRegionResolver bean for other region names like [us-
 
 [NOTE]
 ====
-If your application uses `stacksaga.instance.region=default` (or leaves it as default), you do not need to declare a custom `SagaRegionResolver` bean.
+如果您的应用程序配置为 `stacksaga.instance.region=default`（或完全省略该属性使用默认值），您完全不需要手动声明任何自定义的 `SagaRegionResolver` Bean。
 ====
 
 '''
 
 [[implementing-custom-resolver]]
-== Implementing a Custom `SagaRegionResolver`
+== 如何实现自定义 `SagaRegionResolver`
 
-When deploying multi-region or named-region environments (such as `us-east-1`, `eu-west-1`, or `ap-south-1`), you must declare a Spring `@Bean` implementing `SagaRegionResolver`.
+当面向多地域云原生环境（如 `us-east-1`、`eu-central-1`、`ap-southeast-1`）进行生产部署时，您必须声明一个实现 `SagaRegionResolver` 的 Spring `@Bean`。
 
-The recommended pattern is to define an enterprise enum representing your organization's valid regions:
+推荐的最佳工程实践是定义一个代表企业合法地域的强类型 Java 枚举：
 
 [source,java]
 ----
@@ -177,7 +177,6 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.Arrays;
 import java.util.Map;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Configuration
@@ -215,7 +214,7 @@ public class StackSagaRegionConfiguration {
                 Integer code = nameToCode.get(regionName);
                 if (code == null) {
                     throw new IllegalArgumentException(
-                        "Unrecognized region name: '" + regionName + "'. Valid regions are: " + nameToCode.keySet()
+                        "无法识别的地域名称: '" + regionName + "'. 支持的合法地域为: " + nameToCode.keySet()
                     );
                 }
                 return code;
@@ -226,7 +225,7 @@ public class StackSagaRegionConfiguration {
                 String name = codeToName.get(regionCode);
                 if (name == null) {
                     throw new IllegalArgumentException(
-                        "Unrecognized region code: '" + regionCode + "'. Valid codes are: " + codeToName.keySet()
+                        "无法识别的地域代码: '" + regionCode + "'. 支持的合法代码为: " + codeToName.keySet()
                     );
                 }
                 return name;
@@ -237,47 +236,47 @@ public class StackSagaRegionConfiguration {
 ----
 
 [CAUTION]
-.Ecosystem-Wide Consistency Requirement
+.全生态一致性法则
 ====
-All microservices operating in or coordinating with the same region (Orchestrators, Workers, and Ring Coordinators) must share an identical region-to-code mapping. Packaging your custom `SagaRegionResolver` into a shared internal starter or corporate commons library guarantees this alignment across all services.
+所有在同一地域协同运行或相互通信的微服务节点（编排器、Worker 算子、重试协调器），必须完全共享相同的地域至代码映射表。将您的自定义 `SagaRegionResolver` 封装到公司内部统一的 `company-common-starter` 共享基础库中，是保障全公司所有服务绝对一致的最佳实践。
 ====
 
 '''
 
 [[ecosystem-instance-types]]
-== Role Across StackSaga Instance Types
+== 在各类型 StackSaga 实例中的具体协作角色
 
-The `stacksaga.instance.region` property and `SagaRegionResolver` contract apply consistently across all instance types in the StackSaga ecosystem:
+`stacksaga.instance.region` 属性与 `SagaRegionResolver` 契约在整个生态的所有实例类型中扮演着严密的协作纽带角色：
 
 [cols="1s,3",options="header"]
 |===
-| Instance Type | How `stacksaga.instance.region` and Resolver are Used
+| 实例类型 | `stacksaga.instance.region` 与 Resolver 的实际运转职责
 
-| Synchronous Orchestrator
-| Embeds the resolved 12-bit `regionCode` into the transaction's `SagaUUID` upon initialization in `SagaTemplate.init(...)`. Establishes physical retry partition isolation in the event store.
+| 同步编排器 (Synchronous Orchestrator)
+| 在 `SagaTemplate.init(...)` 初始化时将解析出的 12-bit `regionCode` 写入事务 `SagaUUID`；在底层事件存储中建立物理重试隔离分区。
 
-| Kafka Orchestrator
-| Attaches the region and transaction ID to outbound command topics and callback event envelopes. Connects to regional Ring Coordinators for paused transaction retries.
+| Kafka 编排器 (Kafka Orchestrator)
+| 将地域代号及事务 ID 注入外发指令 Topic 及回调事件信封中；根据地域连接该地域专用的重试环协调器以管理暂停事务重试。
 
-| Worker Services
-| Registers instance discovery metadata with the regional cluster. Validates that incoming command envelopes correspond to compatible regional domains.
+| Worker 服务 (Worker Services)
+| 向所属地域注册集群实例发现元数据；严格校验接收到的指令信封是否来自受支持的合规地域。
 
-| Ring-Coordinator Master
-| Serves as the authoritative coordinator for a specific region. Rejects RSocket connections from any Slave or Orchestrator whose declared region does not match its own.
+| 重试环协调器主节点 (Ring-Coordinator Master)
+| 担任该物理地域内的权威协调核心；直接拒绝任何所声明地域不匹配的 Slave 节点或编排器的 RSocket 连接。
 
-| Ring-Coordinator Slave
-| Connects to the Master within the same region (`stacksaga.coordinator.slave.target-master.host`). Validates regional alignment during the initial RSocket connection handshake.
+| 重试环协调器从节点 (Ring-Coordinator Slave)
+| 仅向同地域内的 Master 发起连接建立链路 (`stacksaga.coordinator.slave.target-master.host`)；在初次 RSocket 握手阶段强制验证地域对齐。
 
-| Trace-Window Connector
-| Transmits instance region and cluster metadata to the Trace-Window dashboard, enabling operators to filter and inspect distributed traces across multi-region cells.
+| Trace-Window 连接器
+| 将当前实例的地域和集群元数据上报至 Trace-Window 控制台，使运维专家能够跨多地域多单元快速过滤与透视分布式事务追踪链路。
 |===
 
 '''
 
 [[related-documentation]]
-== Related Documentation
+== 相关参考文档
 
-* xref:implementations:stacksaga-sync/orchestrator/properties.adoc[Synchronous Orchestrator Configuration Properties]
-* xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc[Kafka Orchestrator Configuration Properties]
-* xref:retry-ring-coordinator:ring-coordinator.adoc[Retry Ring Coordinator Reference]
-* xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[Cassandra Regional Cell Isolation]
+* xref:implementations:stacksaga-sync/orchestrator/properties.adoc[同步编排器配置属性参考]
+* xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc[Kafka 编排器配置属性参考]
+* xref:retry-ring-coordinator:ring-coordinator.adoc[重试环协调器技术参考手册]
+* xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[Cassandra 地域单元化隔离架构]
