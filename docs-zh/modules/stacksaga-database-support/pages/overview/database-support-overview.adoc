@@ -1,77 +1,75 @@
-:description: Learn about Stacksaga Event Store, its benefits, configuration, and use cases in microservice architectures.
+:description: 了解 StackSaga 事件存储 (Event Store)、其在微服务架构中的核心优势、配置与使用场景。
 :keywords: saga desing pattern, spring boot, stacksaga, event store, microservices, event sourcing, retries, monitoring, database per service
 
-= Stacksaga Event Store
+= StackSaga 事件存储 (Event Store)
 
-An event store is a log or database designed to store a sequence of state changes (events), rather than just the final state.
-In stacksaga, #you are able to use your primary database as the event-store by providing a separate schema#, instead of managing a totally separate system or database for the event-store.
-it reduces the operational overhead and complexity of managing multiple databases.
+事件存储 (Event Store) 是一种专门设计用于存储连续状态变更事件（Events）而非仅保留最终状态的日志或数据库。
+在 StackSaga 中，#您可以直接通过划分独立 Schema 的方式复用您现有的主业务数据库作为事件存储#，而无需单独维护一套全新独立的数据库系统。
+这极大地降低了运维开销以及维护多套异构数据库的管理复杂度。
 
-In stacksaga you can configure the database for the event-store as the pattern of database per service.
+在 StackSaga 中，您可以按照每个微服务独立数据库 (Database per Service) 的标准微服务模式来配置事件存储。
 
-NOTE: Even though it is possible to have a single event-store for all services, it is not recommended in production environments due to potential performance bottlenecks and single points of failure and the microservice architecture principles.
+NOTE: 尽管技术上允许多个服务共用同一个集中式事件存储，但在生产环境中并不推荐这样做，因为这会引入潜在的性能瓶颈、单点故障风险，并且违背了微服务自治的设计原则。
 
-== What are the reasons for saving the states in the event-store?
+== 为什么要在事件存储中持久化事务状态？
 
-* *Reliable Retries*
+* *可靠的重试机制 (Reliable Retries)*
 +
-When an execution fails due to a `RetryableExecutorException` (such as network issues), StackSaga enables safe retries.
-In microservice architectures, failures like network errors should not be treated as final exceptions, since transactions often span multiple services, and any service may become temporarily unavailable.
-By persisting each transaction state in the event store, StackSaga ensures that failed executions can be retried reliably, reducing the risk of data loss or inconsistency.
+当执行因抛出 `RetryableExecutorException`（例如网络暂时闪断）而失败时，StackSaga 能够进行安全可靠的重试。
+在微服务架构中，诸如网络波动之类的瞬态故障绝不应直接视为不可挽回的最终异常，因为分布式事务通常横跨多个服务，任何下游服务都可能出现短时间不可用。
+通过在事件存储中持久化每个事务的中间执行状态，StackSaga 确保失败的执行能够可靠地断点重播重试，从而彻底规避数据丢失或状态不一致的风险。
 
-* *Analysis and Monitoring*
+* *追踪分析与监控审计 (Analysis and Monitoring)*
 +
-StackSaga provides a dashboard—xref:trace-window:stacksaga-trace-window.adoc[Stacksaga Trace-Window]—for monitoring transaction traces and reviewing errors.
-All displayed data is sourced from the event store, where transaction records are securely persisted for analysis and troubleshooting.
+StackSaga 提供了专门的可视化控制台——xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace-Window 链路追踪窗口]——用于实时监控事务追踪链路并审查排查错误。
+界面上展示的所有事务拓扑数据均源自事件存储，事务执行记录安全持久化于其中，供随时进行审计、分析与故障诊断。
 
-== StackSaga Database Support modules
+== StackSaga 数据库支持模块体系 (Database Support Modules)
 
-The `stacksaga-database-support` module family provides a pluggable persistence layer for applications built with the Stacksaga framework.
-It abstracts database-specific concerns (schema management, connection handling, idempotent saga state storage, compensating action logs, outbox/event persistence, etc.) so that Stacksaga core features (orchestration, retries, compensations, observability) function consistently across different storage backends.
-and also it provides the necessary APIs for accessing tracing details from the xref:trace-window:stacksaga-trace-window.adoc[].
-as the recorded approach you can choose the appropriate database support module based on your orchestrator service's primary database. +
-For instance, if Mysql database is used as the primary database of the orchestrator service, then the database support module should be `stacksaga-mysql-support`.
+`stacksaga-database-support` 模块家族为基于 StackSaga 框架构建的应用程序提供了可插拔的持久化层抽象。
+它将特定数据库的底层细节进行了抽象封装（包括 Schema 结构管理、数据库连接管理、幂等性 Saga 状态存储、补偿操作回滚日志、Outbox/事件持久化等），使得 StackSaga 的核心功能（流程编排、重试调度、补偿回滚、可观测性）能够在不同的底层存储引擎上完全一致地运行。
+同时，它还为 xref:trace-window:stacksaga-trace-window.adoc[] 提供了访问链路追踪详情所必需的内置 REST API。
+官方推荐的做法是：根据您编排器服务所采用的主业务数据库类型，选用对应的数据库支持模块。 +
+例如，如果编排器服务的主业务数据库是 MySQL，那么对应的支持模块即为 `stacksaga-mysql-support`。
 
-NOTE: As you can see in the diagram, the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Subsystem] sends the retrying request to the orchestrator service. +
-to access the orchestrator service, the in built endpoints are provided through database-support module. refer the respective database support implementation for more details.
+NOTE: 正如架构图所示，xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[重试子系统 (Retry Subsystem)] 会向编排器服务下发重试请求。 +
+为了连通编排器服务，相关的内置管理端点均由数据库支持模块负责提供。详情请参阅各具体数据库支持实现的文档。
 
-== Implementations of database support
+== 目前支持的数据库实现 (Implementations of Database Support)
 
-The following database support implementations are available currently.
+目前 StackSaga 提供以下数据库支持实现：
 
 [.google-anno-skip]
 |===
-| Database | Module | Description | Type
+| 数据库 (Database) | 支持模块 (Module) | 描述说明 (Description) | 数据库类型 (Type)
 
-| Mysql
+| MySQL
 | xref:mysql-database-support/stacksaga-mysql-support.adoc[stacksaga-mysql-support]
-| Database support for Mysql
+| 针对 MySQL 关系型数据库的支持实现
 | SQL
 
-| Postgresql
+| PostgreSQL
 | xref:postgresql-database-support/stacksaga-postgresql-support.adoc[stacksaga-postgresql-support]
-| Database support for Postgresql
+| 针对 PostgreSQL 关系型数据库的支持实现
 | SQL
 
 | Oracle
 | xref:oracle-database-support/stacksaga-oracle-support.adoc[stacksaga-oracle-support]
-| Database support for Oracle
+| 针对 Oracle 企业级数据库的支持实现
 | SQL
 
-| SQL Partition Support
+| SQL 分区支持
 | xref:sql-database-support/stacksaga-sql-partition-support.adoc[stacksaga-sql-partition-support]
-| Centralized partition maintenance for SQL databases (MySQL & PostgreSQL)
+| SQL 数据库（MySQL 与 PostgreSQL）的集中式自动化分区维护支持
 | SQL
-
 
 | Cassandra
 | xref:cassandra-database-support/stacksaga-cassandra-support.adoc[stacksaga-cassandra-support]
-| Database support for Cassandra
-| NOSQL
+| 针对 Apache Cassandra 分布式 NoSQL 数据库的支持实现
+| NoSQL
 
-| Scylladb
-| xref:scylladb-database-support/stacksaga-scylladb-support.adoc[scylladb-cassandra-support]
-| Database support for Scylladb
-| NOSQL
-
+| ScyllaDB
+| xref:scylladb-database-support/stacksaga-scylladb-support.adoc[stacksaga-scylladb-support]
+| 针对 ScyllaDB 超高性能 NoSQL 数据库的支持实现
+| NoSQL
 |===

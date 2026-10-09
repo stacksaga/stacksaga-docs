@@ -1,31 +1,29 @@
-:description: Learn about Stacksaga Event Store, its benefits, configuration, and use cases in microservice architectures.
+:description: 深入了解 StackSaga 事件存储 (Event Store) 的设计理念、核心优势与架构定位。
 :keywords: saga desing pattern, spring boot, stacksaga, event store, microservices, event sourcing, retries, monitoring, database per service
 
+= StackSaga 事件存储架构 (Event Store Architecture)
 
-= Stacksaga Event Store
+事件存储 (Event Store) 是一种专门用于持久化连续状态变更事件（Events）而非单纯保存最终状态的日志或数据库引擎。
+在 StackSaga 中，#您可以直接通过指定独立 Schema 的方式复用您现有的主业务数据库作为事件存储#，而无需单独购买或搭建一套完全独立的数据库基础设施。
+这极大地降低了日常维护运维开销以及维护多套异构数据存储系统的技术复杂度。
 
-An event store is a log or database designed to store a sequence of state changes (events), rather than just the final state.
-In stacksaga, #you are able to use your primary database as the event-store by providing a separate schema#, instead of managing a totally separate system or database for the event-store.
-it reduces the operational overhead and complexity of managing multiple databases.
+在 StackSaga 中，您可以按照每个服务独立数据库 (Database per Service) 的标准微服务架构模式来配置事件存储。
 
-In stacksaga you can configure the database for the event-store as the pattern of database per service.
+image::stacksaga-diagram-event-store-per-service.svg[alt="每个服务独立事件存储架构图"]
 
-image::stacksaga-diagram-event-store-per-service.svg[alt="stacksaga diagram event store per service"]
+NOTE: 尽管技术上允许多个微服务共用同一个事件存储库，但在生产环境中并不推荐这样做，因为这会引入潜在的高并发性能瓶颈、单点故障隐患，并且违背了微服务自治解耦的核心原则。
 
-NOTE: Even though it is possible to have a single event-store for all services, it is not recommended in production environments due to potential performance bottlenecks and single points of failure and the microservice architecture principles.
+== 为什么要在事件存储中保存中间状态？
 
-== What are the reasons for saving the states in the event-store?
-
-* *Reliable Retries*
+* *高可靠的重试调度 (Reliable Retries)*
 +
-When an execution fails due to a `RetryableExecutorException` (such as network issues), StackSaga enables safe retries.
-In microservice architectures, failures like network errors should not be treated as final exceptions, since transactions often span multiple services, and any service may become temporarily unavailable.
-By persisting each transaction state in the event store, StackSaga ensures that failed executions can be retried reliably, reducing the risk of data loss or inconsistency.
+当业务执行因抛出 `RetryableExecutorException`（例如下游网络抖动或超时）而中断时，StackSaga 能够进行安全可靠的重播重试。
+在分布式微服务架构中，诸如网络波动等瞬态异常绝不应直接视为不可逆的最终失败，因为分布式事务通常跨越多个远程微服务，任何依赖服务都可能出现短时不可达。
+通过在事件存储中安全持久化每一步事务的状态，StackSaga 确保失败的执行能够可靠地从断点续跑重试，彻底杜绝数据丢失或状态不一致的隐患。
 
-* *Analysis and Monitoring*
+* *追踪分析与全链路可观测性 (Analysis and Monitoring)*
 +
-StackSaga provides a dashboard—xref:trace-window:stacksaga-trace-window.adoc[Stacksaga Trace-Window]—for monitoring transaction traces and reviewing errors.
-All displayed data is sourced from the event store, where transaction records are securely persisted for analysis and troubleshooting.
+StackSaga 提供了专门的可视化控制台——xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace-Window 链路追踪窗口]——用于实时监控分布式事务链路并诊断错误原因。
+控制台展示的所有链路轨迹与执行快照均从事件存储中读取，所有历史记录均安全保存在其中供日常分析排错与合规审计。
 
-NOTE: The event-store is accessed by both xref:stacksaga-database-support:overview/database-support-overview.adoc[] and as well as the
-xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Subsystem]. refer to their respective sections for more details with the use-causes.
+NOTE: 事件存储同时供 xref:stacksaga-database-support:overview/database-support-overview.adoc[数据库支持模块] 以及 xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[重试子系统 (Retry Subsystem)] 共同访问。有关其具体的协作交互与使用场景，请参阅各自对应的文档章节。

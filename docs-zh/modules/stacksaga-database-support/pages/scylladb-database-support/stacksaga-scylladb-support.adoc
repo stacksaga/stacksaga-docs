@@ -1,23 +1,21 @@
 :impl_name: scylladb
-:toc-title: Stacksaga Scylladb Reactive Support | Scylladb Driver Configuration Guide
-:description: Learn how to configure Stacksaga orchestrator applications to use the Scylladb driver instead of the Cassandra driver in the reactive support module, including Maven dependency setup and retry architecture.
+:toc-title: StackSaga ScyllaDB 响应式支持 | ScyllaDB 驱动配置指南
+:description: 学习如何在响应式支持模块中配置 StackSaga 编排器应用使用 ScyllaDB 驱动替代 Cassandra 驱动，包括 Maven 依赖管理与重试架构。
 :revnumber: 1.0.0
 :revdate: {localdate}
 :keywords: Stacksaga, Scylladb, Cassandra, Reactive Support, Database Integration, Event Store, Maven Dependency Management, Java Driver, Distributed Systems, Java, Orchestrator, Retry Architecture, Saga design pattern, Spring Boot, Spring WebFlux, Spring Saga
 :robots: index,follow
 
-= Stacksaga Scylladb Reactive Support
+= StackSaga ScyllaDB 响应式支持 (ScyllaDB Reactive Support)
 
-== Overview
+== 概述 (Overview)
 
-Configuring Scylladb as the event store for Stacksaga orchestrator applications is almost identical to configuring xref:cassandra-database-support/stacksaga-cassandra-support.adoc[Stacksaga Cassandra Support] as the event store, because the same dependency is used for both Scylladb and Cassandra.
+为 StackSaga 编排器应用程序配置 ScyllaDB 作为事件存储，与配置 xref:cassandra-database-support/stacksaga-cassandra-support.adoc[StackSaga Cassandra 数据库支持] 几乎完全一致，因为二者在底层共享同一个核心集成模块。
 
-If you prefer to use the Scylladb driver instead of the Cassandra driver, you can exclude the Cassandra driver dependency from `spring-boot-starter-data-cassandra` and include the Scylladb driver dependency in your project as shown below.
-
-//
+如果您希望使用官方针对 ScyllaDB 深度优化的专属驱动替代原生的 Cassandra 驱动，您可以通过在 `spring-boot-starter-data-cassandra` 中排除默认的 Cassandra 驱动，并显式引入 ScyllaDB Java Driver，如下文所示。
 
 [[adding-scylladb-support]]
-=== Configuring Scylladb as the Event Store
+=== 配置 ScyllaDB 作为事件存储
 
 [source,xml,subs="attributes+"]
 ----
@@ -37,7 +35,7 @@ If you prefer to use the Scylladb driver instead of the Cassandra driver, you ca
     <artifactId>stacksaga-cassandra-reactive-support</artifactId>
 </dependency>
 
-<!--Additional-->
+<!--额外驱动调优配置-->
 <dependency>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-data-cassandra</artifactId>
@@ -52,20 +50,20 @@ If you prefer to use the Scylladb driver instead of the Cassandra driver, you ca
 <dependency> <!--2-->
     <groupId>com.scylladb</groupId>
     <artifactId>java-driver-core</artifactId>
-    <version>4.17.0.0</version> <!-- Check for the latest version -->
+    <version>4.17.0.0</version> <!-- 请检查并选用最新稳定版本 -->
 </dependency>
 ----
 
-IMPORTANT: It is recommended to http://init.stacksaga.org/[StackSaga Initializer] to get the dependency snippets for your project for the StackSaga related dependencies, as it will ensure you have the correct versions and configurations for your project setup.
+IMPORTANT: 推荐使用 http://init.stacksaga.org/[StackSaga Initializer (初始化器)] 获取项目所需的 StackSaga 依赖配置代码段，以确保拥有匹配正确的依赖版本和配置。
 
-<1> Exclude the `com.datastax.oss:java-driver-core` dependency that `spring-boot-starter-data-cassandra` brings in by default.
-<2> Add the `com.scylladb:java-driver-core` dependency so the Scylladb driver is used instead of the Cassandra driver.
+<1> 排除 `spring-boot-starter-data-cassandra` 默认传递引入的 `com.datastax.oss:java-driver-core` 驱动。
+<2> 显式添加 `com.scylladb:java-driver-core` 依赖，以便底层采用专为 ScyllaDB 优化的原生驱动替代 DataStax 驱动。
 
-IMPORTANT: Most of the time you may use the `spring-boot-starter-data-cassandra` dependency in your project to configure the Cassandra connection.
-When you use the `spring-boot-starter-data-cassandra` dependency, it automatically includes the `com.datastax.oss:java-driver-core` dependency for Cassandra.
-However, since you want to use Scylladb instead of Cassandra, you need to exclude the `com.datastax.oss:java-driver-core` dependency from the `spring-boot-starter-data-cassandra` dependency to avoid conflicts and re-configure the driver for Scylladb by adding the `com.scylladb:java-driver-core` dependency separately.
+IMPORTANT: 通常在项目中配置 Cassandra 连接时，会引入 `spring-boot-starter-data-cassandra` 依赖。
+该依赖会自动打包针对原生 Cassandra 的 `com.datastax.oss:java-driver-core`。
+但当您选择使用 ScyllaDB 时，必须显式排除它以避免类库与协议冲突，并引入 `com.scylladb:java-driver-core`，从而享受针对 ScyllaDB 分片感知架构的极致吞吐性能。
 
-== Retry Architecture
+== 重试架构 (Retry Architecture)
 
-Even though the driver is different, the retry architecture remains the same as in Cassandra.
-Read the xref:cassandra-database-support/stacksaga-cassandra-support.adoc[Stacksaga Cassandra Support] documentation for the retry architecture.
+尽管底层连接驱动有所差异，但整体事务重试架构与 Cassandra 完全一致。
+有关重试架构的详细分析与机制，请参阅 xref:cassandra-database-support/stacksaga-cassandra-support.adoc[StackSaga Cassandra 数据库支持] 文档。

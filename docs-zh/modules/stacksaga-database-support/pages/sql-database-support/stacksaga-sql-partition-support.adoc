@@ -1,69 +1,69 @@
-:title: StackSaga SQL Database Partition Support
-:description: Learn how StackSaga SQL Partition Support automatically maintains range partitions for event-store tables across multiple databases and vendors (MySQL & PostgreSQL) from a single centralized runner.
-:doctitle: StackSaga SQL Database Partition Support
+:title: StackSaga SQL 数据库分区支持 (SQL Database Partition Support)
+:description: 学习 StackSaga SQL 分区支持如何通过单个集中式运行器，自动跨多个数据库和厂商（MySQL 与 PostgreSQL）维护事件存储表的范围分区。
+:doctitle: StackSaga SQL 数据库分区支持 (SQL Database Partition Support)
 :revnumber: 1.0.0
 :revdate: {localdate}
 :keywords: Stacksaga, Database Partitioning, SQL, MySQL, PostgreSQL, R2DBC, Event Store, Table Partitioning, Spring Boot Starter, High Throughput, Range Partition, Unpooled Connections
 :robots: index,follow
 
-= StackSaga SQL Database Partition Support
+= StackSaga SQL 数据库分区支持 (SQL Database Partition Support)
 
-== Overview
+== 概述 (Overview)
 
-In high-throughput distributed systems using the Saga design pattern, the event-store tables—primarily `es_transaction` and `es_transaction_execution_tryout`—experience heavy sequential insert volumes as every transaction state and tryout execution is recorded.
+在使用 Saga 设计模式的高并发分布式系统中，事件存储表（主要是 `es_transaction` 和 `es_transaction_execution_tryout`）承受着极高频度的连续写入操作，因为系统需要详尽记录每一步事务状态与试算执行日志。
 
-To maintain optimal read/write query performance, rapid indexing, and predictable disk usage over time, these tables are partitioned by range (e.g. daily intervals based on `created_at`).
+为了长期维持最优的读写查询性能、快速的索引构建以及可预测的磁盘空间开销，这些表均采用了范围分区 (Range Partitioning，例如基于 `created_at` 的按日自然区间分区)。
 
-`stacksaga-sql-partition-support` is a lightweight, non-blocking Spring Boot Starter designed to **automate the creation and maintenance of future partitions** across all SQL-based event-store databases in your ecosystem.
+`stacksaga-sql-partition-support` 是一个轻量级、非阻塞的 Spring Boot Starter，旨在**自动化创建和维护您整个生态中所有基于 SQL 的事件存储数据库的未来分区**。
 
-=== Architectural Design: Centralized Partition Runner
+=== 架构设计：集中式分区运行器 (Centralized Partition Runner)
 
-In a microservice architecture, each service embeds its respective database reactive starter (`stacksaga-mysql-reactive-support` or `stacksaga-pg-reactive-support`) to execute saga transactions.
+在微服务架构中，每个业务服务都会引入各自对应的数据库响应式 Starter（`stacksaga-mysql-reactive-support` 或 `stacksaga-pg-reactive-support`）来执行分布式 Saga 事务。
 
 [IMPORTANT]
 ====
-*Only One Central Instance Needed*: +
-Unlike the runtime database support modules which run inside every microservice instance, **`stacksaga-sql-partition-support` should be deployed as only one single instance** (or a scheduled standalone utility job) for your entire system.
+*全系统仅需部署一个中心实例*： +
+与嵌入在每个微服务实例内部的运行时数据库支持模块不同，**`stacksaga-sql-partition-support` 在整个系统中应当仅作为单个独立实例部署**（或作为一个定时调度的独立运维任务）。
 ====
 
-Why is a single centralized runner the recommended architecture?
+为什么推荐采用单一的集中式运行器架构？
 
-1. **Avoids Multi-Instance DDL Conflicts & Lock Contention**:
-If every replica or pod of every microservice attempted to execute `ALTER TABLE ... REORGANIZE PARTITION` or schema DDLs at application startup or on a cron trigger, database servers would suffer from metadata lock contention, connection spikes, and deadlocks.
-2. **Strict Runtime Privilege Boundaries**:
-Application microservices should run with minimal database privileges (DML only: `SELECT`, `INSERT`, `UPDATE`, `DELETE`). They do not need DDL or schema alteration rights. With a centralized runner, only this single runner is granted the necessary `ALTER` / `CREATE` privileges.
-3. **Multi-Database & Multi-Vendor Consolidation**:
-Even if different microservices in your architecture use different databases (e.g., Order Service uses MySQL, Payment Service uses PostgreSQL, Inventory Service uses another MySQL database), you **do not** need separate partition runners for each. A single `stacksaga-sql-partition-support` instance can configure **multiple datasources** across **multiple database engines** and process them concurrently.
+1. **避免多实例并发 DDL 冲突与锁争用**：
+如果每个微服务的每个 Pod 或副本在启动时或通过定时任务都尝试执行 `ALTER TABLE ... REORGANIZE PARTITION` 等 Schema DDL，数据库将遭遇严重的元数据锁争用、连接数激增甚至是死锁。
+2. **严格的运行时数据访问权限边界**：
+应用微服务应以最小数据库权限运行（仅需 DML 权限：`SELECT`、`INSERT`、`UPDATE`、`DELETE`），绝不应赋予 DDL 表结构变更权限。通过集中式运行器，只有这单个运行器需要被授予必要的 `ALTER` / `CREATE` 权限。
+3. **跨多数据库与多引擎厂商的大一统归集**：
+即使您架构中的不同微服务使用了不同的数据库类型（例如订单服务使用 MySQL、支付服务使用 PostgreSQL、库存服务使用另一个独立的 MySQL），您也**不需要**为每个服务分别编写分区脚本。单个 `stacksaga-sql-partition-support` 实例可以配置**多个数据源 (Multiple Datasources)**，跨越**多种数据库引擎**并并发统一处理。
 
-image::stacksaga-database-support:stacksaga-diagram-sql-partition-architecture.drawio.svg[StackSaga SQL Partition Architecture]
+image::stacksaga-database-support:stacksaga-diagram-sql-partition-architecture.drawio.svg[StackSaga SQL 分区架构图]
 
-==== Single Point of Failure (SPOF) Consideration: Why It Is Not An Issue
+==== 单点故障 (SPOF) 考量：为什么这完全不是问题
 
-A common architectural question is: _"Does having only one partition runner instance for the entire system introduce a single point of failure?"_
+架构师常有的顾虑是：_“整个系统仅有一个分区运行器实例，是否会引入单点故障 (SPOF)？”_
 
-The answer is **no**. In practice, this design is resilient and poses no risk to your production workloads:
+答案是**完全不会**。在实际生产实践中，该设计具备极高的韧性弹性，对生产业务负载毫无风险：
 
-* **Configurable Pre-Creation Buffer (`unit` + `ahead-count`)**:
-When the runner triggers, it does not merely create a partition for the immediate day. Through `ahead-count` and `unit` (`DAYS`, `WEEK`, `MONTH`, `YEAR`), it pre-allocates partitions for multiple upcoming intervals in advance.
-For example, configuring `unit: DAYS` with `ahead-count: 7` or `unit: MONTH` with `ahead-count: 2` guarantees that valid partitions already exist days or months ahead in your databases.
-* **Completely Decoupled Runtime Transactions**:
-Runtime microservices (`order-service`, `payment-service`, etc.) insert saga events directly into the database. They do *not* communicate with or depend on the partition runner during transaction execution.
-* **Resilience to Runner Downtime**:
-Even if the single partition runner instance goes offline, encounters an infrastructure crash, or is undergoing extended maintenance for multiple days, your microservices continue writing events without interruption because future partition tables are already present in the database.
-* **Automatic Catch-Up Upon Restart**:
-As soon as the partition runner restarts or triggers next, it queries the database, detects any missing future intervals, and idempotently provisions them.
+* **可配置的未来预建缓冲窗口 (`unit` + `ahead-count`)**：
+当运行器触发时，它绝不仅仅创建当天的分区。通过 `ahead-count` 和 `unit`（`DAYS`、`WEEK`、`MONTH`、`YEAR`），它会提前预先创建未来多个周期的时间分区。
+例如，配置 `unit: DAYS` 且 `ahead-count: 7`，或 `unit: MONTH` 且 `ahead-count: 2`，即可确保数据库中始终已经提前存在数天或数月之久的合法分区。
+* **与运行时业务事务完全解耦**：
+运行时的微服务（`order-service`、`payment-service` 等）直接向数据库插入 Saga 事件。在事务执行期间，它们与分区运行器之间*没有任何*网络通信或直接依赖。
+* **从容容忍运行器停机维护**：
+即便该单一分区运行器实例长时间下线、遭遇基础设施崩溃，或经历数天的停机维护，您的微服务依然能够毫无阻碍地持续写入事件，因为未来的分区表早已预先就绪在数据库中。
+* **重启后自动化追赶补偿**：
+一旦分区运行器重启或再次触发，它会自动探测数据库，发现任何缺失的未来时间区间，并幂等地完成增补建表。
 
-== Key Features
+== 核心特性 (Key Features)
 
-* **Startup & Cron Execution**:
-Partitions are checked and pre-created immediately on application startup (`run-on-startup=true`) and periodically on a configurable schedule (`cron`, defaulting to `0 0 12 * * *` — 12:00 PM noon every day).
-* **Multi-Datasource & Concurrency**:
-Configures any number of datasources under `stacksaga.partitioning.sql.datasources.*`. All configured datasources are processed concurrently using Project Reactor's non-blocking `Flux.flatMap(concurrency = 4)`.
-* **Unpooled On-Demand Connections**:
-Because partition maintenance runs only on startup and once a day via cron, holding permanent idle connection pools in memory is unnecessary. The starter creates a direct, unpooled R2DBC connection on-demand, executes the partition DDLs, and closes the connection immediately.
-* **Dialect Auto-Detection (MySQL & PostgreSQL)**:
-The database type is automatically recognized from the R2DBC URL and connection metadata:
-** **MySQL**: Dynamically reorganizes range partitions using the `p_max` catch-all boundary:
+* **启动即检与定时调度执行**：
+在应用启动时立即检查并预建分区（`run-on-startup=true`），并支持通过可配置的 cron 表达式周期性执行（`cron`，默认为 `0 0 12 * * *` —— 每天中午 12:00）。
+* **多数据源并发处理**：
+支持在 `stacksaga.partitioning.sql.datasources.*` 下配置任意数量的数据源。所有配置的数据源均借助 Project Reactor 非阻塞的 `Flux.flatMap(concurrency = 4)` 并行并发执行。
+* **按需创建的非连接池连接 (Unpooled On-Demand Connections)**：
+因为分区维护仅在应用启动和每日定时任务触发时运行数秒，常驻空闲连接池完全没有必要。该模块按需创建直连的无连接池 R2DBC 连接，执行完分区 DDL 后立即安全关闭，零资源浪费。
+* **方言自动推断 (MySQL 与 PostgreSQL)**：
+根据 R2DBC URL 和连接元数据自动识别底层数据库类型：
+** **MySQL**：使用 `p_max` 兜底边界动态重组范围分区：
 [source,sql]
 ----
 ALTER TABLE es_transaction REORGANIZE PARTITION p_max INTO (
@@ -71,27 +71,27 @@ ALTER TABLE es_transaction REORGANIZE PARTITION p_max INTO (
     PARTITION p_max VALUES LESS THAN (MAXVALUE)
 );
 ----
-** **PostgreSQL**: Creates declarative child partitions:
+** **PostgreSQL**：创建声明式子分区：
 [source,sql]
 ----
 CREATE TABLE IF NOT EXISTS es_transaction_p2026_09_13 PARTITION OF es_transaction
     FOR VALUES FROM ('2026-09-13 00:00:00') TO ('2026-09-14 00:00:00');
 ----
-* **Pre-Flight Validation**:
-Validates database connectivity (`validate-on-startup=true`) and inspects user privileges (`validate-privileges=true`) at startup using `SHOW GRANTS` (MySQL) or `has_schema_privilege` (PostgreSQL), providing early warnings if the database user lacks permission.
-* **Pre-Creation (`ahead-count`)**:
-Configurable per datasource. Setting `ahead-count: 2` pre-creates partitions for today plus the next 2 days ahead, preventing data rejection when midnight arrives.
+* **启动前预检探活与权限校验**：
+在启动时验证数据库连通性（`validate-on-startup=true`），并通过 `SHOW GRANTS` (MySQL) 或 `has_schema_privilege` (PostgreSQL) 检查用户操作权限（`validate-privileges=true`），在缺少必要权限时尽早告警。
+* **提前预建机制 (`ahead-count`)**：
+可针对每个数据源独立配置。设置 `ahead-count: 2` 会提前为今天以及未来 2 天预先创建分区，彻底杜绝跨过午夜零点时的数据写入拒绝异常。
 
 [[adding-dependency]]
-== Adding as a Dependency
+== 引入依赖 (Adding as a Dependency)
 
-Add `stacksaga-sql-partition-support` to your standalone partition runner service:
+在您的独立分区运行器微服务中引入 `stacksaga-sql-partition-support`：
 
 [source,xml,subs="attributes+"]
 ----
 <dependencyManagement>
     <dependencies>
-        <dependency> <!--Only for stacksaga dependencies version management-->
+        <dependency> <!--仅用于 stacksaga 依赖项版本管理-->
             <groupId>org.stacksaga</groupId>
             <artifactId>stacksaga-bom</artifactId>
             <version>{stacksaga-version}</version>
@@ -106,7 +106,7 @@ Add `stacksaga-sql-partition-support` to your standalone partition runner servic
         <groupId>org.stacksaga</groupId>
         <artifactId>stacksaga-sql-partition-support</artifactId>
     </dependency>
-    <!-- Add reactive R2DBC drivers matching your configured databases -->
+    <!-- 引入与所配置数据库匹配的响应式 R2DBC 驱动 -->
     <dependency>
         <groupId>io.asyncer</groupId>
         <artifactId>r2dbc-mysql</artifactId>
@@ -118,48 +118,48 @@ Add `stacksaga-sql-partition-support` to your standalone partition runner servic
 </dependencies>
 ----
 
-== Configuration Reference
+== 配置参数参考 (Configuration Reference)
 
-=== Application Properties Example
+=== Application Properties 配置示例
 
 [source,properties]
 ----
-# Enable/disable starter (default: true)
+# 启用/禁用 starter (默认: true)
 stacksaga.partitioning.sql.enabled=true
 
-# Validate database connectivity at startup (default: true)
+# 启动时校验数据库连通性 (默认: true)
 stacksaga.partitioning.sql.validate-on-startup=true
 
-# Validate user partition creation privileges at startup (default: true)
+# 启动时校验用户分区变更权限 (默认: true)
 stacksaga.partitioning.sql.validate-privileges=true
 
-# Run partition creation at application startup (default: true)
+# 启动时立即执行一次分区创建 (默认: true)
 stacksaga.partitioning.sql.run-on-startup=true
 
-# Scheduled cron (default: 12:00 PM noon every day)
+# 定时调度 cron (默认: 每天中午 12:00)
 stacksaga.partitioning.sql.cron=0 0 12 * * *
 
-# Concurrency limit across datasources (default: 4)
+# 跨数据源的并发度限制 (默认: 4)
 stacksaga.partitioning.sql.concurrency=4
 
-# Timeout for opening an R2DBC connection (default: 10s)
+# 建立 R2DBC 连接的超时时间 (默认: 10s)
 stacksaga.partitioning.sql.connect-timeout=10s
 
-# --- Datasource 1: Order Service Database (MySQL) - Daily partitions ---
+# --- 数据源 1: 订单服务数据库 (MySQL) - 按天分区 ---
 stacksaga.partitioning.sql.datasources.orderdb.url=r2dbc:mysql://localhost:3306/order_db
 stacksaga.partitioning.sql.datasources.orderdb.username=partition_admin
 stacksaga.partitioning.sql.datasources.orderdb.password=secret
 stacksaga.partitioning.sql.datasources.orderdb.unit=DAYS
 stacksaga.partitioning.sql.datasources.orderdb.ahead-count=2
 
-# --- Datasource 2: Payment Service Database (PostgreSQL) - Weekly partitions ---
+# --- 数据源 2: 支付服务数据库 (PostgreSQL) - 按周分区 ---
 stacksaga.partitioning.sql.datasources.paymentdb.url=r2dbc:postgresql://localhost:5432/payment_db
 stacksaga.partitioning.sql.datasources.paymentdb.username=partition_admin
 stacksaga.partitioning.sql.datasources.paymentdb.password=secret
 stacksaga.partitioning.sql.datasources.paymentdb.unit=WEEK
 stacksaga.partitioning.sql.datasources.paymentdb.ahead-count=3
 
-# --- Datasource 3: Inventory Service Database (MySQL) - Monthly partitions ---
+# --- 数据源 3: 库存服务数据库 (MySQL) - 按月分区 ---
 stacksaga.partitioning.sql.datasources.inventorydb.url=r2dbc:mysql://localhost:3306/inventory_db
 stacksaga.partitioning.sql.datasources.inventorydb.username=partition_admin
 stacksaga.partitioning.sql.datasources.inventorydb.password=secret
@@ -167,117 +167,117 @@ stacksaga.partitioning.sql.datasources.inventorydb.unit=MONTH
 stacksaga.partitioning.sql.datasources.inventorydb.ahead-count=1
 ----
 
-=== Properties Reference Table
+=== 配置属性参考对照表
 
 [.scrollable-div]
 --
 [cols="3,2,2,5",options="header"]
 [.properties-table.google-anno-skip]
 |===
-|Property Name|Default{nbsp}Value|Type|Description
+|属性名称 (Property Name)|默认值 (Default)|类型 (Type)|描述说明 (Description)
 
 |`stacksaga.partitioning.sql.enabled`
 |`true`
 |`boolean`
-|Enables or disables the partition support starter.
+|启用或禁用分区支持 starter。
 
 |`stacksaga.partitioning.sql.validate-on-startup`
 |`true`
 |`boolean`
-|Whether to test database connectivity at application startup.
+|是否在应用启动时测试数据库连通性。
 
 |`stacksaga.partitioning.sql.validate-privileges`
 |`true`
 |`boolean`
-|Whether to verify that the database user possesses `ALTER` / `CREATE` privileges on startup.
+|是否在启动时验证数据库账号是否拥有 `ALTER` / `CREATE` 权限。
 
 |`stacksaga.partitioning.sql.run-on-startup`
 |`true`
 |`boolean`
-|Whether to execute partition creation immediately when the application starts up.
+|是否在应用启动时立即执行一次分区创建。
 
 |`stacksaga.partitioning.sql.exit-on-completion`
 |`false`
 |`boolean`
-|Whether to automatically terminate the application after startup partition creation completes (designed for Kubernetes CronJobs). Exits with code `0` if all datasources succeed, or `1` if any fail.
+|启动分区创建完成后是否自动终止退出 JVM 应用程序（专为 Kubernetes CronJobs 设计）。所有数据源均成功时以退出码 `0` 退出，任何一个失败则以 `1` 退出。
 
 |`stacksaga.partitioning.sql.cron`
 |`0{nbsp}0{nbsp}12{nbsp}*{nbsp}*{nbsp}*`
 |`String`
-|Spring cron expression for scheduled execution (defaults to 12:00 PM noon every day). Set to `none` or `-` to disable internal scheduling when driven by external schedulers (e.g. Kubernetes CronJob).
+|定时调度的 Spring cron 表达式（默认为每天中午 12:00）。当由外部调度器（如 Kubernetes CronJob）托管时，可设置为 `none` 或 `-` 以禁用内部定时器。
 
 |`stacksaga.partitioning.sql.concurrency`
 |`4`
 |`int`
-|Maximum number of datasources processed simultaneously in parallel.
+|并行并发处理的最大数据源数量。
 
 |`stacksaga.partitioning.sql.connect-timeout`
 |`10s`
 |`Duration`
-|Timeout for establishing an on-demand R2DBC connection.
+|建立按需 R2DBC 连接的超时时间。
 
 |`stacksaga.partitioning.sql.datasources.<name>.url`
 |`-`
 |`String`
-|R2DBC connection URL (e.g. `r2dbc:mysql://host:3306/db` or `r2dbc:postgresql://host:5432/db`).
+|R2DBC 连接 URL（例如 `r2dbc:mysql://host:3306/db` 或 `r2dbc:postgresql://host:5432/db`）。
 
 |`stacksaga.partitioning.sql.datasources.<name>.username`
 |`-`
 |`String`
-|Database username with partition alteration privileges.
+|具备分区 DDL 变更权限的数据库用户名。
 
 |`stacksaga.partitioning.sql.datasources.<name>.password`
 |`-`
 |`String`
-|Database password.
+|数据库密码。
 
 |`stacksaga.partitioning.sql.datasources.<name>.unit`
 |`DAYS`
 |`PartitionUnit`
-|Partition time interval unit: `DAYS`, `WEEK`, `MONTH`, or `YEAR`.
+|分区时间区间单位：`DAYS`（日）、`WEEK`（周）、`MONTH`（月）或 `YEAR`（年）。
 
 |`stacksaga.partitioning.sql.datasources.<name>.ahead-count`
 |`1`
 |`int`
-|Number of intervals (days, weeks, months, or years) into the future to pre-create partitions for.
+|提前预创建的分区区间数量。
 
 |`stacksaga.partitioning.sql.datasources.<name>.type`
 |`-`
 |`DatabaseType`
-|Explicit database type override (`MYSQL` or `POSTGRESQL`). If omitted, auto-detected from URL or metadata.
+|显式指定数据库类型（`MYSQL` 或 `POSTGRESQL`）。若省略，系统会根据 URL 和元数据自动识别。
 |===
 --
 
-== Deployment Strategies
+== 部署策略 (Deployment Strategies)
 
-Because partition maintenance takes only a few seconds to verify and create tables, you can choose between two deployment strategies depending on your operational platform:
+因为分区维护仅需数秒钟即可完成所有校验与建表，您可以根据运维平台在以下两种部署策略中进行选择：
 
-=== Strategy A: Persistent Daemon (Traditional VM / Long-Running Container)
+=== 策略 A：持久化后台常驻守护进程 (传统虚拟机 / 容器)
 
-In a traditional VM or standard Docker container environment:
+在传统的虚拟机或标准 Docker 容器环境中：
 
-* The application runs 24/7 as a background daemon.
-* On startup, it performs connectivity checks, verifies user permissions (`validate-on-startup=true`), and pre-creates partitions (`run-on-startup=true`).
-* After the startup run finishes, it sleeps idle in the background until the next scheduled trigger determined by `stacksaga.partitioning.sql.cron` (e.g. `0 0 12 * * *`).
+* 应用程序作为后台守护进程 7x24 小时常驻运行。
+* 启动时执行连通性探活、验证用户权限（`validate-on-startup=true`），并预先创建分区（`run-on-startup=true`）。
+* 启动执行完成后，在后台休眠，直到达到 `stacksaga.partitioning.sql.cron`（如 `0 0 12 * * *`）所指定的下一次定时调度时刻。
 
-=== Strategy B: Ephemeral Scheduled Job (Kubernetes CronJob)
+=== 策略 B：定时瞬态作业 (Kubernetes CronJob)
 
-In container orchestration environments such as **Kubernetes (k8s)**, maintaining a pod running continuously 24/7 can be inefficient, because after creating the partitions in a few seconds, the application simply sits idle doing nothing until the next scheduled day.
+在云原生容器编排环境（如 **Kubernetes**）中，保持一个 Pod 7x24 小时常驻运行并不经济，因为应用在数秒内建完分区后，整整一天都处于无所事事的空闲状态。
 
-To optimize cluster resource utilization, you can deploy the partition runner as a **Kubernetes `CronJob`** (or container task on AWS ECS / GCP Cloud Run Jobs):
+为了优化集群计算资源利用率，您可以将分区运行器部署为 **Kubernetes `CronJob`**（或 AWS ECS / GCP Cloud Run 上的 Scheduled Jobs）：
 
-* **How It Operates**:
-. Kubernetes triggers the CronJob pod at the desired schedule (e.g. daily at 12:00 PM).
-. The pod starts up, Spring Boot initializes, and with `run-on-startup=true`, it immediately validates all datasources and creates upcoming partitions across all databases concurrently.
-. The internal Spring cron scheduler is disabled by setting `stacksaga.partitioning.sql.cron=none` (or `-`).
-. Enabling `stacksaga.partitioning.sql.exit-on-completion=true` commands the runner to automatically terminate the Spring Boot application and JVM once partition creation finishes:
+* **运行机制**：
+. Kubernetes 按照预定计划（例如每天中午 12:00）拉起 CronJob Pod。
+. Pod 启动并初始化 Spring Boot，在 `run-on-startup=true` 的作用下，立即并发校验并为所有数据库创建未来的分区。
+. 将 `stacksaga.partitioning.sql.cron=none` 设置为禁用内部 Spring 定时器。
+. 开启 `stacksaga.partitioning.sql.exit-on-completion=true`，命令运行器在分区创建完成后自动退出 Spring Boot 与 JVM：
 +
-* If all datasources succeed -> exits cleanly with code `0` (`Completed`).
-* If any datasource fails -> exits with code `1` (`Error`/`Failed`), which causes Kubernetes to alert or retry according to your `restartPolicy`.
+* 若所有数据源均成功 -> 干净退出，退出码为 `0` (`Completed`)。
+* 若有任何数据源失败 -> 以退出码 `1` 退出 (`Error`/`Failed`)，触发 Kubernetes 按照您的 `restartPolicy` 进行告警或重试。
 +
-. Kubernetes releases all pod memory and CPU resources until the next scheduled interval.
+. Kubernetes 立即回收释放 Pod 的内存和 CPU 资源，直到下一个计划周期。
 
-*Example Kubernetes CronJob Manifest*:
+*Kubernetes CronJob 清单示例*：
 
 [source,yaml]
 ----
@@ -287,7 +287,7 @@ metadata:
   name: stacksaga-partition-runner
   namespace: stacksaga
 spec:
-  schedule: "0 12 * * *"  # Trigger daily at 12:00 PM noon
+  schedule: "0 12 * * *"  # 每天中午 12:00 准时触发
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -300,18 +300,18 @@ spec:
             - name: partition-runner
               image: your-docker-registry.internal/stacksaga/stacksaga-partition-runner:1.0.0
               env:
-                # Execute partition creation immediately upon pod start
+                # Pod 启动后立即执行分区创建
                 - name: STACKSAGA_PARTITIONING_SQL_RUN_ON_STARTUP
                   value: "true"
-                # Validate connectivity and permissions at startup
+                # 启动时校验连通性与权限
                 - name: STACKSAGA_PARTITIONING_SQL_VALIDATE_ON_STARTUP
                   value: "true"
                 - name: STACKSAGA_PARTITIONING_SQL_VALIDATE_PRIVILEGES
                   value: "true"
-                # Disable the internal background cron since Kubernetes manages the schedule
+                # 禁用内部 cron，调度权交给 Kubernetes
                 - name: STACKSAGA_PARTITIONING_SQL_CRON
                   value: "none"
-                # Automatically exit with code 0 (or 1 on error) when finished
+                # 执行完毕后自动以退出码 0 (或错误时为 1) 退出
                 - name: STACKSAGA_PARTITIONING_SQL_EXIT_ON_COMPLETION
                   value: "true"
               resources:
@@ -323,51 +323,51 @@ spec:
                   cpu: "500m"
 ----
 
-== Monitoring & Observability
+== 监控与可观测性 (Monitoring & Observability)
 
-`stacksaga-sql-partition-support` provides observability hooks to monitor partition execution results, record metrics, and trigger alerts on failures.
+`stacksaga-sql-partition-support` 提供了可观测性生命周期钩子，用于监控分区执行结果、上报指标并在失败时触发报警。
 
-=== PartitionExecutionCompletedEvent
+=== PartitionExecutionCompletedEvent 事件
 
-Whenever partition creation runs (both on application startup and on cron triggers), the runner automatically publishes a Spring `PartitionExecutionCompletedEvent`.
+每当分区创建执行完毕时（无论是在应用启动时还是在定时触发时），运行器都会自动发布一个 Spring `PartitionExecutionCompletedEvent` 事件。
 
-This event provides detailed execution telemetry:
+该事件提供了丰富的执行遥测数据：
 
 [.scrollable-div]
 --
 [cols="1,1,<2"]
 |===
-|Method|Return Type|Description
+|方法名|返回值类型|描述说明
 
 |`isAllSuccessful()`
 |`boolean`
-|Returns `true` if all configured datasources were partitioned without any error.
+|如果所有配置的数据源都成功完成分区且无任何异常，则返回 `true`。
 
 |`getTotalDatasources()`
 |`int`
-|Total count of datasources evaluated during the execution.
+|本次执行所评估的数据源总数。
 
 |`getSuccessCount()`
 |`int`
-|Number of datasources successfully partitioned.
+|成功完成分区的数据源数量。
 
 |`getFailureCount()`
 |`int`
-|Number of datasources that failed.
+|分区失败的数据源数量。
 
 |`getDuration()`
 |`Duration`
-|Total elapsed execution time.
+|执行消耗的总耗时。
 
 |`getReports()`
 |`Map<String, DatasourceReport>`
-|Per-datasource detailed reports containing table names, partition counts, and error causes (if any).
+|按数据源划分的详细执行报告，包含表名、分区数以及异常错误原因（若有）。
 |===
 --
 
-=== Example: Listening for Partition Events & Alerting
+=== 示例：监听分区事件并发送告警
 
-Developers can register a Spring `@EventListener` to capture partition metrics, push alerts to Slack or PagerDuty, or export data to Prometheus:
+开发人员可以注册一个 Spring `@EventListener` 来捕获分区指标，将失败告警推送到企业微信、钉钉、Slack 或 PagerDuty，或导出指标到 Prometheus：
 
 [source,java]
 ----
@@ -383,28 +383,26 @@ public class PartitionMonitoringListener {
     @EventListener
     public void onPartitionCompleted(PartitionExecutionCompletedEvent event) {
         if (!event.isAllSuccessful()) {
-            log.error("ALERT: Partition creation failed for {}/{} datasources in {} ms!",
-                    event.getFailureCount(), event.getTotalDatasources(), event.getDuration().toMillis());
+            log.error("ALERT: 分区创建失败！共评估 {} 个数据源，失败 {} 个，耗时 {} ms！",
+                    event.getTotalDatasources(), event.getFailureCount(), event.getDuration().toMillis());
 
             event.getReports().forEach((dsName, report) -> {
                 if (!report.isSuccess()) {
-                    log.error("Datasource '{}' failed: {}", dsName, report.getErrorMessage(), report.getError());
-                    // Example: send alert to Slack, Discord, PagerDuty, or Email
-                    // alertService.sendAlert("Partition failure on datasource: " + dsName);
+                    log.error("数据源 '{}' 分区失败: {}", dsName, report.getErrorMessage(), report.getError());
+                    // 示例：向钉钉、企微、Slack 发送告警通知
+                    // alertService.sendAlert("数据库分区失败，数据源: " + dsName);
                 }
             });
         } else {
-            log.info("SUCCESS: All {} datasources partitioned successfully in {} ms.",
+            log.info("SUCCESS: 所有 {} 个数据源分区全部成功完成，总耗时 {} ms。",
                     event.getTotalDatasources(), event.getDuration().toMillis());
         }
     }
 }
 ----
 
-== Related Documentation
+== 相关文档 (Related Documentation)
 
-* xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[StackSaga MySQL Reactive Support]
-* xref:stacksaga-database-support:postgresql-database-support/stacksaga-postgresql-support.adoc[StackSaga PostgreSQL Reactive Support]
-* xref:stacksaga-database-support:overview/database-support-overview.adoc[Database Support Overview]
-
-
+* xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[StackSaga MySQL 响应式支持]
+* xref:stacksaga-database-support:postgresql-database-support/stacksaga-postgresql-support.adoc[StackSaga PostgreSQL 响应式支持]
+* xref:stacksaga-database-support:overview/database-support-overview.adoc[数据库支持概述]

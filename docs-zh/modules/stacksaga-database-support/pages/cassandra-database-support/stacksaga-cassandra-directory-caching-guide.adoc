@@ -1,97 +1,97 @@
-= StackSaga Cassandra Recovery Directory Caching & Calculations Guide
+= StackSaga Cassandra 恢复目录缓存与容量计算指南 (Directory Caching & Calculations Guide)
 :toc: left
 :toclevels: 3
 :sectnums:
 :icons: font
 :source-highlighter: highlightjs
 
-== Executive Overview
+== 核心架构概述 (Executive Overview)
 
-In StackSaga's Cassandra reactive architecture, recovery transactions are discovered through a **5-tier hierarchical active directory**:
-
-[source,text]
-----
-es_days_by_year                             ← Tier 1: Which calendar days have pending work?
-  └── es_recovery_windows_by_day            ← Tier 2: Which UTC minute windows on that day?
-        └── es_instances_by_recovery_window ← Tier 3: Which pod instances wrote work in that window?
-              └── es_buckets_by_instance    ← Tier 4: Which bucket partitions did that pod create?
-                    └── es_recovery_transactions_by_instance ← Tier 5: The actual transaction pointers.
-----
-
-=== The 5x Write Amplification Hazard
-
-In a naive implementation, every single transaction write would execute 5 database write statements (one per tier):
+在 StackSaga 的 Cassandra 响应式架构中，待恢复的事务是通过**五级分层活跃目录 (5-Tier Hierarchical Active Directory)** 进行索引发现的：
 
 [source,text]
 ----
-Tx #1  ──> Write Tier 1, Write Tier 2, Write Tier 3, Write Tier 4, Write Tier 5  (5 writes)
-Tx #2  ──> Write Tier 1, Write Tier 2, Write Tier 3, Write Tier 4, Write Tier 5  (5 writes)
-Tx #3  ──> Write Tier 1, Write Tier 2, Write Tier 3, Write Tier 4, Write Tier 5  (5 writes)
+es_days_by_year                             ← 第 1 层 (Tier 1): 哪一日历天存在待处理工作？
+  └── es_recovery_windows_by_day            ← 第 2 层 (Tier 2): 该日内的哪一个 UTC 分钟窗口？
+        └── es_instances_by_recovery_window ← 第 3 层 (Tier 3): 哪个 Pod 实例在该窗口内写入了数据？
+              └── es_buckets_by_instance    ← 第 4 层 (Tier 4): 该 Pod 创建了哪些分桶 (Bucket) 分区？
+                    └── es_recovery_transactions_by_instance ← 第 5 层 (Tier 5): 实际的事务指针记录。
+----
+
+=== 5 倍写入放大风险 (The 5x Write Amplification Hazard)
+
+在未经优化的朴素实现中，每一次事务写入都需要依次执行 5 条数据库写语句（每个层级一条）：
+
+[source,text]
+----
+Tx #1  ──> 写 Tier 1, 写 Tier 2, 写 Tier 3, 写 Tier 4, 写 Tier 5  (5 次写入)
+Tx #2  ──> 写 Tier 1, 写 Tier 2, 写 Tier 3, 写 Tier 4, 写 Tier 5  (5 次写入)
+Tx #3  ──> 写 Tier 1, 写 Tier 2, 写 Tier 3, 写 Tier 4, 写 Tier 5  (5 次写入)
 ...
-Tx #50000 ─> Write Tier 1, Write Tier 2, Write Tier 3, Write Tier 4, Write Tier 5 (5 writes)
+Tx #50000 ─> 写 Tier 1, 写 Tier 2, 写 Tier 3, 写 Tier 4, 写 Tier 5 (5 次写入)
 ----
 
-Under a load of 100,000 transactions, the database would endure **500,000 writes** — **400,000 of which are completely redundant upserts** to metadata tables that already contain those exact directory keys.
-This creates severe performance degradation:
+在 100,000 笔事务的高并发负载下，数据库将承受 **500,000 次写入**——其中 **400,000 次完全是多余的幂等覆写 (Redundant Upserts)**，反复写入那些早已存在完全相同目录键的元数据表中。
+这会导致严重的性能衰退与集群压力：
 
-1. **CommitLog and Memtable bloat** from redundant metadata writes.
-2. **Unnecessary SSTable compaction pressure** on directory tables.
-3. **5x network round-trips / reactive publisher overhead** on live traffic paths.
+1. **CommitLog 和 Memtable 膨胀**：被大量重复的元数据写入无端填充。
+2. **SSTable 压缩压力激增**：在目录表上触发不必要的 Compaction 压缩风暴。
+3. **5 倍网络往返开销**：在实时业务流量路径上产生昂贵的响应式 Publisher 调度消耗。
 
-=== The Solution: Optimistic Idempotent Upsert with Deferred Confirmation
+=== 解决方案：基于延迟确认的乐观幂等写入 (Optimistic Idempotent Upsert with Deferred Confirmation)
 
-Parent directory tiers (Tiers 1–4) act strictly as directory signposts to guide recovery workers.
-They **do not store transaction payloads or individual transaction IDs**.
+父目录层级（第 1 到 4 层）的作用纯粹是指示牌 (Signposts)，用于指引重试 Worker 快速定位数据。
+它们**绝不存储事务业务载荷，也不存储单独的事务 ID**。
 
-To avoid both write amplification **and** unnecessary thread waiting:
+为了同时规避写入放大**并**消除不必要的线程阻塞等待：
 
-1. **Zero Thread Waiting (Pure Non-Blocking):**
-   * Concurrent threads do not wait or block on each other.
-   * If a bucket is not yet confirmed in Cassandra, any arriving thread simply executes the upsert of Tiers 1–4.
-   * Because Cassandra writes are **idempotent**, multiple concurrent upserts to Tiers 1–4 overwrite the exact same keys with identical values without error or duplication.
-2. **Deferred Confirmation:**
-   * As soon as **any** thread successfully completes writing Tiers 1–4 to Cassandra, it calls `markBucketConfirmed`.
-   * From that moment forward, all subsequent threads see `requiresParentDirectoryInsert == false` and write **Tier 5 ONLY** (the fast path).
-3. **Automatic Fault Tolerance & Self-Healing:**
-   * If a thread encounters a database glitch or network timeout while writing Tiers 1–4, it does **not** confirm.
-   * Concurrent or subsequent threads will naturally attempt the upsert until one succeeds, guaranteeing that directory paths are never orphaned.
+1. **零线程阻塞 (Zero Thread Waiting, 纯非阻塞)：**
+   * 并发线程之间绝不相互阻塞等待。
+   * 如果某个分桶在 Cassandra 中尚未确认，到达的并发线程直接并行执行第 1–4 层的写入。
+   * 因为 Cassandra 的写操作具备**天然幂等性 (Idempotent)**，针对第 1–4 层的多个并发 upsert 覆盖写入完全相同的键值，既不会报错也不会产生脏数据。
+2. **延迟确认机制 (Deferred Confirmation)：**
+   * 一旦**任何**线程成功完成向 Cassandra 写入第 1–4 层，即在内存中调用 `markBucketConfirmed`。
+   * 从那一刻起，后续所有到达的线程都会检测到 `requiresParentDirectoryInsert == false`，从而**仅写入第 5 层 (Tier 5 ONLY)**（快速直达路径 Fast Path）。
+3. **自动化容灾与自愈能力 (Self-Healing)：**
+   * 如果某个线程在写入第 1–4 层时遭遇数据库抖动或超时，它**不会**确认该分桶。
+   * 并发或随后的其他业务线程将自然接续重试写入，直到其中一个成功确认，从而绝对保证目录路径不会遗漏孤立。
 
 [source,text]
 ----
-[Start of Bucket 0 (Unconfirmed)]
+[分桶 0 初始状态 (未确认)]
   │
-  ├─► Tx #1: Confirmed? NO  ──► Upserts Tiers 1–4 + Tier 5 ──► DB OK! ──► markConfirmed(0) ✔️
-  │                                                                             │
-  ├─► Tx #2: Confirmed? NO  ──► Upserts Tiers 1–4 + Tier 5 ──► DB OK!          │ (Now Confirmed!)
-  │   (proceeds concurrently, zero waiting)                                     │
-  │                                                                             ▼
-  │                                                             [Confirmed State Active]
-  │                                                                             │
-  ├─► Tx #3: Confirmed? YES ────────────────────────────────────► Write Tier 5 ONLY (Fast Path)
-  ├─► Tx #4: Confirmed? YES ────────────────────────────────────► Write Tier 5 ONLY (Fast Path)
-  └─► Tx #50,000: Confirmed? YES ───────────────────────────────► Write Tier 5 ONLY (Fast Path)
+  ├─► Tx #1: 已确认? 否 ──► 写入 Tier 1–4 + Tier 5 ──► DB 成功! ──► markConfirmed(0) ✔️
+  │                                                                         │
+  ├─► Tx #2: 已确认? 否 ──► 写入 Tier 1–4 + Tier 5 ──► DB 成功!            │ (此时已变为已确认状态!)
+  │   (并发执行，零阻塞等待)                                                │
+  │                                                                         ▼
+  │                                                          [已激活确认状态 (Confirmed)]
+  │                                                                         │
+  ├─► Tx #3: 已确认? 是 ────────────────────────────────────► 仅写入 Tier 5 (快速直达路径)
+  ├─► Tx #4: 已确认? 是 ────────────────────────────────────► 仅写入 Tier 5 (快速直达路径)
+  └─► Tx #50,000: 已确认? 是 ───────────────────────────────► 仅写入 Tier 5 (快速直达路径)
 ----
 
-For a 50,000-transaction bucket, only a tiny handful of initial concurrent threads (typically 2 to 5 requests during the first 10ms) upsert Tiers 1–4.
-The remaining **49,995+ transactions** insert directly into Tier 5 with zero waiting, achieving an immediate **~80% reduction** in database write traffic.
+对于一个容纳 50,000 笔事务的分桶，仅在最开始的数毫秒内有极少数并发线程（通常仅 2 到 5 个请求）执行了第 1–4 层的写入。
+其余的 **49,995+ 笔事务** 全部零阻塞直接落入第 5 层，立刻实现了**降低 ~80% 数据库写入流量**的飞跃性性能提升。
 
 '''
 
-== Mathematical Calculation Engine
+== 数学计算引擎 (Mathematical Calculation Engine)
 
-The caching and tracking manager (`RecoveryDirectoryTracker`) performs three discrete mathematical calculations per transaction in ~5 nanoseconds without distributed locks.
+缓存与跟踪管理器 (`RecoveryDirectoryTracker`) 在内存中对每笔事务执行三个独立的数学计算，耗时仅约 5 纳秒，全程无需任何分布式锁。
 
-=== Calculation 1: Target Window Index & UTC Midnight Rollover
+=== 计算 1：目标时间窗口索引与 UTC 午夜跨天回绕 (UTC Midnight Rollover)
 
-Transaction scheduling is partitioned into discrete time windows of granularity `windowIntervalMinutes` (default: `1`, giving 1440 windows per 24h day).
-Each saga domain entity can configure independent delay horizons:
+事务调度被划分为粒度为 `windowIntervalMinutes` 的离散时间窗口（默认：`1` 分钟，即 24 小时一天共 1440 个时间窗口）。
+每个 Saga 领域实体均可配置独立的延迟跨度：
 
-* **Retry (`RETRY`):** Transient downstream failures target immediate future window `W + delayWindows` (default: W + 1).
-* **Restore (`RESTORE`):** Dead-man's switch watchdog rows target far-future window `W + delayWindows` (default: W + 600, i.e. 10 hours ahead).
+* **重试 (`RETRY`)：** 瞬态下游故障，目标指向紧邻的未来时间窗口 `W + delayWindows`（默认：W + 1）。
+* **崩溃恢复守护 (`RESTORE`)：** 类似看门狗的看门事务记录，目标指向遥远的未来时间窗口 `W + delayWindows`（默认：W + 600，即提前 10 小时）。
 
-==== Formulas & Pseudocode
+==== 公式与伪代码
 
-.Target Window and UTC Midnight Rollover Calculation
+.目标窗口与 UTC 午夜跨天计算公式
 [source,text]
 ----
 totalWindowsPerDay = 1440 / windowIntervalMinutes
@@ -100,221 +100,221 @@ minutesSinceMidnight = (utcHour * 60) + utcMinute
 currentWindowIndex = minutesSinceMidnight / windowIntervalMinutes
 targetWindowIndex  = currentWindowIndex + delayWindows
 
-// Calculate Calendar Day Offset (handles midnight UTC rollover)
+// 计算日历天偏移量 (精准处理跨越午夜零点的场景)
 daysOffset        = targetWindowIndex / totalWindowsPerDay
 targetWindowInDay = targetWindowIndex % totalWindowsPerDay
 
-targetDate  = utcDate + daysOffset days
+targetDate  = utcDate + daysOffset 天
 minuteOfDay = targetWindowInDay * windowIntervalMinutes
 ----
 
-==== Step-by-Step Breakdown
+==== 步骤解析
 
-1. **Total Daily Windows (`totalWindowsPerDay`):**
-   * If `windowIntervalMinutes = 1`: `totalWindowsPerDay = 1440 / 1 = 1440`.
-   * If `windowIntervalMinutes = 5`: `totalWindowsPerDay = 1440 / 5 = 288`.
-2. **Current Window Index (`currentWindowIndex`):**
-   * Computes minutes elapsed since midnight UTC (`minutesSinceMidnight`) and divides by `windowIntervalMinutes`.
-3. **Target Window Index (`targetWindowIndex`):**
-   * Adds the domain-configured `delayWindows` to `currentWindowIndex`.
-4. **UTC Midnight Rollover (`daysOffset` and `targetWindowInDay`):**
-   * If `targetWindowIndex < totalWindowsPerDay`: the write stays within today's calendar date (`daysOffset = 0`).
-   * If `targetWindowIndex >= totalWindowsPerDay`: the write crosses midnight UTC:
-     * `daysOffset` advances the calendar date by `targetWindowIndex / totalWindowsPerDay` days.
-     * `targetWindowInDay` wraps to the beginning of the next day using modulo arithmetic (`%`).
-5. **Cassandra Clustering Key (`minuteOfDay`):**
-   * Scaled back to the discrete minute of the day (0 to 1439) to match table clustering definitions (`minute_of_day ASC`).
+1. **每日总窗口数 (`totalWindowsPerDay`)：**
+   * 若 `windowIntervalMinutes = 1`：`totalWindowsPerDay = 1440 / 1 = 1440`。
+   * 若 `windowIntervalMinutes = 5`：`totalWindowsPerDay = 1440 / 5 = 288`。
+2. **当前窗口索引 (`currentWindowIndex`)：**
+   * 计算自 UTC 午夜起流逝的分钟数 (`minutesSinceMidnight`) 并除以 `windowIntervalMinutes`。
+3. **目标窗口索引 (`targetWindowIndex`)：**
+   * 将领域配置的延迟跨度 `delayWindows` 累加到 `currentWindowIndex`。
+4. **UTC 午夜跨天 (`daysOffset` 与 `targetWindowInDay`)：**
+   * 若 `targetWindowIndex < totalWindowsPerDay`：写操作仍落在当天的日历日期内（`daysOffset = 0`）。
+   * 若 `targetWindowIndex >= totalWindowsPerDay`：写操作跨越了 UTC 午夜零点：
+     * `daysOffset` 依据 `targetWindowIndex / totalWindowsPerDay` 自动递进日历天。
+     * `targetWindowInDay` 通过取模运算 (`%`) 平滑回绕到次日的起始分钟。
+5. **Cassandra 集群列键 (`minuteOfDay`)：**
+   * 映射回当天的自然分钟刻度 (0 到 1439)，精确契合表结构的集群列定义 (`minute_of_day ASC`)。
 
 ---
 
-=== Calculation 2: Monotonic Slot Allocation & Odd/Even Bucket Segregation
+=== 计算 2：单调槽位分配与奇偶分桶隔离 (Odd/Even Bucket Segregation)
 
-Every target window maintains a JVM-local `AtomicLong` counter.
-When a transaction is assigned to that window, it atomically claims a monotonic sequence slot (1, 2, 3...).
+每个目标窗口在本地维护一个 JVM 级别的 `AtomicLong` 计数器。
+当事务分配到该窗口时，它原子地获取一个单调递增的序列槽位 (1, 2, 3...)。
 
-==== Formulas & Pseudocode
+==== 公式与伪代码
 
-.Slot Allocation and Bucket Index Calculation
+.槽位分配与分桶索引计算
 [source,text]
 ----
-slot = counter.incrementAndGet()  // Monotonic: 1, 2, 3...
+slot = counter.incrementAndGet()  // 单调递增: 1, 2, 3...
 bucketSequence = (slot - 1) / bucketSize
 
-// RETRY uses Even Bucket Indexes: 0, 2, 4, 6...
+// RETRY 使用偶数分桶索引: 0, 2, 4, 6...
 retryBucketIndex = bucketSequence * 2
 
-// RESTORE uses Odd Bucket Indexes: 1, 3, 5, 7...
+// RESTORE 使用奇数分桶索引: 1, 3, 5, 7...
 restoreBucketIndex = (bucketSequence * 2) + 1
 ----
 
-==== Why Segregate Even and Odd Buckets?
+==== 为什么必须对奇数桶和偶数桶进行物理隔离？
 
 [cols="1,2,2",options="header"]
 |===
-| Dimension | Even Buckets (`RETRY`) | Odd Buckets (`RESTORE`)
+| 核心维度 | 偶数分桶 (`RETRY`) | 奇数分桶 (`RESTORE`)
 
-| **Bucket Indexes**
+| **分桶索引序列**
 | 0, 2, 4, 6...
 | 1, 3, 5, 7...
 
-| **Trigger Condition**
-| Transient step failure (rare, e.g. HTTP 503)
-| Transaction start (every single saga execution)
+| **触发生成条件**
+| 瞬态步骤调用失败（极低概率，如 HTTP 503）
+| 事务初始化启动（每一笔正常 Saga 事务均会生成）
 
-| **Deletion Pattern**
-| Dropped via **O(1) Partition Tombstone** when bucket finishes
-| Deleted via **individual row deletes** on normal transaction success
+| **数据删除模式**
+| 分桶处理完毕后通过 **O(1) 分区墓碑 (Partition Tombstone)** 一次性整桶丢弃
+| 事务正常成功后通过**单行删除语句 (Individual Row Deletes)** 移除
 
-| **Tombstone Status**
-| **0% cell tombstones** (100% live scan path for workers)
-| Absorbs high-frequency completion cell tombstones
+| **墓碑扫描状态**
+| **0% 单元格墓碑**（Worker 拥有 100% 极速纯净扫描路径）
+| 承担高并发正常完成所产生的大量单元格墓碑 (Cell Tombstones)
 
-| **Cassandra Safety**
-| Completely eliminates `ReadFailureException` (>100,000 tombstones)
-| Isolates tombstone churn away from retry scan paths
+| **Cassandra 安全性保障**
+| 彻底杜绝扫描阶段的 `ReadFailureException`（墓碑数超 100,000 阈值）
+| 将墓碑频繁删除的扰动完全隔离在正常重试扫描路径之外
 |===
 
 ---
 
-=== Calculation 3: In-Memory Boundary Tracking (`requiresParentDirectoryInsert`)
+=== 计算 3：内存边界跟踪判断 (`requiresParentDirectoryInsert`)
 
-To determine whether Tiers 1–4 need to be inserted, each window state tracks confirmed bucket indexes using a concurrent thread-safe set:
+为了精准判定当前事务是否需要写入第 1–4 层，每个时间窗口状态使用并发线程安全集合记录已确认的分桶索引：
 
 [source,java]
 ----
 Set<Long> confirmedBuckets = ConcurrentHashMap.newKeySet();
 ----
 
-When an allocation claims a slot and calculates `bucketIndex`, it checks:
+当槽位分配计算得到 `bucketIndex` 时，立即执行检查：
 
 [source,java]
 ----
 boolean requiresParentDirectoryInsert = !confirmedBuckets.contains(bucketIndex);
 ----
 
-* If `confirmedBuckets.contains(bucketIndex)` is **`false`**:
-  * The bucket has **not yet been confirmed** as written in Cassandra.
-  * `requiresParentDirectoryInsert` is **`true`**.
-  * The thread executes the idempotent upsert of Tiers 1–4, and upon database success calls:
+* 若 `confirmedBuckets.contains(bucketIndex)` 为 **`false`**：
+   * 该分桶**尚未在 Cassandra 中确认持久化**。
+   * `requiresParentDirectoryInsert` 判定为 **`true`**。
+   * 当前线程执行第 1–4 层的幂等写入，在数据库确认成功后回调：
 +
 [source,java]
 ----
 tracker.markBucketConfirmed(domain, type, allocation);
 ----
-* If `confirmedBuckets.contains(bucketIndex)` is **`true`**:
-  * The directory hierarchy for this bucket is already confirmed written in Cassandra.
-  * `requiresParentDirectoryInsert` is **`false`**.
-  * The thread **bypasses Tiers 1–4 completely** and inserts directly into **Tier 5 ONLY**.
+* 若 `confirmedBuckets.contains(bucketIndex)` 为 **`true`**：
+   * 该分桶的目录层级已被确认存在于 Cassandra 中。
+   * `requiresParentDirectoryInsert` 判定为 **`false`**。
+   * 当前线程**完全绕过第 1–4 层**，直接**仅写入第 5 层 (Tier 5 ONLY)**。
 
 '''
 
-== Complete Step-by-Step Numerical Walkthrough
+== 完整数字演算流程示例 (Numerical Walkthrough)
 
-Assume the following configuration:
+假定系统配置如下：
 * `bucketSize = 50,000`
 * `windowIntervalMinutes = 1`
-* Current UTC Time: `10:00:00 UTC` (`minutesSinceMidnight = 600`, `currentWindow = 600`)
-* Operation: `RETRY` (delay = 1 window -> target window 601)
+* 当前 UTC 时间：`10:00:00 UTC` (`minutesSinceMidnight = 600`, `currentWindow = 600`)
+* 操作类型：`RETRY`（延迟 = 1 个窗口 -> 目标时间窗口为 601）
 
 [cols="1,1,1,1,1,3",options="header"]
 |===
-| Step / Transaction | Slot | Bucket Seq | Bucket Index | `requiresParentInsert` | Cassandra Database Operations
+| 步骤 / 事务 | 槽位 (Slot) | 分桶序列 | 分桶索引 | `requiresParentInsert` | Cassandra 数据库具体操作
 
 | **Tx #1** +
-_(Window & Bucket Initializer)_
+_(窗口与分桶初始化写入)_
 | 1
 | (1 - 1) / 50000 = 0
 | 0 * 2 = **0**
 | **`true`** +
-(unconfirmed)
-| **5-Tier Initializer Writes:** +
-1. `INSERT INTO es_days_by_year ...` (Tier 1) +
-2. `INSERT INTO es_recovery_windows_by_day ... minute_of_day = 601` (Tier 2) +
-3. `INSERT INTO es_instances_by_recovery_window ... instance_id` (Tier 3) +
-4. `INSERT INTO es_buckets_by_instance ... bucket_index = 0` (Tier 4) +
-5. `INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 0, tx_1` (Tier 5) +
-_On success: calls `markBucketConfirmed(0)`._
+(未确认)
+| **5 层全量初始化写入：** +
+1. `INSERT INTO es_days_by_year ...` (第 1 层) +
+2. `INSERT INTO es_recovery_windows_by_day ... minute_of_day = 601` (第 2 层) +
+3. `INSERT INTO es_instances_by_recovery_window ... instance_id` (第 3 层) +
+4. `INSERT INTO es_buckets_by_instance ... bucket_index = 0` (第 4 层) +
+5. `INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 0, tx_1` (第 5 层) +
+_DB 成功后回调：`markBucketConfirmed(0)`。_
 
 | **Tx #2** +
-_(Concurrent before confirmation)_
+_(确认完成前的并发请求)_
 | 2
 | (2 - 1) / 50000 = 0
 | 0 * 2 = **0**
 | **`true`** +
-(if Tx #1 in-flight)
-| **Concurrent Idempotent Upsert:** +
-Executes Tiers 1–4 in parallel without waiting. +
-Cassandra handles the duplicate write idempotently with zero error.
+(若 Tx #1 仍在网络中)
+| **并发幂等写入：** +
+无需等待 Tx #1，并行执行第 1–4 层写入。 +
+Cassandra 幂等地处理重复写入，零错误零冲突。
 
 | **Tx #3 .. #50,000** +
-_(Confirmed Fast Path)_
+_(已确认快速通道)_
 | 3 .. 50000
 | 0
 | **0**
 | **`false`** +
-(confirmed!)
-| **Fast Path Writes:** +
-`INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 0, tx_N` (Tier 5 ONLY) +
-_Zero metadata table overhead across 49,997+ writes._
+(已确认!)
+| **极速直达路径写入：** +
+`INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 0, tx_N` (仅写入第 5 层) +
+_随后的 49,997+ 次写入完全免除任何目录元数据开销。_
 
 | **Tx #50,001** +
-_(Bucket Rollover Boundary)_
+_(分桶翻转滚动边界)_
 | 50001
 | (50001 - 1) / 50000 = 1
 | 1 * 2 = **2**
 | **`true`** +
-(bucket 2 unconfirmed)
-| **Bucket Rollover Writes:** +
-1. Upsert Tiers 1–3 markers (idempotent no-op in Cassandra) +
-2. `INSERT INTO es_buckets_by_instance ... bucket_index = 2` (Tier 4: registers new bucket) +
-3. `INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 2, tx_50001` (Tier 5) +
-_On success: calls `markBucketConfirmed(2)`._
+(分桶 2 尚未确认)
+| **分桶滚动写入：** +
+1. 幂等更新第 1–3 层标记（在 Cassandra 中为无害 no-op） +
+2. `INSERT INTO es_buckets_by_instance ... bucket_index = 2` (第 4 层：注册新分桶) +
+3. `INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 2, tx_50001` (第 5 层) +
+_DB 成功后回调：`markBucketConfirmed(2)`。_
 
 | **Tx #50,002** +
-_(Fast Path in Bucket 2)_
+_(分桶 2 内的快速通道)_
 | 50002
 | 1
 | **2**
 | **`false`** +
-(bucket 2 confirmed)
-| **Fast Path Write:** +
-`INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 2, tx_50002` (Tier 5 ONLY)
+(分桶 2 已确认)
+| **极速直达路径写入：** +
+`INSERT INTO es_recovery_transactions_by_instance ... bucket_index = 2, tx_50002` (仅写入第 5 层)
 |===
 
 '''
 
-== Architecture of the Implemented Tracking Classes
+== 跟踪管理核心类的职责架构
 
-All tracking classes reside in `org.stacksaga.cassandra.recovery`:
+所有恢复目录跟踪类均封装于 `org.stacksaga.cassandra.recovery` 包下：
 
 [cols="1,3",options="header"]
 |===
-| Class Name | Architectural Role
+| 类名 (Class Name) | 架构定位与核心职责 (Architectural Role)
 
 | `RecoveryType`
-| Enum distinguishing `RETRY` (computes even buckets 0, 2, 4...) and `RESTORE` (computes odd buckets 1, 3, 5...).
+| 枚举类，区分 `RETRY`（计算偶数桶 0, 2, 4...）与 `RESTORE`（计算奇数桶 1, 3, 5...）。
 
 | `RecoveryWindow`
-| Immutable record encapsulating `(LocalDate date, int minuteOfDay)` corresponding directly to Cassandra composite partition and clustering keys.
+| 不可变 Record，封装 `(LocalDate date, int minuteOfDay)`，与 Cassandra 的复合分区键与集群键直接映射。
 
 | `RecoveryAllocationResult`
-| Carrier record containing the target `RecoveryWindow`, computed `bucketIndex`, allocated sequence `slot`, and the boolean flag `requiresParentDirectoryInsert`.
+| 承载结果的 Record，包含目标 `RecoveryWindow`、计算出的 `bucketIndex`、分配的序列 `slot`，以及布尔标志位 `requiresParentDirectoryInsert`。
 
 | `RecoveryBucketTrackingState`
-| JVM-local thread-safe tracking state holding the `AtomicLong` counter and `ConcurrentHashMap.newKeySet()` of confirmed buckets for a given window.
+| JVM 本地线程安全状态载体，持有特定时间窗口的 `AtomicLong` 计数器以及已确认分桶的 `ConcurrentHashMap.newKeySet()`。
 
 | `RecoveryWindowCalculator`
-| Component that converts timestamps and domain configurations into target `RecoveryWindow` instances with automatic UTC midnight rollover.
+| 计算组件，负责将时间戳与领域配置自动转换为目标 `RecoveryWindow`，自动处理跨越 UTC 午夜零点的时间回绕。
 
 | `RecoveryDirectoryTracker`
-| Central tracking service managing the cache of active `RecoveryWindowKey` states, providing non-blocking allocation methods, confirmation callbacks (`markBucketConfirmed`), and memory pruning.
+| 核心跟踪服务，统一管理活跃 `RecoveryWindowKey` 状态缓存，提供非阻塞槽位分配方法、确认回调 (`markBucketConfirmed`) 以及内存修剪机制。
 |===
 
 '''
 
-== Reactive Integration Example (Project Reactor)
+== 反应式编程集成代码示例 (Project Reactor)
 
-Here is how the reactive service layer uses `RecoveryDirectoryTracker` with deferred confirmation:
+以下展示反应式服务层如何结合使用 `RecoveryDirectoryTracker` 与延迟确认机制：
 
 [source,java]
 ----
@@ -332,33 +332,33 @@ public class ReactiveRecoveryService {
     private final CassandraRecoveryDao recoveryDao;
 
     /**
-     * Registers a transient retry failure.
+     * 注册瞬态失败的重试事务
      */
     public Mono<Void> registerRetry(String domain, String transactionId, byte[] payload) {
-        // Step 1: Allocate slot non-blockingly (~5 nanoseconds)
+        // 步骤 1: 非阻塞方式极速分配槽位 (~5 纳秒)
         return tracker.allocateReactive(domain, RecoveryType.RETRY)
             .flatMap(allocation -> {
-                // Step 2: Branch based on deferred confirmation check
+                // 步骤 2: 基于延迟确认标志位进行分支判断
                 if (allocation.requiresParentDirectoryInsert()) {
-                    // Unconfirmed: Upsert Tiers 1-4, mark confirmed on DB success, then append Tier 5
+                    // 未确认状态: 并发写入第 1–4 层，DB 成功后置为已确认，随后追加第 5 层
                     return Mono.when(
                         recoveryDao.insertTier1DaysByYear(allocation.targetDate()),
                         recoveryDao.insertTier2WindowsByDay(allocation.targetDate(), allocation.targetMinuteOfDay()),
                         recoveryDao.insertTier3InstanceMarker(allocation.targetDate(), allocation.targetMinuteOfDay()),
                         recoveryDao.insertTier4BucketIndex(allocation.targetDate(), allocation.targetMinuteOfDay(), allocation.bucketIndex())
                     )
-                    // Once Cassandra confirms success, flip confirmed flag in memory!
+                    // 一旦 Cassandra 返回成功，立即在内存中翻转确认标志!
                     .doOnSuccess(unused -> tracker.markBucketConfirmed(domain, RecoveryType.RETRY, allocation))
                     .then(recoveryDao.insertTier5RetryTransaction(allocation, transactionId, payload));
                 } else {
-                    // Fast Path (Already confirmed): Append to Tier 5 ONLY with zero waiting
+                    // 快速通道 (已确认状态): 零阻塞等待，仅写入第 5 层
                     return recoveryDao.insertTier5RetryTransaction(allocation, transactionId, payload);
                 }
             });
     }
 
     /**
-     * Registers a dead-man's switch watchdog at transaction start.
+     * 在事务启动时注册崩溃守护看门狗记录
      */
     public Mono<String> registerRestoreWatchdog(String domain, String transactionId) {
         return tracker.allocateReactive(domain, RecoveryType.RESTORE)
@@ -388,31 +388,31 @@ public class ReactiveRecoveryService {
 
 '''
 
-== Memory Bound Invariant: Stale Window Pruning
+== 内存防膨胀机制：过期时间窗口清理 (Stale Window Pruning)
 
-Because orchestrator pods run indefinitely in containerized production environments, in-memory tracking states must not grow without bound.
+由于容器化生产环境中的微服务 Pod 长期连续运行，JVM 内存中的跟踪状态绝不能无限膨胀。
 
-Standard-Nodes write only into **future horizons**:
+标准节点 (Standard-Nodes) 永远只向**未来视界**写入数据：
 
-* Retry writes into W + 1 (or domain delay W + D).
-* Restore writes into W + 600 (or domain delay W + D).
+* Retry 写入 W + 1（或领域配置的延迟 W + D）。
+* Restore 写入 W + 600（或领域配置的延迟 W + D）。
 
-Once wall-clock UTC time has progressed past window W, no pod will ever write to that window again.
-`RecoveryDirectoryTracker` provides the `pruneExpiredWindows` method:
+一旦真实物理时间超过时间窗口 W，将永远没有任何 Pod 会再次向该窗口写入记录。
+`RecoveryDirectoryTracker` 提供了定时修剪方法 `pruneExpiredWindows`：
 
 [source,java]
 ----
-@Scheduled(fixedDelay = 300_000) // Runs every 5 minutes
+@Scheduled(fixedDelay = 300_000) // 每 5 分钟执行一次
 public void pruneStaleRecoveryWindows() {
     LocalDateTime nowUtc = LocalDateTime.now(ZoneOffset.UTC);
     int currentMinuteOfDay = nowUtc.getHour() * 60 + nowUtc.getMinute();
     
-    // Purges any window tracking state strictly in the past
+    // 清理所有已经成为过去式的时间窗口状态
     tracker.pruneExpiredWindows(nowUtc.toLocalDate(), currentMinuteOfDay);
 }
 ----
 
-This guarantees that:
+这提供了坚实的不变量保证：
 
-* Active heap footprint of `RecoveryDirectoryTracker` is strictly bounded to under 50 KB.
-* Zero memory leaks occur regardless of how many days or months the microservice runs.
+* `RecoveryDirectoryTracker` 在 JVM 堆内存中的活跃占用被严格约束在 50 KB 以内。
+* 无论微服务连续平稳运行多少天或多少个月，均彻底实现零内存泄露。
