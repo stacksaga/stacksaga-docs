@@ -1,0 +1,265 @@
+:description: Overview of the StackSaga Synchronous Engine: enterprise-grade reactive Saga orchestration, Straight-Through Processing (STP), and event sourcing for Banking, Fintech, and distributed microservices with Spring Boot.
+:keywords: stacksaga, saga orchestration, banking transactions, fintech microservices, straight-through processing, STP, human-in-the-loop, HITL, Spring Boot, distributed transactions, event sourcing, transaction tracing, idempotency, workflow compensation, pausable LRT
+:toc-title: Stacksaga Synchronous Engine
+:robots: index,follow
+
+= Stacksaga Synchronous Engine
+
+Stacksaga-Sync Engine is a reactive Saga orchestration engine framework built on top of Spring Boot.
+
+It enables developers to design and manage complex workflows by coordinating primary executions and their compensating actions, effectively addressing eventual consistency challenges in distributed systems through the Saga design pattern.
+
+The Stacksaga-Sync Engine architecture supports implementing any synchronous communication style you choose — such as REST (over HTTP), gRPC (over HTTP/2), or GraphQL (over HTTP) — giving you the flexibility to integrate microservices using the most appropriate approach for your system’s needs.
+
+And also you can see here some of the major features that StackSaga provides.
+
+NOTE: Even though Stacksaga-Sync Engine runs reactively under the hood, it is fully compatible with both *reactive* and *non-reactive* Spring environments.
+
+* Saga Orchestration engine for managing primary and compensating work flows.
+* Dual Long-Running Transaction (LRT) models: support for both xref:stacksaga-sync/index.adoc#continuous-lrt[*Continuous LRTs*] (unbroken straight-through execution) and xref:stacksaga-sync/index.adoc#pausable-lrt[*Pausable LRTs*] (business wait states with callback correlation via xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause()`] and xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`SagaTemplate.resume()`]).
+* Transaction Coordination
+* Idempotency (Ensures that repeating the same operation multiple times has the same effect as performing it once, which is crucial for reliability.)
+* Transactions Asynchronous-Retrying
+* Event sourcing (State Management)
+* Monitoring Distributed transaction tracing via the StackSaga xref:trace-window:stacksaga-trace-window.adoc[Trace-Window].
+* Concurrency Control and, many more…
+
+
+
+[[stacksaga_components]]
+== Stacksaga-Components (High-Level Overview)
+
+In the StackSaga ecosystem, few components are working together.
+It can be divided as below based on the usage.
+
+* Orchestration service related components
+** xref:stacksaga-spring-boot-starter[stacksaga-spring-boot-starter]
+** xref:stacksaga-db-support[stacksaga-db-support]
+** xref:stacksaga-env-support[stacksaga-env-support]
+* xref:agent_service_related_components[Agent service related components]
+* xref:stacksaga-trace-window[StackSaga Trace-Window]
+
+Here you can see the relationship between them and how they are used in the StackSaga ecosystem.
+
+image:overview/stacksaga-diagram-stacksaga-components.svg[alt="stacksaga components overview",title="Stacksaga components overview",width=800]
+
+*Description*
+
+* xref:stacksaga-spring-boot-starter[stacksaga-spring-boot-starter] provides the core features of the StackSaga framework like managing the saga work flows, transaction coordination, idempotency, event sourcing, and so on.
+* xref:stacksaga-db-support[stacksaga-db-support] provides the event-store supportive implementation for the StackSaga framework and rest APIs for accessing the tracing details from the StackSaga Trace-Window.
+* xref:stacksaga-env-support[stacksaga-env-support] provides the environment related geographical (region, zone, instance ID, etc.) data to the SEC in the cloud environment.
+* xref:agent_service_related_components[Agent service] provides the transaction retrying management for the Orchestration service as a separate application.
+* xref:stacksaga-trace-window[StackSaga Trace-Window] provides the monitoring facilities of the transactions. (no need to implement due to its hosted in the cloud for you)
+
+See the individual sections for more details.
+
+[[orchestration_service_related_components]]
+== Orchestration Service Related Components (Domain-Centric Orchestration)
+
+A key architectural advantage of StackSaga is that you **never deploy a dedicated or standalone orchestration server**.
+Instead, StackSaga follows a **Domain-Centric (Service-Embedded) Orchestration** model:
+
+* **No Dedicated Orchestrator Infrastructure**: You do not build or deploy separate "orchestrator microservices". Instead, any standard microservice becomes an orchestrator simply by adding StackSaga components to it.
+* **Per-Domain Centralization**:
+  ** For an order placement workflow, add StackSaga components into `order-service`. The `order-service` becomes the central orchestrator for that order domain.
+  ** If your system also has a complex multi-step payment clearance, refund, or settlement saga, simply add StackSaga components into `payment-service` to make it the orchestrator for the payment domain.
+  ** A single microservice can orchestrate one or multiple business domains within its bounded context.
+* **Zero Downstream Changes**: Microservices invoked by the orchestrator (such as `user-service` or `inventory-service`) remain standard utility services with zero StackSaga dependencies.
+
+[[stacksaga-spring-boot-starter]]
+=== `stacksaga-spring-boot-starter` Dependency
+
+`stacksaga-spring-boot-starter` is the core of the framework, and it can be added as a dependency into your project like below.
+
+[source,xml,subs="attributes+"]
+----
+<dependency>
+  <groupId>org.stacksaga</groupId>
+  <artifactId>stacksaga-spring-boot-starter</artifactId>
+  <version>{stacksaga-version}</version>
+</dependency>
+----
+
+`stacksaga-spring-boot-starter` works with the following major components.
+
+* xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[SagaTemplate and Event Listeners] — Entry point to initialize, watch, and resume sagas with `stacksaga-spring-boot-starter`.
+* xref:stacksaga-sync/orchestrator/domain-entity.adoc[Domain Entity] — To store the necessary payload and execution state for the transaction.
+* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Executors] — To create, execute, and pause each atomic step within the saga.
+
+[[stacksaga-db-support]]
+=== `stacksaga-db-support` Dependency
+
+StackSaga works with the help of the event-store.
+So it requires a one of database implementations for connecting with the target database.
+The database implementation is based on your target Orchestration service's database.
+For instance, if you want to configure stacksaga into the `order-service`, and the Mysql database is used as the primary database in the `order-service`, you have to add the stacksaga database support mysql implementation called `stacksaga-mysql-support` dependency into the `order service`.
+
+Currently, the following database implementations are available.
+
+* Mysql Database - xref:stacksaga-database-support:mysql-database-support/stacksaga-mysql-support.adoc[stacksaga-mysql-support]
+* Cassandra Database - xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc[stacksaga-cassandra-support]
+* MongoDb Database - `stacksaga-mongodb-support` #Comming soon!#
+
+[[stacksaga-env-support]]
+=== `stacksaga-env-support` Dependency
+
+`stacksaga-env-support` Dependency provides the environment related geographical (region, zone, instance ID, etc.) data to the SEC.
+Based on where your applications are deployed the `stacksaga-env-support` should be changed.
+For instance, if you deploy your `order-service` application in the *eureka* environment(Eureka based service discovery and load balancing), you have to add the `stacksaga-eureka-support` dependency into the `order service`.
+And if you want to migrate your `order-service` application to the *kubernetes* environment, you can change the `stacksaga-eureka-support` dependency to the `stacksaga-k8s-support` dependency in the `order service`.
+
+Currently, StackSaga supports for multiple cloud and container environments through instance region resolution (see xref:ROOT:saga-region-resolver.adoc[Instance Region Resolution & SagaRegionResolver]).
+
+[[agent_service_related_components]]
+=== Retry & Cluster Coordination Components
+
+To manage distributed transaction retrying, StackSaga uses the Retry Subsystem coordinated via token ring partitioning.
+Refer to xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Subsystem Architecture] for complete deployment and configuration details.
+
+[[stacksaga-trace-window]]
+=== StackSaga Trace-Window
+
+Stacksaga Trace-Window is the platform that you can see the transaction tracing details of the transaction that you made in graphically.
+there is nothing to be implemented regarding this component. you can visit https://trace.stacksaga.org[trace.stacksaga.org] and use it.
+
+== Low-Level Digram (LLD)
+
+Here you can see how the StackSaga Execution Coordinator (SEC) fits into the overall Stacksaga architecture.
+
+image::ROOT:stacksaga-diagram-SEC.svg[alt="StackSaga  StackSaga Execution Coordinator (SEC) in Stacksaga framework"]
+
+. The request comes to the orchestration service, and it is handed off to SEC with the SEC to process them asynchronously.
+. SEC will pick up the request and start the execution from the configured starting point.
+. Each step will be executed one by one based on the programmatic navigation by keeping the state in the event-store in case of retrying and tracing.
+with the help of the stacksaga-database-support module and stacksaga-env-support module(to get the instance's metadata(optional)).
+. If there is any primary execution failure, SEC will trigger the compensation executions in reverse order.
+. If there is any failure in the compensation execution due to any resource unavailability, the SEC will keep the transaction in retry mode and retry the transaction based on the configured retry policy.
+. Configured agent-service frequently checks for the transactions that are in retry mode and retry them by calling the orchestration service's built-in retrying endpoint that is provided by the stacksaga-database-support module.
+. Again, the SEC will pick up the request and start the execution from the failed point by restoring the previous state from the event-store.
+. Each update of the transaction is saved in the event-store, and the SEC will publish the events to the configured listeners for each transaction state change.
+. The administrators can see the tracing details of the transaction graphically by accessing the StackSaga Trace-Window via the in-built endpoints that are provided by the stacksaga-database-support module.
+
+== Custom Configurations
+
+StackSaga provides the flexibility to customize some advanced features based on your needs.
+
+=== Saga Scheduler Configuration
+
+Stacksaga-Framework (Synchronous) provides a default scheduler configuration for saga execution that uses Project Reactor's BoundedElastic scheduler.
+This configuration is automatically applied unless you provide a custom implementation.
+
+This scheduler is used after
+
+==== Default Configuration
+
+The default scheduler is provided by the `StackSagaSyncAutoConfiguration` class and requires no additional setup.
+
+===== Default Specifications
+
+[cols="1,2"]
+[.google-anno-skip]
+|===
+| Parameter | Value
+
+| **Scheduler Type**
+| `BoundedElastic`
+
+| **Thread Pool Size**
+| `availableProcessors() × 10`
+
+| **Queue Capacity**
+| `100,000`
+
+| **Thread Name Prefix**
+| `saga-exe`
+
+| **Threading Timeout**
+| `60 seconds`
+
+| **Daemon Threads**
+| `false`
+|===
+
+===== Example Default Behavior
+
+With default configuration on a system with 4 CPU cores:
+- Maximum thread pool size: **40 threads** (4 × 10) - Queue capacity: **100,000 tasks**
+- Idle thread timeout: **60 seconds** before threads are disposed - Threads are non-daemon (will prevent JVM shutdown if pending)
+
+==== Customizing the Scheduler
+
+To customize the scheduler behavior, create your own `AbstractSchedulerProvider` bean in your classpath.
+The framework will automatically detect and use it instead of the default.
+
+===== Implementation Guide
+
+[source,java]
+----
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.stacksaga.util.AbstractSchedulerProvider;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+
+@Configuration
+public class CustomSchedulerConfiguration {
+
+    @Bean
+    public AbstractSchedulerProvider customSchedulerProvider() {
+        return new AbstractSchedulerProvider() {
+            @Override
+            protected Scheduler scheduler() {
+                return Schedulers.newBoundedElastic(
+                    50,              // Custom thread pool size
+                    50_000,          // Custom queue capacity
+                    "custom-saga",   // Custom thread name prefix
+                    120,             // Custom timeout in seconds
+                    true             // Daemon threads (optional)
+                );
+            }
+        };
+    }
+}
+----
+
+===== Customization Options
+
+TIP: The `AbstractSchedulerProvider` is a template that abstracts Reactor's Scheduler creation.
+You can customize any of the following parameters:
+
+* **Thread Pool Size**: Number of threads to maintain in the pool
+* **Queue Capacity**: Maximum number of pending tasks
+* **Thread Name Prefix**: Custom prefix for thread names (useful for debugging and monitoring)
+* **Idle Timeout**: Time in seconds before idle threads are terminated
+* **Daemon Flag**: Whether threads should be daemon threads
+
+===== Best Practices
+
+IMPORTANT: Consider the following when customizing:
+
+* Adjust thread pool size based on your expected saga concurrency
+* Queue capacity should be sized to handle burst loads without OutOfMemoryError
+* Use daemon threads cautiously—non-daemon threads (default) ensure graceful shutdown
+* Monitor thread utilization to right-size your configuration
+* Test configuration changes thoroughly in your specific environment
+
+////
+StackSaga consists of four major components in high-level.
+
+. *StackSaga Framework.* +
+StackSaga Framework provides orchestration engine to manage the saga work flows to execute the primary executions, compensating executions, transaction reties, and so on.
+Stacksaga framework consists of three major components (dependencies).
+** stacksaga-core (stacksaga-starter) +
+The core and common features that are required by Saga execution coordinator engine.
+** stacksaga-database-support +
+The event-store supportive implementation for the saga engine.
+It can be chosen as needed based on the database which is used for the service.
+If the service that used as orchestration engine is using mysql, then the stacksaga-database-support implementation should be `stacksaga-starter-mysql`.
+** StackSaga Environment Support +
+The *StackSaga-environment-support* implementation facilitates the management of instance metadata that requires for handling the geographical identification of instances by interacting with the environment like Eureka, Kubernetes and so on.
+. *StackSaga Agent*
+. *xref:admin:stacksaga-trace-window.adoc[StackSaga Trace-Window]*
++
+StackSaga trace-window provides the monitoring facilities of the transactions and manages the security.
+////
+

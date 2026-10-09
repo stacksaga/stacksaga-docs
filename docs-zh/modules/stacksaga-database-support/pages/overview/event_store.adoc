@@ -1,0 +1,31 @@
+:description: Learn about Stacksaga Event Store, its benefits, configuration, and use cases in microservice architectures.
+:keywords: saga desing pattern, spring boot, stacksaga, event store, microservices, event sourcing, retries, monitoring, database per service
+
+
+= Stacksaga Event Store
+
+An event store is a log or database designed to store a sequence of state changes (events), rather than just the final state.
+In stacksaga, #you are able to use your primary database as the event-store by providing a separate schema#, instead of managing a totally separate system or database for the event-store.
+it reduces the operational overhead and complexity of managing multiple databases.
+
+In stacksaga you can configure the database for the event-store as the pattern of database per service.
+
+image::stacksaga-diagram-event-store-per-service.svg[alt="stacksaga diagram event store per service"]
+
+NOTE: Even though it is possible to have a single event-store for all services, it is not recommended in production environments due to potential performance bottlenecks and single points of failure and the microservice architecture principles.
+
+== What are the reasons for saving the states in the event-store?
+
+* *Reliable Retries*
++
+When an execution fails due to a `RetryableExecutorException` (such as network issues), StackSaga enables safe retries.
+In microservice architectures, failures like network errors should not be treated as final exceptions, since transactions often span multiple services, and any service may become temporarily unavailable.
+By persisting each transaction state in the event store, StackSaga ensures that failed executions can be retried reliably, reducing the risk of data loss or inconsistency.
+
+* *Analysis and Monitoring*
++
+StackSaga provides a dashboard—xref:trace-window:stacksaga-trace-window.adoc[Stacksaga Trace-Window]—for monitoring transaction traces and reviewing errors.
+All displayed data is sourced from the event store, where transaction records are securely persisted for analysis and troubleshooting.
+
+NOTE: The event-store is accessed by both xref:stacksaga-database-support:overview/database-support-overview.adoc[] and as well as the
+xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Subsystem]. refer to their respective sections for more details with the use-causes.

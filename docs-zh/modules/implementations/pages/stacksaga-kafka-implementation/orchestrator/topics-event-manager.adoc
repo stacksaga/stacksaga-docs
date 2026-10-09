@@ -1,0 +1,277 @@
+:description: StackSaga Kafka Topics and EventManager specifications — defining topics, naming rules, topic keys, and EventManager routing with onNext/onNextRevert.
+:keywords: StackSaga, AbstractTopic, EventManager, onNext, onNextRevert, topic name, topic key, registerTopics, SagaEventType
+= Topics and EventManager
+:page-priority: 0.7
+
+[.lead]
+With the xref:stacksaga-kafka-implementation/orchestrator/domain-entity.adoc[Domain-Entity] defined, the next step is to describe the saga itself: the *Topics* that name each step and the *EventManager* that routes between them. This page covers defining topics (with their naming rules and keys) and wiring the `EventManager` that drives the forward (`onNext()`) and compensation (`onNextRevert()`) flow. How the per-domain callback topic is then consumed and tuned is covered separately in xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[Configuration].
+
+[[custom_topic_implementation]]
+== StackSaga Topic
+
+StackSaga Topics are constant values that are used to identify the execution endpoint in StackSaga.
+Topic are nothing but the kafka topics that are used to send the command messages to the worker services.
+Stacksaga topics contains additional metadata such as the name of the topic, the type of the topic (primary or compensation), and the span name that is used to identify the execution point.
+Stacksaga topics are used in the `EventManager` to determine which topic should be triggered next based on the execution flow.
+
+As per the place-order example, there were 4 atomic executions (Spans) in the primary flow like fetching user's details, initialize order, make the payment,and inventory update. and also there were 3 atomic executions in the compensation flow like cancel order, refund payment, and release inventory. so there are 7 spans in total. here is the sample topics that are used in the place-order example,
+
+[source,java]
+----
+class PlaceOrderTopic extends AbstractTopic<PlaceOrderTopic> {//<1>
+
+    //<2>
+    protected PlaceOrderTopic(String topicName, float topicKey, SagaEventType sagaEventType, String targetService) {
+        super(topicName, topicKey, sagaEventType, targetService);
+    }
+
+
+    //<3>
+    protected PlaceOrderTopic(String topicName, float topicKey, SagaEventType sagaEventType, String targetService, PlaceOrderTopic parent) {
+        super(topicName, topicKey, sagaEventType, targetService, parent);
+    }
+
+    //<4>
+    //primary execution topics.
+    public static final PlaceOrderTopic DO_FETCH_USER_DETAILS = new PlaceOrderTopic("user-service.fetch-user-details", 1, SagaEventType.QUERY_DO_ACTION, "user-service");
+    public static final PlaceOrderTopic DO_INITIALIZE_ORDER = new PlaceOrderTopic("order-service.initialize-order", 2, SagaEventType.COMMAND_DO_ACTION, "order-service");
+    public static final PlaceOrderTopic DO_MAKE_PAYMENT = new PlaceOrderTopic("payment-service.make-payment", 3, SagaEventType.COMMAND_DO_ACTION, "payment-service");
+    public static final PlaceOrderTopic DO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory-service.update-inventory", 4, SagaEventType.COMMAND_DO_ACTION, "inventory-service");
+
+    //<5>
+    //revert/compensation topics.
+    public static final PlaceOrderTopic UNDO_INITIALIZE_ORDER = new PlaceOrderTopic("order-service.initialize-order", -2, SagaEventType.COMMAND_UNDO_ACTION, "order-service", DO_INITIALIZE_ORDER);
+    public static final PlaceOrderTopic UNDO_MAKE_PAYMENT = new PlaceOrderTopic("payment-service.make-payment", -3, SagaEventType.COMMAND_UNDO_ACTION, "payment-service", DO_MAKE_PAYMENT);
+    public static final PlaceOrderTopic UNDO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory-service.update-inventory", -4, SagaEventType.COMMAND_UNDO_ACTION, "inventory-service", DO_INVENTORY_UPDATE);
+}
+----
+
+<1> Create the custom topic class by extending the `AbstractTopic` class.
+<2> Override the constructors for primary execution topic instantiation. +
+*`topicName`*: the name of the topic that is used in the kafka. see xref:#topic_name_specification[Topic Name Specification] for more details +
+*`topicKey`*: the constant and unique (withing the domain) float value to represent the topic. see xref:#topic_key_specification[Topic Key Specification] for more details. +
+*`sagaEventType`*: the type of the topic. it can be either `SagaEventType.QUERY_DO_ACTION` for query execution or `SagaEventType.COMMAND_DO_ACTION` for command execution. +
+*`targetService`*: the name of the target service that is responsible for executing the command. this is used for logging and debugging purposes.
+<3> Override the constructors for compensation execution topic instantiation. +
+the parameters are the same as the primary execution topic constructor with an additional parameter for the parent topic. +
+*`parent`*: the primary execution topic that is related to the compensation topic. this is used to indicate the relationship between the primary execution and the compensation execution. for instance, in the place-order example, the compensation topic `UNDO_INITIALIZE_ORDER` is related to the primary execution topic `DO_INITIALIZE_ORDER`.
+<4> Create the primary execution topics as static final fields in the custom topic class by fallowing the conventions.
+<5> Create the compensation execution topics as static final fields in the custom topic class by fallowing the conventions.
+
+IMPORTANT: The custom topic class is not a spring bean at all. make sure not to annotate it with any spring annotations.
+
+[[topic_name_specification]]
+== Topic Name Specification In StackSaga-Kafka
+
+IMPORTANT: Endpoint topics are *owned and defined by the worker applications*, not by the orchestrator.
+A topic exists to feed a worker endpoint (`@SagaEndpoint`), so the worker is its authoritative source.
+Here in the orchestrator you declare the same topic in the `AbstractTopic` class only to *address* it when routing command messages — the orchestrator publishes to the topic but never owns or consumes it.
+For the full explanation of endpoint topics — ownership, the service-qualified naming best practice, and the auto-added `saga.` prefix — see xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#endpoint-topics[Endpoint Topics] on the worker page.
+The topic name you write in the `AbstractTopic` class must match the worker's `topicNameSuffix` *exactly*.
+
+The rules below apply to the topic name you provide when declaring each topic in the `AbstractTopic` class:
+
+. *Name a topic after the service and action it targets* — the form `\{service-name\}.\{action\}` (e.g. `user-service.fetch-user-details`, `payment-service.make-payment`), not after the saga domain, because the endpoint is a worker-service capability that other saga domains can reuse. See xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#endpoint-topics-naming[Naming an endpoint topic].
+. Use `.` as the hierarchical segment separator (e.g. `order-service.initialize-order`). Hyphens (`-`) are permitted *within* a segment (e.g. `user-service`, `fetch-user-details`) but not *as* the separator; underscores (`_`) are not permitted anywhere.
+. For a compensation topic, reuse the *same* name as the primary topic it reverses — e.g. `UNDO_INITIALIZE_ORDER` reuses `order-service.initialize-order`. They are told apart by the `SagaEventType` and the sign of the xref:#topic_key_specification[topic key].
+. Do *not* write the `saga.` prefix — the framework adds it automatically to build the real Kafka topic (e.g. `order-service.initialize-order` → `saga.order-service.initialize-order`). If you *do* include the `saga.` prefix yourself, the framework keeps it as-is and does not add it again.
+
+[[topic_key_specification]]
+== Topic Key Specification In StackSaga-Kafka
+
+The topic key is used for serialization and deserialization process.
+The row topic names are not passed via the header of the kafka messages, instead, the topic key is used for that purpose. therefore, the keys can not be changed once it is used in the system. therefore, it is highly recommended to use a constant and unique float value for each topic within the same domain. for instance, in the place-order example, the topic key for `DO_FETCH_USER_DETAILS` is 1, the topic key for `DO_INITIALIZE_ORDER` is 2, the topic key for `DO_MAKE_PAYMENT` is 3, and the topic key for `DO_INVENTORY_UPDATE` is 4. and also for compensation topics, it is recommended to use negative float values to differentiate them from primary execution topics. for instance, in the place-order example, the topic key for `UNDO_INITIALIZE_ORDER` is -2, the topic key for `UNDO_MAKE_PAYMENT` is -3, and the topic key for `UNDO_INVENTORY_UPDATE` is -4.
+
+NOTE: Decimal topic key values (e.g., `1.1`, `1.2`, `-1.1`) are reserved for the upcoming sub-execution feature, which will allow additional before/after sub-steps to be attached to a primary or compensation execution.
+Avoid using decimal keys in the current version to prevent conflicts with that future capability.
+
+As per the custom topic class that is mentioned above, here is the list of topics with their keys and names that are used in the place-order example,
+
+[cols="2,2,2,3",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Execution
+| Topic Type
+| Mentioned Topic Name
+| Real Topic Name
+
+| Fetch User Details
+| `QUERY_DO_ACTION`
+| `user-service.fetch-user-details`
+| `saga.user-service.fetch-user-details`
+
+| Initialize Order
+| `COMMAND_DO_ACTION`
+| `order-service.initialize-order`
+| `saga.order-service.initialize-order`
+
+| Make Payment
+| `COMMAND_DO_ACTION`
+| `payment-service.make-payment`
+| `saga.payment-service.make-payment`
+
+| Inventory Update
+| `COMMAND_DO_ACTION`
+| `inventory-service.update-inventory`
+| `saga.inventory-service.update-inventory`
+
+| Cancel Order
+| `COMMAND_UNDO_ACTION`
+| `order-service.initialize-order`
+| `saga.order-service.initialize-order`
+
+| Refund Payment
+| `COMMAND_UNDO_ACTION`
+| `payment-service.make-payment`
+| `saga.payment-service.make-payment`
+
+| Release Inventory
+| `COMMAND_UNDO_ACTION`
+| `inventory-service.update-inventory`
+| `saga.inventory-service.update-inventory`
+
+|===
+
+NOTE: A primary topic and its compensation resolve to the *same* real Kafka topic — e.g. both `DO_INITIALIZE_ORDER` and `UNDO_INITIALIZE_ORDER` map to `saga.order-service.initialize-order`. There is a single topic per endpoint; the framework tells the primary command apart from its compensation by the `SagaEventType` and the sign of the topic key, not by the topic name.
+
+[[event_manager]]
+== EventManager
+
+Stacksaga-Kafka supports fully runtime dynamic execution navigation based on your conditions and the state of the transaction.
+So the EventManager is the component that is responsible for that. let's create a custom EventManager for the `OrderDomainEntity` as below.
+
+[source,java]
+----
+@SagaEventManager( //<1>
+        value = "placeOrderEventManager", //<2>
+        listenerScope = OrchestratorListenerScope.SHARED_GLOBAL, //<3>
+        groupType = GroupType.SHARE,
+        domainCallbackTopicSuffix = "place-order" //<4>
+)
+public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEntity, PlaceOrderTopic> { //<5>
+
+    @Override
+    public Supplier<List<PlaceOrderTopic>> registerTopics() { //<6>
+        return () -> List.of(
+                PlaceOrderTopic.DO_FETCH_USER_DETAILS,
+                PlaceOrderTopic.DO_INITIALIZE_ORDER,
+                PlaceOrderTopic.DO_MAKE_PAYMENT,
+                PlaceOrderTopic.DO_INVENTORY_UPDATE,
+                PlaceOrderTopic.UNDO_INITIALIZE_ORDER,
+                PlaceOrderTopic.UNDO_MAKE_PAYMENT,
+                PlaceOrderTopic.UNDO_INVENTORY_UPDATE
+        );
+    }
+
+    @Override
+    public @NonNull SagaPrimaryEventAction<PlaceOrderTopic> onNext( //<7>
+            PlaceOrderTopic recentTopic,
+            OrderDomainEntity currentDomainEntityState,
+            SagaPrimaryEventActionUtil<PlaceOrderTopic> actionUtil
+    ) {
+        if (recentTopic.equals(PlaceOrderTopic.DO_FETCH_USER_DETAILS)) {
+            currentDomainEntityState.getMetadata().put("navigated-do-initialize-order-at", LocalDateTime.now().toString());
+            return actionUtil.next(PlaceOrderTopic.DO_INITIALIZE_ORDER);
+        }
+        if (recentTopic.equals(PlaceOrderTopic.DO_INITIALIZE_ORDER)) {
+            currentDomainEntityState.getMetadata().put("navigated-do-make-payment-at", LocalDateTime.now().toString());
+            return actionUtil.next(PlaceOrderTopic.DO_MAKE_PAYMENT);
+        }
+        if (recentTopic.equals(PlaceOrderTopic.DO_MAKE_PAYMENT)) {
+            currentDomainEntityState.getMetadata().put("navigated-do-inventory-update-at", LocalDateTime.now().toString());
+            return actionUtil.next(PlaceOrderTopic.DO_INVENTORY_UPDATE);
+        }
+        if (recentTopic.equals(PlaceOrderTopic.DO_INVENTORY_UPDATE)) {
+            return actionUtil.complete();
+        }
+        return actionUtil.error(new IllegalStateException("Unexpected topic: " + recentTopic));
+    }
+
+    @Override
+    public void onNextRevert( //<8>
+            PlaceOrderTopic recentExecutedTopic,
+            PlaceOrderTopic nextTopic,
+            OrderDomainEntity lastDomainEntityState,
+            NonRetryableExecutorException nonRetryableExecutorException,
+            RevertHintStore revertHintStore,
+            Supplier<NavigableMap<Integer, PlaceOrderTopic>> remainingReverts
+    ) {
+
+        {//sample usage of revert hint store and next topic in the onNextRevert method.
+            if (nextTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) { //<9>
+                revertHintStore.put("BEFORE_NOTE:UNDO_MAKE_PAYMENT", "Sample value before reverting UNDO_MAKE_PAYMENT");
+            }
+            if (nextTopic.equals(PlaceOrderTopic.UNDO_INITIALIZE_ORDER)) {
+                revertHintStore.put("BEFORE_NOTE:UNDO_INITIALIZE_ORDER", "Sample value before reverting UNDO_INITIALIZE_ORDER");
+            }
+        }
+
+        {//sample usage of remaining reverts and recentExecutedTopic
+            if (recentExecutedTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) { //<10>
+                log.info("Remaining reverts after reverting UNDO_MAKE_PAYMENT: {}", remainingReverts);
+            }
+
+            if (recentExecutedTopic.equals(PlaceOrderTopic.UNDO_INITIALIZE_ORDER)) {
+                log.info("Remaining reverts after reverting UNDO_INITIALIZE_ORDER: {}", remainingReverts);
+            }
+        }
+    }
+}
+----
+
+<1> Annotate the custom EventManager class with `@SagaEventManager` annotation. It primarily marks the class as a Spring bean.
+<2> *value*: provide the name of the Spring bean for the custom EventManager. It is used for identification of the EventManager by name.
+<3> *listenerScope* and *groupType*: Configure how this event manager's callback (reply) topic is consumed. +
+*`listenerScope`* selects the container allocation — `OrchestratorListenerScope.SHARED_GLOBAL` (pool into the single global container, the default choice), `OrchestratorListenerScope.SHARED_GROUP` (share a named container with other managers), or `OrchestratorListenerScope.ISOLATED` (a dedicated container). For `SHARED_GROUP` and `ISOLATED`, the container's `concurrency` and `autoStart` are configured via the `sharedGroupExecutionListener`/`isolatedExecutionListener` attributes (`@SagaEventManagerListener`); every event manager sharing a `SHARED_GROUP` container must declare the *same* `autoStart`, or registration fails fast with a `ValidationException`. +
+*`groupType`* selects the Kafka group protocol — `GroupType.CONSUMER` (classic consumer group) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption not capped by partition count). +
+See xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[] for full details.
+<4> *domainCallbackTopicSuffix*: provide the common suffix for the topics that are related to the same domain. This is used internally by the framework to build the domain's *callback topic* — the topic on which it receives response messages from the Kafka worker endpoints. See xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[Per-Domain Callback Topic] for the exact naming format.
+<5> Create a custom EventManager class by extending the `AbstractEventManager` class and providing your custom DomainEntity and Topic class as generic parameters.
+<6> Override the `registerTopics()` method to register the topics that are used in the transaction. This method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. You should return the list of topics via a supplier.
+<7> Override the `onNext()` method to determine the next topic based on the recently completed topic, the current state of the domain entity, and the provided `SagaPrimaryEventActionUtil` (`actionUtil`).
+This method is invoked by the framework after each successful execution in the primary flow and its primary responsibility is *routing* — deciding which topic to trigger next.
+Lightweight orchestrator-side bookkeeping is also permitted here: for example, recording a navigation timestamp in the domain entity metadata (as shown above) is a safe, low-cost operation that will be included in the persisted domain entity snapshot for traceability.
+However, business logic, database calls, external HTTP requests, or any other blocking I/O must not be placed here, because this method runs on the callback listener container's processing threads (a bounded pool sized by the container's concurrency); blocking them reduces callback throughput and can stall other sagas that share the container.
+Use the `actionUtil` factory parameter to return the routing decision:
+* `actionUtil.next(topic)` to route the workflow to the next step/topic.
+* `actionUtil.complete()` when all steps have been processed successfully to finish the Long-Running Transaction (LRT).
+* `actionUtil.error(exception)` to abort the forward execution and initiate the compensation (rollback) flow.
+<8> Override the `onNextRevert()` (Optional) method to perform any action at each step of the compensation flow.
+*Call timing*: this method is called *after* `recentExecutedTopic` has completed its compensation successfully and *before* `nextTopic` is dispatched to the worker.
+Both parameters are therefore available at the same time — you can react to what just finished and prepare context for what is about to run.
+<9> Sample usage of the `RevertHintStore` and the `nextTopic` parameters in the `onNextRevert()` method.
+Use `nextTopic` to determine which compensation topic is about to be dispatched, and use `revertHintStore` to store any metadata that the upcoming compensation execution will need.
+See the Javadoc of the class for full details about all parameters.
+<10> Sample usage of the `remainingReverts` and the `recentExecutedTopic` parameters in the `onNextRevert()` method.
+Use `recentExecutedTopic` to identify which compensation step just completed, and `remainingReverts` to inspect the full set of compensation steps still pending.
+
+NOTE: The `nextTopic` parameter was introduced in preparation for an upcoming sub-execution feature that will allow additional before/after sub-steps to be attached to a compensation execution.
+In the current version it reflects the next top-level compensation topic.
+
+WARNING: As a best practice, avoid performing any I/O-intensive or high-CPU operations inside the event navigator.
+These methods should be used only to evaluate routing conditions based on the provided parameters. +
+`onNext()` and `onNextRevert()` execute on the callback listener container's processing threads — a limited pool shared by the sagas bound to that container.
+Executing expensive operations here occupies those threads, leading to head-of-line blocking, reduced callback throughput, and degraded performance across the application.
+
+.Quick Reference: Exception Behavior in `onNext()` and `onNextRevert()`
+[cols="2,2,2",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Thrown / Returned From | Immediate Effect | Resulting State Transition
+
+| `onNext()` — any exception (including `actionUtil.error(...)`)
+| Compensation begins
+| `IN_PROGRESS` → `FAILED` → `COMPENSATING`
+
+| `onNextRevert()` — any exception
+| Compensation terminates
+| `COMPENSATING` → Compensation Failed
+
+|===
+
+NOTE: Any exception thrown from `onNext()` — or returned via `actionUtil.error(...)` — is treated by the framework as a non-retryable failure and immediately transitions the saga to `FAILED`, triggering the compensation sequence.
+This means `onNext()` can be used *intentionally* to start compensation based on orchestrator-side conditions: for instance, if a business rule evaluated after receiving a worker reply determines the saga should not proceed further. +
+Similarly, any exception thrown from `onNextRevert()` causes the compensation sequence to terminate immediately and the transaction is marked as compensation-failed.
+See the xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#exception-handling-reference[Exception Handling Reference] for the full breakdown across all methods.
+
+NOTE: Each `EventManager` receives worker replies through a dedicated *per-domain callback topic*, and the listener container that consumes it is allocated by the `listenerScope` (`SHARED_GLOBAL`, `SHARED_GROUP`, or `ISOLATED`) and `groupType` declared on `@SagaEventManager`. The callback-topic naming, the three listener scopes, and the group-protocol behaviour are all documented in xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[Callback Topic and Listener Models].

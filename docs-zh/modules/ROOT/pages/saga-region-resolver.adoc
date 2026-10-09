@@ -1,0 +1,283 @@
+:description: Comprehensive guide to instance region configuration and SagaRegionResolver in StackSaga. Covers 12-bit UUIDv7 region embedding, static name confirmation vs. properties, default fallback, and multi-region custom implementations.
+:keywords: stacksaga, SagaRegionResolver, stacksaga.instance.region, UUIDv7, multi-region, region code, architecture, fail-fast, ValidationException
+
+= Instance Region Resolution & SagaRegionResolver
+
+[.lead]
+In the StackSaga distributed ecosystem, every instance—whether an Orchestrator (Synchronous or Kafka), Worker, Ring-Coordinator Master, Ring-Coordinator Slave, or Trace-Window Connector—declares its operational locality via the `stacksaga.instance.region` configuration property.
+
+Far from being an inert metadata label, the region is an active, fundamental architectural boundary:
+it isolates token-ring retry topologies, governs database keyspace partitions, determines cluster membership handshakes, and is directly encoded into every transaction identifier (`SagaUUID`) across your distributed systems.
+
+To guarantee safety, zero configuration drift, and bidirectional reverse resolution, StackSaga enforces the `SagaRegionResolver` contract across all instance types in the ecosystem.
+
+'''
+
+[[why-static-name-confirmation]]
+== Why Static Name Confirmation Instead of Dynamic Properties?
+
+A common question is: _"Why does StackSaga require a compiled `SagaRegionResolver` interface and static name confirmation, instead of simply allowing developers to provide arbitrary region strings and codes via `application.yml`?"_
+
+StackSaga intentionally rejects free-form, unvalidated property definitions for regions due to three architectural guarantees:
+
+=== 1. Enforcing a Single Source of Truth Across Microservices
+In a distributed enterprise with dozens of microservices deployed across independent codebases, configuration files (`application.yml`, Helm charts, Kubernetes ConfigMaps, environment variables) are managed by different teams.
+
+If region mappings were configured via ad-hoc strings in properties files:
+
+* *Typos and naming variations* — One team defines `region: us-east-1`, another writes `useast-1`, a third specifies `us_east_1`, and a fourth uses `US-EAST-1`.
+* *Code collisions* — One team assigns `region-code: 1` to `us-east-1`, while another team assigns `region-code: 1` to `eu-west-1`.
+
+By requiring an implementation of the Java contract `SagaRegionResolver`, an enterprise can publish a centralized shared library (or shared enum) containing all approved corporate regions and their assigned integer codes.
+Every microservice imports this library and registers the resolver bean.
+If any deployment manifest contains a typo (such as `region: us-eat-1`), the application fails fast at startup before processing any transactions.
+
+=== 2. Transaction ID Permanence & Reverse Resolution
+StackSaga transactions persist in event stores (Cassandra, MySQL, PostgreSQL), Kafka topics, and log aggregators.
+The numeric region code is permanently encoded into the 12-bit payload of the transaction's `UUIDv7` (see xref:#uuidv7-region-encoding[]).
+
+When an operator, monitoring tool, or the StackSaga Trace-Window inspects a historical transaction ID (even years later):
+
+* The system extracts the 12-bit integer from the UUID: `SagaUUID.regionOf(uuid)`.
+* It calls `sagaRegionResolver.getRegionNameByCode(code)` to immediately restore the human-readable region name (`"us-east-1"`).
+* This lookup runs in O(1) time in memory without requiring a database query or an external lookup service.
+
+If region definitions were loose strings in properties files that changed over time, historical transaction IDs would lose their geographical identity.
+
+=== 3. Symmetrical Bijective Invariant (Fail-Fast Verification)
+The framework enforces that the resolver is strictly bijective (a 1-to-1 two-way mapping).
+During Spring Boot startup, the framework executes a round-trip test:
+
+[source,text]
+----
+Name -> getRegionCodeByName(Name) -> Code -> getRegionNameByCode(Code) -> Confirmed Name
+----
+
+If `Confirmed Name` does not equal `Name`, or if two different names produce the same code, startup aborts immediately with a `ValidationException`.
+
+'''
+
+[[uuidv7-region-encoding]]
+== Self-Describing Transaction IDs: 12-Bit Region Encoding in UUIDv7
+
+StackSaga generates canonical transaction identifiers via `SagaUUID`, formatted as `<prefix>-<UUIDv7>` (for example, `ordr-0195655a-350f-786d-96eb-63c1dfc6e9ba`).
+
+Under RFC 9562, a time-ordered `UUIDv7` structure consists of:
+
+* *48 bits* — Unix epoch timestamp in milliseconds.
+* *4 bits* — Version indicator (`0111` for version 7).
+* *12 bits* — `rand_a` field.
+* *2 bits* — Variant indicator (`10`).
+* *62 bits* — Random entropy (`rand_b`).
+
+StackSaga utilizes the 12-bit `rand_a` space (4,096 values, from `0` to `4095` / `0x000` to `0xFFF`) to embed the numeric region code:
+
+[source,text]
+----
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           unix_ts_ms                          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|          unix_ts_ms           |  ver  |      region_code      | <- 12-bit region (0..4095)
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|var|                         rand_b                            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                            rand_b                             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+----
+
+Whenever a transaction is initiated (`SagaTemplate.init(...)`), the engine resolves the current node's region code via `SagaRegionResolver` and writes it into the low 12 bits of the UUID's Most Significant Bits (MSB).
+
+Consequently:
+
+* Any node or utility can invoke `SagaUUID.regionOf(UUID id)` or `sagaUUID.getRegionCode()` to extract the exact region code without database overhead.
+* Routing rules, cell isolation boundaries, and cross-datacenter event streams can filter and dispatch transactions based on their embedded region code.
+
+'''
+
+[[the-saga-region-resolver-contract]]
+== The `SagaRegionResolver` Interface Contract
+
+The contract is defined in `org.stacksaga.api.SagaRegionResolver`:
+
+[source,java]
+----
+package org.stacksaga.api;
+
+public interface SagaRegionResolver {
+
+    /**
+     * Resolves a human-readable region name to its numeric 12-bit code (0..4095).
+     *
+     * @param regionName the region name string (e.g., "default", "us-east-1")
+     * @return the unique integer region code
+     */
+    int getRegionCodeByName(String regionName);
+
+    /**
+     * Resolves a numeric region code back to its canonical region name string.
+     *
+     * @param regionCode the 12-bit integer region code (0..4095)
+     * @return the canonical region name string
+     */
+    String getRegionNameByCode(int regionCode);
+}
+----
+
+=== Strict Contract Rules
+
+1. *Bijective Mapping* — Every supported `regionName` must map to one unique `regionCode`, and every `regionCode` must map back to the identical `regionName`.
+2. *Code 0 is Reserved* — Region code `0` is strictly reserved for the `"default"` region. Custom regions must never return `0`.
+3. *Valid Code Range* — All custom region codes must fall strictly in the range 1 to 4095 (`0x001` through `0xFFF`).
+4. *Consistency* — All participating nodes in a cluster (Orchestrators, Ring Coordinators, Workers) must share identical resolver mappings.
+
+'''
+
+[[default-auto-configuration]]
+== Default Auto-Configuration Behavior
+
+StackSaga provides out-of-the-box support for single-region and development deployments without requiring manual resolver registration.
+
+In `StackSagaStarterAutoConfiguration`:
+
+* A fallback bean named `defaultSagaRegionResolver` is registered with `@ConditionalOnMissingBean(SagaRegionResolver.class)`.
+* By default, it maps `"default"` (case-insensitive) to code `0`:
+  - `getRegionCodeByName("default")` -> `0`
+  - `getRegionNameByCode(0)` -> `"default"`
+* If any region name other than `"default"` is encountered, the default resolver throws a `RuntimeException`:
++
+[source,text]
+----
+Default region resolver only supports 'default' region name. 
+Please provide a custom SagaRegionResolver bean for other region names like [us-east-1].
+----
+
+[NOTE]
+====
+If your application uses `stacksaga.instance.region=default` (or leaves it as default), you do not need to declare a custom `SagaRegionResolver` bean.
+====
+
+'''
+
+[[implementing-custom-resolver]]
+== Implementing a Custom `SagaRegionResolver`
+
+When deploying multi-region or named-region environments (such as `us-east-1`, `eu-west-1`, or `ap-south-1`), you must declare a Spring `@Bean` implementing `SagaRegionResolver`.
+
+The recommended pattern is to define an enterprise enum representing your organization's valid regions:
+
+[source,java]
+----
+package com.example.config;
+
+import org.stacksaga.api.SagaRegionResolver;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.util.Arrays;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+@Configuration
+public class StackSagaRegionConfiguration {
+
+    public enum EnterpriseRegion {
+        DEFAULT("default", 0),
+        US_EAST_1("us-east-1", 1),
+        EU_CENTRAL_1("eu-central-1", 2),
+        AP_SOUTHEAST_1("ap-southeast-1", 3);
+
+        private final String regionName;
+        private final int code;
+
+        EnterpriseRegion(String regionName, int code) {
+            this.regionName = regionName;
+            this.code = code;
+        }
+
+        public String getRegionName() { return regionName; }
+        public int getCode() { return code; }
+    }
+
+    @Bean
+    public SagaRegionResolver customSagaRegionResolver() {
+        return new SagaRegionResolver() {
+            private final Map<String, Integer> nameToCode = Arrays.stream(EnterpriseRegion.values())
+                    .collect(Collectors.toMap(EnterpriseRegion::getRegionName, EnterpriseRegion::getCode));
+
+            private final Map<Integer, String> codeToName = Arrays.stream(EnterpriseRegion.values())
+                    .collect(Collectors.toMap(EnterpriseRegion::getCode, EnterpriseRegion::getRegionName));
+
+            @Override
+            public int getRegionCodeByName(String regionName) {
+                Integer code = nameToCode.get(regionName);
+                if (code == null) {
+                    throw new IllegalArgumentException(
+                        "Unrecognized region name: '" + regionName + "'. Valid regions are: " + nameToCode.keySet()
+                    );
+                }
+                return code;
+            }
+
+            @Override
+            public String getRegionNameByCode(int regionCode) {
+                String name = codeToName.get(regionCode);
+                if (name == null) {
+                    throw new IllegalArgumentException(
+                        "Unrecognized region code: '" + regionCode + "'. Valid codes are: " + codeToName.keySet()
+                    );
+                }
+                return name;
+            }
+        };
+    }
+}
+----
+
+[CAUTION]
+.Ecosystem-Wide Consistency Requirement
+====
+All microservices operating in or coordinating with the same region (Orchestrators, Workers, and Ring Coordinators) must share an identical region-to-code mapping. Packaging your custom `SagaRegionResolver` into a shared internal starter or corporate commons library guarantees this alignment across all services.
+====
+
+'''
+
+[[ecosystem-instance-types]]
+== Role Across StackSaga Instance Types
+
+The `stacksaga.instance.region` property and `SagaRegionResolver` contract apply consistently across all instance types in the StackSaga ecosystem:
+
+[cols="1s,3",options="header"]
+|===
+| Instance Type | How `stacksaga.instance.region` and Resolver are Used
+
+| Synchronous Orchestrator
+| Embeds the resolved 12-bit `regionCode` into the transaction's `SagaUUID` upon initialization in `SagaTemplate.init(...)`. Establishes physical retry partition isolation in the event store.
+
+| Kafka Orchestrator
+| Attaches the region and transaction ID to outbound command topics and callback event envelopes. Connects to regional Ring Coordinators for paused transaction retries.
+
+| Worker Services
+| Registers instance discovery metadata with the regional cluster. Validates that incoming command envelopes correspond to compatible regional domains.
+
+| Ring-Coordinator Master
+| Serves as the authoritative coordinator for a specific region. Rejects RSocket connections from any Slave or Orchestrator whose declared region does not match its own.
+
+| Ring-Coordinator Slave
+| Connects to the Master within the same region (`stacksaga.coordinator.slave.target-master.host`). Validates regional alignment during the initial RSocket connection handshake.
+
+| Trace-Window Connector
+| Transmits instance region and cluster metadata to the Trace-Window dashboard, enabling operators to filter and inspect distributed traces across multi-region cells.
+|===
+
+'''
+
+[[related-documentation]]
+== Related Documentation
+
+* xref:implementations:stacksaga-sync/orchestrator/properties.adoc[Synchronous Orchestrator Configuration Properties]
+* xref:implementations:stacksaga-kafka-implementation/orchestrator/properties.adoc[Kafka Orchestrator Configuration Properties]
+* xref:retry-ring-coordinator:ring-coordinator.adoc[Retry Ring Coordinator Reference]
+* xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[Cassandra Regional Cell Isolation]

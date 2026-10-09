@@ -1,0 +1,146 @@
+<mxfile host="app.diagrams.net" modified="2026-10-02T12:00:00.000Z" agent="Mozilla/5.0" version="21.0.0" type="device">
+  <diagram id="pausable-lrt" name="Pausable Long-Running Transaction (Pausable LRT)">
+    <mxGraphModel dx="1200" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="560" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="Pausable Long-Running Transaction (Pausable LRT / Wait-State)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#0f172a;" vertex="1" parent="1">
+          <mxGeometry x="200" y="20" width="700" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Deliberate business wait state awaiting external callback/webhook (Uber / Async Webhook Use Case)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontColor=#64748b;" vertex="1" parent="1">
+          <mxGeometry x="250" y="50" width="600" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Orchestrator Container -->
+        <mxCell id="box_orchestrator" value="&lt;b&gt;Orchestrator Service&lt;/b&gt; (order-service)" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#10b981;strokeWidth=2;verticalAlign=top;align=left;spacingLeft=15;spacingTop=10;fontColor=#047857;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="25" y="80" width="1030" height="235" as="geometry" />
+        </mxCell>
+
+        <!-- Client Inbound -->
+        <mxCell id="client_req" value="&lt;b&gt;Client Request&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size: 10px;&quot;&gt;POST /orders&lt;/font&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#94a3b8;strokeWidth=1.5;fontColor=#0f172a;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="45" y="135" width="100" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- SEC Engine -->
+        <mxCell id="sec_engine" value="&lt;b&gt;SagaTemplate &amp;amp; SEC&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#047857&quot; style=&quot;font-size: 10px;&quot;&gt;Execution Coordinator&lt;/font&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#10b981;strokeWidth=2;fontColor=#065f46;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="180" y="130" width="125" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- Event Store -->
+        <mxCell id="event_store" value="&lt;b&gt;Event Store&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size: 10px;&quot;&gt;State &amp;amp; Keys&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=6;fillColor=#ffffff;strokeColor=#059669;strokeWidth=1.5;fontColor=#0f172a;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="195" y="210" width="95" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Connection: SEC <-> Event Store -->
+        <mxCell id="edge_sec_db" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#10b981;strokeWidth=1.5;dashed=1;" edge="1" parent="1" source="sec_engine" target="event_store">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Connection: Client -> SEC -->
+        <mxCell id="edge_client_sec" value="startWith()" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#64748b;strokeWidth=1.5;fontColor=#64748b;fontSize=9;" edge="1" parent="1" source="client_req" target="sec_engine">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Step 1 -->
+        <mxCell id="span1" value="&lt;b&gt;Step 1&lt;/b&gt;&lt;br/&gt;InitializeOrder&lt;br/&gt;Executor" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0284c7;strokeWidth=1.5;fontColor=#0f172a;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="330" y="132" width="110" height="62" as="geometry" />
+        </mxCell>
+
+        <!-- Step 2 (Pausable Step) -->
+        <mxCell id="span2" value="&lt;b&gt;Step 2 (Pausable)&lt;/b&gt;&lt;br/&gt;NotifyRestaurant&lt;br/&gt;&lt;font color=&quot;#b45309&quot; style=&quot;font-size: 9px;&quot;&gt;stepManager.pause()&lt;/font&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#f59e0b;strokeWidth=2;fontColor=#92400e;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="472" y="128" width="122" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- SEC -> Step 1 -->
+        <mxCell id="edge_sec_span1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0284c7;strokeWidth=1.5;" edge="1" parent="1" source="sec_engine" target="span1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Step 1 -> Step 2 -->
+        <mxCell id="edge_span1_span2" value="next()" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0284c7;strokeWidth=1.5;fontColor=#0284c7;fontSize=9;" edge="1" parent="1" source="span1" target="span2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- PAUSE Wait State Box -->
+        <mxCell id="pause_state" value="&lt;b&gt;PAUSED (Wait State)&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#b45309&quot; style=&quot;font-size: 9px;&quot;&gt;• Threads released&lt;br/&gt;• State in Event Store&lt;br/&gt;• Awaiting callback&lt;/font&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#fffbeb;strokeColor=#d97706;strokeWidth=2;dashed=1;fontColor=#92400e;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="625" y="125" width="150" height="76" as="geometry" />
+        </mxCell>
+
+        <mxCell id="edge_span2_pause" value="pause()" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#d97706;strokeWidth=2;fontColor=#d97706;fontSize=9;" edge="1" parent="1" source="span2" target="pause_state">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Callback Controller inside Orchestrator -->
+        <mxCell id="ctrl_callback" value="&lt;b&gt;Callback Controller&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#047857&quot; style=&quot;font-size: 9px;&quot;&gt;POST /callbacks/order-ready&lt;br/&gt;&lt;b&gt;sagaTemplate.resume(tx, key)&lt;/b&gt;&lt;/font&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#10b981;strokeWidth=2;fontColor=#065f46;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="625" y="215" width="150" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Step 3 (Resumed Step) -->
+        <mxCell id="span3" value="&lt;b&gt;Step 3 (Resumed)&lt;/b&gt;&lt;br/&gt;DispatchDelivery&lt;br/&gt;Executor" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0284c7;strokeWidth=1.5;fontColor=#0f172a;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="815" y="132" width="115" height="62" as="geometry" />
+        </mxCell>
+
+        <!-- Controller to Step 3 (Resume invocation) -->
+        <mxCell id="edge_resume_span3" value="resume()" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#059669;strokeWidth=2;fontColor=#059669;fontSize=9;" edge="1" parent="1" source="ctrl_callback" target="span3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="795" y="250" />
+              <mxPoint x="795" y="163" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Complete Terminal Badge -->
+        <mxCell id="badge_complete" value="&lt;b&gt;COMPLETED&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size: 8px;&quot;&gt;stepManager.complete()&lt;/font&gt;" style="rounded=1;arcSize=20;whiteSpace=wrap;html=1;fillColor=#10b981;strokeColor=#059669;strokeWidth=1.5;fontColor=#ffffff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="960" y="143" width="90" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="edge_span3_complete" value="complete()" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#059669;strokeWidth=2;fontColor=#059669;fontSize=8;" edge="1" parent="1" source="span3" target="badge_complete">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Downstream Utility Services Container -->
+        <mxCell id="box_utilities" value="&lt;b&gt;Participating Microservices &amp;amp; Real-World Asynchronous Actors&lt;/b&gt;" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#94a3b8;strokeWidth=1.5;dashed=1;verticalAlign=top;align=left;spacingLeft=15;spacingTop=8;fontColor=#475569;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="25" y="340" width="1030" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- Restaurant Service -->
+        <mxCell id="ms_restaurant" value="&lt;b&gt;restaurant-service&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#b45309&quot; style=&quot;font-size: 9px;&quot;&gt;Kitchen Cooks Order (20-40 min)&lt;br/&gt;Holds idempotencyKey&lt;/font&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d97706;strokeWidth=2;fontColor=#78350f;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="450" y="370" width="170" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Delivery Service -->
+        <mxCell id="ms_delivery" value="&lt;b&gt;delivery-service&lt;/b&gt;&lt;br/&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size: 9px;&quot;&gt;Courier Dispatch&lt;br/&gt;REST / gRPC&lt;/font&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#64748b;strokeWidth=1.5;fontColor=#0f172a;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="800" y="370" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Step 2 -> Restaurant (Pass idempotencyKey) -->
+        <mxCell id="edge_call_restaurant" value="1. Passes idempotencyKey" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#d97706;strokeWidth=1.5;fontColor=#b45309;fontSize=9;" edge="1" parent="1" source="span2" target="ms_restaurant">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Restaurant -> Callback Controller (Webhook callback) -->
+        <mxCell id="edge_cb_restaurant" value="2. Callback: key = idempotencyKey" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#059669;strokeWidth=2;fontColor=#065f46;fontSize=9;" edge="1" parent="1" source="ms_restaurant" target="ctrl_callback">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="700" y="400" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 3 -> Delivery Service -->
+        <mxCell id="edge_call_delivery" value="3. Dispatch Order" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#059669;strokeWidth=1.5;dashed=1;fontColor=#475569;fontSize=9;" edge="1" parent="1" source="span3" target="ms_delivery">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Summary Note at Bottom -->
+        <mxCell id="summary_note" value="&lt;b&gt;Pausable Flow:&lt;/b&gt; Deliberate business wait state. The saga sleeps safely in the event store without holding CPU threads until the external webhook callback returns the correlation key (idempotencyKey) to resume execution." style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#fffbeb;strokeColor=#fde68a;strokeWidth=1;fontColor=#92400e;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="25" y="465" width="1030" height="35" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

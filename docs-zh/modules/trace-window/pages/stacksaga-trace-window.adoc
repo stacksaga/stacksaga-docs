@@ -1,0 +1,264 @@
+= StackSaga TraceWindow Dashboard
+
+== Overview
+
+*StackSaga TraceWindow* is the dedicated monitoring and transaction tracing dashboard of the StackSaga framework.
+It provides developers, architects, and operators with real-time visual observability into distributed saga transaction execution flows, step states, execution timelines, exception stack traces, and compensation paths.
+
+image:stack-saga-high-level-diagram.svg[alt="StackSaga TraceWindow in the StackSaga ecosystem"]
+
+=== Core Capabilities
+
+* **Interactive Transaction Visualization:** Trace every orchestrator action, execution order, state transition, and compensation routine in a rich graphical timeline.
+* **Dual Operational Modes:** Seamless *Local Development Mode* for local testing without authentication tokens, and enterprise *Production Mode* backed by GitHub OAuth and fine-grained access control.
+* **Flexible Topologies:** Native support for both standalone direct service connections (*Direct Mode*) and enterprise reverse-proxied clusters (*Gateway Mode*).
+* **Data Privacy by Design:** All transaction trace data, business payloads, and database records **remain entirely inside your private infrastructure**.
+The StackSaga Central cloud service operates strictly as an identity and authorization plane — it never stores, mirrors, or processes your business transactions.
+
+'''
+
+== Operational & Security Modes
+
+TraceWindow operates in one of two modes, determined by the security configuration in your target microservice:
+
+[cols="1,2,2",options="header"]
+|===
+| Feature | Local Development Mode | Production Mode
+
+| *Connector Property*
+| `stacksaga.trace-window.secure-api=false`
+| `stacksaga.trace-window.secure-api=true`
+
+| *Service Access Token*
+| Not required
+| Required (`stacksaga.trace-window.access-token`)
+
+| *GitHub Login & Projects*
+| Not required
+| Required (GitHub OAuth + Project/Service registration)
+
+| *Authorization Engine*
+| Bypassed (instant local database access)
+| Validated by StackSaga Central (Dual-Token check)
+
+| *Ideal For*
+| Local developer machines, offline testing, CI environments
+| Staging, QA, and Production microservice clusters
+|===
+
+=== 1. Local Development Mode (`secure-api=false`)
+
+When developing locally on your workstation (e.g., `http://localhost:8080`), you can connect directly without creating a project or generating tokens:
+
+* Enable the local trace connector endpoints in your service (`stacksaga.trace-window.enable-api=true`).
+* Disable security checks (`stacksaga.trace-window.secure-api=false`).
+* Open TraceWindow, provide your service URL, and immediately inspect transaction data.
+
+=== 2. Production Mode (`secure-api=true`)
+
+In production environments, access to sensitive transaction traces is protected by StackSaga's **Dual-Token Authorization Model**:
+
+1. **User Session Token (JWT):** Identifies the operator logged into TraceWindow via GitHub OAuth.
+2. **Service Access Token:** A unique secret generated inside TraceWindow and configured in the microservice (`stacksaga.trace-window.access-token`).
+3. **Dual Verification via StackSaga Central:** When a trace request is dispatched, the target service forwards both tokens to **StackSaga Central**.
+StackSaga Central validates that the service token is valid and active, and that the authenticated operator has read permissions for that project.
+
+'''
+
+== Production Setup & Project Management
+
+Follow these steps to register your application in TraceWindow and obtain credentials for Production Mode:
+
+=== Step 1: Sign in with GitHub
+
+Navigate to https://trace.stacksaga.org/[StackSaga TraceWindow] and sign in using your GitHub account.
+
+=== Step 2: Create a Project
+
+Create a project to logically group your microservices and manage team permissions:
+
+image:stacksaga-trace-window-create-new-project.png[alt="Create New Project"]
+
+Once created, your project will appear on your TraceWindow dashboard:
+
+image:stacksaga-trace-window-after-creating-new-project.png[alt="After Creating Project"]
+
+[[manage_operators]]
+[TIP]
+====
+*Team Collaboration & RBAC:* You can invite other team members to act as **service operators** under your project.
+Go to *Manage Operators*, enter their GitHub username, and assign roles.
+You can grant or revoke operator permissions at any time without changing application secrets.
+====
+
+=== Step 3: Register a Service
+
+Create a service under your newly created project.
+Use a clean identifier matching your microservice name (e.g., `order-service`):
+
+image:stacksaga-trace-window-creating-new-service.png[alt="Creating New Service"]
+
+The registered service will be listed under your project dashboard:
+
+image:stacksaga-trace-window-after-creating-new-service.png[alt="After Creating Service"]
+
+=== Step 4: Generate a Service Access Token
+
+Generate a Service Access Token for the target service:
+
+image:stacksaga-trace-window-creating-new-service-token.png[alt="Create Service Token"]
+
+You can optionally configure an expiration period.
+Copy the generated token immediately and store it securely:
+
+image:stacksaga-trace-window-copy-created-service-token.png[alt="Copy Service Token"]
+
+=== Step 5: Configure Application Properties
+
+Add the generated access token to your service configuration:
+
+[source,properties]
+.application.properties (Production Setup)
+----
+spring.application.name=order-service
+
+# Expose the local /stacksaga/* endpoints
+stacksaga.trace-window.enable-api=true
+
+# Enforce access token security
+stacksaga.trace-window.secure-api=true
+
+# Service access token generated from TraceWindow UI
+stacksaga.trace-window.access-token=04949811-7be5-427f-8a80-57a26592493f
+----
+
+TIP: In production, supply the token via environment variables (e.g., `STACKSAGA_ACCESS_TOKEN`) or a secret manager rather than committing plain text into version control.
+
+[NOTE]
+====
+To learn how to include the connector dependency in Maven/Gradle, configure secondary port isolation, or tune reactive Netty threads, refer to the companion xref:stacksaga-trace-window-connector-overview.adoc[StackSaga TraceWindow Connector Guide].
+====
+
+'''
+
+[[connection_topologies]]
+== Connection Topologies: Direct Mode vs Gateway Mode
+
+TraceWindow communicates directly from the operator's browser session to the target backend URL.
+Depending on how your infrastructure exposes services, you can connect using **Direct Mode** or **Gateway Mode**.
+
+[cols="1,2,2",options="header"]
+|===
+| Architecture | Direct Mode | Gateway Mode
+
+| *Intermediary*
+| None (direct connection to microservice)
+| Reverse Proxy / API Gateway (Spring Cloud Gateway, Nginx, Kubernetes Ingress)
+
+| *Target URL Pattern*
+| `+{host:port}/{api-path}+`
+| `+{host:port}/{service-name \| URL-alias}/{api-path}+`
+
+| *Typical Environments*
+| Local workstation, standalone container, direct VM.
+| Production Kubernetes/VPC microservice clusters.
+
+| *Example Target URL*
+| `http://localhost:8081/stacksaga/api/v1/welcome`
+| `https://api.mycompany.com/order-service/stacksaga/api/v1/welcome`
+
+|===
+
+[[direct_mode]]
+=== 1. Direct Mode
+
+In **Direct Mode**, there is no intermediate gateway.
+TraceWindow dispatches trace requests directly to the microservice host and port.
+
+image:stacksaga-direct-mode.svg[alt="StackSaga TraceWindow Direct Mode Architecture"]
+
+*Target URL Pattern:*
+
+[source,text]
+----
+{host:port}/{api-path}
+----
+
+*Examples:*
+* `http://localhost:8081/stacksaga/api/v1/welcome`
+* `http://localhost:8081/stacksaga/api/v1/transaction?transactionId=OS-1724153095843`
+* `https://order-service.internal.corp:8443/stacksaga/api/v1/welcome`
+
+*Direct Mode Execution Flow:*
+1. **Developer Access:** The operator opens TraceWindow in their browser and enters the target service address (e.g., `http://localhost:8081`).
+2. **Direct Dispatch:** TraceWindow makes an HTTP call directly to `order-service` with the `Bearer User_Token` header.
+3. **Security Interception:** The connector interceptor inside `order-service` extracts the user token and its configured `stacksaga.trace-window.access-token`, forwarding both to **StackSaga Central**.
+4. **Validation:** StackSaga Central verifies token validity, project membership, and operator permissions against the Central DB.
+5. **Trace Data Stream:** Upon authorization, `order-service` queries its local `Event-Store` database and streams transaction execution records back to TraceWindow.
+
+[[gateway_mode]]
+=== 2. Gateway Mode
+
+In **Gateway Mode**, internal microservices are shielded behind a reverse proxy or API Gateway (such as Spring Cloud Gateway, Nginx, or Kubernetes Ingress).
+
+image:stacksaga-gateway-mode.svg[alt="StackSaga TraceWindow Gateway Mode Architecture"]
+
+*Target URL Pattern:*
+
+[source,text]
+----
+{host:port}/{service-name | URL-alias}/{api-path}
+----
+
+*Examples:*
+* `https://api.mycompany.com/order-service/stacksaga/api/v1/welcome`
+* `https://api.mycompany.com/payment-service/stacksaga/api/v1/transaction?transactionId=PS-1724153095843`
+* `http://localhost:8080/order-service/stacksaga/api/v1/welcome`
+
+The `{service-name | URL-alias}` prefix instructs the Gateway which internal microservice to route the request to.
+
+[TIP]
+====
+For complete technical routing configuration files (Spring Cloud Gateway, Nginx reverse proxy, and Kubernetes Ingress), refer to the xref:stacksaga-trace-window-connector-overview.adoc#gateway-routing-examples[Gateway Routing Examples in the Connector Reference Guide].
+====
+
+'''
+
+== Connecting & Validating in TraceWindow
+
+Before transaction trace data is queried, TraceWindow performs a handshake probe with the target service.
+
+1. Open the **Connect Service** modal in TraceWindow.
+2. Enter the **Root URL** of the service (or Gateway) and provide the **Service Name / Alias** if operating in Gateway Mode.
+3. TraceWindow calls the `GET /stacksaga/api/v1/welcome` handshake endpoint on the target service.
+4. If authentication and permissions succeed, a success confirmation is displayed:
++
+image:stacksaga-admin-login-successful.png[alt="Connection Successful"]
+
+5. If the service token is invalid, missing, or your user account has not been added to the project, an HTTP `403 Forbidden` response is returned:
+
+NOTE: The `/stacksaga/api/v1/welcome` endpoint acts as a lightweight handshake probe.
+Once validated, TraceWindow saves the connection settings for your active session.
+
+=== Resolving Mixed Content Errors
+
+When accessing a target service running over plain HTTP (e.g., `http://localhost:8080` or an internal IP) from the secure TraceWindow dashboard (`https://trace.stacksaga.org`), modern web browsers will block the cross-origin request due to **Mixed Content Security Restrictions**:
+
+==== Solution: Browser Insecure Origins Flag
+
+To bypass this restriction during local development and testing on non-SSL endpoints:
+
+1. In your browser (Chrome, Edge, Brave), navigate to `chrome://flags` or `edge://flags`.
+2. Search for **Insecure origins treated as secure**.
+3. Add your target service domain or IP address and port (e.g., `http://192.168.1.50:8080`), and select **Enabled**:
++
+image:mixed-content/stacksaga-demo-k8s-mixed-content-error-solution.png[alt="Bypass Mixed Content via Flags"]
+
+4. Relaunch the browser.
+TraceWindow can now communicate with your non-SSL backend successfully:
+
+[TIP]
+====
+*Private Network Access (PNA) Support:* In addition to mixed content flags, modern Chromium browsers enforce Private Network Access preflights when a public website (`https://trace.stacksaga.org`) contacts private IP addresses.
+The StackSaga Connector automatically handles this by returning `Access-Control-Allow-Private-Network: true` (controlled via `stacksaga.trace-window.allow-private-network=true`, which is enabled by default).
+====

@@ -1,0 +1,1053 @@
+:description: Domain Entity and Event Sourcing specifications for stacksaga-orchestrator — creating custom DomainEntity classes, key generation, idempotency, and mapper customization.
+:keywords: StackSaga, DomainEntity, SagaDomainEntity, event sourcing, key generation, idempotency, saga domain identifier
+:domain-entity-scan-prop: stacksaga.domain-entity-scan
+:template-class: SagaTemplate
+:page-priority: 0.7
+
+= Domain Entity and Event Sourcing
+
+// tag::what-is-domain-entity-event-sourcing[]
+== What is Domain Entity Event Sourcing?
+
+The *Domain-Entity* object serves as the central data container throughout the entire lifecycle of a distributed transaction.
+It functions as a shared, strongly typed data bucket, enabling each executor (span) in the saga workflow to consume existing transactional data and contribute newly produced state as the business process moves forward.
+
+Rather than mutating a single record in place without history, StackSaga employs *Domain-Entity Event Sourcing*.
+Every significant atomic transition generates a new, immutable snapshot of the Domain-Entity state, which is immediately committed to the Event Store:
+
+. **Baseline State**: Upon transaction initiation, the initial state of the Domain-Entity is persisted as the baseline version with status `STARTED`.
+. **Step Snapshots**: As each atomic executor completes its operation, a point-in-time snapshot of the updated Domain-Entity is persisted, stamped with the unique span identifier and execution metadata.
+
+*Domain-Entity event sourcing provides two core architectural capabilities:*
+
+. *Transaction Re-Invoke & Automatic Recovery (Retrying and Restoring)*
+- If an atomic execution fails due to a transient issue (such as temporary network latency or service unavailability), the saga engine can safely retry the operation. If a transaction halts due to a system crash or node restart, it can be seamlessly restored and re-invoked from the exact point of interruption. Because historical state is preserved at every milestone, the engine restores the precise Domain-Entity snapshot that existed when the failure occurred, eliminating data corruption and partial-state inconsistencies.
+
+. *Full Transaction Observability & Auditability via Dashboard*
+- Storing every discrete state transition provides complete chronological traceability. System administrators and developers can inspect the Domain-Entity state before and after each atomic execution runs, making it straightforward to audit the evolution of a transaction, diagnose edge-case anomalies, and inspect payload mutations through the Trace-Window dashboard.
+// end::what-is-domain-entity-event-sourcing[]
+
+// tag::domain-entity-as-saga-domain-identifier[]
+== Domain Entity as the Saga Domain Identifier
+
+In addition to serving as the transactional data carrier, the `DomainEntity` class fulfills a fundamental architectural role in the StackSaga framework: it serves as the **Saga Domain Identifier**.
+
+The framework uses the `DomainEntity` class type to distinguish business domains and bind together all executors responsible for handling that specific workflow. In other words, the Domain-Entity class acts as the strongly typed anchor for the entire saga:
+
+* For example, in an e-commerce platform, an order fulfillment process uses `OrderDomainEntity` as its domain identifier, while a customer subscription process uses `SubscriptionDomainEntity`.
+* Each business domain defines its own dedicated `DomainEntity` subclass containing fields relevant to that business context.
+
+[NOTE]
+====
+Each distinct Long-Running Transaction (LRT) requires its own dedicated `DomainEntity` subclass.
+StackSaga uses the **class type itself**—not an arbitrary runtime string or field value—as the discriminator to identify the saga domain.
+For instance, `PlaceOrder` and `CancelSubscription` workflows must be implemented as separate classes: `OrderDomainEntity` and `CancelSubscriptionDomainEntity`.
+
+Beyond transaction identification, the `DomainEntity` class acts as the generic type anchor that unifies all related framework components for that saga domain:
+
+* `{template-class}<OrderDomainEntity, ?>`
+* `AbstractEventManager<OrderDomainEntity, ?>`
+* `TransactionEventListener<OrderDomainEntity>`
+* `CommandExecutor<OrderDomainEntity>` / `QueryExecutor<OrderDomainEntity>`
+
+This design guarantees compile-time type safety, structured routing, and clean domain isolation across the entire application.
+====
+// end::domain-entity-as-saga-domain-identifier[]
+
+// tag::domain-entity-lifecycle[]
+== Domain Entity Lifecycle & State Progression in Saga Execution
+
+Throughout a saga transaction, the `DomainEntity` traverses three distinct lifecycle phases:
+
+. *Phase 1: State Creation & Initialization (`STARTED`)*
+. *Phase 2: Progressive Evolution & Forward Mutation (`IN_PROGRESS`)*
+. *Phase 3: Lifecycle Termination (`COMPLETED` or `FAILED`)*
+
+Understanding how data is populated, consumed, mutated, and finalized across these phases is essential for designing reliable, idempotent saga workflows.
+
+=== Phase 1: State Creation & Initialization
+
+The lifecycle begins with the client application before the transaction is handed to the saga orchestration engine:
+
+. **Custom Instance Creation**: The developer instantiates the custom `DomainEntity` subclass (for example, `OrderDomainEntity`) and populates it with the initial request payload received from the customer or upstream service (e.g., `user_id`, `amount`, `items`).
+. **Initial Field State**: Only the initial request attributes are populated at this point. All downstream attributes (such as `delivery_details`, `order_id`, and `payment_id`) remain `null`.
+. **Saga Handoff**: The entity is passed to the orchestrator via the template initiation method:
++
+[source,java,subs="attributes+"]
+----
+sagaTemplate.init(orderDomainEntity)
+    .startWith(UserDetailExecutor.class)
+    ...
+    .execute();
+----
+. **Baseline Event Persistence**: Before invoking the first executor, the orchestration engine serializes the entity and commits the initial snapshot (Version 0) to the Event Store, tagging the transaction with status `STARTED`.
+
+=== Phase 2: Progressive Evolution & Forward Mutation
+
+Once the saga engine assumes execution control, it coordinates the sequential execution of atomic spans (`QueryExecutor` and `CommandExecutor`):
+
+* **Selective State Consumption (Read Flow)**:
++
+Each executor does not need the entire dataset; it queries only the specific properties it requires from the current Domain-Entity snapshot. For instance:
++
+- `UserDetailExecutor` reads `user_id` to query customer shipping details.
+- `OrderInitializeExecutor` reads `user_id` and `amount` to register the order.
+- `MakePaymentExecutor` reads `order_id` and `amount` to process the payment.
+
+* **Forward State Mutation (`doProcess()`)**:
++
+When an executor completes its external invocation, it enriches the Domain-Entity using setter methods (e.g., `domainEntity.setDeliveryDetails(...)`, `domainEntity.setOrderId(...)`).
+Upon return from `doProcess()`, the framework automatically serializes the mutated Domain-Entity and writes an immutable snapshot to the Event Store, stamped with the unique span identifier and marked with status `IN_PROGRESS`.
+
+* **State Preservation in Non-Mutating Spans**:
++
+IMPORTANT: **Not every executor needs to add new properties to the Domain-Entity.** For example, `ReserveItemsExecutor` reads `items` and `order_id` to reserve stock in an external warehouse service. Even though it performs a critical transactional command, it does not add new fields to the domain entity. In this step, existing fields remain **preserved**, and the engine persists a milestone snapshot confirming successful execution of that atomic span.
+
+* **Compensation Immutability Rule (`doRevert()`)**:
++
+[IMPORTANT]
+====
+During compensating executions (`doRevert()`), the Domain-Entity is **strictly read-only**.
+Compensations must never alter the Domain-Entity state, ensuring that the historical audit record of what actually occurred remains immutable.
+Any metadata required for compensation (such as authorization tokens or transient cancellation IDs) is managed independently through the **Revert-Hint-Store**.
+====
+
+=== Phase 3: Lifecycle Termination
+
+The saga lifecycle terminates in one of two deterministic states:
+
+. **Successful Completion (`COMPLETED`)**:
+- When all executors in the workflow successfully return `stepManager.next(...)` without encountering a pivot exception (unrecoverable failure), the saga workflow reaches its terminal node.
+- The engine transitions the transaction to status `COMPLETED`, and the final, fully enriched Domain-Entity snapshot is sealed in the Event Store as the permanent record of the completed business transaction.
+
+. **Pivot Failure & Backward Compensation (`FAILED`)**:
+- If an atomic execution encounters a non-retryable error (a pivot execution failure), forward progression immediately halts.
+- The saga engine initiates backward rollback, executing `doRevert()` on all previously completed command executors in reverse order.
+- Once all compensations are finalized, the transaction terminates with status `FAILED`. The Domain-Entity retains its last valid forward state prior to the failure, providing developers and operators with exact forensic data in the Trace-Window dashboard.
+
+=== Visualizing State Progression: The Place-Order Architecture
+
+The following architectural diagram illustrates the complete step-by-step lifecycle and state progression of `OrderDomainEntity` during a place-order transaction:
+
+image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="StackSaga Domain-Entity State Transition Architecture",width=100%]
+
+=== Understanding the Diagram Layout
+
+The diagram is organized into three architectural columns across the execution timeline:
+
+. *Left Column (Saga Executors)*: Displays the atomic execution units (`QueryExecutor` and `CommandExecutor`), detailing the specific method invocations (`doProcess()` vs `doRevert()`) and external service interactions.
+. *Center Spine (Execution Timeline & Data Flow)*: Illustrates the chronological flow from initiation (`INIT`) through steps `01` to `04` down to terminal completion (`END`).
+  - *Blue Dashed Connectors (`Reads from State`)*: Depict an executor reading specific input properties from the previous snapshot.
+  - *Green Solid Connectors (`Updates State`)*: Depict state updates flowing from `doProcess()` to produce a new persisted milestone in the Event Store.
+. *Right Column (OrderDomainEntity Snapshots)*: Displays the point-in-time state of the Domain-Entity committed to the Event Store after each step:
+  - *Mint Green Rows (`✓ initial` / `✓ updated`)*: Highlight newly initialized or mutated properties.
+  - *Gray Rows (`preserved`)*: Highlight previously captured properties that remain intact and accessible.
+  - *White Rows (`null`)*: Indicate uninitialized properties awaiting downstream execution.
+
+=== Step-by-Step State Evolution Matrix
+
+[cols="1,2,2,3",options="header"]
+|===
+| Step | Executor & Type | State Read (Input) | State Mutation & Lifecycle Event
+
+| *INIT*
+| *Client Controller*
+| Order request payload from client.
+| Creates `OrderDomainEntity` with initial fields (`user_id = "mafei"`, `amount = 100.0`, `items = [...]`). Downstream fields are `null`. Snapshot persisted to Event Store with status `STARTED`.
+
+| *01*
+| *UserDetailExecutor* +
+(`QueryExecutor`)
+| Reads `user_id` from Domain-Entity.
+| Queries external `User-Service` to fetch shipping address. Mutates `delivery_details = "No344 New York."`. Snapshot persisted with status `IN_PROGRESS`. (As a query executor, read-only lookup requires no `doRevert()`).
+
+| *02*
+| *OrderInitializeExecutor* +
+(`CommandExecutor`)
+| Reads `user_id` and `amount` from Domain-Entity.
+| Calls `Order-Service` to record an order entry. Mutates `order_id = "1245"`. Implements `doRevert()` to void the order if downstream steps fail later. Snapshot persisted with status `IN_PROGRESS`.
+
+| *03*
+| *ReserveItemsExecutor* +
+(`CommandExecutor`)
+| Reads `items` and `order_id` from Domain-Entity.
+| Calls `Stock-Service` to place an inventory hold. *Notice:* No new fields are added; existing fields are preserved (`reserved`). Implements `doRevert()` to release inventory hold on rollback. Snapshot persisted to record span milestone.
+
+| *04*
+| *MakePaymentExecutor* +
+(`CommandExecutor`)
+| Reads `order_id` and `amount` from Domain-Entity.
+| Calls `Payment-Service` to charge the customer. Mutates `payment_id = "tx01343743131083017"`. Implements `doRevert()` to issue refund if needed. Snapshot persisted with all required properties fully populated.
+
+| *END*
+| *Saga Engine*
+| Final transaction validation.
+| All executors completed successfully without pivot exceptions. Transaction reaches `COMPLETED` state; final Domain-Entity state is sealed in the Event Store.
+|===
+
+=== Key Architectural Takeaways
+
+* *Decoupled Microservice Architecture*: Microservices never communicate directly with each other to pass context. The `DomainEntity` acts as the single source of truth and shared data carrier across the entire distributed workflow.
+* *Monotonic State Accumulation*: The Domain-Entity accumulates state progressively—each executor enriches the shared bucket with the output of its execution so subsequent executors can consume it.
+* *State Preservation vs. Modification*: An executor is not required to mutate the Domain-Entity. It can execute business logic and succeed while keeping existing state preserved.
+* *Event Sourcing & Re-Invoke Guarantees*: Because each step's snapshot is committed to the Event Store, the engine can restore the exact historical state to retry a failed operation or compensate previous steps without data corruption.
+* *Strict Mutation Boundary*: State modifications are strictly confined to `doProcess()`. Compensating executions (`doRevert()`) remain read-only, with rollback metadata isolated in the Revert-Hint-Store.
+// end::domain-entity-lifecycle[]
+
+// tag::how-domain-entity-is-used[]
+// (Consolidated into domain-entity-lifecycle - retained for backward-compatibility)
+// end::how-domain-entity-is-used[]
+
+// tag::creating-custom-domain-entity[]
+[[creating_custom_domain_entity]]
+== Creating a Custom Domain-Entity
+
+To define a custom Domain-Entity, create a class that extends the `DomainEntity` base class provided by the framework and annotate it with `@SagaDomainEntity`.
+
+You can declare any fields required to maintain state across the saga workflow (such as `username`, `totalAmount`, `productItems`, etc.). When starting a transaction, pass an initialized instance of this custom class to `{template-class}.init(...).startWith(...).execute()`.
+
+[source,java]
+----
+import java.util.List;
+import java.util.Map;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import org.stacksaga.api.DomainEntity;
+import org.stacksaga.api.UnknownPropertyArchive;
+import org.stacksaga.annotation.SagaDomainEntity;
+import org.stacksaga.annotation.SagaDomainEntityVersion;
+
+@Getter
+@Setter
+//<1>
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity"
+)
+public class OrderDomainEntity extends DomainEntity { //<2>
+
+    //<4>
+    @JsonProperty("username")
+    private String username;
+
+    @JsonProperty("order_id")
+    private String orderId;
+
+    @JsonProperty("total_amount")
+    private double totalAmount;
+
+    @JsonProperty("payment_reference_id")
+    private String paymentReferenceId;
+
+    @JsonProperty("user_validation_data")
+    private UserValidationData userValidationData;
+
+    @JsonProperty("product_items")
+    private List<ProductItem> productItems;
+
+    @JsonProperty("metadata")
+    private Map<String, String> metadata;
+
+    protected OrderDomainEntity() {
+        //<3>
+        super(OrderDomainEntity.class);
+    }
+
+    //<5>
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    public static class ProductItem extends UnknownPropertyArchive {
+        @JsonProperty("product_id")
+        private String productId;
+
+        @JsonProperty("quantity")
+        private int quantity;
+
+        @JsonProperty("price")
+        private double price;
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    public static class UserValidationData extends UnknownPropertyArchive {
+        @JsonProperty("is_user_validated")
+        private boolean userValidated;
+
+        @JsonProperty("validation_note")
+        private String validationNote;
+    }
+}
+----
+
+<1> `@SagaDomainEntity`: Configures the domain entity metadata:
+* **`name`**: The unique identifier for the domain entity within the framework. Used to bind transactions and executors.
+* **`version`**: The schema version declared via `@SagaDomainEntityVersion`. Essential for domain-entity up-casting and down-casting across rolling deployments. +
+xref:#further_configurations[See further configurations for custom mappers and key generators.]
+<2> **Inheritance**: The custom class must extend `DomainEntity` to inherit core saga identification and lifecycle capabilities.
+<3> **Constructor**: A protected no-argument constructor that calls `super(OrderDomainEntity.class)`. Because the framework instantiates domain entities dynamically during deserialization and state restoration, parameterized constructors should not be declared.
+<4> **Field Mapping**: Declare attributes required to carry transaction state. Using `@JsonProperty` annotations is strongly recommended to guarantee deterministic JSON serialization and avoid naming discrepancies during schema evolution.
+<5> **Nested Types & Unknown Property Archiving**: For complex nested objects, declare static inner classes (or separate classes) extending `org.stacksaga.api.UnknownPropertyArchive`. The `UnknownPropertyArchive` base class automatically captures unrecognized properties during deserialization, ensuring seamless backward and forward compatibility during schema upgrades.
+
+[IMPORTANT]
+====
+**Refactoring Safety**: The framework identifies the domain entity using the logical `name` attribute declared in `@SagaDomainEntity(name = "...")`, rather than the Java class name or package. You can safely refactor, rename, or relocate the Java class without disrupting active transactions or historical event-store records, provided the `@SagaDomainEntity` `name` remains identical.
+Two different custom domain-entity classes cannot declare the same `name`.
+====
+
+[IMPORTANT]
+====
+**Spring Bean Notice**: In StackSaga, custom domain entities are lightweight state carriers—they are **not** Spring beans.
+They do not need to be within the application's component scan package. Instead, register the package containing your domain entities using the `{domain-entity-scan-prop}` configuration property.
+====
+
+[[securing_sensitive_data]]
+=== Securing Sensitive Data & Trace-Window Protection (Data Masking)
+
+Because the `DomainEntity` represents the complete state of a transaction, it is serialized and committed to the Event Store at every atomic span snapshot.
+These serialized snapshots are retrieved and displayed directly on the **Trace-Window dashboard** (`/execution/binary`) for forensic analysis, debugging, and observability.
+
+When transactions process sensitive business data—such as passwords, authentication tokens, API keys, credit card numbers, or Personally Identifiable Information (PII)—developers must ensure that sensitive values are protected and not exposed in plain text within the Event Store or on the Trace-Window dashboard.
+
+Since the `DomainEntity` is a standard Java object serialized via Jackson, you can leverage Jackson annotations and custom getter/setter encapsulation to secure sensitive properties:
+
+==== 1. Masking Sensitive Fields with Jackson Annotations (`@JsonIgnore`)
+
+If a field is only needed at runtime in memory and should **never** be persisted to the Event Store or shown in the Trace-Window:
+
+* Annotate the getter method or field with `@JsonIgnore`.
+* Jackson will exclude this property from the serialized JSON payload.
+
+[source,java]
+----
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+public class OrderDomainEntity extends DomainEntity {
+
+    @JsonProperty("card_last_four")
+    private String cardLastFour;
+
+    // Ephemeral in-memory CVV: Never serialized or persisted to the Event Store
+    @JsonIgnore
+    private String cvv;
+
+    // ...
+}
+----
+
+==== 2. Encrypted / Obfuscated Storage with Plain-Text Business Accessors
+
+When sensitive data **must** be retained across saga spans (so subsequent executors can use it), store the data in an encrypted, hashed, or encoded form in the persisted property, while providing a `@JsonIgnore`-annotated helper method for your executors to decrypt or decode the actual value in memory:
+
+[source,java]
+----
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.stacksaga.annotation.SagaDomainEntity;
+import org.stacksaga.annotation.SagaDomainEntityVersion;
+import org.stacksaga.api.DomainEntity;
+
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity"
+)
+public class OrderDomainEntity extends DomainEntity {
+
+    // Serialized & stored in Event Store (safe for Trace-Window dashboard)
+    @JsonProperty("token")
+    private String encodedToken;
+
+    public OrderDomainEntity() {
+        super(OrderDomainEntity.class);
+    }
+
+    /**
+     * Business methods / executors call this method to retrieve the real decrypted data.
+     * Annotated with @JsonIgnore so Jackson does not serialize it into the Event Store or Trace-Window.
+     */
+    @JsonIgnore
+    public String getTokenAsString() {
+        return decodeOrDecrypt(this.encodedToken);
+    }
+
+    public String getEncodedToken() {
+        return this.encodedToken;
+    }
+
+    public void setEncodedToken(String encodedToken) {
+        this.encodedToken = encodedToken;
+    }
+}
+----
+
+[TIP]
+====
+**Trace-Window Security Best Practice**:
+By storing only masked or encrypted values (e.g., `encodedToken`, `maskedPan`) in `@JsonProperty` fields and exposing decrypted values solely through `@JsonIgnore` accessor methods:
+
+* The transaction state remains fully persistent and recoverable across nodes and retries.
+* The Trace-Window dashboard safely renders non-sensitive or masked payloads to developers and auditors without leaking confidential customer credentials or PII.
+====
+// end::creating-custom-domain-entity[]
+
+// tag::further-configurations[]
+[[further_configurations]]
+== Further Configurations
+
+Furthermore, you can provide some additional configurations for the custom domain-entity by using the attributes of the `@SagaDomainEntity` annotation.
+
+. xref:#custom_mapper_provider_for_domain_entity[]
+. xref:#custom_key_generator_provider_for_domain_entity[]
+
+[[custom_mapper_provider_for_domain_entity]]
+=== Custom Mapper Provider for Domain-Entity
+
+By default, stacksaga uses the default `ObjectMapper` that spring boot provides via `DefaultDomainEntityMapperProvider`.
+in case if you want to customize the `ObjectMapper` for your target domain-entity, you can create and provide a custom `objectMapper` object for the target Domain-Entity as a custom implementation of `AbstractDomainEntityMapperProvider`.
+It can be created any number of custom mapper providers for different domain-entities as needed as below.
+
+[source,java]
+----
+@Component //<1>
+public class OrderDomainEntityMapperProvider extends AbstractDomainEntityMapperProvider { //<2>
+
+    @Override //<3>
+    protected ObjectMapper provide() {
+        return new ObjectMapper(); //<4>
+    }
+}
+//-------------------------------------------------------------------------------
+
+@Getter
+@Setter
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity",
+        mapper = OrderDomainEntityMapperProvider.class //<5>
+)
+public class OrderDomainEntity extends DomainEntity {
+    //...
+}
+
+----
+
+<1> *@Component*: Mark your custom object mapper implementation as a Spring bean.
+<2> Extend class by  `AbstractDomainEntityMapperProvider` abstract class. +
++
+IMPORTANT: `provide()` method is invoked only once at the initialization phase of the framework to get the custom `ObjectMapper` object for the target domain-entity.
+
+<3> Override the method for providing the custom `ObjectMapper` object.
+<4> return the customized `ObjectMapper` object.
+<5> *mapper*: provide your custom domain entity mapper provider class in the DomainEntity class.
+
+[[custom_key_generator_provider_for_domain_entity]]
+=== Custom Key Generator Provider for Domain-Entity
+
+The key generator is responsible for generating the transaction key prefix and the idempotency keys for each span.
+By default, StackSaga uses `DefaultDomainEntityKeyGenerator` as the key generator for all domain-entities.
+If you want to customize key generation for a specific domain-entity, you can create a custom implementation by extending `AbstractDomainEntityKeyGenerator`.
+You can create separate custom key generator providers for different domain-entities as needed.
+
+`AbstractDomainEntityKeyGenerator` provides two methods with default implementations that you can override:
+
+- xref:#generateTransactionKeyPrefix[`generateTransactionKeyPrefix`] - generates the transaction key prefix.
+- xref:#generateIdempotencyKey[`generateIdempotencyKey`] - generates an idempotency key for each span of the transaction.
+
+[[generateTransactionKeyPrefix]]
+=== Transaction Key Generation
+
+Every saga transaction requires a globally unique identifier represented by `SagaUUID`.
+A `SagaUUID` consists of two parts separated by a hyphen:
+
+* `<prefix>-<UUIDv7>`
+
+1. **Prefix**: Generated by `generateTransactionKeyPrefix(...)` in `AbstractDomainEntityKeyGenerator`.
+2. **Suffix**: A time-based unique UUID generated automatically by the framework using the https://github.com/cowtowncoder/java-uuid-generator[java-uuid-generator] library.
+
+Because the framework automatically appends a high-entropy, time-based UUID suffix, uniqueness across transactions and distributed nodes is guaranteed.
+The prefix serves as a concise, human-readable qualifier for observability, tracing, and domain segmentation.
+
+[TIP]
+====
+*Why UUIDv7 for Transaction Identifiers?*
+
+UUIDv7 embeds a high-precision epoch timestamp in its leading 48 bits, producing chronologically monotonic identifiers.
+This design provides critical architectural advantages for event sourcing and transactional storage:
+
+* *Database Partition Pruning*: In SQL and distributed event-store implementations configured with time-range partitioning, the embedded timestamp can be extracted directly from the transaction ID to route queries straight to the relevant partition, eliminating expensive multi-partition scans.
+* *Index Locality & Write Throughput*: Unlike random UUIDv4 values that cause frequent B-Tree page splits and random I/O, sequentially ordered UUIDv7 keys append naturally to database indexes, maintaining page density and maximizing write throughput.
+* *Chronological Traceability*: Transactions are naturally sorted by creation time directly from their identifiers, simplifying time-window queries, log correlation, and audit reconciliation.
+====
+
+==== Default Behavior (first4)
+
+Providing a custom key generator is optional.
+If you do not provide a custom key generator, StackSaga uses `DefaultDomainEntityKeyGenerator`.
+By default, it extracts the **first 4 characters (`first4`)** of the domain-entity name defined in the `@SagaDomainEntity(name = "...")` annotation and converts them to **lowercase**.
+
+For example, with `@SagaDomainEntity(name = "OrderDomainEntity")`, the first 4 characters (`"Orde"`) are converted to lowercase (`"orde"`), resulting in transaction IDs like:
+
+* `orde-0195655a-350f-786d-96eb-63c1dfc6e9ba`
+* `orde-0195655a-4e20-7a1b-80c2-1249fae53412`
+
+==== Prefix Constraints & Lowercase Formatting
+
+When customizing the prefix via `generateTransactionKeyPrefix(...)`:
+
+* **Lowercase Requirement**: Developers should provide the prefix string in **lowercase**. If not provided in lowercase, the framework automatically converts it to lowercase internally.
+* **Allowed Characters**: Alphanumeric characters and hyphens only (`[a-zA-Z0-9-]`).
+* **Disallowed**: Spaces, whitespace, and special characters (such as `_`, `:`, `#`, `@`, `.`, `/`, `%`) are strictly prohibited and will cause the framework to reject the transaction ID.
+
+A custom prefix can be used to:
+
+- incorporate service name or domain namespace,
+- embed region or cluster identifiers for multi-region routing and log filtering,
+- satisfy organizational compliance or observability conventions.
+
+TIP: To see how to supply a custom prefix in code, see the xref:#custom_key_generator_example[Custom Key Generator Example] below.
+
+[[generateIdempotencyKey]]
+=== Generating Idempotency Keys for Saga Spans
+
+NOTE: If you are new to the concept of idempotency, refer to xref:foundations:idempotency.adoc[] first.
+
+
+Each span in a saga transaction (i.e., each atomic execution attempt) requires an idempotency key to ensure safe, duplicate-proof retries.
+The `generateIdempotencyKey` method receives runtime execution context divided into two input objects: `SafeIdempotentInput` and `UnSafeIdempotentInput`.
+
+[IMPORTANT]
+====
+Do not use properties from `UnSafeIdempotentInput` to construct idempotency keys. Values within `UnSafeIdempotentInput` may vary across retry attempts or cluster nodes, which can produce non-deterministic keys and break retry safety. `UnSafeIdempotentInput` is intended strictly for diagnostic logging and debugging.
+
+Always derive idempotency keys exclusively from `SafeIdempotentInput`, which provides deterministic, stable attributes guaranteed to remain consistent across retries throughout the transaction lifecycle.
+====
+
+The framework's default implementation produces a fixed-length MD5 hash by concatenating the `transactionId`, `currentExecutionName`, and `executionMode` from `SafeIdempotentInput` and hashing the composite string via the provided `HashGenerator`. This ensures compact, collision-resistant idempotency keys.
+
+[[custom_key_generator_example]]
+=== Custom Key Generator Example
+
+Here is an example of how to override `generateTransactionKeyPrefix` and `generateIdempotencyKey` to provide custom logic and configure it in your custom `DomainEntity` class.
+
+NOTE: Because `AbstractDomainEntityKeyGenerator` provides default implementations for all methods, you only need to override the specific methods you want to customize (e.g., overriding only `generateTransactionKeyPrefix` if you only need custom prefix naming, or only `generateIdempotencyKey` if you only require custom idempotency logic).
+
+[source,java]
+----
+@Component //<1>
+public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenerator { //<2>
+
+    @Override //<3>
+    // This method is called when each transaction is initialized to supply the prefix
+    public String generateTransactionKeyPrefix(String serviceName, String applicationVersion, String instanceId, String region, String zone, SagaDomainEntity sagaDomainEntity) {
+        // Custom prefix should be lowercase (alphanumeric and hyphens only)
+        return String.format("%s-%s", serviceName.toLowerCase(), region.toLowerCase());
+    }
+
+    @Override //<4>
+    public String generateIdempotencyKey(SafeIdempotentInput safeIdempotentInput, UnSafeIdempotentInput unSafeIdempotentInput) {
+         final String rowKey = new StringJoiner(":")
+                .add(safeIdempotentInput.transactionId().toString())
+                .add(safeIdempotentInput.currentExecutionName())
+                .add(safeIdempotentInput.executionMode().name().toLowerCase())
+                .toString();
+       return this.hashGenerator().generateHash(rowKey, HashGenerator.ALGType.MD5);
+    }
+}
+
+//: Configure The custom KeyGen With Custom DomainEntity
+
+@Getter
+@Setter
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity",
+        mapper = OrderDomainEntityMapperProvider.class,
+        keyGen = OrderDomainEntityKeyGenerator.class //<5>
+)
+public class OrderDomainEntity extends DomainEntity {
+    //...
+}
+----
+
+<1> *@Component*: Mark your custom key generator implementation as a Spring bean.
+<2> Extend the custom class by `AbstractDomainEntityKeyGenerator`.
+<3> Override the `generateTransactionKeyPrefix` method to create your custom prefix for the transaction ID (`SagaUUID`). Developers should provide the prefix in lowercase; if uppercase characters are provided, the framework converts them to lowercase internally. +
+#The method is called when each transaction is initialized.#
+<4> Override the `generateIdempotencyKey` method and create your custom idempotency key for each span. +
+#The method is called before each span execution is invoked.#
+<5> Provide your custom class as `keyGen` of `@SagaDomainEntity` in your DomainEntity class.
+
+IMPORTANT: It is highly recommended to use the base class method `hashGenerator()` to produce a fixed-length hash of a composite string for generating the idempotency key, rather than returning a raw concatenation of input values. This approach ensures that the idempotency key is compact, consistent in length, and has a low risk of collisions, even when the input values are long or contain variable content.
+
+WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
+The framework may invoke it concurrently.
+
+[[idempotency_key_versioning_and_inflight_transactions]]
+=== Modifying Idempotency Key Logic Across Releases & In-Flight Transactions
+
+In production microservice architectures, applications evolve continuously through zero-downtime rolling deployments.
+When releasing a new service version that alters how idempotency keys are constructed, you must ensure that **in-flight transactions** remain backward-compatible and deterministic.
+
+==== The In-Flight Retry Hazard
+
+Consider the following distributed scenario:
+
+1. Service version `1.0.0` is deployed and executing transactions.
+2. An executor executes an atomic operation (e.g., calling an external payment or inventory API), dispatching a request with idempotency key `K1`.
+3. Before the response can be committed to the Event Store, a transient network error, gateway timeout, or container restart occurs. The transaction is marked for retry in the Event Store.
+4. Next, service version `1.1.0` is deployed with an updated idempotency key generation formula in `OrderDomainEntityKeyGenerator`.
+5. When the StackSaga retry subsystem or scheduler re-invokes the paused transaction under version `1.1.0`, it invokes `generateIdempotencyKey(...)`.
+6. *The Failure Mode:* If the key generator applies the *new* `1.1.0` formula to this retried transaction, it generates key `K2` instead of `K1`.
+Because `K2 != K1`, the downstream microservice cannot recognize this request as a retry of the earlier attempt. It treats `K2` as a brand-new transaction and executes the side-effect a second time (e.g., duplicate charges or double inventory reservations).
+
+[CAUTION]
+====
+**Idempotency Key Invariance:**
+An idempotency key for any given execution span must remain **strictly identical** across all attempts, retries, and compensations throughout the transaction lifecycle, even across application deployments.
+====
+
+==== Semantic Version Branching with Object-Level Methods
+
+To prevent this issue, increment the version in `@SagaDomainEntityVersion` when changing key generation logic and use the **`DomainEntity` object-level versioning API** to branch conditionally.
+
+The framework provides the target `DomainEntity` via `unSafeIdempotentInput.domainEntity()`. This instance preserves the transaction's **initial event version** (the version stamped when the transaction was first created in the Event Store), allowing your key generator to distinguish historical in-flight transactions from newly initiated transactions.
+
+`DomainEntity` exposes the following object-level version-comparison methods:
+
+* *`domainEntity.compare(String versionString)`*: Compares the transaction's initialized version with a semantic version string (e.g., `domainEntity.compare("1.1.0")`). Returns a negative integer if the transaction was initialized under an older version, `0` if equal, or a positive integer if newer.
+* *`domainEntity.compare(Version versionY)`*: Compares against a pre-parsed Jackson `tools.jackson.core.Version` object.
+* *`domainEntity.isInitializedVersionBetween(DomainEntityVersionDetail from, DomainEntityVersionDetail to)`*: Determines whether the transaction was initialized within a specific historical version range.
+* *`domainEntity.compareInitializedVersionToCurrentVersion()`*: Compares the transaction's initialized version from the Event Store with the version declared on the current application's `@SagaDomainEntity` annotation.
+* *`domainEntity.getInitializedVersionAsString()`*: Returns the initial version as a string (e.g., `"1.0.0"`).
+
+[TIP]
+====
+*Why use `compare(...)` instead of raw string equality?* +
+In active production systems, in-flight transactions in the Event Store may span **multiple prior versions** (e.g., `1.0.0`, `1.0.1`, `1.0.2`) when deploying `1.1.0`. Hardcoding string checks like `"1.0.0".equals(...)` is fragile and requires manually enumerating every previous version. Checking `domainEntity.compare("1.1.0") < 0` cleanly routes all historical transactions to the legacy formula in a single check.
+====
+
+==== Multi-Version Key Generator Implementation
+
+Here is an example of an `AbstractDomainEntityKeyGenerator` that supports legacy in-flight transactions while executing the new formula for fresh transactions:
+
+[source,java]
+----
+@Component
+public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenerator {
+
+    @Override
+    public String generateIdempotencyKey(
+            SafeIdempotentInput safeIdempotentInput,
+            UnSafeIdempotentInput unSafeIdempotentInput
+    ) {
+        DomainEntity domainEntity = unSafeIdempotentInput.domainEntity();
+
+        // Check if the transaction originated before version 1.1.0 (covers 1.0.0, 1.0.1, 1.0.2, etc.)
+        if (domainEntity != null && domainEntity.compare("1.1.0") < 0) {
+            return generateLegacyIdempotencyKey(safeIdempotentInput);
+        }
+
+        // Standard key generation for version 1.1.0 and above
+        return generateModernIdempotencyKey(safeIdempotentInput);
+    }
+
+    private String generateLegacyIdempotencyKey(SafeIdempotentInput safeInput) {
+        // Legacy key generation formula used in releases prior to 1.1.0
+        final String rawKey = safeInput.transactionId().toString() + ":" + safeInput.currentExecutionName();
+        return this.hashGenerator().generateHash(rawKey, HashGenerator.ALGType.MD5);
+    }
+
+    private String generateModernIdempotencyKey(SafeIdempotentInput safeInput) {
+        // Updated key generation formula for 1.1.0+
+        final String rawKey = new StringJoiner(":")
+                .add(safeInput.transactionId().toString())
+                .add(safeInput.currentExecutionName())
+                .add(safeInput.executionMode().name().toLowerCase())
+                .toString();
+        return this.hashGenerator().generateHash(rawKey, HashGenerator.ALGType.MD5);
+    }
+}
+----
+// end::further-configurations[]
+
+// tag::domain-entity-versioning[]
+[[domain_entity_versioning]]
+== Domain-Entity Versioning & Version Casting
+
+In enterprise microservice systems, software evolves continuously through feature additions, refactoring, and schema adjustments.
+In distributed saga workflows orchestrated by StackSaga, any structural modification to a transaction's state or execution sequence necessitates updating the version of the corresponding Domain-Entity.
+
+Because StackSaga relies on Event Sourcing and automated transaction retry/restoration mechanisms to guarantee eventual consistency across distributed services, managing schema versions deterministically is paramount.
+
+=== Why Domain-Entity Versioning is Critical
+
+When an atomic span or executor encounters a transient failure (e.g., downstream timeout, network partition), the transaction is paused until the retry engine or scheduler re-invokes it.
+During this window, a new application release with updated business logic or modified entity fields may be deployed.
+
+When the saga engine recovers an in-flight transaction, the historical snapshot retrieved from the Event Store may not match the Java class definition of the newly deployed application.
+The engine requires explicit version metadata to identify the exact schema under which the transaction originated, allowing it to reconstruct and reconcile historical state safely without data corruption or deserialization failure.
+
+[TIP]
+====
+[[what_is_the_events_version]]
+*What is the Event's Version?*
+
+When a saga transaction is initiated, the baseline event (snapshot) is committed to the Event Store tagged with the `@SagaDomainEntityVersion` declared on the custom `DomainEntity` class at that time.
+This initial version is termed the **Event Version** (or Transaction Real Version).
+Even as new application versions are subsequently deployed, this historical transaction retains its original event version, which executors can query at runtime via `domainEntity.getRealVersionAsString()`.
+====
+
+[[when_to_update_domain_entity_version]]
+=== When to Update the Domain-Entity Version
+
+The version declared in `@SagaDomainEntityVersion(major = ..., minor = ..., patch = ...)` must be incremented whenever changes are made that impact the transaction's state schema or execution topology:
+
+* xref:#domain_entity_structure_changing[Domain-Entity Structure Changes]
+** xref:#adding_new_data[Adding new fields (Up-Casting trigger)]
+** xref:#removing_existing_data[Removing existing fields (Down-Casting trigger)]
+* xref:#executor_changing[Executor Modifications]
+** xref:#changing_something_inside_the_existing_executor[Modifying existing executor logic]
+** xref:#changing_executors_count[Altering executor count (Adding or removing executors)]
+* xref:#key_generator_changing[Key Generator & Idempotency Logic Modifications]
+
+[[domain_entity_structure_changing]]
+==== 1. Domain-Entity Structure Changes
+
+If the schema or property set of your custom `DomainEntity` class changes, the version must be updated.
+
+[[adding_new_data]]
+* **Adding New Data (Up-Casting Trigger)**:
++
+When new properties are added to the custom `DomainEntity`, increment the version.
+Adding fields leads to *Up-Casting* during transaction replays, where older snapshots from the Event Store are cast into the newer schema definition containing the additional fields.
++
+image:implementations:aggregator/stacksaga-diagram-aggregator-change-add-new-data.drawio.svg[alt="StackSaga Domain-Entity change - add new data",width=70%]
+
+[[removing_existing_data]]
+* **Removing Existing Data (Down-Casting Trigger)**:
++
+When obsolete fields are deleted from the custom `DomainEntity`, increment the version.
+Removing fields triggers *Down-Casting* during transaction replays, where historical snapshots in the Event Store still contain properties no longer defined in the current Java class.
++
+image:implementations:aggregator/stacksaga-diagram-aggregator-change-remove-data.drawio.svg[alt="StackSaga Domain-Entity change - remove data",width=70%]
+
+[[executor_changing]]
+==== 2. Executor Modifications
+
+Even when the `DomainEntity` class fields remain untouched, changes to the workflow's executors can alter how transactional state is produced, consumed, or compensated, requiring a version bump.
+
+[[changing_something_inside_the_existing_executor]]
+* **Modifying Existing Executor Logic**:
++
+If you modify the internal business logic of an existing executor (such as altering external API payloads or changing downstream validation criteria), determine whether the modification should apply to pending historical transactions waiting to be retried.
+Incrementing the version allows your executors to branch conditionally based on `domainEntity.getRealVersionAsString()` to apply legacy handling for in-flight transactions while executing new logic for fresh transactions.
++
+image:implementations:aggregator/stacksaga-diagram-executor-change.drawio.svg[alt="StackSaga executor modification",width=70%]
+
+[[changing_executors_count]]
+* **Changing Executor Count**:
++
+Altering the number of executors in a saga workflow alters the execution graph:
+
+[[adding_new_executor]]
+** **Adding New Executors**:
+When an additional step (such as `command-executor-4`) is introduced into the sequence, increment the domain-entity version.
++
+image:implementations:aggregator/stacksaga-diagram-executor-adding.drawio.svg[alt="StackSaga adding new executor",width=70%]
+
+[[removing_existing_executor]]
+** **Removing Existing Executors**:
+Removing an executor from the workflow sequence requires an updated version.
++
+image:implementations:aggregator/stacksaga-diagram-executor-removing.drawio.svg[alt="StackSaga removing executor",width=70%]
+
+[IMPORTANT]
+====
+**Caution When Removing Executors in Live Deployments**:
+Executors participate directly in automated retries and compensations (`doRevert()`).
+If historical transactions remain pending in the Event Store at a step that references an executor you intend to delete, the saga engine cannot replay or rollback those transactions if the Java executor class has been completely removed from the codebase.
+**Best Practice**: Keep deprecated executor classes in the application until all in-flight historical transactions from previous versions have completed or terminated.
+====
+
+[NOTE]
+====
+While upgrading an existing `QueryExecutor` to a `CommandExecutor` is theoretically possible, converting a `CommandExecutor` to a `QueryExecutor` is strictly prohibited because compensating historical commands requires rollback capabilities. The StackSaga team recommends against changing existing executor types.
+====
+
+[[key_generator_changing]]
+==== 3. Key Generator & Idempotency Logic Changes
+
+If you alter how idempotency keys are generated in your custom `AbstractDomainEntityKeyGenerator` implementation, you must increment the `@SagaDomainEntityVersion`.
+
+Incrementing the version ensures that:
+
+* In-flight transactions recovered from the Event Store after transient errors can be identified via `domainEntity.compare(...)` or `domainEntity.isInitializedVersionBetween(...)`.
+* The custom key generator can route historical transactions to the legacy key generation algorithm, preserving exact idempotency key invariance across retries and preventing duplicate downstream executions.
+* For a detailed architectural explanation and code sample, see xref:#idempotency_key_versioning_and_inflight_transactions[Modifying Idempotency Key Logic Across Releases & In-Flight Transactions].
+
+[[domain_entity_version_casting]]
+=== Domain-Entity Version Casting (The SEC Replay Mechanism)
+
+During rolling application updates, instances running the new version are deployed while older instances are phased out.
+In an event-sourced architecture, pending or failed events from prior application releases remain stored in the Event Store awaiting retry or compensation.
+
+When the Saga Execution Coordinator (SEC) recovers these transactions, it must reconstruct a live Java `DomainEntity` instance from the older serialized JSON binary payload:
+
+.Event rebuilding by the engine for transaction retrying
+image:implementations:aggregator/stacksaga-diagram-event-rebuiding.drawio.svg[alt="StackSaga diagram event rebuilding",width=70%]
+
+This deserialization, mapping, and conversion process is called **Domain-Entity Version Casting**.
+
+[WARNING]
+====
+If schema changes between versions are not managed correctly, the engine will fail to deserialize historical events, causing in-flight transactions to halt with unrecoverable deserialization exceptions.
+Developers must maintain backward compatibility across rolling versions.
+====
+
+[[domain_entity_oriented_casting_architecture]]
+=== Casting Classifications: Up-Casting vs. Down-Casting
+
+Depending on how the Domain-Entity state structure evolves, version casting falls into two categories:
+
+. *<<domain_entity_oriented_up_casting,Up-Casting>>*
+. *<<domain_entity_oriented_down_casting,Down-Casting>>*
+
+[[domain_entity_oriented_up_casting]]
+==== 1. Domain-Entity Up-Casting
+
+Up-Casting occurs when the current application version has **more attributes** than the historical event snapshot stored in the Event Store.
+For example, the legacy event was persisted with 3 fields, while the current domain-entity class defines 4 or more fields:
+
+image:implementations:aggregator/Architecture-Stacksaga-aggregator-oriented-up-casting-view.drawio.svg[alt="StackSaga Domain-Entity version up-casting",width=100%]
+
+*Handling Up-Casting in StackSaga:*
+StackSaga handles Up-Casting automatically.
+The framework's default JSON serializer/deserializer (`Jackson ObjectMapper`) deserializes older JSON payloads into the newer class without error, initializing any newly added fields to their default values (`null`, `0`, or default collection instances).
+Developers do not need to write custom conversion logic for Up-Casting.
+
+[[domain_entity_oriented_down_casting]]
+==== 2. Domain-Entity Down-Casting
+
+Down-Casting occurs when the current application version has **fewer attributes** than the historical event snapshot stored in the Event Store (e.g., obsolete properties were deleted from the Java class):
+
+image:implementations:aggregator/Architecture-Stacksaga-aggregator-oriented-down-casting-view.drawio.svg[alt="StackSaga Domain-Entity version down-casting",width=100%]
+
+When older events containing legacy fields are deserialized into the new class, standard deserializers either fail on unknown properties or discard the unrecognized data.
+In saga orchestrations, silently dropping this data is perilous because pending executors or compensations may still require those legacy values to complete their tasks.
+
+[[domain_entity_event_casting]]
+=== Handling Down-Casting & Schema Evolution
+
+To safely manage Domain-Entity down-casting, two technical approaches exist:
+
+[WARNING]
+====
+**Anti-Pattern: Ignoring Unknown Properties (`@JsonIgnoreProperties(ignoreUnknown = true)`)**:
+Disabling `FAIL_ON_UNKNOWN_PROPERTIES` or annotating classes with `@JsonIgnoreProperties(ignoreUnknown = true)` prevents deserialization errors, but permanently discards the legacy attributes from memory.
+If a retrying executor or compensating rollback needs those removed values, the transaction will fail due to missing data. This approach is strongly discouraged.
+====
+
+[[collect_missing_properties]]
+==== Recommended Solution: Archiving Unknown Properties via `UnknownPropertyArchive`
+
+Instead of discarding unknown properties, StackSaga provides the `UnknownPropertyArchive` base class (`org.stacksaga.api.UnknownPropertyArchive`).
+When the engine deserializes an older JSON payload containing fields no longer declared as Java class variables, `UnknownPropertyArchive` intercepts and stores those unrecognized key-value pairs in an internal `missingProperties` map.
+
+* **Root Domain-Entity Automatic Archiving**:
+The base `DomainEntity` class in StackSaga inherently extends `UnknownPropertyArchive`. Therefore, any top-level properties removed from your custom `DomainEntity` class are automatically captured into `missingProperties` without requiring custom annotations or methods.
+
+* **Nested Classes Archiving**:
+For complex nested types or inner classes (such as line items, customer details, or metadata), developers must explicitly extend `UnknownPropertyArchive` on each nested static class to capture removed child properties.
+
+==== Code Walkthrough: Handling Down-Casting
+
+Consider an order processing workflow where version `1.0.0` evolves to version `1.1.0`.
+
+*Legacy Schema (`OrderDomainEntity` Version 1.0.0)*:
+
+[source,java]
+----
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity"
+)
+@Getter
+@Setter
+public class OrderDomainEntity extends DomainEntity {
+
+    public OrderDomainEntity() {
+        super(OrderDomainEntity.class);
+    }
+
+    @JsonProperty("order_id")
+    private String orderId;
+
+    @JsonProperty("username")
+    private String username;
+
+    @JsonProperty("total")
+    private Double total;
+
+    @JsonProperty("is_active")
+    private Integer isActive;
+
+    @JsonProperty("comment")
+    private String comment; // <1>
+
+    @JsonProperty("item_details")
+    private List<ItemDetail> itemDetails = new ArrayList<>();
+
+    @Getter
+    @Setter
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class ItemDetail implements Serializable { // <2>
+
+        @JsonProperty("item_name")
+        private String itemName;
+
+        @JsonProperty("qty")
+        private int qty;
+
+        @JsonProperty("price")
+        private double price;
+
+        @JsonProperty("note")
+        private String note; // <3>
+    }
+}
+----
+<1> `comment` is defined on the root entity.
+<2> `ItemDetail` is a nested static class.
+<3> `note` is defined on the nested `ItemDetail` class.
+
+*New Schema (`OrderDomainEntity` Version 1.1.0)*:
+
+In the new release, business requirements change: the root property `comment` and the item property `note` are deprecated and removed from the active Java model:
+
+[source,java]
+----
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 1, patch = 0),
+        name = "OrderDomainEntity"
+)
+@Getter
+@Setter
+public class OrderDomainEntity extends DomainEntity {
+
+    public OrderDomainEntity() {
+        super(OrderDomainEntity.class);
+    }
+
+    @JsonProperty("order_id")
+    private String orderId;
+
+    @JsonProperty("username")
+    private String username;
+
+    @JsonProperty("total")
+    private Double total;
+
+    @JsonProperty("is_active")
+    private Integer isActive;
+
+    // Field 'comment' removed from root class // <1>
+
+    @JsonProperty("item_details")
+    private List<ItemDetail> itemDetails = new ArrayList<>();
+
+    @Getter
+    @Setter
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class ItemDetail extends UnknownPropertyArchive { // <2>
+
+        @JsonProperty("item_name")
+        private String itemName;
+
+        @JsonProperty("qty")
+        private int qty;
+
+        @JsonProperty("price")
+        private double price;
+
+        // Field 'note' removed from ItemDetail // <3>
+    }
+}
+----
+<1> The `comment` property is removed from the root class. Because `OrderDomainEntity` extends `DomainEntity` (which extends `UnknownPropertyArchive`), any legacy `comment` values in historical events are automatically routed to `domainEntity.getMissingProperties().get("comment")`.
+<2> `ItemDetail` now extends `UnknownPropertyArchive` to capture removed nested fields.
+<3> The `note` property is removed from `ItemDetail`. Because `ItemDetail` extends `UnknownPropertyArchive`, legacy `note` values are captured in `itemDetail.getMissingProperties().get("note")`.
+
+[WARNING]
+====
+If an inner nested class removes properties without extending `UnknownPropertyArchive`, deserializing legacy events will fail.
+StackSaga validates domain-entity schemas against sample payloads (configured via `SagaSerializable`) during application startup, failing fast if casting incompatibilities are detected.
+====
+
+==== Accessing Preserved Properties in Executors
+
+When an executor runs, it can check whether the transaction originated from a legacy version and retrieve preserved properties from `getMissingProperties()`:
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "OrderSaveExecutor")
+@AllArgsConstructor
+public class OrderSaveExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            OrderDomainEntity currentDomainEntity,
+            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
+            String idempotencyKey
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // Check if the transaction originated before version 1.1.0 (covers 1.0.0, 1.0.1, etc.)
+        if (currentDomainEntity.compare("1.1.0") < 0) { // <1>
+            // Retrieve root missing property
+            Object comment = currentDomainEntity.getMissingProperties().get("comment"); // <2>
+            if (comment != null) {
+                log.info("Processing legacy transaction with comment: {}", comment);
+            }
+
+            // Retrieve nested missing property from inner items
+            for (OrderDomainEntity.ItemDetail itemDetail : currentDomainEntity.getItemDetails()) { // <3>
+                Object note = itemDetail.getMissingProperties().get("note");
+                if (note != null) {
+                    log.info("Legacy item note: {}", note);
+                }
+            }
+        } else {
+            // Standard execution path for version 1.1.0+
+            log.info("Processing standard order: {}", currentDomainEntity.getOrderId());
+        }
+
+        return stepManager.next(UpdateStockExecutor.class, "SAVED_ORDER");
+    }
+
+    @Override
+    public SagaExecutionEventName doRevert(
+            NonRetryableExecutorException primaryExecutionException,
+            OrderDomainEntity finalDomainEntityState,
+            RevertHintStore revertHintStore,
+            String idempotencyKey
+    ) throws RetryableExecutorException {
+        // Revert logic can also inspect finalDomainEntityState.compare(...) or getMissingProperties() if needed
+        return SagaExecutionEventName.of("REVERTED_ORDER_SAVE");
+    }
+}
+----
+<1> Use `currentDomainEntity.compare("1.1.0") < 0` (or `currentDomainEntity.getRealVersionAsString()`) to detect the transaction's baseline event version. Comparing against a cutoff threshold covers all historical releases (e.g. `1.0.0`, `1.0.1`) without requiring manual string checks for each release.
+<2> Retrieve root-level removed properties via `currentDomainEntity.getMissingProperties().get(...)`.
+<3> Retrieve nested removed properties via `itemDetail.getMissingProperties().get(...)`.
+
+[NOTE]
+====
+The `getMissingProperties()` map and object-level versioning methods (`compare(...)`, `isInitializedVersionBetween(...)`, `getRealVersionAsString()`) are accessible across all executor types, including `CommandExecutor`, `QueryExecutor`, and `RevertAfterExecutor`.
+====
+// end::domain-entity-versioning[]
+

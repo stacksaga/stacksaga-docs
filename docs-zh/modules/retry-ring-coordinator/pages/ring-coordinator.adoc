@@ -1,0 +1,402 @@
+= Ring-Coordinator
+
+== Overview
+
+As mentioned in the xref:transaction-retrying-with-retry-coordinator.adoc[previous section], the retry ring-coordinator is a separate service — distinct from your utility microservices — that runs as either a `master` or a `slave`, depending on how it is configured.
+This section walks through how the retry ring-coordinator is set up and how it works.
+
+IMPORTANT: The `Master` and `Slave` retry ring-coordinator instances can also be deployed within the same service instance.
+Refer to the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section for more details.
+
+IMPORTANT: After adding the `stacksaga-ring-coordinator-spring-boot-starter` dependency to your project and configuring the retry ring-coordinator as `master` or `slave`, you can run the retry ring-coordinator as a Spring Boot application.
+
+=== How Master and Slave Connect
+
+Before configuring each role, it helps to see how a Master and a Slave find each other.
+On startup, a Slave opens a persistent `RSocket` connection to the Master using the host and port configured via `stacksaga.coordinator.slave.target-master.*`.
+The Master accepts the connection and adds the Slave to its registry — from its next 30-second publish cycle onward, the Master starts sending that Slave its token-range updates.
+
+[plantuml,target=ring-coordinator-master-slave-handshake,format=svg]
+----
+@startuml ring-coordinator-master-slave-handshake
+!theme plain
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam sequenceMessageAlign center
+
+skinparam participant {
+  BackgroundColor #EEF4FF
+  BorderColor #4A6FA5
+  FontColor #1A1A2E
+}
+
+skinparam sequence {
+  ArrowColor #4A6FA5
+  LifeLineBorderColor #4A6FA5
+  LifeLineBackgroundColor #EEF4FF
+  NoteBackgroundColor #FFF9E6
+  NoteBorderColor #E0A800
+}
+
+title <b>Ring-Coordinator — Master/Slave Connection</b>
+
+participant "Ring-Coordinator\n(Master)" as master
+participant "Ring-Coordinator\n(Slave)" as slave
+
+slave -> master : RSocket request-stream\nconnect to target-master.host:target-master.port
+master -> slave : ACK — connection established\n(persistent stream open)
+
+note right of master
+  Master adds the Slave to its
+  live registry. Waits for the
+  30th-second publish cycle.
+end note
+
+== Every 30 seconds ==
+master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
+
+note right of slave
+  Slave sub-divides its range
+  across connected Orchestrators
+  (see the Ring-Coordinator
+  Connector page).
+end note
+
+@enduml
+----
+
+The xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[Retry-Coordinator-Slave section] of the architecture guide covers what happens next — how the Slave divides its range across Orchestrator instances.
+
+[[ring-coordinator-master]]
+== Ring-Coordinator As `Master`
+
+If the retry ring-coordinator is configured as `master`, it is responsible for managing the entire token ring and sharing partitions of it with every `slave` retry ring-coordinator connected to it within the same region and cluster.
+Read more about the Master's responsibilities xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-master[here].
+
+Add the `stacksaga-ring-coordinator-spring-boot-starter` dependency to your project as follows:
+
+.pom.xml
+[source,xml,subs="attributes+"]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency> <!--Only for stacksaga dependencies version management-->
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>{stacksaga-version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-ring-coordinator-spring-boot-starter</artifactId>
+    </dependency>
+</dependencies>
+----
+
+[IMPORTANT]
+====
+To run the retry ring-coordinator as a Spring application, you do not need any web-related dependencies such as `spring-boot-starter-web` or `spring-boot-starter-webflux` — the retry ring-coordinator exposes no HTTP endpoints of its own, only `RSocket` endpoints for `slave` instances to connect to.
+It can therefore run as a non-web application.
+
+In production, however, you will usually want visibility into its metrics and other monitoring data.
+Add the `spring-boot-starter-actuator` dependency to expose those endpoints, and additionally add one of the web starters only if you need the actuator endpoints reachable over `HTTP`.
+====
+
+=== Configuration
+
+The retry ring-coordinator can be configured via `application.properties` or `application.yml`.
+Below is a minimal configuration for the retry ring-coordinator as `master`:
+
+.application.properties
+[source,properties]
+----
+#stacksaga-master coordinator configuration
+stacksaga.coordinator.instance-type=master #<1>
+stacksaga.coordinator.target-services=order-service #<2>
+
+#stacksaga-instance configuration
+stacksaga.instance.cluster=cluster1 #<3>
+stacksaga.instance.region=us-east-1 #<4>
+stacksaga.instance.zone=us-east-1a #<5>
+
+#rsocket server configuration
+spring.rsocket.server.port=1000 #<6>
+spring.rsocket.server.address=localhost #<7>
+spring.rsocket.server.transport=tcp #<8>
+
+----
+
+<1> Set `stacksaga.coordinator.instance-type` to `master`, since this instance runs as the Master.
+
+<2> The target service(s) this Master coordinates retries for — `order-service` in this example.
+This can be a comma-separated list when a single Master manages multiple services; see the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
+
+<3> The `cluster` this instance belongs to.
+Only `slave` retry ring-coordinator instances and Orchestrators in the same cluster can connect to this Master — see the xref:transaction-retrying-with-retry-coordinator.adoc#virtual-cluster[Virtual Cluster] section.
+
+<4> The `region` this instance belongs to.
+Only `slave` retry ring-coordinator instances and Orchestrators in the same region can connect to this Master — see the xref:transaction-retrying-with-retry-coordinator.adoc#multi-region-deployment[Regional Deployment] section.
+
+<5> The `zone` this instance belongs to.
+It has no functional impact here, but should be set as per the StackSaga core specification.
+
+<6> The `RSocket` server port. `slave` retry ring-coordinator instances connect to the Master over `RSocket` — backed by the default RSocket server provided by `spring-boot-starter-rsocket` — and Orchestrators use the same port to look up which `slave` instance to connect to.
+
+<7> The `RSocket` network address that the server binds to.
+
+<8> The `RSocket` transport protocol.
+It must be `tcp` for retry ring-coordinator services.
+
+[[ring-coordinator-slave]]
+== Ring-Coordinator As `Slave`
+
+If the retry ring-coordinator is configured as `slave`, it is responsible for connecting to the `master` retry ring-coordinator, subscribing to receive its assigned ring portion, and publishing sub-ring portions to the Orchestrator instances subscribed to it within the same region and cluster.
+Read more about the Slave's responsibilities xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-slave[here].
+
+Adding the `stacksaga-ring-coordinator-spring-boot-starter` dependency is exactly the same as for the xref:#ring-coordinator-master[Master] — both roles use the same starter.
+Only the configuration differs, as shown below.
+
+=== Configuration
+
+.application.properties
+[source,properties]
+----
+#stacksaga-slave coordinator configuration
+stacksaga.coordinator.instance-type=slave #<1>
+stacksaga.coordinator.target-services=order-service #<2>
+
+#stacksaga-instance configuration
+stacksaga.instance.cluster=cluster1 #<3>
+stacksaga.instance.region=us-east-1 #<4>
+stacksaga.instance.zone=us-east-1a #<5>
+
+#rsocket server configuration
+spring.rsocket.server.port=1001 #<6>
+spring.rsocket.server.address=localhost #<7>
+spring.rsocket.server.transport=tcp #<8>
+
+#connecting to the master retry ring-coordinator
+stacksaga.coordinator.slave.target-master.port=1000 #<9>
+stacksaga.coordinator.slave.target-master.host=localhost #<10>
+
+----
+
+<1> Set `stacksaga.coordinator.instance-type` to `slave`, since this instance runs as a Slave.
+
+<2> The target service(s) this Slave subscribes to on the Master, receiving their ring portion and publishing sub-ring portions to the subscribed Orchestrator instances.
+This can be a comma-separated list when a single Slave subscribes for multiple services; see the xref:transaction-retrying-with-retry-coordinator.adoc#ring-coordinator-deployment-topologies[deployment topologies] section.
++
+IMPORTANT: If a Slave supports multiple services, all of those services must also be supported by the Master.
+Otherwise, the connection between the Master and Slave will not be established.
+
+<3> The `cluster` this instance belongs to — same semantics as for the xref:#ring-coordinator-master[Master].
+The Master, and any Orchestrator instances that want to subscribe to this Slave, must share this cluster name for the connection to succeed.
+
+<4> The `region` this instance belongs to — same semantics as for the xref:#ring-coordinator-master[Master].
+The Master, and any subscribing Orchestrator instances, must share this region for the connection to succeed.
+
+<5> The `zone` this instance belongs to.
+It has no functional impact here, but should be set as per the StackSaga core specification.
+
+<6> The `RSocket` server port.
+Orchestrator instances connect to this Slave over `RSocket` to receive their sub-range updates.
+
+<7> The `RSocket` network address that the server binds to.
+
+<8> The `RSocket` transport protocol.
+It must be `tcp` for retry ring-coordinator services.
+
+<9> The `RSocket` server port of the Master this Slave connects to, in the same region and cluster.
+
+<10> The `RSocket` server host of the Master this Slave connects to, in the same region and cluster.
+
+[[kubernetes-statefulset-deployment]]
+== Automated Role Detection via Kubernetes StatefulSet
+
+When deploying a Clustered Ring-Coordinator on Kubernetes, configuring separate Deployments for Master (`stacksaga.coordinator.instance-type=master`) and Slaves (`stacksaga.coordinator.instance-type=slave`) adds unnecessary operational overhead.
+Instead, it is recommended to run the Ring-Coordinator cluster as a **Kubernetes StatefulSet**.
+
+In a StatefulSet, each pod receives a deterministic, ordinal-indexed hostname:
+----
+<statefulset-name>-0  (e.g., ring-coordinator-0)
+<statefulset-name>-1  (e.g., ring-coordinator-1)
+<statefulset-name>-2  (e.g., ring-coordinator-2)
+----
+
+StackSaga can automatically determine the coordinator's role directly from this ordinal index using the `stacksaga.coordinator.deploy.index-based` property:
+
+* **Pod Index `0`** is automatically designated as the **`master`** node.
+* **Pod Index `> 0`** (e.g. index 1, 2, ...) are automatically designated as **`slave`** nodes.
+
+=== Enabling Index-Based Role Resolution
+
+To enable automatic role detection, set `stacksaga.coordinator.deploy.index-based=true`:
+
+.application.properties
+[source,properties]
+----
+# Enable index-based role detection for Kubernetes StatefulSet
+stacksaga.coordinator.deploy.index-based=true #<1>
+
+# Optional: instance-type does not need to be set; it is derived automatically #<2>
+
+# Target service(s) coordinated by this cluster
+stacksaga.coordinator.target-services=order-service,payment-service #<3>
+
+# RSocket server settings
+spring.rsocket.server.port=7777 #<4>
+spring.rsocket.server.transport=tcp
+
+# Target master connection (used by Slave pods when index > 0)
+stacksaga.coordinator.slave.target-master.host=ring-coordinator-0.ring-coordinator-headless #<5>
+stacksaga.coordinator.slave.target-master.port=7777 #<6>
+
+# Cluster and region metadata
+stacksaga.instance.cluster=cluster1
+stacksaga.instance.region=us-east-1
+stacksaga.instance.zone=us-east-1a
+----
+
+<1> Enables automated index-based role detection.
+<2> `stacksaga.coordinator.instance-type` becomes optional. Pod `0` automatically runs as `master`, while pods `1..N` run as `slave`.
+<3> The services coordinated by this ring-coordinator cluster.
+<4> RSocket port used for communication.
+<5> The hostname of the Master pod (pod `0`). In Kubernetes, this typically points to the headless service DNS of the Master pod (e.g., `<statefulset-name>-0.<headless-service-name>`). When pod `0` starts as Master, it ignores this property; when pods `1..N` start as Slaves, they use it to connect to pod `0`.
+<6> The port of the Master pod.
+
+=== Pod Identifier Resolution Order
+
+When `stacksaga.coordinator.deploy.index-based=true` is set, StackSaga determines the pod index by inspecting the following sources in order:
+
+1. `stacksaga.coordinator.instance-id` (explicit override if specified in configuration)
+2. `POD_NAME` (standard Kubernetes downward API environment variable)
+3. `HOSTNAME` (standard Kubernetes pod hostname environment variable)
+
+The numeric index is extracted from the suffix after the last hyphen (`-`), ignoring any FQDN domain suffixes (e.g., `ring-coordinator-0.ring-coordinator-headless.default.svc.cluster.local` resolves index `0`).
+
+[NOTE]
+====
+In standard Docker containers and standalone Linux environments, `stacksaga.coordinator.deploy.index-based` should remain `false` (the default).
+When disabled, StackSaga will not attempt to parse container IDs or hostnames as StatefulSet ordinals, and will use the explicitly configured `stacksaga.coordinator.instance-type`.
+====
+
+[[configuration-properties]]
+== Configuration Properties Reference
+
+The following table summarizes all the configuration properties for the retry ring-coordinator. The first group applies to both `master` and `slave` instances; the second group applies only to `slave` instances.
+
+NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory and have no default — you must set them explicitly.
+
+[cols="3,1,1,5", options="header"]
+[.properties-table.google-anno-skip]
+|===
+|Property Name|Default|Type|Description
+
+4+s| Common — applies to both Master and Slave instances
+
+|`stacksaga.coordinator.deploy.index-based`
+|`false`
+|`boolean`
+|Whether the coordinator instance role (`master` or `slave`) is determined automatically based on the pod ordinal index (e.g., in a Kubernetes StatefulSet). When `true`, pod index `0` runs as `master` and indices `>0` run as `slave`, and `stacksaga.coordinator.instance-type` becomes optional.
+
+|`stacksaga.coordinator.instance-type`
+|-
+|`InstanceType` (Enum)
+|The role this instance runs as — `master` or `slave`. Required when `stacksaga.coordinator.deploy.index-based` is `false`. When index-based deployment is enabled, this property is derived automatically from the pod index.
+
+|`stacksaga.coordinator.target-services`
+|-
+|`String`
+|A comma-separated list of the service(s) this instance handles. The Master uses it to decide which Slaves may connect to it; a Slave uses it to decide which Master to connect to. Every service supported by a Slave must also be supported by its Master, otherwise the connection is rejected — but a Master may support more services than any single Slave.
+
+|`spring.rsocket.server.port`
+|-
+|`int`
+|The port the embedded RSocket server binds to. Slaves connect to the Master on this port, and Orchestrators connect to a Slave on this port, so it serves both connection types.
+
+|`spring.rsocket.server.address`
+|-
+|`String`
+|The network address the embedded RSocket server binds to.
+
+|`spring.rsocket.server.transport`
+|-
+|`String`
+|The transport protocol for the embedded RSocket server. Must be `tcp` for retry ring-coordinator services.
+
+|`stacksaga.instance.cluster`
+|-
+|`String`
+|The cluster this instance belongs to. Components only connect to one another when their `cluster` values match, so it must be identical across every Master, Slave, and Orchestrator that needs to connect.
+For multi-cluster topologies and cell isolation in Cassandra, see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[Horizontal Scaling via Virtual Clusters].
+
+|`stacksaga.instance.region`
+|`default`
+|`String`
+|The region this instance belongs to. Master and Slave instances reject connections if their `region` values do not match.
++
+NOTE: Defaults to `default` (region code `0`). For multi-region topologies, configure a custom xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] bean across all coordinator and orchestrator services.
+
+|`stacksaga.instance.zone`
+|-
+|`String`
+|The zone this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
+
+4+s| Slave-only — applies to `slave` instances
+
+|`stacksaga.coordinator.slave.target-master.host`
+|-
+|`String`
+|The host of the Master this Slave connects to (in the same region and cluster). Used to establish the RSocket connection from the Slave to the Master.
+
+|`stacksaga.coordinator.slave.target-master.port`
+|-
+|`int`
+|The port of the Master this Slave connects to (in the same region and cluster). Used to establish the RSocket connection from the Slave to the Master.
+
+|`stacksaga.coordinator.slave.target-master.reconnect.max-retries`
+|`10`
+|`int`
+|Maximum number of TCP reconnect attempts when establishing the connection to the Master. If the Slave still cannot connect after this many attempts, the instance shuts down.
+
+|`stacksaga.coordinator.slave.target-master.reconnect.backoff-duration`
+|`2s`
+|`Duration`
+|The initial backoff between TCP reconnect attempts. After a failed attempt the Slave waits this long before retrying, growing on each subsequent attempt up to `max-backoff-duration`.
+
+|`stacksaga.coordinator.slave.target-master.reconnect.max-backoff-duration`
+|`6s`
+|`Duration`
+|The upper bound on the TCP reconnect backoff. The growing backoff between reconnect attempts never exceeds this value.
+
+|`stacksaga.coordinator.slave.target-master.retry.max-retries`
+|`Long.MAX_VALUE`
+|`long`
+|Maximum number of RSocket stream retry attempts before giving up. This governs recovery of the RSocket stream itself, and is distinct from the TCP `reconnect` attempts above. Defaults to `Long.MAX_VALUE` (effectively infinite), which is recommended in production so the stream is always eventually recovered.
+
+|`stacksaga.coordinator.slave.target-master.retry.backoff-duration`
+|`2s`
+|`Duration`
+|The initial backoff between RSocket stream retry attempts. After a failed attempt the Slave waits this long before retrying, growing on each subsequent attempt up to `max-backoff-duration`.
+
+|`stacksaga.coordinator.slave.target-master.retry.max-backoff-duration`
+|`6s`
+|`Duration`
+|The upper bound on the RSocket stream retry backoff. The growing backoff between retry attempts never exceeds this value.
+
+|`stacksaga.coordinator.slave.target-master.retry.jitter`
+|`0.5`
+|`double`
+|The jitter factor applied to the RSocket stream retry backoff. Randomizing the backoff avoids a thundering-herd problem when many Slaves reconnect to the Master at once. Must be between `0` (no jitter) and `1` (full jitter — a random value between 0 and the backoff duration).
+
+|`stacksaga.coordinator.slave.lookup.ip-prefer`
+|`false`
+|`boolean`
+|Controls what the Master hands back to Orchestrators when they look up the available Slaves to connect to. When `true`, the Master returns Slave IP addresses; when `false` (the default), it returns Slave hostnames.
+|===
