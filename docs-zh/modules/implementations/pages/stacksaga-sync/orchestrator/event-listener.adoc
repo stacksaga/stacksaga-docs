@@ -1,43 +1,43 @@
-= Transaction Event Listener
+= 事务事件监听器 (Transaction Event Listener)
 
 [[event_listener_for_stage_change_events]]
-== Transaction State Change Listeners
+== 事务状态变更监听器 (Transaction State Change Listeners)
 
-After handing over the transaction to the StackSaga engine by calling the `execute` or `executeAsync` method of the `StackSagaTemplate`, the transaction is being executed and updated the status time to time after each execution (primary and compensation) in the transaction flow.
-so if you want to keep listening to the transaction status changes and perform any action based on that, framework provides the way to do that.
+在通过调用 `StackSagaTemplate` 的 `execute` 或 `executeAsync` 方法将事务交由 StackSaga 引擎接管后，事务便开始在流转中执行，并在事务流程的每个执行步骤（主执行与补偿执行）完成后随时更新其状态。
+如果您希望持续监听事务状态的变化并基于其执行相应动作，框架提供了完善的监听机制。
 
-It also can be implemented based on the environment.
+根据运行环境的不同，可以选择对应的实现方式：
 
-. `TransactionEventListener` for non-reactive environment.
-. `ReactiveTransactionEventListener` for reactive environment.
+. **`TransactionEventListener`**：适用于非响应式（命令式，Imperative）环境。
+. **`ReactiveTransactionEventListener`**：适用于响应式（Reactive）环境。
 
-If you want to get notified about the transaction status changes, there are two ways are available in the framework.
+如果您希望获取事务状态变更的通知，框架提供了两种主要途径：
 
-. Using `StackSagaTemplate.getCurrentState`
-. Using `TransactionEventListener` or `ReactiveTransactionEventListener`.
+. 使用 `StackSagaTemplate.getCurrentState`
+. 使用 `TransactionEventListener` 或 `ReactiveTransactionEventListener`
 
-IMPORTANT: using `StackSagaTemplate.getCurrentState` method to get the current state of the transaction by providing the transactionId approach is not efficient because when you call this method, the engine fetches the current state of the transaction from the event-store.
-but if you are using the listeners, you will be notified about the transaction status changes after each execution in the transaction flow without the need to call any method to get the current state of the transaction because the current state of the transaction is being passed to the callback method of those listeners realtime.
-due to it is happening realtime you don't want to poll the transaction state. for instance in the place-order example, after executing you can push the notification to update the user about the order status changes by using those listeners.
-but in some cases you might want to get the current state of the transaction even after the transaction is completed. for instance after the user might need to see the details after placing order. then you can use the `SagaTemplate.getCurrentState` method to get the current state of the transaction by providing the transactionId.
-The use cases are different for both approaches, so you can choose the one that is suitable for your use case.
+IMPORTANT: 通过提供 `transactionId` 调用 `StackSagaTemplate.getCurrentState` 方法获取事务当前状态的方式效率较低，因为每当您调用此方法时，引擎都必须从事件存储 (Event Store) 中实时读取事务状态。
+而如果使用监听器，在事务流中的每次步骤执行之后，您都会实时收到状态变更通知，无需主动轮询调用任何方法，因为事务的当前状态会实时传递给监听器的回调方法。
+在下单示例中，执行完成后，您可以通过这些监听器即时推送通知以更新用户的订单状态。
+但在某些情况下，您可能希望在事务完成后主动查询当前状态（例如用户在下单后进入页面查看订单详情），此时便可以通过 `SagaTemplate.getCurrentState` 并传入 `transactionId` 进行查询。
+这两种方式的适用场景截然不同，您可以根据实际需求灵活选用。
 
 [IMPORTANT]
 ====
-*Sequential Execution and Latency Impact:*
-While you are using the `onStateChanged` method of the listeners, be aware that the method is invoked sequentially as part of the transaction lifecycle after each span finishes. The next span in the saga flow is triggered only after the current `onStateChanged` completes. Avoid doing heavy computations or blocking I/O directly in this method because it directly delays the entire transaction flow. If heavy processing is required, offload it to a separate thread pool.
+*顺序执行与延迟影响 (Sequential Execution and Latency Impact)：* +
+在使用监听器的 `onStateChanged` 方法时，请注意该方法是在每个跨度执行完毕后作为事务生命周期的一部分**顺序同步调用的**。Saga 流程中的下一个跨度只有在当前 `onStateChanged` 执行完成后才会被触发。避免在此方法中直接执行繁重的计算或阻塞式 I/O，因为这会直接延缓整个分布式事务的流转速度。如果需要进行重型处理，请将其异步转交至独立的线程池。
 
-*At-Least-Once Notification in Pausable LRT (Duplicate Invocations):*
-In xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable LRTs], if an executor pauses awaiting an external callback with a timeout `Duration`, `onStateChanged` is invoked upon initial successful completion of that executor. If the external callback does not arrive before the timeout expires, the framework re-executes the paused executor, invoking `onStateChanged` **again** for the same step. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#pausable-lrt-timeout-reexecution[Timeout Re-Execution Mechanics].
+*可暂停长事务 (Pausable LRT) 中的至少一次通知（重复调用风险）：* +
+在 xref:stacksaga-sync/index.adoc#pausable-lrt[可暂停长事务 (Pausable LRT)] 中，如果执行器配置了超时时长 (`Duration`) 并暂停等待外部回调，在执行器最初成功执行完毕时会触发一次 `onStateChanged`。如果外部回调在超时过期前未到达，框架将重新执行该暂停的执行器，从而为同一步骤**再次**调用 `onStateChanged`。参见 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#pausable-lrt-timeout-reexecution[超时重新执行机制]。
 
-*Crucial Design Rule — Use a `QueryExecutor` for Business Logic:*
-Never use `TransactionEventListener` to execute critical business state changes or non-idempotent operations. If an uncompensated operation must be performed following an executor (such as generating an internal receipt or audit record), model it as a formal **`QueryExecutor`** within the saga flow rather than placing it in a listener.
+*至关重要的设计原则 —— 使用 `QueryExecutor` 处理业务逻辑：* +
+切勿使用 `TransactionEventListener` 执行核心业务状态变更或非幂等性操作。如果某个无需补偿的操作必须紧随某个执行器执行（例如生成内部收据或审计记录），请在 Saga 流程中将其建模为合法的 **`QueryExecutor`**，而不是放在事件监听器中。
 ====
 
 [[transaction_event_listener]]
 === TransactionEventListener
 
-You can implement the `TransactionEventListener` interface to listen to the transaction events in a non-reactive environment as below.
+您可以实现 `TransactionEventListener` 接口，在非响应式环境中监听事务事件，如下所示：
 
 [source,java]
 ----
@@ -48,23 +48,23 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
     @Override
     public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state) {
         TransactionCompleteStatus currentStatus = state.getCurrentStatus();
-        log.info("Current status of transaction: {}", currentStatus);
+        log.info("当前事务状态: {}", currentStatus);
         NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory();
-        log.info("Execution history of transaction: {}", executionHistory);
+        log.info("事务执行历史: {}", executionHistory);
         OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
-        log.info("Current domain entity state: {}", currentDomainEntity);
+        log.info("当前领域实体状态: {}", currentDomainEntity);
         ZonedDateTime startedDateTime = state.getStartedDateTime();
-        log.info("Transaction started at: {}", startedDateTime.toLocalDateTime());
+        log.info("事务启动时间: {}", startedDateTime.toLocalDateTime());
     }
 }
 ----
 
-NOTE: `onStateChanged` here is invoked on the framework's dedicated `blockingExecutionScheduler` — a bounded-elastic scheduler reserved for blocking, non-reactive listener code — never on the thread that drove the transaction step itself. This keeps a slow or blocking `TransactionEventListener` from delaying unrelated transactions. Tune it via `stacksaga.scheduler.blocking-execution.*`, see xref:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties].
+NOTE: 此处的 `onStateChanged` 是在框架专用的 `blockingExecutionScheduler`（专为阻塞式、非响应式监听器代码保留的有界弹性调度器）上调用的，绝不会运行在驱动事务步骤本身的线程上。这防止了缓慢或阻塞的 `TransactionEventListener` 拖慢不相关的事务。可通过 `stacksaga.scheduler.blocking-execution.*` 对其进行调优，参见 xref:stacksaga-sync/orchestrator/properties.adoc[配置属性]。
 
 [[reactive_transaction_event_listener]]
 === ReactiveTransactionEventListener
 
-You can implement the `ReactiveTransactionEventListener` interface to listen to the transaction events in reactive environment as below.
+您可以实现 `ReactiveTransactionEventListener` 接口，在响应式环境中监听事务事件，如下所示：
 
 [source,java]
 ----
@@ -78,16 +78,16 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
                 .just(transactionState)
                 .doOnNext(state -> {
                     TransactionCompleteStatus currentStatus = state.getCurrentStatus();
-                    log.info("Current status of transaction: {}", currentStatus);
+                    log.info("当前事务状态: {}", currentStatus);
                     NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory();
-                    log.info("Execution history of transaction: {}", executionHistory);
+                    log.info("事务执行历史: {}", executionHistory);
                     OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
-                    log.info("Current domain entity state: {}", currentDomainEntity);
+                    log.info("当前领域实体状态: {}", currentDomainEntity);
                     ZonedDateTime startedDateTime = state.getStartedDateTime();
-                    log.info("Transaction started at: {}", startedDateTime.toLocalDateTime());
+                    log.info("事务启动时间: {}", startedDateTime.toLocalDateTime());
                 })
                 .flatMap(orderDomainEntityTransactionState -> {
-                    //simulate some async processing here.
+                    // 在此处模拟异步处理逻辑
                     return Mono.delay(Duration.ofSeconds(1))
                             .then();
                 });
@@ -95,12 +95,12 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
 }
 ----
 
-NOTE: No scheduler hop is inserted for `onStateChanged` here — it inherits the framework's shared, non-blocking `executionScheduler` that drives ongoing saga processing. Any blocking call made inside it can therefore starve unrelated transactions; keep this implementation fully reactive/non-blocking. Tune the scheduler via `stacksaga.scheduler.execution.*`, see xref:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties].
+NOTE: 此处的 `onStateChanged` 不会插入额外的调度器切换 —— 它直接继承驱动进行中 Saga 处理的框架共享非阻塞 `executionScheduler`。因此，在其中进行的任何阻塞调用都可能导致不相关的事务发生饥饿；请确保此实现保持完全响应式/非阻塞。可通过 `stacksaga.scheduler.execution.*` 对该调度器进行调优，参见 xref:stacksaga-sync/orchestrator/properties.adoc[配置属性]。
 
-== Recommended Handler Pattern
+== 推荐的处理程序模式 (Recommended Handler Pattern)
 
-StackSaga team suggests to implement the saga transaction related things in a separate class called `Handler` that is responsible for starting, listening and checking the status of the saga transactions.
-The below code snippet is showing the recommended architecture for the Handler.
+StackSaga 团队建议将 Saga 事务相关的操作集中在一个名为 `Handler` 的独立类中实现，该类专门负责启动、监听和检查 Saga 事务的状态。
+以下代码展示了 Handler 的推荐架构：
 
 [source,java]
 ----
@@ -115,7 +115,7 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
         return this
                 .sagaTemplate
                 .init(() -> {
-                  //....
+                  // 初始化领域实体....
                 })
                 .....
     }
@@ -129,11 +129,11 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
     }
     @Override
     public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) { //<3>
-        //....
+        // 处理状态变更通知....
     }
 }
 ----
 
-<1> The `handle` method is responsible for starting the saga transaction by using the `SagaTemplate` and providing the required parameters to start the transaction.
-<2> Fetch the current state of the transaction by using the `SagaTemplate`
-<3> Implement the `onStateChanged` method to listen to the transaction status changes by implementing the `TransactionEventListener` interface and override the `onStateChanged` method.
+<1> `handle` 方法负责使用 `SagaTemplate` 并提供启动事务所需的必要参数来发起 Saga 事务。
+<2> 使用 `SagaTemplate` 获取事务的当前聚合状态。
+<3> 实现 `TransactionEventListener` 接口并重写 `onStateChanged` 方法，以监听事务状态的实时变更。

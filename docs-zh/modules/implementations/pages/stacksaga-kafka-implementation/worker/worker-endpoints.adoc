@@ -1,177 +1,172 @@
-:description: stacksaga-kafka-worker endpoint specifications — exception handling, Query and Command endpoints, reactive and non-reactive patterns, scheduler configuration, retry template, and @SagaEndpoint annotation reference.
-:keywords: stacksaga-kafka-worker, QueryEndpoint, CommandEndpoint, NonRetryableExecutorException, RetryableExecutorException, JustRetryableExecutorException, SagaEndpoint, scheduler, RetryTemplate
-= stacksaga-kafka-worker — Endpoints
+:description: stacksaga-kafka-worker 端点规范指南 — 异常处理、Query 与 Command 端点、响应式与非响应式模式、调度器配置、重试模板以及 @SagaEndpoint 注解参考手册。
+:keywords: stacksaga-kafka-worker, QueryEndpoint, CommandEndpoint, NonRetryableExecutorException, RetryableExecutorException, JustRetryableExecutorException, SagaEndpoint, 调度器, scheduler, RetryTemplate, 重试模板
+= stacksaga-kafka-worker — 端点设计手册 (Endpoints)
 
-*Stacksaga-kafka-worker* is the module that provides the functionalities for the worker services to execute the commands that are sent by the orchestrator via the regular topics. it is responsible for consuming the command messages from the regular topics, executing the business logic, and sending the response messages back to the orchestrator via the per-domain callback topic managed by the orchestrator.
+*stacksaga-kafka-worker* 是为 Worker 微服务提供命令执行能力的核心模块，用于执行编排器通过常规主题发送的业务命令。它负责消费来自常规主题的命令消息、执行具体业务逻辑，并通过编排器托管的基于领域的专用回调主题将应答结果回传给编排器。
 
-In high-level, The following duties are done by the `stacksaga-kafka-worker` module.
+在高层架构中，`stacksaga-kafka-worker` 承担以下核心职责：
 
-. Provides the specifications for creating the kafka saga endpoints according to the Stacksaga kafka engine in the target client service.
-
-. Making the response back to the orchestrator service after each invocation.
-
-. Providing immediate retrying facilities in case of retryable exceptions.
-
+. 在目标客户端服务中，按照 StackSaga Kafka 引擎规范提供创建 Kafka Saga 端点的核心抽象。
+. 在每次端点调用完成后，自动向编排器服务派发应答消息。
+. 针对可重试的临时异常，提供开箱即用的进程内即时重试能力。
 
 [[endpoint-topics]]
-== Endpoint Topics
+== 端点主题 (Endpoint Topics)
 
-Every saga endpoint consumes command messages from a Kafka topic that *belongs to the worker service hosting the endpoint*.
-The topic is *defined here, on the worker side*, through the `topicNameSuffix` attribute of `@SagaEndpoint` — this is the authoritative declaration of the endpoint's topic.
-The orchestrator declares the *same* topic name in its `AbstractTopic` class purely to *address* it when routing command messages; the orchestrator publishes to the topic but neither owns nor consumes it.
+每个 Saga 端点均从属于*托管该端点的 Worker 服务*的 Kafka 主题中消费命令消息。
+该主题是*在 Worker 端通过 `@SagaEndpoint` 的 `topicNameSuffix` 属性声明并定义的* — 这是该端点主题的权威法定声明。
+编排器在其 `AbstractTopic` 类中声明*相同*的主题名称，纯粹是为了在路由命令消息时进行*网络寻址*；编排器向该主题发布消息，但既不拥有也不消费它。
 
 [[endpoint-topics-naming]]
-=== Naming an endpoint topic
+=== 端点主题命名规范
 
-Because a topic is a *capability of the worker service* — and the very same endpoint can be invoked by more than one saga domain — name it after the *service and action it targets*, in the form `\{service-name\}.\{action\}` (for example, `user-service.fetch-user-details`, `payment-service.make-payment`), rather than after any single saga domain.
-For example, a `user-service.fetch-user-details` query endpoint might be reused by a place-order saga, a cancel-subscription saga, and others. Service-qualified naming therefore:
+因为主题是 *Worker 服务的业务能力*（且完全相同的端点可被多个不同的 Saga 领域复用），所以请以其*针对的服务和操作动作*命名，采用 `\{service-name\}.\{action\}` 形式（例如 `user-service.fetch-user-details`、`payment-service.make-payment`），而非以任何单一 Saga 领域命名。
+例如，一个 `user-service.fetch-user-details` 查询端点可以同时被下单 Saga、取消订阅 Saga 以及其他业务流程复用。因此，基于服务限定的命名具有以下优势：
 
-* keeps the name *globally unique* — endpoint topics share one Kafka namespace, so a service-qualified name avoids collisions between endpoints of different services;
-* makes it *self-documenting* which service owns and consumes the topic; and
-* lets the same endpoint be *reused across saga domains*, each domain referencing the topic by the same name.
+* 保持主题名称*全局唯一* — 所有端点主题共享统一的 Kafka 命名空间，服务限定命名可彻底避免不同微服务之间的端点主题冲突；
+* 使主题归属*清晰自解释* — 一目了然哪个服务拥有并消费该主题；
+* 支持*跨 Saga 领域高度复用* — 每个业务领域均通过完全相同的标准主题名称引用该端点。
 
-*Naming rules:* use `.` as the hierarchical segment separator; `-` is permitted *within* a segment (e.g. `user-service`, `fetch-user-details`) but not *as* the separator; `_` is not permitted anywhere.
+*命名规则：* 使用英文句点 `.` 作为分层分段分隔符；连字符 `-` 允许在分段*内部*使用（例如 `user-service`、`fetch-user-details`），但不能*作为*分隔符本身；严禁在任何位置使用下划线 `_`。
 
 [[endpoint-topics-prefix]]
-=== The `saga.` prefix
+=== `saga.` 前缀机制
 
-An endpoint consumes from one Kafka topic. A `CommandEndpoint` receives both its primary and its compensation commands on that topic and runs `doProcess()` or `undoProcess()` for each accordingly.
+一个端点消费单个 Kafka 主题。对于 `CommandEndpoint`，主执行命令与补偿命令均在同一个主题中接收，并分别对应执行 `doProcess()` 或 `undoProcess()`。
 
-The framework prefixes the topic name with `saga.`:
+框架会自动为主题名称追加 `saga.` 前缀：
 
-* If your `topicNameSuffix` does *not* already start with `saga.`, the framework prepends it — so `topicNameSuffix = "payment-service.make-payment"` becomes the real Kafka topic `saga.payment-service.make-payment`.
-* If you *do* include the `saga.` prefix yourself (e.g. `topicNameSuffix = "saga.payment-service.make-payment"`), the framework keeps it as-is and does *not* add it again.
+* 如果您的 `topicNameSuffix` **未以** `saga.` 开头，框架会自动在前端追加 — 即 `topicNameSuffix = "payment-service.make-payment"` 将生成真实的 Kafka 主题 `saga.payment-service.make-payment`。
+* 如果您在声明时**已自行包含**了 `saga.` 前缀（例如 `topicNameSuffix = "saga.payment-service.make-payment"`），框架会原样保留，**不会**重复追加。
 
-Either way the real topic name must be of the form `saga.<name>`, where `<name>` is lowercase and uses `.` or `-` between segments (no uppercase, no underscores).
+无论采用哪种方式，实际生成的 Kafka 主题名称格式必须为 `saga.<name>`，其中 `<name>` 全小写，且分段之间使用 `.` 或 `-` 连接（禁止大写字母与下划线）。
 
-IMPORTANT: The orchestrator's `AbstractTopic` definition for the same span applies the *identical* `saga.` prefixing rule, so use the *same* topic name on both sides — the orchestrator and the worker must resolve to the exact same real topic.
-See xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_name_specification[the orchestrator-side topic declaration] and xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_key_specification[Topic Key Specification].
+IMPORTANT: 编排器端在 `AbstractTopic` 中为相同跨度定义的主题应用了*完全相同*的 `saga.` 前缀规则，因此两端必须使用*完全一致*的主题后缀 — 编排器与 Worker 必须精准解析到完全相同的真实 Kafka 主题。
+详见 xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_name_specification[编排器端主题声明] 与 xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_key_specification[主题键规范]。
 
-NOTE: StackSaga does not create these topics programmatically. Whether a topic is auto-created on first use depends on the broker (`auto.create.topics.enable`); otherwise pre-create it in the Kafka cluster before starting the applications. See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[Endpoint Topic Listener Models].
+NOTE: StackSaga 不会编程式自动创建这些主题。是否在首次使用时自动建表取决于 Broker 配置 (`auto.create.topics.enable`)；生产环境下推荐在启动应用前在 Kafka 集群中显式预先创建好主题。详见 xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[端点主题监听器模型]。
 
 [[stacksaga_kafka_endpoints]]
-== StackSaga Kafka Endpoints
+== StackSaga Kafka 端点类型 (Endpoint Types)
 
-Stacksaga Kafka Endpoints stands for creating topics accordingly Stacksaga engine's form. the endpoint As per the architecture it can be created 2 types of endpoints as fallows,
+StackSaga Kafka 端点代表按照 StackSaga 引擎规范构建的执行节点。根据业务属性，可以创建两类端点：
 
-. *xref:#query-endpoints[]*
-. *xref:#command-endpoints[]*
+. *xref:#query-endpoints[查询端点 (Query Endpoint)]*
+. *xref:#command-endpoints[命令端点 (Command Endpoint)]*
 
 [[exception-handling-reference]]
-=== Exception Handling Reference
+=== 异常处理参考手册 (Exception Handling Reference)
 
-Choosing the correct exception type inside an endpoint method is one of the most critical implementation decisions in StackSaga-Kafka.
-The wrong choice can either leave a saga stalled indefinitely, trigger unnecessary compensation, or discard valuable error context that the compensation process needs.
+在端点方法内部选择正确的异常类型，是 StackSaga-Kafka 中最具决定性的开发考量之一。
+抛出错误的异常类型可能导致 Saga 无限期停滞、触发不必要的全局补偿回滚，或是丢失补偿所需的珍贵故障上下文。
 
-==== Exception Types at a Glance
+==== 异常类型速查表
 
 [cols="1,1,2,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Exception | Available In | Framework Response | Use When
+| 异常类型 | 适用方法 | 框架响应机制 | 使用场景
 
 | `NonRetryableExecutorException`
 | `doProcess()`, `undoProcess()`
-| In `doProcess()`: transitions the saga to `FAILED` and triggers the compensation sequence. +
-In `undoProcess()`: terminates the compensation sequence immediately.
-| The failure is permanent — a business rule violation, invalid input, or any condition that retrying will never resolve.
-Use `put()` to attach error metadata for the compensation process.
+| 在 `doProcess()` 中：将 Saga 状态流转为 `FAILED`，并立即触发逆向补偿序列。 +
+在 `undoProcess()` 中：立即终止补偿流程。
+| 故障为永久性不可恢复 — 业务规则校验不通过、输入参数非法或任何重试绝不可能解决的错误。
+使用 `put()` 附加用于补偿流程的错误元数据。
 
 | `RetryableExecutorException`
 | `doProcess()`, `undoProcess()`
-| Schedules the saga for a deferred retry via the ring coordinator.
-The step is re-attempted from the last persisted event store state.
-| The failure is transient — a network timeout, temporary resource unavailability, or an infrastructure blip expected to resolve on its own.
+| 通过环形协调器将 Saga 调度为延期异步重试。
+该步骤将从事件存储库中最后持久化的状态重新执行。
+| 故障为暂时性瞬态波动 — 网络超时、下游依赖临时不可用或预计可自我愈合的基础设施抖动。
 
 | `JustRetryableExecutorException`
-| `doProcess()`, `undoProcess()` *(non-reactive only)*
-| Triggers an immediate in-process retry via Spring `RetryTemplate` without notifying the orchestrator.
-When the immediate retry limit is exhausted, fall back to `RetryableExecutorException` to schedule a deferred retry.
-| A fast local retry is worth attempting before escalating to a scheduled retry.
-Always use this as the first line of defence for transient failures in non-reactive endpoints.
+| `doProcess()`, `undoProcess()` *(仅限非响应式)*
+| 通过 Spring `RetryTemplate` 在当前 Worker 进程内立即触发重试，不向编排器发送通知。
+当即时重试次数耗尽后，回退抛出 `RetryableExecutorException` 以触发延期调度重试。
+| 在升级为全局调度重试之前，值得在本地立即快速重试的场景。
+始终作为非响应式端点防御瞬态故障的第一道防线。
 
-| Any unhandled exception
+| 任何未捕获的常规异常
 | `doProcess()`, `undoProcess()`, `onNext()`, `onNextRevert()`
-| Treated identically to `NonRetryableExecutorException` by the framework.
-| *Never intentional in endpoints* — see the WARNING below.
-In `onNext()`, throwing intentionally is a supported pattern to force compensation — see below.
+| 被框架等同于 `NonRetryableExecutorException` 处理。
+| *在端点中绝非刻意为之* — 参见下文警告。
+而在 `onNext()` 中，刻意抛出异常是被官方支持的强制回滚模式。
 
 |===
 
-WARNING: Never let an unhandled exception escape from an endpoint accidentally.
-Any `Throwable` not wrapped in a framework exception type is treated as non-retryable.
-The compensation sequence starts (or terminates if in `undoProcess()`) with no error context, because unhandled exceptions carry no `put()` key-value pairs for the compensation process to use.
-Always catch your exceptions and wrap them with the correct type.
+WARNING: 切勿任由未捕获的常规异常从端点向外逃逸。
+任何未包装在框架专用异常中的 `Throwable` 都会被当作不可重试致命错误。
+补偿序列将被迫启动（如果在 `undoProcess()` 中则直接终止），且不携带任何错误上下文，因为未捕获异常无法通过 `put()` 传递键值对供补偿步骤使用。
+务必在端点内显式捕获底层异常并包装为合规的框架异常类型。
 
-==== Exception Decision Flow
+==== 异常决策树 (Exception Decision Flow)
 
-When implementing an endpoint method, use the following logic to decide which exception to throw:
+在实现端点方法时，依据以下逻辑判定抛出何种异常：
 
-. *Is the failure transient?* (timeout, temporary resource unavailability, infrastructure blip)
-.. *YES — non-reactive endpoint?* → Throw `JustRetryableExecutorException` first. If the immediate retry limit is exhausted → throw `RetryableExecutorException`.
-.. *YES — reactive endpoint?* → Use `retryWhen()` in the reactive pipeline. If retries are exhausted → return `Mono.error(RetryableExecutorException.of(...))`.
-. *Is it a permanent business failure?* (invalid data, violated rule, unrecoverable state) → Throw `NonRetryableExecutorException`. Use `put()` to attach error context for the compensation steps.
-. *Neither of the above?* → Wrap in `NonRetryableExecutorException` with a descriptive message. Never let it propagate as an unhandled exception.
+. *故障是否为瞬态网络/资源波动？*（超时、临时资源不可用、基础设施抖动）
+.. *是 — 且为非响应式端点？* → 优先抛出 `JustRetryableExecutorException`。若即时重试上限耗尽 → 抛出 `RetryableExecutorException`。
+.. *是 — 且为响应式端点？* → 在响应式管道中使用 `retryWhen()`。若重试耗尽 → 返回 `Mono.error(RetryableExecutorException.of(...))`。
+. *是否为永久性业务校验失败？*（无效数据、业务冲突、不可逆错误） → 抛出 `NonRetryableExecutorException`。使用 `put()` 附加供补偿步骤使用的上下文。
+. *属于上述之外的其他非预期异常？* → 包装为包含清晰描述信息的 `NonRetryableExecutorException`。绝不允许作为裸异常向外冒泡。
 
-==== Throwing from `onNext()` and `onNextRevert()`
+==== 在 `onNext()` 与 `onNextRevert()` 中抛出异常的行为
 
-Exception handling is not limited to endpoint methods.
-The `onNext()` and `onNextRevert()` methods in the `EventManager` also participate in the saga failure model:
+异常处理不仅限于端点方法。`EventManager` 中的 `onNext()` 与 `onNextRevert()` 同样参与 Saga 故障生命周期：
 
-* *`onNext()`* — Any exception thrown here (or returned via `actionUtil.error(...)`) is treated as a non-retryable failure.
-The framework transitions the saga to `FAILED` and begins the compensation sequence immediately.
-This means you can use `onNext()` *intentionally* to force compensation based on orchestrator-side business conditions — for instance, if a rule evaluated after a worker's reply determines the saga must not continue.
+* *`onNext()`* — 在此处抛出的任何异常（或通过 `actionUtil.error(...)` 返回的异常）均被视为不可重试故障。
+框架立即将 Saga 状态流转为 `FAILED` 并启动逆向补偿序列。
+这意味着您可以*有意识地*利用 `onNext()` 基于编排器端业务规则强制发起补偿 — 例如在收到 Worker 应答后，规则校验判定该订单不应继续推进。
 
-* *`onNextRevert()`* — Any exception thrown here causes the compensation sequence to terminate immediately.
-The transaction is marked as compensation-failed and will not be retried.
+* *`onNextRevert()`* — 在此处抛出的任何异常都会导致补偿序列立即终止。
+事务被标记为补偿失败 (Compensation Failed) 且不再重试。
 
 [cols="2,2,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Thrown / Returned From | Immediate Effect | Resulting State Transition
+| 抛出 / 返回自 | 即时效应 | 产生的状态流转
 
-| `doProcess()` — `NonRetryableExecutorException` or unhandled exception
-| Compensation begins
+| `doProcess()` — `NonRetryableExecutorException` 或未捕获异常
+| 启动补偿回滚
 | `IN_PROGRESS` → `FAILED` → `COMPENSATING`
 
-| `onNext()` — any exception (or `actionUtil.error(...)`)
-| Compensation begins
+| `onNext()` — 任何异常（或 `actionUtil.error(...)`）
+| 启动补偿回滚
 | `IN_PROGRESS` → `FAILED` → `COMPENSATING`
 
-| `undoProcess()` — unhandled exception
-| Compensation terminates
-| `COMPENSATING` → Compensation Failed
+| `undoProcess()` — 未捕获异常
+| 终止补偿流程
+| `COMPENSATING` → 补偿失败 (Compensation Failed)
 
-| `onNextRevert()` — any exception
-| Compensation terminates
-| `COMPENSATING` → Compensation Failed
+| `onNextRevert()` — 任何异常
+| 终止补偿流程
+| `COMPENSATING` → 补偿失败 (Compensation Failed)
 
 |===
 
 [[query-endpoints]]
-=== Query Endpoint
+=== 查询端点 (Query Endpoint)
 
-If an execution(atomic execution) doesn't make any state change due to executing that execution those kinds of executions are executed in *Query Endpoints*. due to it doesn't make any changes in the database state, it has no any compensation action to undo. +
-these are the topics that define in the in xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[StackSaga Topic] with type of `SagaEventType.QUERY_DO_ACTION`
+如果某个原子执行在执行期间不对任何数据库造成状态修改，此类执行应在*查询端点 (Query Endpoint)* 中实现。由于它不改变数据库状态，因此无需任何逆向补偿操作撤销。 +
+这些主题在 xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[StackSaga 主题] 中定义为 `SagaEventType.QUERY_DO_ACTION` 类型。
 
-For instance, in the place-order example, the execution of *fetching user's details and validate* is a query execution because it doesn't make any state change in the database, it just fetches the data and returns it. here is the custom endpoint for that execution.
+例如在下单示例中，*获取用户详情并校验*就是典型的查询执行，因为它不修改数据库，仅查询数据并返回。
 
-Query endpoints can be created in two different ways in StackSaga.
+查询端点在 StackSaga 中支持两种编程风格：
 
-. xref:#non-reactive-query-endpoint[]
-. xref:#reactive-query-endpoint[]
-
+. xref:#non-reactive-query-endpoint[非响应式（阻塞）查询端点]
+. xref:#reactive-query-endpoint[响应式（非阻塞）查询端点]
 
 [[non-reactive-query-endpoint]]
-==== Non-Reactive (Imperative) Query Endpoint
+==== 非响应式（命令式）查询端点
 
-Non-reactive query endpoints are the traditional and blocking way of implementing the query endpoints. in this approach, the method that is responsible for executing the query is implemented in a blocking way. for instance, in the place-order example, the query endpoint for fetching user's details can be implemented as follows.
+非响应式查询端点采用传统且直观的阻塞式编写模式：
 
 [source,java]
 ----
 //<2>
 @SagaEndpoint(
-        //the real topic name will be saga.user-service.get-user
+        //真实 Kafka 主题为 saga.user-service.get-user
         topicNameSuffix = "user-service.get-user", //<3>
         listenerScope = WorkerListenerScope.SHARED_GLOBAL, //<4>
         groupType = GroupType.SHARE
@@ -190,12 +185,12 @@ public class UserValidateEndpoint extends QueryEndpoint { //<1>
             log.info("Received payload for before user validation: {}", currentDomainEntityState);
             try {
                 {
-                    //user validation logic //<9>
+                    //用户校验业务逻辑 //<9>
                     String username = currentDomainEntityState.get("username").asText();
                     log.info("Validating user with username: {}", username);
                 }
                 {//<10>
-                    // put the result into the domain entity state for the next topic to use.
+                    // 将处理结果存入领域实体状态，供后续主题消费
                     currentDomainEntityState.put("is_user_validated", true);
                     currentDomainEntityState.put("validation_note", "user validated at " + LocalDateTime.now());
                 }
@@ -216,57 +211,37 @@ public class UserValidateEndpoint extends QueryEndpoint { //<1>
 }
 ----
 
-NOTE: The example has been simplified to focus on the main points. make sure refer each and every concept though the documentation to have a better understanding of the framework and its capabilities.
-
-<1> Create a custom query endpoint class by extending the `QueryEndpoint` class.
-<2> Annotate the custom query endpoint class with `@SagaEndpoint` annotation. it primarily marks the class as a spring bean.
-<3> *topicNameSuffix*: provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.get-user` becomes the real topic `saga.user-service.get-user`. (If your suffix already starts with `saga.`, the framework keeps it as-is and does not add the prefix again.) this is the topic the `EventManager` sends command messages to, to trigger the execution of this endpoint.
-<4> *listenerScope* and *groupType*: Configure how this endpoint's topic is consumed. +
-*`listenerScope`* selects the listener-container allocation — `WorkerListenerScope.SHARED_GLOBAL` (pool into the single global container, the default choice), `WorkerListenerScope.SHARED_GROUP` (share a container with endpoints of the same `containerId`), or `WorkerListenerScope.ISOLATED` (a dedicated container). +
-*`groupType`* selects the Kafka group protocol — `GroupType.CONSUMER` (classic consumer group) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption not capped by partition count); see xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[]. +
-See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[] for the listener scopes.
-
-<5> Override the `doProcess()` method to implement the business logic for executing the query. this method is invoked by the framework when a message is received in the respective topic. you can use the provided `ConsumerRecord` to access the message key, payload, and other metadata withing the method scope.
-
-<6> You can access the message key from the `ConsumerRecord` in string format. the key is the transaction id from the orchestrator that is sent along with the message.
+<1> 继承 `QueryEndpoint` 类以创建自定义查询端点。
+<2> 在类上标注 `@SagaEndpoint` 注解，声明其为 Spring Bean 与 Saga 执行节点。
+<3> *topicNameSuffix*：指定该端点的主题名称后缀。框架通过在该后缀前加上 `saga.` 前缀构建实际的 Kafka 主题 — 即 `user-service.get-user` 解析为真实主题 `saga.user-service.get-user`。（若已包含 `saga.` 前缀则原样保留）。`EventManager` 正是向该主题派发命令以触发本端点。
+<4> *listenerScope* 与 *groupType*：配置该端点主题的消费容器。 +
+*`listenerScope`* 选择容器分配策略 — `WorkerListenerScope.SHARED_GLOBAL`（汇入单个全局容器，默认之选）、`WorkerListenerScope.SHARED_GROUP`（按 `containerId` 分组共享容器）或 `WorkerListenerScope.ISOLATED`（独立专属容器）。 +
+*`groupType`* 选择 Kafka 消费组协议 — `GroupType.CONSUMER`（传统消费者组）或 `GroupType.SHARE`（Kafka 4 共享组 / KIP-932，并行度不受分区数限制）；参见 xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[]。
+<5> 重写 `doProcess()` 方法以实现执行查询的业务逻辑。当对应主题收到消息时框架调用此方法。可通过传入的 `ConsumerRecord` 在方法内获取消息键、载荷及其他上下文元数据。
+<6> 以字符串格式从 `ConsumerRecord` 中获取消息键。该键即为编排器随消息传递的全局事务 ID。
 +
-NOTE: For your understanding,The reason is for setting the transaction id as the message key is to ensure that all messages related to the same transaction are sent to the same partition in Kafka, which allows for ordered processing of messages within a transaction.
-
-<7> You can access the idempotency key from the payload of the `ConsumerRecord`. the idempotency key is generated by the framework in the orchestrator side and sent along with the message to ensure that even if the same message is processed multiple times due to retries or duplicates, it will have the same idempotency key, allowing you to implement idempotent processing logic in your endpoint.
-
-<8> You can access the current state of the domain entity from the payload of the `ConsumerRecord` by using the `getCurrentDomainEntityStateForUpdate()` method. this method returns an optional value that contains the current state of the domain entity if it is present. in primary execution, the domain entity state is always present because the state is sent from the orchestrator. the `Optional` provide the safe access.
+NOTE: 将事务 ID 设为消息键的核心原因在于保证同一事务的所有消息均被哈希派发到 Kafka 的同一个分区中，确保单个事务内消息处理的严格顺序性。
+<7> 从 `ConsumerRecord` 的载荷中提取幂等键 (`idempotencyKey`)。该键由编排器端框架生成并随消息传输，确保即使因网络重试或重复投递而多次处理同一消息，也始终携带完全一致的幂等键，以便在端点内部实现安全幂等控制。
+<8> 通过载荷的 `getCurrentDomainEntityStateForUpdate()` 方法获取领域实体的当前状态。该方法返回一个包含当前状态的 `Optional`。在主执行流程中领域实体始终存在。
 +
-IMPORTANT: In the target service side, the domain entity state can be got as the Java Object. because the original CustomDomainEntity is in the orchestrator side. in the worker side you can get the domain entity state as a `ObjectNode` which is a JSON tree structure that is provided by the Jackson library. you can use the methods of the `ObjectNode` class to access and manipulate the domain entity state. for instance, you can use the `get("fieldName")` method to access a specific field in the domain entity state, and you can use the `put("fieldName", value)` method to add or update a field in the domain entity state.
-
-<9> Implement the business logic for executing the query. you can use the current state of the domain entity to perform the necessary operations and get the required data. for instance, you can call the internal service class and get the user data from the database based on the username that is provided in the domain entity state.
-
-<10> After getting the required data and performing the necessary operations, you can put the result into the domain entity state for the next topic to use. for instance, you can put a field `is_user_validated` with value `true` to indicate that the user has been validated successfully, and also you can put a field `validation_note` with some note about the validation process.
+IMPORTANT: 在目标 Worker 服务端，领域实体以 `ObjectNode`（Jackson 提供的 JSON 树形结构）的形式提供，而非原生的 Java 实体对象（因为原生的强类型 CustomDomainEntity 仅存在于编排器端）。可使用 `ObjectNode` 的 `get("fieldName")` 提取属性，并使用 `put("fieldName", value)` 追加或修改属性。
+<9> 执行具体的查询与校验业务逻辑。
+<10> 处理完毕后，将业务计算结果追加回领域实体中，供后续主题读取。
 +
-IMPORTANT: the adding field to the domain entity state in the worker side should have been defined in the CustomDomainEntity class in the orchestrator side because the domain entity state is shared between the orchestrator and the worker via the kafka messages, so the structure of the domain entity state should be defined in a way that both sides can understand. therefore, it is recommended to define all the possible fields that can be added to the domain entity state in the CustomDomainEntity class in the orchestrator side. +
-If you try to add a field in the *worker* side that is not defined in the CustomDomainEntity class in the *orchestrator* side, it will be added to the `missingProperties` map in the domain entity state, and you can access it by using the `getMissingProperties()` or `getMissingProperty(String key)` in the orchestrator side. it helps to avoid the serialization and deserialization issues that can be caused by adding undefined fields in the worker side, but it is recommended to define all the possible fields in the CustomDomainEntity class in the orchestrator side to have a clear contract between the orchestrator and the worker. +
-Even if the undefined fields are added to the `missingProperties` map, it can be accessed in the same way by another next  *worker* that is executed after the current worker.
+IMPORTANT: Worker 端向领域实体添加的新字段，应事先在编排器端的 CustomDomainEntity 中完成定义。若在 Worker 端添加了编排器端未声明的字段，该字段会自动归档至领域实体的 `missingProperties` 映射中，编排器端可通过 `getMissingProperties()` 访问它。
 +
-WARNING: As mentioned in the architecture, all the modifications that made on the domain entity state within the method are not applied on the state if any exception (RetryableExecutorException or NonRetryableExecutorException) is thrown from the method. +
-the reason is that the original domain entity state (Entered State) is sent from the orchestrator to the worker should be as it is for the re-invocation in case of retrying. on other hand, if it is thrown `NonRetryableExecutorException`, the updated values are not valid due to the compensation process is started and the state will be reverted to the last successful state. if you want to bring some error related data you can use the `put()` method of the `NonRetryableExecutorException` to add that data in a key-value format, and then you can access it in the orchestrator side during the compensation processing.
-
-<11> This is the most important part in the implementation of the endpoint. you must handle the exceptions properly by throwing them with the appropriate type. if the exception is retryable, you should throw it by wrapping with `RetryableExecutorException`. if the exception is non-retryable, you should throw it by wrapping with `NonRetryableExecutorException`.
-+
-IMPORTANT: IF the exception is retryable one, the full exception trace message is not sent to the orchestrator, instead, only the exception message is sent to the orchestrator to reduce the redundant information that is sent to the orchestrator because the retryable exceptions are automatically retried by the framework and there is nothing to monitor or debug.
-+
-IMPORTANT: By throwing the `RetryableExecutorException`, stacksaga support asynchronous retrying based on scheduling. but it is recommended to implement immediate retrying by using the `JustRetryableExecutorException` before throwing the `RetryableExecutorException` to have a better user experience and reduce the overall processing time of the transaction. because the `JustRetryableExecutorException` will trigger an immediate retry without waiting for the scheduled retry, and if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt. in case the immediate retry is failed, you can throw the `RetryableExecutorException` to trigger the scheduled retry as a fallback mechanism. see here how the `JustRetryableExecutorException` can be used for immediate retrying in the endpoint implementation.
-
-<12> when throwing `NonRetryableExecutorException`, you can also provide additional information by using the `put()` method to add key-value pairs to the exception. this additional information can be useful for future compensation processing. because in the compensation processing, you can access the exception and get the additional information that you provided in the exception to perform the necessary compensation logic. for instance, if you put an `error_code` with value `USER_VALIDATION_FAILED` in the exception, you can access it in the compensation processing and check if the error code is `USER_VALIDATION_FAILED` to perform specific compensation logic for that error code.
-+
-IMPORTANT: Make sure not to manage the exception related metadata withing your exception because the exception object is not serialized and sent to the orchestrator. therefore, if you want to send any additional information related to the exception to the orchestrator for future compensation processing, you should use the `put()` method of the `NonRetryableExecutorException` to add that information in a key-value format. this way, the additional information will be serialized and sent to the orchestrator along with the message, and you can access it in the orchestrator side during the compensation processing. (only the exception trace is sent to the orchestrator as a string)
+WARNING: 如架构所述，若从方法中抛出了任何异常（`RetryableExecutorException` 或 `NonRetryableExecutorException`），方法内部对领域实体状态所做的任何修改都**不会**被应用。因为重试时必须基于原始输入状态重新调用；而在不可重试失败时，系统将开启逆向补偿，状态回退到上一次成功快照。若需传递故障相关的上下文数据，必须使用 `NonRetryableExecutorException.put()` 以键值对形式附加，供补偿阶段提取。
+<11> 正确包装并抛出异常：若为可重试瞬态异常，使用 `RetryableExecutorException.of(e)` 包装抛出；若为不可重试业务失败，包装为 `NonRetryableExecutorException`。
+<12> 抛出 `NonRetryableExecutorException` 时，可通过 `put()` 链式附加丰富的上下文元数据。这些元数据会随消息序列化传递回编排器，并在补偿执行期间供相关步骤使用。
 
 [[reactive-query-endpoint]]
-==== Reactive (Non-Blocking) Query Endpoint
+==== 响应式（非阻塞）查询端点
 
 [source,java]
 ----
 @Slf4j
 @SagaEndpoint(
-        //the real topic name will be saga.user-service.get-user
+        //真实主题名称为 saga.user-service.get-user
         topicNameSuffix = "user-service.get-user",
         listenerScope = WorkerListenerScope.SHARED_GLOBAL,
         groupType = GroupType.SHARE
@@ -288,10 +263,10 @@ public class ReactiveUserValidateEndpoint extends ReactiveQueryEndpoint {//<1>
                 .getUserDetails(username)
                 .flatMap(userDetails -> {
                     {
-                        //user validation logic
+                        //用户校验业务逻辑
                     }
                     {
-                        // put the result into the domain entity state for the next topic to use.
+                        // 将结果存入领域实体状态供后续主题使用
                         currentDomainEntityState.put("is_user_validated", true);
                         currentDomainEntityState.put("validation_note", "user validated at " + LocalDateTime.now());
                     }
@@ -310,34 +285,28 @@ public class ReactiveUserValidateEndpoint extends ReactiveQueryEndpoint {//<1>
 }
 ----
 
-IMPORTANT: If you are not familiar with how the endpoints are working in the Stacksaga Kafka Orchestrator, it is recommended to refer to the xref:#non-reactive-query-endpoint[] before going through the reactive query endpoint because all the concepts and the main points have been explained there in a more detailed way.
-
-Most of the points are the same as the xref:#non-reactive-query-endpoint[], the main difference is that in the reactive query endpoint, you need to return a `Mono<Void>` from the `doProcess()` method, and you can use the reactive programming paradigm to implement the business logic for executing the query. you can use the `Mono` and `Flux` types from Project Reactor to handle asynchronous and non-blocking operations in your endpoint implementation. for instance, in the example above, the `internalUserService.getUserDetails(username)` method returns a `Mono<UserDetails>` which is a reactive type that represents a single asynchronous value. you can use the `map()` operator to transform the result and perform the necessary operations, and you can use the `onErrorResume()` operator to handle exceptions and return the appropriate error types.
+在响应式查询端点中，`doProcess()` 方法返回 `Mono<Void>`，并利用 Project Reactor 的响应式管道实现非阻塞调用。在 `onErrorResume` 中将底层异常转换为 `Mono.error(RetryableExecutorException...)` 或 `Mono.error(NonRetryableExecutorException...)`。
 
 [[command-endpoints]]
-=== Command Endpoint
+=== 命令端点 (Command Endpoint)
 
-If an atomic execution makes state change in the database those kinds of executions are executed in *Command Endpoints*. due to it makes changes in the database, it has compensation action to undo. +
-xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[] which creates as the type of `SagaEventType.COMMAND_DO_ACTION` and `SagaEventType.COMMAND_UNDO_ACTION` are configured in the command endpoints.
+如果某个原子执行会在数据库中引起状态变更，此类执行必须在*命令端点 (Command Endpoint)* 中实现。由于它更改了数据库状态，因此必须提供逆向补偿操作以撤销变更。 +
+这些端点对应在 xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#custom_topic_implementation[StackSaga 主题] 中声明的 `SagaEventType.COMMAND_DO_ACTION` 与 `SagaEventType.COMMAND_UNDO_ACTION` 主题。
 
-For instance, in the place-order example, the execution of *Make Payment* execution is a command execution because it makes state change in the payment service's database by creating a new payment record and updating the user's balance. in case the entire process should be compensated after successfully executing the *Make Payment* execution, the compensation action will be triggered to undo the payment.
+例如在下单示例中，*执行支付扣款*就是命令执行，因为它扣减了用户余额并创建了支付凭证。若后续步骤失败，必须触发补偿动作执行退款。
 
-In the Command endpoints, there are two methods that you need to implement to handle the primary execution and the compensation execution. the `doProcess()` method is responsible for executing the primary execution and the `undoProcess()` method is responsible for executing the compensation logic to undo the changes that are made by the primary execution in case of any failure in the next steps after the primary execution. therefore, you need to implement both methods to have a complete command endpoint implementation.
+在命令端点中，需要实现两个核心方法：
 
-* in the `doProcess()` method, it can be thrown `RetryableExecutorException` and `NonRetryableExecutorException` to indicate the failure of the primary execution to the framework. if `RetryableExecutorException` is thrown, the framework will schedule the transaction for retrying based on the retry configurations. if `NonRetryableExecutorException` is thrown, the framework will trigger the compensation process to undo the transaction.
+* `doProcess()`：负责执行正向主业务命令。
+* `undoProcess()`：负责执行逆向补偿逻辑，撤销 `doProcess()` 所造成的数据库副作用。
 
-* If it is thrown `NonRetryableExecutorException` from the `doProcess()` method, the modified values withing the method is not applied to the domain entity state because the compensation process is started and the state will be reverted to the last successful state. see more in details in the example.
+命令端点同样支持两种模式：
 
-*Command endpoints* can be created in two different ways in StackSaga.
-
-. xref:#non-reactive-command-endpoint[]
-. xref:#reactive-command-endpoint[]
-
+. xref:#non-reactive-command-endpoint[非响应式（命令式）命令端点]
+. xref:#reactive-command-endpoint[响应式（非阻塞）命令端点]
 
 [[non-reactive-command-endpoint]]
-==== Non-Reactive (Imperative) Command Endpoint
-
-Non-reactive command endpoints are the traditional and blocking way of implementing the command endpoints. in this approach, the method that is responsible for executing the command is implemented in a blocking way.
+==== 非响应式（命令式）命令端点
 
 [source,java]
 ----
@@ -353,7 +322,7 @@ class MakePaymentEndpoint extends CommandEndpoint { //<1>
     @Override
     public void doProcess(ConsumerRecord<String, SagaPayload> consumerRecord)
             throws JustRetryableExecutorException, RetryableExecutorException, NonRetryableExecutorException {
-        //the theory is the same as the query endpoint.
+        //正向处理原理与查询端点完全一致
     }
 
     //<2>
@@ -366,11 +335,11 @@ class MakePaymentEndpoint extends CommandEndpoint { //<1>
         log.info("Last domain entity state {}", lastDomainEntityState);
 
         try {
-            {//undo payment logic
+            {//退款补偿业务逻辑
                 final double totalAmount = lastDomainEntityState.get("total_amount").asDouble();
                 final String paymentRef = lastDomainEntityState.get("payment_reference_id").asText();
                 this.internalPaymentSerivce.refundPayment(paymentRef, totalAmount);
-                //update some hints for the next revert execution if needed.
+                //若需要，为后续补偿执行更新提示信息
                 consumerRecord.value().getHintStore().ifPresent(hintStore -> {//<4>
                     hintStore.put("last_refund_time", LocalDateTime.now().toString());
                 });
@@ -382,31 +351,19 @@ class MakePaymentEndpoint extends CommandEndpoint { //<1>
 }
 ----
 
-NOTE: The `doProcess()` method implementation is not provided in the example because the main focus is on the `undoProcess()` method to explain the compensation processing in the command endpoints. but the theory for implementing the `doProcess()` method is the same as the query endpoint that is explained in the previous section. read the xref:#non-reactive-query-endpoint[] to understand how to implement the `doProcess()` method.
-
-<1> Create a custom command endpoint class by extending the `CommandEndpoint` class.
-<2> Override the `doProcess()` method to implement the business logic for executing the command. this is exactly the same as the query endpoint, you can refer xref:#non-reactive-query-endpoint[] example to get the details about how to implement the `doProcess()` method.
-
-
-<3> Override the `undoProcess()` method to implement the business logic for undoing the command. this method is invoked by the framework when a compensation action is triggered for the respective command execution. you can use the provided `ConsumerRecord` to access the message key, payload, and other metadata within the method scope.
+<1> 继承 `CommandEndpoint` 类创建自定义命令端点。
+<2> 分别重写 `doProcess()` 实现正向命令，重写 `undoProcess()` 实现逆向补偿回滚。
+<3> `undoProcess()` 中 `ConsumerRecord` 载荷包含正向命令执行前已知的领域实体快照（可通过 `getDomainEntityState()` 访问）。此状态在补偿期间为**严格只读**不可修改。
+<4> 若需向后续补偿步骤传递元数据，可通过 `getHintStore()` 访问提示存储库并通过 `put()` 存入键值对。
 +
-IMPORTANT: the payload of the `ConsumerRecord` in the `undoProcess()` method contains the last state of the domain entity before the execution of the command that is being compensated. you can access this state by using the `getDomainEntityState()` method of the payload. this allows you to have the necessary information to perform the compensation logic based on the last known state of the domain entity. `getDomainEntityState()` method returns a `JsonNode` which is a JSON tree structure that is provided by the Jackson library. you can use the methods of the `JsonNode` class to access the fields in the last domain entity state. for instance, you can use the `get("fieldName")` method to access a specific field in the last domain entity state. but you can not modify the last domain entity state because it is immutable in the compensation processing.
+IMPORTANT: 提示存储库中的更新仅在 `undoProcess()` 正常成功返回时才会被持久化并传递给后续步骤。若抛出重试异常或非预期异常，当前所写的提示不会生效。
+<5> 识别补偿逻辑中可能出现的瞬态异常，并使用 `RetryableExecutorException.of(e)` 包装抛出以启动重试。在 `undoProcess()` 中仅允许抛出 `JustRetryableExecutorException` 与 `RetryableExecutorException`。抛出任何未捕获异常均会导致全局补偿流程彻底终止。
 
-<4> If you want to send some hints or additional information from the current compensation execution to the next compensation execution in the next step, you can use the `getHintStore()` method of the payload to access the hint store and put the necessary information in it. the hint store is a key-value store that allows you to share information between different compensation executions. for instance, if you want to put the last refund time as a hint for the next compensation execution, you can use the `put()` method of the hint store to add that information with a specific key as shown in the example.
-+
-IMPORTANT: The updated or added hints in the hint store is applied only if there is no any error that is thrown from the `undoProcess()` method. if `RetryableExecutorException` is thrown from the `undoProcess()` method, the compensation process will be retried based on the retry configurations, and the hints that are added or updated in the current execution will not be applied in the next retry execution because it is expected to have the same conditions for the retry executions until it is succeeded. Note that `JustRetryableExecutorException` is a subclass of `RetryableExecutorException` and the same rule applies — hints are not applied when it is thrown either. therefore, make sure to manage the hints properly in the compensation processing to ensure that they are applied correctly in the next compensation execution. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated and the hints that are added or updated in the current execution will not be applied because there will be no next compensation execution due to the termination of the transaction.
+[[immediate_retry_with_just_retryable_executor_exception]]
+==== 基于 `JustRetryableExecutorException` 的进程内即时重试
 
-<5> Identify the retryable exceptions that can be thrown from the compensation logic and make sure to throw them by wrapping with `RetryableExecutorException` to enable the retrying mechanism for the compensation process. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated. therefore, it is important to handle the exceptions properly in the compensation logic to ensure that the compensation process can retry when necessary and to avoid unexpected termination of the transaction. in `undoProcess()` only can throw `JustRetryableExecutorException` and `RetryableExecutorException`.
-
-NOTE: The maximum number of retry attempts for compensation executions, retry window durations, boundary guard thresholds, and the behavior for permanently stuck or exhausted compensation transactions (dead-letter handling) are all configured through `stacksaga-database-support`.
-See the xref:stacksaga-database-support:overview/database-support-overview.adoc[stacksaga-database-support documentation] for full details on these configurations.
-
-==== Immediate Retry with `JustRetryableExecutorException`
-
-Immediate retry with `JustRetryableExecutorException` only support for the non-reactive endpoints because the reactive endpoints already support immediate retry by using the reactive programming paradigm without the need for a specific exception type. in the non-reactive endpoints, you can throw `JustRetryableExecutorException` to trigger an immediate retry without waiting for the scheduled retry. if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt. in case the immediate retry is failed, you can throw the `RetryableExecutorException` to trigger the scheduled retry as a fallback mechanism. in the non-reactive endpoints, the retry is handled behind the scenes by the framework by using spring retry-template. so you are able to use all the features that are provided by the https://docs.spring.io/spring-batch/docs/4.3.10/reference/html/retry.html#retryTemplate[spring retry-template] for retrying in the non-reactive endpoints.
-Here is an example of how the `JustRetryableExecutorException` can be used for immediate retrying in the non-reactive command endpoint implementation.
-
-NOTE: Immediate retry with `RetryTemplate` is supported for `doProcess()` method in both non-reactive command and query endpoints and also for `undoProcess()` method in the non-reactive command endpoints.
+基于 `JustRetryableExecutorException` 的即时重试专用于非响应式端点（响应式端点可在管道中直接使用 `retryWhen()`）。
+抛出 `JustRetryableExecutorException` 会立即在当前线程通过 Spring `RetryTemplate` 触发本地即时重试，无需等待调度器唤醒，亦不向编排器发送冗余网络消息。当即时重试耗尽后，再回退抛出 `RetryableExecutorException` 以触发延期调度重试。
 
 [source,java]
 ----
@@ -432,7 +389,7 @@ public class MakePaymentEndpoint extends CommandEndpoint {
                     } catch (SomeRetryableException e) {
                         RetryContext retryContext = consumerRecord.value().getRetryContext().orElseThrow();
                         if (retryContext.getRetryCount() >= 3) {
-                            //if the retry count has reached the threshold, we can throw a NonRetryableExecutorException to stop further retries.
+                            //达到重试阈值，抛出不可重试异常终止并触发全局回滚
                             throw NonRetryableExecutorException
                                     .buildWith(e)
                                     .put("error_code", "PAYMENT_FAILED_AFTER_RETRIES")
@@ -456,13 +413,10 @@ public class MakePaymentEndpoint extends CommandEndpoint {
 }
 ----
 
-This example shows how to implement immediate retrying in the `MakePaymentEndpoint` command endpoint by using the `JustRetryableExecutorException`. in this example, if the `makePayment()` method throws a retryable exception, it checks the retry count from the `RetryContext` that is provided in the payload of the `ConsumerRecord`. although it has been wrapped with `Optional` you can safely access it because the retry context is always present if the executor is a non-reactive one. if the retry count has reached the threshold (in this example, it is 3), it throws a `NonRetryableExecutorException` to stop further immediate retries and indicate to the framework to schedule the retry based on the retry configurations. if the retry count has not reached the threshold, it throws a `JustRetryableExecutorException` with a message indicating to the framework to invoke an immediate retry. if the immediate retry is successful, it will avoid the delay that is caused by scheduling, and also it will avoid sending redundant messages to the orchestrator for each retry attempt.
-
-
 [[configure_retry_template_for_non_reactive_endpoints]]
-==== Configure `RetryTemplate` for Non-Reactive Endpoints
+==== 为非响应式端点配置 `RetryTemplate`
 
-As we mentioned above, the non-reactive endpoints use `RetryTemplate` for handling retries, and you can configure the `RetryTemplate` to customize the retry behavior for your endpoints. you can configure the `RetryTemplateBuilder` by defining a bean of type `AbstractRetryTemplateProvider` in your application context and overriding the `retryTemplateBuilder()` method to provide your custom configuration for the `RetryTemplate`. here is an example of how to configure the `RetryTemplate` for non-reactive endpoints.
+非响应式端点利用 `RetryTemplate` 处理本地重试。您可以通过定义继承自 `AbstractRetryTemplateProvider` 的 Spring Bean 来自定义该模板：
 
 [source,java]
 ----
@@ -477,9 +431,7 @@ public class MakePaymentRetryTemplateProvider extends AbstractRetryTemplateProvi
 }
 ----
 
-IMPORTANT: The `MakePaymentRetryTemplateProvider` class is annotated with `@Component` to make it a Spring bean.
-
-After creating the custom `RetryTemplateProvider`, you can configure it into the endpoint as below.
+在端点上通过 Bean 名称引用该 Provider：
 
 [source,java]
 ----
@@ -496,16 +448,10 @@ public class MakePaymentEndpoint extends CommandEndpoint {
 }
 ----
 
-In this example, the `MakePaymentRetryTemplateProvider` is configured for both primary execution and revert execution by using the `primaryExecutionRetryTemplate` and `revertExecutionRetryTemplate` attributes of the `@SagaEndpoint` annotation.
-Note that these attributes take the *Spring bean name* of the provider (a `String`), not the class — `makePaymentRetryTemplateProvider` is the default bean name generated for the `@Component`-annotated `MakePaymentRetryTemplateProvider` class.
-You can configure different providers for primary execution and revert execution if you want different retry behavior for each.
-
-NOTE: If these attributes are omitted, they default to the framework-provided shared providers `sharedDefaultPrimaryAbstractRetryTemplateProvider` and `sharedDefaultRevertAbstractRetryTemplateProvider`, whose behavior is tuned through the `stacksaga.kafka.worker.retry.primary.*` and `stacksaga.kafka.worker.retry.revert.*` properties (see xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#configuration_properties_stacksaga_kafka_worker[]).
+若省略这些属性，默认使用框架内置的全局共享 Provider（通过 `stacksaga.kafka.worker.retry.*` 统一调优）。
 
 [[reactive-command-endpoint]]
-==== Reactive (Non-Blocking) Command Endpoint
-
-If you are in a reactive programming environment and want to implement the command endpoints in a non-blocking way, you can extend the `ReactiveCommandEndpoint` class and implement the `doProcess()` and `undoProcess()` methods by using the reactive programming paradigm with Project Reactor's `Mono` and `Flux` types. the theory for implementing the reactive command endpoint is the same as the non-reactive command endpoint, but you need to return a `Mono<Void>` from both methods and use the reactive operators to handle asynchronous operations and exceptions. for instance, you can use the `map()`, `flatMap()`, and `onErrorResume()` operators to implement the business logic and exception handling in a reactive way.
+==== 响应式（非阻塞）命令端点
 
 [source,java]
 ----
@@ -519,7 +465,7 @@ class ReactiveMakePaymentEndpoint extends ReactiveCommandEndpoint { //<1>
 
     @Override
     public Mono<Void> doProcess(ConsumerRecord<String, SagaPayload> consumerRecord) {
-        //the theory is the same as the query endpoint.
+        //正向处理逻辑与响应式查询端点一致
     }
 
     @Override
@@ -530,10 +476,10 @@ class ReactiveMakePaymentEndpoint extends ReactiveCommandEndpoint { //<1>
         log.info("Last domain entity state {}", lastDomainEntityState);
         final double totalAmount = lastDomainEntityState.get("total_amount").asDouble();
         final String paymentRef = lastDomainEntityState.get("payment_reference_id").asText();
-        this.internalPaymentSerivce
+        return this.internalPaymentSerivce
                 .refundPayment(paymentRef, totalAmount)
                 .flatMap(response -> {
-                        //update some hints for the next revert execution if needed.
+                        //若需要，更新补偿提示信息
                         consumerRecord.value().getHintStore().ifPresent(hintStore -> {
                             hintStore.put("last_refund_time", LocalDateTime.now().toString());
                         });
@@ -546,81 +492,61 @@ class ReactiveMakePaymentEndpoint extends ReactiveCommandEndpoint { //<1>
 }
 ----
 
-NOTE: `doProcess()` method implementation is not provided in the example because the main focus is on the `undoProcess()` method to explain the compensation processing in the command endpoints. but the theory for implementing the `doProcess()` method is the same as the query endpoint that is explained in the previous section. read the xref:#non-reactive-query-endpoint[] to understand how to implement the `doProcess()` method.
+<1> 继承 `ReactiveCommandEndpoint`。
+<2> 标注 `@SagaEndpoint` 注解。
+<3> 在 `onErrorResume` 中捕获重试异常并转换为 `Mono.error(RetryableExecutorException.of(e))`。
 
-<1> Create a custom reactive command endpoint class by extending the `ReactiveCommandEndpoint` class.
-<2> Annotate the custom reactive command endpoint class with `@SagaEndpoint` annotation. it primarily marks the class as a spring bean.
-<3> Identify the retryable exceptions that can be thrown from the compensation logic and make sure to handle them by using the `onErrorResume()` operator to return a `Mono.error()` with `RetryableExecutorException` to enable the retrying mechanism for the compensation process. if any unhandled exception is thrown from the `undoProcess()` method, the compensation process will be stopped and the transaction will be terminated. therefore, it is important to handle the exceptions properly in the compensation logic to ensure that the compensation process can retry when necessary and to avoid unexpected termination of the transaction.
+=== @SagaEndpoint 注解属性参考手册
 
-IMPORTANT: Based on the `RetryableExecutorException` Stacksaga framework provide only the asynchronous retrying (scheduling retry). if you want to have the immediate retrying( in the same thread), you can manage it withing the pipeline by using the `retryWhen()` operator of the reactive programming. it is recommended implement the immediate retrying logic first before throwing the `RetryableExecutorException` to have a better control over the retrying mechanism and to avoid unnecessary scheduling of retries when the retry can be done immediately. in case the immediate retry is exhausted, you can throw the `RetryableExecutorException` to schedule the retry based on the retry configurations. read more about Retry to better understand the retrying mechanisms.
-
-=== @SagaEndpoint Annotation
-
-`@SagaEndpoint` is the main annotation that is used to mark the custom endpoint classes in Stacksaga Kafka worker applications. it is a meta-annotation that is used to create custom annotations for different types of endpoints such as query endpoints and command endpoints. the `@SagaEndpoint` annotation provides several attributes that can be used to configure the behavior of the endpoint, such as the topic name suffix, listener scope, and other configurations. by using this annotation, you can easily create and configure your custom endpoints in a consistent way across your application. here we are going to see all the attributes of the `@SagaEndpoint` annotation and how to use them to tuning the behavior of your endpoints for your specific use case.
+`@SagaEndpoint` 是在 StackSaga Kafka Worker 应用中标记自定义端点类的核心元注解。其属性参考如下：
 
 . `value`
-- Description: This attribute is used to provide a unique name for the endpoint. it is optional and can be used for better readability and debugging purposes. if not provided, the framework will use the class name as the default value for the endpoint name.
-Spring bean is created with the name provided in this attribute.
+- 描述：指定端点的全局唯一标识名称（选填）。若不指定，默认使用类名生成 Spring Bean。
 . `topicNameSuffix`
-- provide the suffix of the topic name for this endpoint. the framework will create the real topic name by prefixing the provided suffix with `saga.` — so `user-service.get-user` becomes the real topic `saga.user-service.get-user` (if your suffix already starts with `saga.`, it is kept as-is). this is the topic the `EventManager` sends command messages to, to trigger this endpoint. therefore, it is important to provide the correct topic name suffix that matches the topic name that is used in the `EventManager` to ensure that the messages are sent to the correct topic and consumed by the correct endpoint.
-See xref:#endpoint-topics[Endpoint Topics] for the ownership, naming, and prefix details.
+- 描述：端点的主题名称后缀。框架通过在该后缀前加上 `saga.` 构建实际的 Kafka 主题。必须与编排器 `AbstractTopic` 中声明的名称完全匹配。
 +
-.Quick Reference: Topic Naming Rules
+.主题命名规范速查表
 [cols="1,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Rule | Detail
+| 规则 | 详细说明
 
-| Naming convention (best practice)
-| Name the topic `\{service-name\}.\{action\}` after the service and action it targets — e.g. `user-service.fetch-user-details` — *not* after the saga domain, since the endpoint is a service capability that other saga domains can reuse. See xref:#endpoint-topics-naming[Naming an endpoint topic].
+| 命名约定（最佳实践）
+| 按照 `\{service-name\}.\{action\}` 形式命名（如 `user-service.fetch-user-details`），切勿以 Saga 领域命名，以便跨领域复用。
 
-| Segment separator
-| Use `.` to separate hierarchical segments (e.g., `order-service.initialize-order`, `user-service.fetch-user-details`).
+| 分段分隔符
+| 使用英文句点 `.` 分隔各层级段（如 `order-service.initialize-order`）。
 
-| Hyphens
-| Permitted *within* a segment (e.g., `user-service`, `fetch-user-details`) but not *as* the separator itself.
+| 连字符
+| 允许在分段内部使用（如 `user-service`），但不能充当分段分隔符。
 
-| Underscores
-| Not permitted anywhere in the topic name.
+| 下划线
+| 严禁在主题名称中的任何位置使用。
 
-| Prefix auto-added
-| The framework prepends `saga.` to build the single real topic — but only if the suffix does not already start with `saga.`. You provide the *same* suffix used in the orchestrator's `AbstractTopic`.
-So `topicNameSuffix = "payment-service.make-payment"` produces the real topic `saga.payment-service.make-payment`.
+| 自动追加前缀
+| 框架会自动在前端追加 `saga.` 生成真实的实际主题（前提是后缀未以 `saga.` 开头）。例如 `payment-service.make-payment` 生成 `saga.payment-service.make-payment`。
 
-| Topic key
-| Each topic requires a unique `float` key within the domain.
-Positive integers (1, 2, 3…) for the primary action; matching negative values (-1, -2, -3…) for its compensation.
-Decimal values (e.g., `1.1`) are reserved for the upcoming sub-execution feature — avoid them in the current version.
-
+| 主题键
+| 每个主题在领域内必须拥有唯一的 `float` 键。正整数（1, 2, 3…）用于主执行；对应的负值（-1, -2, -3…）用于其补偿。小数保留给未来子执行特性，暂请勿用。
 |===
-See full specification in xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_name_specification[Topic Name Specification] and xref:stacksaga-kafka-implementation/orchestrator/topics-event-manager.adoc#topic_key_specification[Topic Key Specification].
 
 . `listenerScope`
-- Selects the listener-container allocation for the endpoint.
-`WorkerListenerScope.SHARED_GLOBAL` pools the endpoint into the single global container shared by all default endpoints (the default choice); `WorkerListenerScope.SHARED_GROUP` shares a container with other endpoints that declare the same `containerId`; `WorkerListenerScope.ISOLATED` gives the endpoint a dedicated container.
-listenerScope tuning is one of the most important configurations and should be considered carefully. see xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[].
+- 描述：选择端点的监听器容器分配模式。
+`WorkerListenerScope.SHARED_GLOBAL`（默认汇入单个全局共享容器）；`WorkerListenerScope.SHARED_GROUP`（与其他相同 `containerId` 的端点共享专用容器）；`WorkerListenerScope.ISOLATED`（专属独立独占容器）。详见 xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#topic_model_stacksaga_kafka_worker[]。
 
 . `groupType`
-- Selects the Kafka group protocol for the endpoint's container.
-`GroupType.CONSUMER` uses the classic consumer-group protocol (a `ConcurrentMessageListenerContainer`); `GroupType.SHARE` uses the Kafka 4 share-group protocol (KIP-932, a `ShareKafkaMessageListenerContainer`), whose parallelism is not capped by the partition count.
-Every endpoint sharing a container (all `SHARED_GLOBAL` endpoints, or all members of a `SHARED_GROUP`) must declare the *same* `groupType`; a mismatch fails fast at startup.
-`GroupType.SHARE` requires a Kafka 4.x broker with share groups enabled.
-See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[].
+- 描述：选择端点容器运行的 Kafka 消费组协议。
+`GroupType.CONSUMER` 使用传统消费者组协议；`GroupType.SHARE` 使用 Kafka 4 共享组协议 (KIP-932)，其并行度不受分区数限制。共享同一容器的所有端点必须保持协议一致。详见 xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[]。
 
 . `containerId`
-- Only used when `listenerScope = WorkerListenerScope.SHARED_GROUP`.
-It is the group key that binds endpoints together into a single shared container — endpoints declaring the same `containerId` share one container. Ignored for the other scopes.
-See xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#shared_group_listener_scope_endpoint_topics[].
+- 描述：仅在 `listenerScope = WorkerListenerScope.SHARED_GROUP` 时生效。作为将多个端点绑定到同一个共享容器的分组标识键。其他作用域下被忽略。
 
 . `concurrency`
-- The concurrency level of the endpoint's listener container (default `1`).
-For an `ISOLATED` endpoint it sets that dedicated container's concurrency. For a `SHARED_GROUP` endpoint the container adopts the *maximum* `concurrency` declared across all members of the group. (For `SHARED_GLOBAL`, the global container's concurrency comes from the `stacksaga.kafka.worker.global-endpoint-topic-listener.concurrency` property instead.)
-With `GroupType.CONSUMER`, effective parallelism is still bounded by the partition count; with `GroupType.SHARE` it is not — see xref:stacksaga-kafka-implementation/worker/worker-configuration.adoc#worker_group_type[].
+- 描述：端点监听器容器的并发度（默认 `1`）。
+在 `ISOLATED` 模式下直接设定该专用容器的并发数；在 `SHARED_GROUP` 模式下，容器采用该组所有成员中声明的*最大并发度*。对于 `GroupType.CONSUMER`，有效并行度受限于分区数；对于 `GroupType.SHARE` 则不受限制。
 
 . `primaryExecutionRetryTemplate`
-- The *Spring bean name* (a `String`) of the `AbstractRetryTemplateProvider` used for immediate, in-process retries of the primary execution (`doProcess()`) of non-reactive `CommandEndpoint` and `QueryEndpoint`.
-Defaults to `"sharedDefaultPrimaryAbstractRetryTemplateProvider"`. see xref:#configure_retry_template_for_non_reactive_endpoints[].
+- 描述：用于非响应式 `CommandEndpoint` 与 `QueryEndpoint` 主执行 (`doProcess()`) 进程内即时重试的 `AbstractRetryTemplateProvider` 的 *Spring Bean 名称*（字符串）。默认为 `"sharedDefaultPrimaryAbstractRetryTemplateProvider"`。
 
 . `revertExecutionRetryTemplate`
-- The *Spring bean name* (a `String`) of the `AbstractRetryTemplateProvider` used for immediate, in-process retries of the compensation execution (`undoProcess()`) of a non-reactive `CommandEndpoint`.
-Defaults to `"sharedDefaultRevertAbstractRetryTemplateProvider"`. see xref:#configure_retry_template_for_non_reactive_endpoints[].
+- 描述：用于非响应式 `CommandEndpoint` 补偿执行 (`undoProcess()`) 进程内即时重试的 `AbstractRetryTemplateProvider` 的 *Spring Bean 名称*（字符串）。默认为 `"sharedDefaultRevertAbstractRetryTemplateProvider"`。

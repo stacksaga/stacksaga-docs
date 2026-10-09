@@ -1,67 +1,64 @@
-:description: Configuration properties reference for stacksaga-spring-boot-starter — domain entity scanning, scheduler tuning, and instance cluster/region/zone settings for the synchronous StackSaga orchestrator.
+:description: stacksaga-spring-boot-starter 配置属性参考 —— 同步 StackSaga 编排器的领域实体扫描、调度器调优以及实例集群/区域/可用区设置。
 :keywords: StackSaga, configuration properties, stacksaga-spring-boot-starter, domain-entity-scan, instance cluster, region, zone, synchronous orchestrator, AbstractSchedulerProvider, executionScheduler, blockingExecutionScheduler, scheduler, parallelism, thread-cap, TransactionEventListener, ReactiveTransactionEventListener
 :page-priority: 0.7
 
-= Configuration Properties Of `stacksaga-spring-boot-starter`
+= `stacksaga-spring-boot-starter` 配置属性参考
 
 [cols="5,1,1,3",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Property
-| DataType
-| Default Value
-| Description
+| 属性名称 | 数据类型 | 默认值 | 描述说明
 
 | `stacksaga.domain-entity-scan`
-| `[]`
 | `String[]`
-| A comma-separated list of package names to scan for `@SagaDomainEntity` annotated classes. for instance, `com.example.domain,com.example.anotherdomain`.
+| `[]`
+| 用于扫描带有 `@SagaDomainEntity` 注解的类的包名列表（以逗号分隔）。例如：`com.example.domain,com.example.anotherdomain`。
 
 | `stacksaga.scheduler.execution.parallelism`
-| `Runtime.getRuntime().availableProcessors()`
 | `int`
-| The number of worker threads backing the framework's shared, non-blocking `executionScheduler` — the parallel `reactor.core.scheduler.Scheduler` (created as `Schedulers.newParallel("saga-exe", parallelism)`) that drives ongoing reactive/saga processing, and that a `ReactiveTransactionEventListener#onStateChanged` implementation runs on. See xref:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[ReactiveTransactionEventListener].
+| `Runtime.getRuntime().availableProcessors()`
+| 支持框架共享非阻塞 `executionScheduler` 的工作线程数 —— 该并行 `reactor.core.scheduler.Scheduler`（通过 `Schedulers.newParallel("saga-exe", parallelism)` 创建）负责驱动持续进行的响应式/Saga 处理，以及 `ReactiveTransactionEventListener#onStateChanged` 实现的运行环境。参见 xref:stacksaga-sync/orchestrator/event-listener.adoc#reactive_transaction_event_listener[ReactiveTransactionEventListener]。
 
 | `stacksaga.scheduler.blocking-execution.thread-cap`
-| `Runtime.getRuntime().availableProcessors() * 10`
 | `int`
-| The maximum number of threads the `blockingExecutionScheduler` — a bounded-elastic `reactor.core.scheduler.Scheduler` dedicated to invoking blocking, non-reactive user code such as `TransactionEventListener#onStateChanged` — may create. See xref:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[TransactionEventListener].
+| `Runtime.getRuntime().availableProcessors() * 10`
+| `blockingExecutionScheduler` 允许创建的最大线程数 —— 这是一个有界弹性 (Bounded-Elastic) `reactor.core.scheduler.Scheduler`，专门用于调用阻塞式、非响应式的用户代码（例如 `TransactionEventListener#onStateChanged`）。参见 xref:stacksaga-sync/orchestrator/event-listener.adoc#transaction_event_listener[TransactionEventListener]。
 
 | `stacksaga.scheduler.blocking-execution.queued-task-cap`
-| `100000`
 | `int`
-| The maximum number of tasks the `blockingExecutionScheduler` may queue once every thread up to `thread-cap` is busy, before further submissions are rejected.
+| `100000`
+| 当达到 `thread-cap` 限制且所有线程均处于繁忙状态时，`blockingExecutionScheduler` 允许排队的最大任务数，超过此容量后将拒绝新任务提交。
 
 | `stacksaga.scheduler.blocking-execution.ttl-seconds`
-| `60`
 | `int`
-| The idle time-to-live, in seconds, before an unused `blockingExecutionScheduler` worker thread is reclaimed.
+| `60`
+| 空闲存活时间（以秒为单位），超过此时间未使用的 `blockingExecutionScheduler` 工作线程将被回收。
 
 | `stacksaga.scheduler.blocking-execution.daemon`
-| `false`
 | `boolean`
-| Whether `blockingExecutionScheduler` worker threads are created as daemon threads. Left `false` by default so the JVM does not exit while a listener invocation is still in flight.
+| `false`
+| `blockingExecutionScheduler` 工作线程是否创建为守护线程。默认保持 `false`，以确保当监听器调用仍在进行中时 JVM 不会提前退出。
 
 | `stacksaga.scheduler.graceful-shutdown-timeout-seconds`
-| `30`
 | `int`
-| How long, in seconds, shutdown gives each scheduler's in-flight/queued tasks to finish before forcing an immediate disposal. Applies to both `executionScheduler` and `blockingExecutionScheduler`.
+| `30`
+| 停机时在强制立即释放前，给予每个调度器正在进行/排队任务完成的等待超时时间（以秒为单位）。同时适用于 `executionScheduler` 与 `blockingExecutionScheduler`。
 
-|`stacksaga.instance.cluster`
-|-
-|`String`
-|The cluster this instance belongs to. Components only connect to one another when their `cluster` values match, so it must be identical across every Master, Slave, and Orchestrator that needs to connect.
+| `stacksaga.instance.cluster`
+| `String`
+| -
+| 当前实例所属的集群名称。各组件仅在 `cluster` 值相同时才能互相连接，因此必须在所有需要连接的 Master、Slave 以及编排器之间保持完全一致。
 
-|`stacksaga.instance.region`
-|`default`
-|`String`
-|The operational deployment region this instance belongs to. Used to identify transaction origins, enforce cluster boundaries, and coordinate retries.
+| `stacksaga.instance.region`
+| `String`
+| `default`
+| 当前实例所属的运行部署区域。用于标识事务来源、强制集群边界并协调分布式重试。
 +
-NOTE: Defaults to `default` (region code `0`). If a custom region is configured (e.g., `us-east-1`), you must declare a custom xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring bean; otherwise, application startup fails fast with a `ValidationException`.
+NOTE: 默认为 `default`（区域代码 `0`）。如果配置了自定义区域（例如 `us-east-1`），必须声明自定义 xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring Bean；否则应用程序启动时将快速失败并抛出 `ValidationException`。
 
-|`stacksaga.instance.zone`
-|-
-|`String`
-|The zone this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
+| `stacksaga.instance.zone`
+| `String`
+| -
+| 当前实例所属的可用区 (Zone)。在此处无强制业务影响，但应按照 StackSaga 核心规范进行设置。
 
 |===

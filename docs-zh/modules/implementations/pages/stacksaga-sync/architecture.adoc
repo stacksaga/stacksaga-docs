@@ -1,171 +1,147 @@
 :page-priority: 0.7
 
+= 架构 - StackSaga 框架（同步，Synchronous）
 
-= Architecture - Stacksaga-Framework (Synchronous)
+以下各节通过三个演进式部署阶段，循序渐进地介绍 StackSaga 框架（同步实现）的架构体系。
+每个阶段均构建在前一个阶段的基础之上，逐步增加生产就绪能力。
+这种分阶段方式使得团队可以从极简配置起步，并随着系统需求的增长逐步增强系统韧性。
 
-The following sections describe the Stacksaga-Framework (Synchronous) architecture progressively across three deployment stages.
-Each stage builds on the previous one, adding production-readiness capabilities incrementally.
-This staged approach makes it possible to start with a minimal setup and harden the system as requirements grow.
-
-. xref:#stacksaga-synchronous-architecture-1st-stage[Stage 1: Basic Setup] — orchestrator service + utility microservices communication any protocol (e.g., REST, gRPC).
-. xref:#stacksaga-synchronous-architecture-2nd-stage[Stage 2: Retry-Ready Setup] — Configuring Retry Sub System — distributed retry via ring coordinator.
-. xref:#stacksaga-synchronous-architecture-3rd-stage[Stage 3: Monitoring Setup] — saga-level observability via trace window.
-
-
+. xref:#stacksaga-synchronous-architecture-1st-stage[阶段 1：基础架构搭建] —— 编排器服务 + 通过通用协议（例如 REST、gRPC）通信的下游标准微服务。
+. xref:#stacksaga-synchronous-architecture-2nd-stage[阶段 2：重试就绪架构] —— 配置重试子系统 —— 通过环形协调器 (Ring Coordinator) 实现分布式重试。
+. xref:#stacksaga-synchronous-architecture-3rd-stage[阶段 3：监控可观测架构] —— 通过 Trace Window 实现 Saga 级别的端到端全链路可观测性。
 
 [[stacksaga-identifying-service-roles]]
-== Service Classification: Orchestrator, and Standard Utility
+== 服务分类：编排器服务与标准实用服务 (Service Classification: Orchestrator, and Standard Utility)
 
-Before going any further into the architecture, it is important to first recognize the different types of services within the *StackSaga Synchronous ecosystem*.
-Understanding *how* a service is classified makes everything that follows — the staged architecture, the dependency tables, the request flow — far easier to map back onto your own system.
+在进一步深入架构之前，首先识别 *StackSaga 同步生态系统* 中的不同服务类型至关重要。
+理解服务*如何*被归类，将使后续的所有内容 —— 分阶段架构演进、依赖项表格、请求处理流 —— 更容易与您自己的实际业务系统进行映射。
 
 [cols="1,3",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Role | Description
+| 角色 | 描述说明
 
-| *Orchestrator service*
-| Any existing service that has been given the additional role of driving a saga's business transaction end-to-end. Simply, the applications that has the `stacksaga-spring-boot-starter` dependency are considered orchestrator services. They are responsible for starting sagas, sending commands to workers, and coordinating the overall flow of the saga.
+| *编排器服务 (Orchestrator service)*
+| 赋予了端到端驱动 Saga 业务事务额外职责的任意现有微服务。简而言之，引入了 `stacksaga-spring-boot-starter` 依赖项的应用程序均被视为编排器服务。它们负责发起 Saga、向工作节点发送指令并协调 Saga 的整体流转。
 
-| *Standard utility service*
-| The baseline role every service has. A service that has *no* StackSaga dependency and is never invoked by the orchestrator remains purely a standard utility service. However, they also can be invoked by the orchestrator as part of a saga via the exposed endpoints, but they do not have any StackSaga dependencies themselves. They are not involved in the saga's retry coordination or monitoring etc.
+| *标准实用服务 (Standard utility service)*
+| 每个微服务原本具有的基准角色。*未引入*任何 StackSaga 依赖且未被编排器调用的服务纯粹是标准实用服务。然而，它们也可以通过公开的端点作为 Saga 的一部分被编排器调用，但其自身无需任何 StackSaga 依赖，亦不参与 Saga 的重试协调或监控等内部治理。
 |===
 
-*Orchestrator* is StackSaga-ecosystem role labels, not new kinds of deployments or separate services entirely built for stacksaga.
-Every microservice in a system — `order-service`, `payment-service`, `user-service`, and so on — is, first and foremost, a *standard utility service*: it keeps exposing its own REST/gRPC endpoints, running its own business logic, and serving its own consumers exactly as it did before StackSaga entered the picture.
+*编排器* 是 StackSaga 生态系统中的角色标签，而不是全新的部署形态或专门为 StackSaga 从头构建的独立服务。
+系统中的每个微服务 —— `order-service`、`payment-service`、`user-service` 等 —— 首先且最重要的依然是*标准实用服务*：它继续暴露其既有的 REST/gRPC 端点，执行自己的业务逻辑，并一如既往地为消费者提供服务。
 
-Adding a StackSaga dependency to one of these services does not replace or restrict what it already does — it overlays an additional role on top.
-For example, if `order-service` adds `stacksaga-spring-boot-starter`, it keeps doing everything it already did (exposing its own endpoints, calling other internal services, etc.) and *additionally* gains the orchestrator role for driving a specific saga.
-Within the StackSaga ecosystem, that service is now referred to as the *orchestrator service* — but only in the context of that saga.
+向其中一个微服务添加 StackSaga 依赖项绝不会替代或限制其既有功能 —— 而是为其叠加了一层额外职责。
+例如，如果 `order-service` 引入了 `stacksaga-spring-boot-starter`，它将继续履行原有的全部功能（对外提供自己的端点、调用其他内部微服务等），并*额外*获得驱动特定 Saga 的编排器角色。
+在 StackSaga 生态系统的语境中，该服务现被称为*编排器服务* —— 但这仅针对该特定 Saga 而言。
 
-TIP: This is one of the biggest advantages of StackSaga: it can be introduced into any existing microservice with zero disruption.
-There is no need to peel a service out of its domain, stand up a new dedicated orchestration service, or rewrite existing endpoints and business logic to make room for it.
-You simply add the relevant StackSaga dependency to a service that already lives in your system, and it takes on the orchestrator role *alongside* its existing responsibilities.
-Adoption is incremental and additive, not a redesign.
+TIP: 这是 StackSaga 最大的优势之一：它可以零侵入、零中断地引入到任何现有微服务中。
+无需将服务从其业务域中强行剥离，无需专门搭建新的独立编排服务，也无需为了迁就编排引擎而重写现有的端点和业务逻辑。
+您只需将相关的 StackSaga 依赖项添加到系统中已有的服务中，它便会在承担原有业务职责的同时*顺理成章*地扮演编排器角色。
+采纳过程是渐进增量的叠加，而不是颠覆性的重构。
 
 [[stacksaga-synchronous-architecture-1st-stage]]
-== Stage 1: Basic Setup
+== 阶段 1：基础架构搭建 (Stage 1: Basic Setup)
 
-This stage establishes the minimal viable topology: an orchestrator service that can start and drive sagas, and one or more utility services that can receive execution request via endpoints and return results.
+该阶段建立了最小可行拓扑架构：一个能够发起并驱动 Saga 的编排器服务，以及一个或多个能够通过通信端点接收执行请求并返回结果的标准实用服务。
 
-No retry coordination or external monitoring is configured at this stage.
+在该阶段尚未配置重试协调或外部监控控制台。
 
-image::implementations:stacksaga-sync/stacksaga-diagram-stage-1-minimal-architecture-overview.svg[StackSaga-Sync Architecture: Stage 1 — Basic Setup,width=800]
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-1-minimal-architecture-overview.svg[StackSaga 同步架构：阶段 1 —— 基础搭建,width=800]
 
-=== Dependencies
+=== 核心依赖项 (Dependencies)
 
 [cols="1,1,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Service
-| Dependency
-| Purpose
+| 服务组件 | 依赖项 | 用途与职责
 
-////
-todo: link the items
-////
-
-
-| Orchestrator
+| 编排器 (Orchestrator)
 | `stacksaga-spring-boot-starter`
-| Provides the saga engine`SEC`, ,`StackSagaTemplate`,`TransactionEventListener`, `Executor`, and the necessary infrastructure for defining and executing sagas.
+| 提供 Saga 引擎 `SEC`、`StackSagaTemplate`、`TransactionEventListener`、`Executor` 以及定义和执行 Saga 所需的基础设施。
 
-| Orchestrator
+| 编排器 (Orchestrator)
 | `stacksaga-database-support`
-| Provides the event store adapter for persisting `SagaDomainEntity` state and execution history.
+| 提供事件存储适配器，用于持久化 `SagaDomainEntity` 业务实体状态与步骤执行历史。
 |===
 
-=== Request and Execution Flow
+=== 请求与执行流程 (Request and Execution Flow)
 
-. An inbound HTTP request (e.g., `POST /order`) reaches the `OrderController` on the orchestrator service.
-. The controller instantiates a `PlaceOrderDomainEntity` — the xref:#[`SagaDomainEntity`] subclass for the order placement saga — populates its initial payload, and calls xref:#[`StackSagaTemplate.init(...).startWith(..).fireAndForget().execute();`].
-From this point the saga engine takes full control.
-. Each spans (xref:#[executors]) will be executed one by one based on the programmatic navigation by keeping the state in the event-store in case of retrying and tracing.
-with the help of the `stacksaga-database-support` module.
-. If there is any *primary execution failure* , SEC will trigger the compensation executions in reverse order.
-. Each and every State Change is notified to the `TransactionEventListener` for monitoring and observability. the user can be notified then.
+. 入站 HTTP 请求（例如 `POST /order`）到达编排服务上的 `OrderController`。
+. 控制器实例化 `PlaceOrderDomainEntity` —— 对应订单创建 Saga 的 `SagaDomainEntity` 子类，填充其初始载荷，并调用 `StackSagaTemplate.init(...).startWith(..).fireAndForget().execute();`。从此时起，Saga 引擎接管全权控制。
+. 在 `stacksaga-database-support` 模块的协助下，各执行器（`Executor`）根据编程式导航逐一执行，同时将执行状态持久化在事件存储中，以便于后续重试和追踪。
+. 如果发生任何*主执行失败 (Primary execution failure)*，SEC 将以逆序触发对应的补偿执行操作。
+. 每次状态变更均会通知 `TransactionEventListener`，以便进行监控和可观测性采集，并在此时通知终端用户。
 
-NOTE: The diagram above shows only 2 spans for clarity.
-In practice, a saga can traverse any number of spans across different utility services with help of executors.
+NOTE: 出于示意清晰的考虑，上图仅展示了 2 个步骤跨度。在实际生产中，Saga 可以在各执行器的协助下跨越不同实用微服务执行任意数量的步骤。
 
 [[stacksaga-synchronous-architecture-2nd-stage]]
-== Stage 2 — Retry-Ready Setup
+== 阶段 2：具备重试能力的就绪架构 (Stage 2 — Retry-Ready Setup)
 
-Stage 2 introduces the distributed retry capability with retry subsystems.
-The retry subsystem is responsible for coordinating the retry of sagas that have stalled due to transient failures in the infrastructure.
-Without this stage, a saga that stalls due to a transient infrastructure failure (e.g., a utility service being temporarily unavailable, any network timeout) will remain in an incomplete state indefinitely.
-Stage 2 makes the system self-healing for such failures.
+阶段 2 引入了具备重试子系统的分布式重试能力。
+重试子系统负责协调由于基础设施瞬时故障而停滞的 Saga 事务的自动重试。
+如果没有此阶段，因瞬时基础设施故障（例如下游微服务暂时不可用、网络超时）而停滞的 Saga 将无限期地保持在未完成状态。
+阶段 2 使得分布式系统针对此类瞬时故障具备了自我修复 (Self-Healing) 的能力。
 
-image::implementations:stacksaga-sync/stacksaga-diagram-stage-2-retry-ready-architecture-overview.svg[StackSaga-Sync Architecture: Stage 2 — Retry-Ready Setup,width=800]
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-2-retry-ready-architecture-overview.svg[StackSaga 同步架构：阶段 2 —— 重试就绪架构,width=800]
 
-=== New Components at This Stage
+=== 该阶段新增的组件 (New Components at This Stage)
 
 [cols="1,1,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Service
-| New Component
-| Purpose
+| 服务组件 | 新增组件 | 用途与职责
 
-| Ring Coordinator Service
+| 环形协调器服务 (Ring Coordinator Service)
 | `stacksaga-ring-coordinator`
-| A standalone service that manages the token ring. It tracks available orchestrator instances, distributes Murmur3 token sub-ranges among them, and handles range rebalancing when instances join or leave the cluster. see xref:#
+| 管理令牌环的独立轻量级服务。它负责跟踪所有可用的编排器实例，在其之间分配 Murmur3 令牌子范围，并在实例加入或离开集群时处理令牌范围的动态再平衡。
 
-| Orchestrator
+| 编排器 (Orchestrator)
 | `stacksaga-ring-coordinator-connector`
-| Connects the orchestrator instance to the ring coordinator (via RSocket `request-stream`), receives and holds its assigned token sub-range, and enables the local retry scheduler to scan the event store for transactions whose Murmur3 hash falls within the owned range.
+| 将编排器实例连接到环形协调器（通过 RSocket `request-stream`），接收并持有其分配的令牌子范围，并启用本地重试调度器扫描事件存储中 Murmur3 哈希落在其持有范围内的异常事务。
 |===
 
-=== Retry Mechanism
+=== 重试机制运作原理 (Retry Mechanism)
 
-By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, the instance is promoted to a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry Node].
-The ring coordinator assigns each registered orchestrator instance a contiguous sub-range of the Murmur3 token ring.
-The retry scheduler on each instance periodically scans the event store for transactions that are in a non-terminal state (e.g., `IN_PROGRESS`, `COMPENSATING`) and whose transaction ID hashes into the locally owned token range.
-When such a transaction is found, the scheduler re-submits it to the saga engine for re-execution from the last incomplete step.
+通过向编排器服务添加 `stacksaga-ring-coordinator-connector`，该微服务实例被晋升为 xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[重试节点 (Retry Node)]。
+环形协调器为每个注册的编排器实例分配 Murmur3 令牌环的连续子范围。
+每个实例上的重试调度器定期扫描事件存储中处于非终态（例如 `IN_PROGRESS`、`COMPENSATING`）且事务 ID 哈希属于本地持有令牌范围的事务。
+一旦发现此类事务，调度器便将其重新提交给 Saga 引擎，从最后一个未完成的步骤恢复重新执行。
 
-This partitioning ensures that in a multi-instance orchestrator deployment, each stuck transaction is retried by exactly one instance — there is no duplication of retry work and no need for distributed locking.
-When an instance restarts or a new instance joins, the ring coordinator rebalances token ranges and the new assignment is delivered over the existing RSocket stream.
+这种分区机制确保在多实例编排器部署中，每个停滞的事务**恰好由一个实例进行重试** —— 绝无重复重试工作，且完全不需要分布式数据库锁。
+当实例重启或新实例加入集群时，环形协调器会自动再平衡令牌范围，并通过现有的 RSocket 流下发新的分配。
 
-NOTE: The ring coordinator is a separate service (`stacksaga-ring-coordinator-spring-boot-starter`) that must be deployed independently.
-It is a lightweight coordination service and does not participate in the business logic. +
-It is recommended read xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[] to understand the retry mechanism in depth and how the ring coordinator works.
+NOTE: 环形协调器是一个独立的轻量级服务 (`stacksaga-ring-coordinator-spring-boot-starter`)，需单独部署。它仅负责令牌协调，完全不参与实际的业务逻辑。 +
+建议深入阅读 xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[]，全面理解重试机制与环形协调器的设计哲学。
 
 [[stacksaga-synchronous-architecture-3rd-stage]]
-== Stage 3 — Monitoring and Observability Setup
+== 阶段 3：监控与可观测性架构 (Stage 3 — Monitoring and Observability Setup)
 
-Stage 3 adds the observability layer, enabling the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] to query real-time and historical saga execution data from the orchestrator service.
+阶段 3 引入了可观测性层，使 xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] 能够从编排器服务实时查询当前及历史的 Saga 执行全景数据。
 
-image::implementations:stacksaga-sync/stacksaga-diagram-stage-3-monitoring-and-retry-ready-architecture-overview.svg[StackSaga-Sync Architecture: Stage 3 — Monitoring + Retry-Ready,width=800]
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-3-monitoring-and-retry-ready-architecture-overview.svg[StackSaga 同步架构：阶段 3 —— 监控与重试就绪架构,width=800]
 
-=== New Component at This Stage
+=== 该阶段新增的组件 (New Component at This Stage)
 
 [cols="1,1,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Service
-| New Component
-| Purpose
+| 服务组件 | 新增组件 | 用途与职责
 
-| Orchestrator
+| 编排器 (Orchestrator)
 | `stacksaga-trace-window-connector`
-| Exposes a set of internal APIs (consumed by the StackSaga Trace Window UI) that surface per-transaction execution traces, step-level timelines, failure details, retry histories, and compensation status from the event store.
+| 暴露一组内部 API（供 StackSaga Trace Window UI 调用），从事件存储中提取每笔事务的执行轨迹、步骤级时间线、故障异常详情、重试审计历史以及补偿状态。
 |===
 
-=== What Becomes Visible
+=== 获得的端到端可视化能力 (What Becomes Visible)
 
-With the trace window connector in place, the StackSaga Trace Window provides:
+引入 Trace Window 连接器后，StackSaga Trace Window 提供以下核心洞察能力：
 
-* Per-saga execution graphs showing each step, its execution timestamp, duration, status, and any error payload.
-* Compensation traces showing which executors executed, in what order, and whether they succeeded.
-* Retry audit logs showing how many retry attempts were made, which retry node handled each attempt, and the outcome.
-* Live transaction status for in-progress sagas.
+* **单笔 Saga 执行全景拓扑图**：展示每个步骤、其执行时间戳、耗时、执行状态以及任何错误载荷。
+* **补偿轨迹追踪**：显示执行了哪些补偿执行器、其执行顺序以及补偿是否成功完成。
+* **重试审计日志**：显示执行了多少次重试尝试、哪个重试节点接管了每次尝试以及最终的处理结果。
+* **实时事务状态监测**：对正在进行中的 Saga 事务进行毫秒级实时状态追踪。
 
-This layer does not change the Kafka topology or the retry behavior — it is a passive observability connector that reads from the existing event store and exposes the data through an API consumed by the Trace Window UI.
+该层级完全不改变底层的重试行为或执行拓扑 —— 它是一个被动的可观测性连接器，仅从现有的事件存储中读取数据，并通过 Trace Window UI 消费的 API 暴露出去。
 
-With Stage 3 in place, the full StackSaga-Kafka deployment is production-ready: it supports asynchronous saga execution, distributed retry with token ring partitioning, comprehensive observability via the Trace Window.
-
-////
-todo: link to environment support section once it's written
-////
-
-See more about how the application is deployed in environments.
+随着阶段 3 的就绪，完整的 StackSaga 同步编排体系达到生产就绪水准：支持端到端同步长事务执行、基于令牌环切片的分布式自治重试以及通过 Trace Window 提供的全链路深度可观测性。

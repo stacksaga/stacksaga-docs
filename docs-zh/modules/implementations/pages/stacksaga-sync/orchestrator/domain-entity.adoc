@@ -1,77 +1,77 @@
-:description: Domain Entity and Event Sourcing specifications for stacksaga-orchestrator — creating custom DomainEntity classes, key generation, idempotency, and mapper customization.
-:keywords: StackSaga, DomainEntity, SagaDomainEntity, event sourcing, key generation, idempotency, saga domain identifier
+:description: stacksaga-orchestrator 的领域实体 (Domain Entity) 与事件溯源 (Event Sourcing) 规范指南 — 创建自定义 DomainEntity 类、键生成、幂等性以及自定义映射器。
+:keywords: StackSaga, DomainEntity, SagaDomainEntity, 事件溯源, event sourcing, key generation, 键生成, idempotency, 幂等性, saga domain identifier, 领域标识符
 :domain-entity-scan-prop: stacksaga.domain-entity-scan
 :template-class: SagaTemplate
 :page-priority: 0.7
 
-= Domain Entity and Event Sourcing
+= 领域实体与事件溯源 (Domain Entity and Event Sourcing)
 
 // tag::what-is-domain-entity-event-sourcing[]
-== What is Domain Entity Event Sourcing?
+== 什么是领域实体事件溯源？ (What is Domain Entity Event Sourcing?)
 
-The *Domain-Entity* object serves as the central data container throughout the entire lifecycle of a distributed transaction.
-It functions as a shared, strongly typed data bucket, enabling each executor (span) in the saga workflow to consume existing transactional data and contribute newly produced state as the business process moves forward.
+在分布式事务的整个生命周期中，*领域实体 (Domain-Entity)* 对象充当核心数据载体。
+它是一个共享的、强类型的数据容器，使 Saga 工作流中的每个执行器（跨度 / span）能够在业务流程向前推进的过程中消费现有的事务数据，并贡献新产生的业务状态。
 
-Rather than mutating a single record in place without history, StackSaga employs *Domain-Entity Event Sourcing*.
-Every significant atomic transition generates a new, immutable snapshot of the Domain-Entity state, which is immediately committed to the Event Store:
+StackSaga 并非就地修改单条无历史记录的数据，而是采用*领域实体事件溯源 (Domain-Entity Event Sourcing)* 机制。
+每一次重要的原子状态流转都会生成一份不可变的领域实体状态快照 (Snapshot)，并立即提交持久化到事件存储库 (Event Store) 中：
 
-. **Baseline State**: Upon transaction initiation, the initial state of the Domain-Entity is persisted as the baseline version with status `STARTED`.
-. **Step Snapshots**: As each atomic executor completes its operation, a point-in-time snapshot of the updated Domain-Entity is persisted, stamped with the unique span identifier and execution metadata.
+. **基准状态 (Baseline State)**：在事务初始化时，领域实体的初始状态作为基准版本持久化，状态标记为 `STARTED`。
+. **步骤快照 (Step Snapshots)**：当每个原子执行器完成其操作后，都会持久化一个更新后的领域实体的时间点快照，并盖上唯一的跨度标识符和执行元数据戳记。
 
-*Domain-Entity event sourcing provides two core architectural capabilities:*
+*领域实体事件溯源提供了两项核心架构能力：*
 
-. *Transaction Re-Invoke & Automatic Recovery (Retrying and Restoring)*
-- If an atomic execution fails due to a transient issue (such as temporary network latency or service unavailability), the saga engine can safely retry the operation. If a transaction halts due to a system crash or node restart, it can be seamlessly restored and re-invoked from the exact point of interruption. Because historical state is preserved at every milestone, the engine restores the precise Domain-Entity snapshot that existed when the failure occurred, eliminating data corruption and partial-state inconsistencies.
+. *事务重新调用与自动恢复（重试与状态还原）*
+- 如果原子执行因瞬态问题（如临时网络延迟或下游服务不可用）而失败，Saga 引擎可以安全重试该操作。如果事务因系统崩溃或节点重启而中断，则可以从中断的确切位置无缝恢复并重新调用。因为每个里程碑的历史状态都完好保存，引擎能够精确还原故障发生时存在的领域实体快照，彻底杜绝数据损坏和部分状态不一致。
 
-. *Full Transaction Observability & Auditability via Dashboard*
-- Storing every discrete state transition provides complete chronological traceability. System administrators and developers can inspect the Domain-Entity state before and after each atomic execution runs, making it straightforward to audit the evolution of a transaction, diagnose edge-case anomalies, and inspect payload mutations through the Trace-Window dashboard.
+. *通过仪表盘实现全局事务可观测性与审计溯源*
+- 存储每个离散的状态变迁提供了完整的按时间顺序排列的可追溯性。系统管理员和开发人员可以在每个原子执行器运行之前和之后检查领域实体的状态，从而能够通过 Trace-Window（链路追踪窗口）仪表盘轻松审计事务的演进轨迹、诊断极端边缘异常并检查载荷数据变更。
 // end::what-is-domain-entity-event-sourcing[]
 
 // tag::domain-entity-as-saga-domain-identifier[]
-== Domain Entity as the Saga Domain Identifier
+== 领域实体作为 Saga 领域标识符 (Domain Entity as Saga Domain Identifier)
 
-In addition to serving as the transactional data carrier, the `DomainEntity` class fulfills a fundamental architectural role in the StackSaga framework: it serves as the **Saga Domain Identifier**.
+除了作为事务数据载体之外，`DomainEntity` 类在 StackSaga 框架中还承担着一项基础架构职责：它充当 **Saga 领域标识符 (Saga Domain Identifier)**。
 
-The framework uses the `DomainEntity` class type to distinguish business domains and bind together all executors responsible for handling that specific workflow. In other words, the Domain-Entity class acts as the strongly typed anchor for the entire saga:
+框架利用 `DomainEntity` 的类类型来区分业务领域，并将负责处理该特定工作流的所有执行器绑定在一起。换句话说，领域实体类充当了整个 Saga 的强类型锚点：
 
-* For example, in an e-commerce platform, an order fulfillment process uses `OrderDomainEntity` as its domain identifier, while a customer subscription process uses `SubscriptionDomainEntity`.
-* Each business domain defines its own dedicated `DomainEntity` subclass containing fields relevant to that business context.
+* 例如，在电子商务平台中，订单履行流程使用 `OrderDomainEntity` 作为其领域标识符，而客户订阅流程使用 `SubscriptionDomainEntity`。
+* 每个业务领域定义自己专用的 `DomainEntity` 子类，其中包含与该业务上下文相关的属性字段。
 
 [NOTE]
 ====
-Each distinct Long-Running Transaction (LRT) requires its own dedicated `DomainEntity` subclass.
-StackSaga uses the **class type itself**—not an arbitrary runtime string or field value—as the discriminator to identify the saga domain.
-For instance, `PlaceOrder` and `CancelSubscription` workflows must be implemented as separate classes: `OrderDomainEntity` and `CancelSubscriptionDomainEntity`.
+每个不同的长事务 (LRT - Long-Running Transaction) 都需要有自己专用的 `DomainEntity` 子类。
+StackSaga 使用**类类型本身**（而非运行时的任意字符串或属性值）作为判别器来标识 Saga 领域。
+例如，`PlaceOrder`（下单）和 `CancelSubscription`（取消订阅）工作流必须实现为独立的类：`OrderDomainEntity` 和 `CancelSubscriptionDomainEntity`。
 
-Beyond transaction identification, the `DomainEntity` class acts as the generic type anchor that unifies all related framework components for that saga domain:
+除了事务识别外，`DomainEntity` 类还作为泛型类型锚点，统一了该 Saga 领域的所有相关框架组件：
 
 * `{template-class}<OrderDomainEntity, ?>`
 * `AbstractEventManager<OrderDomainEntity, ?>`
 * `TransactionEventListener<OrderDomainEntity>`
 * `CommandExecutor<OrderDomainEntity>` / `QueryExecutor<OrderDomainEntity>`
 
-This design guarantees compile-time type safety, structured routing, and clean domain isolation across the entire application.
+这种设计确保了编译期类型安全、结构化路由以及跨整个应用程序的清晰领域隔离。
 ====
 // end::domain-entity-as-saga-domain-identifier[]
 
 // tag::domain-entity-lifecycle[]
-== Domain Entity Lifecycle & State Progression in Saga Execution
+== Saga 执行中领域实体的生命周期与状态流转
 
-Throughout a saga transaction, the `DomainEntity` traverses three distinct lifecycle phases:
+在整个 Saga 事务执行期间，`DomainEntity` 历经三个清晰的生命周期阶段：
 
-. *Phase 1: State Creation & Initialization (`STARTED`)*
-. *Phase 2: Progressive Evolution & Forward Mutation (`IN_PROGRESS`)*
-. *Phase 3: Lifecycle Termination (`COMPLETED` or `FAILED`)*
+. *阶段 1：状态创建与初始化 (`STARTED`)*
+. *阶段 2：渐进式演进与前向变更 (`IN_PROGRESS`)*
+. *阶段 3：生命周期终态终止 (`COMPLETED` 或 `FAILED`)*
 
-Understanding how data is populated, consumed, mutated, and finalized across these phases is essential for designing reliable, idempotent saga workflows.
+理解跨这些阶段如何填充、消费、变更和终结数据，对于设计高可靠、幂等的 Saga 工作流至关重要。
 
-=== Phase 1: State Creation & Initialization
+=== 阶段 1：状态创建与初始化 (State Creation & Initialization)
 
-The lifecycle begins with the client application before the transaction is handed to the saga orchestration engine:
+该生命周期始于客户端应用程序，随后才将事务移交给 Saga 编排引擎：
 
-. **Custom Instance Creation**: The developer instantiates the custom `DomainEntity` subclass (for example, `OrderDomainEntity`) and populates it with the initial request payload received from the customer or upstream service (e.g., `user_id`, `amount`, `items`).
-. **Initial Field State**: Only the initial request attributes are populated at this point. All downstream attributes (such as `delivery_details`, `order_id`, and `payment_id`) remain `null`.
-. **Saga Handoff**: The entity is passed to the orchestrator via the template initiation method:
+. **自定义实例创建**：开发者实例化自定义 `DomainEntity` 子类（例如 `OrderDomainEntity`），并使用从客户或上游服务接收到的初始请求载荷填充它（例如 `user_id`、`amount`、`items`）。
+. **初始字段状态**：此时仅填充了初始请求属性。所有下游属性（例如 `delivery_details`、`order_id` 和 `payment_id`）均保持为 `null`。
+. **移交 Saga**：通过模板初始化方法将实体传递给编排器：
 +
 [source,java,subs="attributes+"]
 ----
@@ -80,131 +80,127 @@ sagaTemplate.init(orderDomainEntity)
     ...
     .execute();
 ----
-. **Baseline Event Persistence**: Before invoking the first executor, the orchestration engine serializes the entity and commits the initial snapshot (Version 0) to the Event Store, tagging the transaction with status `STARTED`.
+. **持久化基准事件**：在调用第一个执行器之前，编排引擎序列化实体并将初始快照（版本 0）提交到事件存储库，将事务标记为 `STARTED` 状态。
 
-=== Phase 2: Progressive Evolution & Forward Mutation
+=== 阶段 2：渐进式演进与前向变更 (Progressive Evolution & Forward Mutation)
 
-Once the saga engine assumes execution control, it coordinates the sequential execution of atomic spans (`QueryExecutor` and `CommandExecutor`):
+一旦 Saga 引擎接管执行控制权，它将协调原子跨度（`QueryExecutor` 和 `CommandExecutor`）的顺序执行：
 
-* **Selective State Consumption (Read Flow)**:
+* **选择性状态消费（读流程）**：
 +
-Each executor does not need the entire dataset; it queries only the specific properties it requires from the current Domain-Entity snapshot. For instance:
+每个执行器并不需要全部数据集；它仅从当前领域实体快照中查询其所需的特定属性。例如：
 +
-- `UserDetailExecutor` reads `user_id` to query customer shipping details.
-- `OrderInitializeExecutor` reads `user_id` and `amount` to register the order.
-- `MakePaymentExecutor` reads `order_id` and `amount` to process the payment.
+- `UserDetailExecutor` 读取 `user_id` 以查询客户收货地址详情。
+- `OrderInitializeExecutor` 读取 `user_id` 和 `amount` 来登记订单。
+- `MakePaymentExecutor` 读取 `order_id` 和 `amount` 来处理支付扣款。
 
-* **Forward State Mutation (`doProcess()`)**:
+* **前向状态变更 (`doProcess()`)**：
 +
-When an executor completes its external invocation, it enriches the Domain-Entity using setter methods (e.g., `domainEntity.setDeliveryDetails(...)`, `domainEntity.setOrderId(...)`).
-Upon return from `doProcess()`, the framework automatically serializes the mutated Domain-Entity and writes an immutable snapshot to the Event Store, stamped with the unique span identifier and marked with status `IN_PROGRESS`.
+当执行器完成外部调用后，它使用 setter 方法丰富领域实体（例如 `domainEntity.setDeliveryDetails(...)`、`domainEntity.setOrderId(...)`）。
+从 `doProcess()` 返回时，框架会自动序列化变更后的领域实体，并将不可变快照写入事件存储库，盖上唯一的跨度标识符并标记为 `IN_PROGRESS` 状态。
 
-* **State Preservation in Non-Mutating Spans**:
+* **非变更跨度中的状态保留 (State Preservation)**：
 +
-IMPORTANT: **Not every executor needs to add new properties to the Domain-Entity.** For example, `ReserveItemsExecutor` reads `items` and `order_id` to reserve stock in an external warehouse service. Even though it performs a critical transactional command, it does not add new fields to the domain entity. In this step, existing fields remain **preserved**, and the engine persists a milestone snapshot confirming successful execution of that atomic span.
+IMPORTANT: **并非每个执行器都需要向领域实体添加新属性。** 例如，`ReserveItemsExecutor` 读取 `items` 和 `order_id` 以在外部仓储服务中锁定库存。尽管它执行了关键的事务命令，但它并没有向领域实体追加新字段。在这一步中，既有字段保持**完好保留 (preserved)**，引擎会持久化一个里程碑快照以确认该原子跨度执行成功。
 
-* **Compensation Immutability Rule (`doRevert()`)**:
+* **补偿不可变规则 (`doRevert()`)**：
 +
 [IMPORTANT]
 ====
-During compensating executions (`doRevert()`), the Domain-Entity is **strictly read-only**.
-Compensations must never alter the Domain-Entity state, ensuring that the historical audit record of what actually occurred remains immutable.
-Any metadata required for compensation (such as authorization tokens or transient cancellation IDs) is managed independently through the **Revert-Hint-Store**.
+在补偿执行 (`doRevert()`) 期间，领域实体是**严格只读**的。
+补偿操作绝不能修改领域实体的状态，确保对实际已发生事实的历史审计记录保持不可篡改。
+补偿所需的任何元数据（例如授权令牌或临时取消标识）均通过 **Revert-Hint-Store (补偿提示存储库)** 独立管理。
 ====
 
-=== Phase 3: Lifecycle Termination
+=== 阶段 3：生命周期终态 (Lifecycle Termination)
 
-The saga lifecycle terminates in one of two deterministic states:
+Saga 生命周期最终会在以下两种确定性状态之一终止：
 
-. **Successful Completion (`COMPLETED`)**:
-- When all executors in the workflow successfully return `stepManager.next(...)` without encountering a pivot exception (unrecoverable failure), the saga workflow reaches its terminal node.
-- The engine transitions the transaction to status `COMPLETED`, and the final, fully enriched Domain-Entity snapshot is sealed in the Event Store as the permanent record of the completed business transaction.
+. **成功完成 (`COMPLETED`)**：
+- 当工作流中的所有执行器均成功返回 `stepManager.next(...)` 且未遇到关键致命异常（枢轴不可恢复故障）时，Saga 工作流到达终态节点。
+- 引擎将事务流转为 `COMPLETED` 状态，最终完全填充的领域实体快照在事件存储库中归档封存，作为已完成业务事务的永久审计凭证。
 
-. **Pivot Failure & Backward Compensation (`FAILED`)**:
-- If an atomic execution encounters a non-retryable error (a pivot execution failure), forward progression immediately halts.
-- The saga engine initiates backward rollback, executing `doRevert()` on all previously completed command executors in reverse order.
-- Once all compensations are finalized, the transaction terminates with status `FAILED`. The Domain-Entity retains its last valid forward state prior to the failure, providing developers and operators with exact forensic data in the Trace-Window dashboard.
+. **关键故障与逆向回滚 (`FAILED`)**：
+- 如果原子执行遇到不可重试错误（枢轴执行故障），前向演进立即停止。
+- Saga 引擎启动逆向回滚，以相反顺序对先前所有已完成的命令执行器执行 `doRevert()`。
+- 一旦所有补偿全部完成，事务以 `FAILED` 状态终止。领域实体保留故障发生前最后一次有效的正向状态，在 Trace-Window 仪表盘中为开发人员和运维人员提供确切的事后分析取证数据。
 
-=== Visualizing State Progression: The Place-Order Architecture
+=== 状态流转可视化：下单架构示例 (Place-Order Architecture)
 
-The following architectural diagram illustrates the complete step-by-step lifecycle and state progression of `OrderDomainEntity` during a place-order transaction:
+以下架构图展示了在下单事务执行期间 `OrderDomainEntity` 完整的分步生命周期与状态流转过程：
 
-image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="StackSaga Domain-Entity State Transition Architecture",width=100%]
+image:implementations:aggregator/stacksaga-diagram-aggregator-state.svg[alt="StackSaga 领域实体状态流转架构图",width=100%]
 
-=== Understanding the Diagram Layout
+=== 理解架构图布局
 
-The diagram is organized into three architectural columns across the execution timeline:
+该图沿执行时间线组织为三个架构列：
 
-. *Left Column (Saga Executors)*: Displays the atomic execution units (`QueryExecutor` and `CommandExecutor`), detailing the specific method invocations (`doProcess()` vs `doRevert()`) and external service interactions.
-. *Center Spine (Execution Timeline & Data Flow)*: Illustrates the chronological flow from initiation (`INIT`) through steps `01` to `04` down to terminal completion (`END`).
-  - *Blue Dashed Connectors (`Reads from State`)*: Depict an executor reading specific input properties from the previous snapshot.
-  - *Green Solid Connectors (`Updates State`)*: Depict state updates flowing from `doProcess()` to produce a new persisted milestone in the Event Store.
-. *Right Column (OrderDomainEntity Snapshots)*: Displays the point-in-time state of the Domain-Entity committed to the Event Store after each step:
-  - *Mint Green Rows (`✓ initial` / `✓ updated`)*: Highlight newly initialized or mutated properties.
-  - *Gray Rows (`preserved`)*: Highlight previously captured properties that remain intact and accessible.
-  - *White Rows (`null`)*: Indicate uninitialized properties awaiting downstream execution.
+. *左列（Saga 执行器 / Saga Executors）*：展示原子执行单元（`QueryExecutor` 和 `CommandExecutor`），详述具体的方法调用（`doProcess()` 与 `doRevert()`）及外部微服务交互。
+. *中轴线（执行时间线与数据流）*：说明从初始化 (`INIT`) 经步骤 `01` 到 `04` 直至终态完成 (`END`) 的时间流。
+  - *蓝色虚线箭头 (`Reads from State`)*：表示执行器从前一快照读取特定输入属性。
+  - *绿色实线箭头 (`Updates State`)*：表示从 `doProcess()` 流出的状态更新，在事件存储库中生成持久化的新里程碑。
+. *右列（OrderDomainEntity 快照）*：展示每一步后提交至事件存储库的领域实体时间点状态：
+  - *薄荷绿行 (`✓ initial` / `✓ updated`)*：高亮显示新初始化或变更的属性。
+  - *灰色行 (`preserved`)*：高亮显示先前捕获且保持完好可访问的属性。
+  - *白色行 (`null`)*：表示等待下游执行初始化的未赋值属性。
 
-=== Step-by-Step State Evolution Matrix
+=== 逐步状态演进矩阵表
 
 [cols="1,2,2,3",options="header"]
 |===
-| Step | Executor & Type | State Read (Input) | State Mutation & Lifecycle Event
+| 步骤 | 执行器与类型 | 状态读取 (输入) | 状态变更与生命周期事件
 
 | *INIT*
-| *Client Controller*
-| Order request payload from client.
-| Creates `OrderDomainEntity` with initial fields (`user_id = "mafei"`, `amount = 100.0`, `items = [...]`). Downstream fields are `null`. Snapshot persisted to Event Store with status `STARTED`.
+| *客户端控制器 (Client Controller)*
+| 客户端提交的订单请求载荷。
+| 使用初始字段创建 `OrderDomainEntity`（`user_id = "mafei"`、`amount = 100.0`、`items = [...]`）。下游字段均为 `null`。快照持久化到事件存储库，状态为 `STARTED`。
 
 | *01*
 | *UserDetailExecutor* +
 (`QueryExecutor`)
-| Reads `user_id` from Domain-Entity.
-| Queries external `User-Service` to fetch shipping address. Mutates `delivery_details = "No344 New York."`. Snapshot persisted with status `IN_PROGRESS`. (As a query executor, read-only lookup requires no `doRevert()`).
+| 从领域实体读取 `user_id`。
+| 调用外部 `User-Service` 查询送货地址。变更属性 `delivery_details = "No344 New York."`。快照持久化，状态为 `IN_PROGRESS`。（作为查询执行器，只读操作无需实现 `doRevert()`）。
 
 | *02*
 | *OrderInitializeExecutor* +
 (`CommandExecutor`)
-| Reads `user_id` and `amount` from Domain-Entity.
-| Calls `Order-Service` to record an order entry. Mutates `order_id = "1245"`. Implements `doRevert()` to void the order if downstream steps fail later. Snapshot persisted with status `IN_PROGRESS`.
+| 从领域实体读取 `user_id` 和 `amount`。
+| 调用 `Order-Service` 记录订单条目。变更属性 `order_id = "1245"`。实现 `doRevert()` 以便在后续步骤失败时作废订单。快照持久化，状态为 `IN_PROGRESS`。
 
 | *03*
 | *ReserveItemsExecutor* +
 (`CommandExecutor`)
-| Reads `items` and `order_id` from Domain-Entity.
-| Calls `Stock-Service` to place an inventory hold. *Notice:* No new fields are added; existing fields are preserved (`reserved`). Implements `doRevert()` to release inventory hold on rollback. Snapshot persisted to record span milestone.
+| 从领域实体读取 `items` 和 `order_id`。
+| 调用 `Stock-Service` 锁定库存。*注意：* 没有追加新字段；既有字段完好保留 (`preserved`)。实现 `doRevert()` 以便在回滚时释放库存锁定。持久化快照以记录跨度里程碑。
 
 | *04*
 | *MakePaymentExecutor* +
 (`CommandExecutor`)
-| Reads `order_id` and `amount` from Domain-Entity.
-| Calls `Payment-Service` to charge the customer. Mutates `payment_id = "tx01343743131083017"`. Implements `doRevert()` to issue refund if needed. Snapshot persisted with all required properties fully populated.
+| 从领域实体读取 `order_id` 和 `amount`。
+| 调用 `Payment-Service` 向客户扣款。变更属性 `payment_id = "tx01343743131083017"`。实现 `doRevert()` 以便在需要时发起退款。持久化快照，此时所有必需属性均已填充完毕。
 
 | *END*
-| *Saga Engine*
-| Final transaction validation.
-| All executors completed successfully without pivot exceptions. Transaction reaches `COMPLETED` state; final Domain-Entity state is sealed in the Event Store.
+| *Saga 引擎 (Saga Engine)*
+| 最终事务校验。
+| 所有执行器均成功完成且未触发枢轴故障。事务流转至 `COMPLETED` 状态；最终领域实体状态在事件存储库中封存归档。
 |===
 
-=== Key Architectural Takeaways
+=== 核心架构要点
 
-* *Decoupled Microservice Architecture*: Microservices never communicate directly with each other to pass context. The `DomainEntity` acts as the single source of truth and shared data carrier across the entire distributed workflow.
-* *Monotonic State Accumulation*: The Domain-Entity accumulates state progressively—each executor enriches the shared bucket with the output of its execution so subsequent executors can consume it.
-* *State Preservation vs. Modification*: An executor is not required to mutate the Domain-Entity. It can execute business logic and succeed while keeping existing state preserved.
-* *Event Sourcing & Re-Invoke Guarantees*: Because each step's snapshot is committed to the Event Store, the engine can restore the exact historical state to retry a failed operation or compensate previous steps without data corruption.
-* *Strict Mutation Boundary*: State modifications are strictly confined to `doProcess()`. Compensating executions (`doRevert()`) remain read-only, with rollback metadata isolated in the Revert-Hint-Store.
+* *解耦的微服务架构*：微服务之间从不直接相互调用来传递上下文。`DomainEntity` 作为单一事实来源和共享数据载体贯穿整个分布式工作流。
+* *单调状态累积 (Monotonic State Accumulation)*：领域实体渐进式累积状态——每个执行器使用其执行结果丰富共享容器，以便后续执行器消费。
+* *状态保留与状态修改*：执行器并不强制要求修改领域实体。它可以执行业务逻辑并成功返回，同时保留既有状态不变。
+* *事件溯源与重放保证*：因为每一步的快照都持久化在事件存储库中，引擎可以恢复确切的历史状态以重试失败操作或补偿先前步骤，避免数据污染。
+* *严格变更边界*：状态修改严格限制在 `doProcess()` 中。补偿执行 (`doRevert()`) 保持纯只读，回滚所需的元数据隔离保存在 Revert-Hint-Store 中。
 // end::domain-entity-lifecycle[]
-
-// tag::how-domain-entity-is-used[]
-// (Consolidated into domain-entity-lifecycle - retained for backward-compatibility)
-// end::how-domain-entity-is-used[]
 
 // tag::creating-custom-domain-entity[]
 [[creating_custom_domain_entity]]
-== Creating a Custom Domain-Entity
+== 创建自定义领域实体 (Creating a Custom Domain-Entity)
 
-To define a custom Domain-Entity, create a class that extends the `DomainEntity` base class provided by the framework and annotate it with `@SagaDomainEntity`.
+要定义自定义领域实体，需创建一个继承自框架基类 `DomainEntity` 的类，并为其添加 `@SagaDomainEntity` 注解。
 
-You can declare any fields required to maintain state across the saga workflow (such as `username`, `totalAmount`, `productItems`, etc.). When starting a transaction, pass an initialized instance of this custom class to `{template-class}.init(...).startWith(...).execute()`.
+您可以声明在 Saga 工作流中维护状态所需的任何属性字段（如 `username`、`totalAmount`、`productItems` 等）。启动事务时，将此自定义类的已初始化实例传递给 `{template-class}.init(...).startWith(...).execute()`。
 
 [source,java]
 ----
@@ -283,43 +279,43 @@ public class OrderDomainEntity extends DomainEntity { //<2>
 }
 ----
 
-<1> `@SagaDomainEntity`: Configures the domain entity metadata:
-* **`name`**: The unique identifier for the domain entity within the framework. Used to bind transactions and executors.
-* **`version`**: The schema version declared via `@SagaDomainEntityVersion`. Essential for domain-entity up-casting and down-casting across rolling deployments. +
-xref:#further_configurations[See further configurations for custom mappers and key generators.]
-<2> **Inheritance**: The custom class must extend `DomainEntity` to inherit core saga identification and lifecycle capabilities.
-<3> **Constructor**: A protected no-argument constructor that calls `super(OrderDomainEntity.class)`. Because the framework instantiates domain entities dynamically during deserialization and state restoration, parameterized constructors should not be declared.
-<4> **Field Mapping**: Declare attributes required to carry transaction state. Using `@JsonProperty` annotations is strongly recommended to guarantee deterministic JSON serialization and avoid naming discrepancies during schema evolution.
-<5> **Nested Types & Unknown Property Archiving**: For complex nested objects, declare static inner classes (or separate classes) extending `org.stacksaga.api.UnknownPropertyArchive`. The `UnknownPropertyArchive` base class automatically captures unrecognized properties during deserialization, ensuring seamless backward and forward compatibility during schema upgrades.
+<1> `@SagaDomainEntity`：配置领域实体元数据：
+* **`name`**：领域实体在框架内的全局唯一标识名称。用于绑定事务与执行器。
+* **`version`**：通过 `@SagaDomainEntityVersion` 声明的模型结构版本号。对于滚动发布过程中的领域实体向上转换 (Up-Casting) 和向下转换 (Down-Casting) 至关重要。 +
+xref:#further_configurations[参见自定义映射器与键生成器的高级配置。]
+<2> **继承**：自定义类必须继承 `DomainEntity`，以继承核心 Saga 标识与生命周期能力。
+<3> **构造函数**：调用 `super(OrderDomainEntity.class)` 的 protected 无参构造函数。由于框架在反序列化和状态恢复期间会动态实例化领域实体，因此不应声明有参构造函数。
+<4> **字段映射**：声明承载事务状态所需的属性。强烈建议使用 `@JsonProperty` 注解以确保确定性 JSON 序列化，并避免模式演进期间的命名不一致。
+<5> **嵌套类型与未知属性归档**：对于复杂的嵌套对象，声明继承自 `org.stacksaga.api.UnknownPropertyArchive` 的静态内部类（或独立类）。`UnknownPropertyArchive` 基类在反序列化期间自动捕获未识别属性，确保架构升级时的无缝前后向兼容性。
 
 [IMPORTANT]
 ====
-**Refactoring Safety**: The framework identifies the domain entity using the logical `name` attribute declared in `@SagaDomainEntity(name = "...")`, rather than the Java class name or package. You can safely refactor, rename, or relocate the Java class without disrupting active transactions or historical event-store records, provided the `@SagaDomainEntity` `name` remains identical.
-Two different custom domain-entity classes cannot declare the same `name`.
+**重构安全性**：框架通过 `@SagaDomainEntity(name = "...")` 中声明的逻辑 `name` 属性标识领域实体，而不是通过 Java 类名或包名。只要 `@SagaDomainEntity` 的 `name` 保持一致，您就可以安全地重构、重命名或移动 Java 类文件，而不会中断活动事务或历史事件存储库记录。
+两个不同的自定义领域实体类不能声明相同的 `name`。
 ====
 
 [IMPORTANT]
 ====
-**Spring Bean Notice**: In StackSaga, custom domain entities are lightweight state carriers—they are **not** Spring beans.
-They do not need to be within the application's component scan package. Instead, register the package containing your domain entities using the `{domain-entity-scan-prop}` configuration property.
+**Spring Bean 说明**：在 StackSaga 中，自定义领域实体是轻量级的状态载体——它们**不是** Spring Bean。
+它们无需位于应用程序的组件扫描包路径下。应通过 `{domain-entity-scan-prop}` 配置属性注册包含领域实体的包。
 ====
 
 [[securing_sensitive_data]]
-=== Securing Sensitive Data & Trace-Window Protection (Data Masking)
+=== 敏感数据保护与追踪窗口防护（数据脱敏）
 
-Because the `DomainEntity` represents the complete state of a transaction, it is serialized and committed to the Event Store at every atomic span snapshot.
-These serialized snapshots are retrieved and displayed directly on the **Trace-Window dashboard** (`/execution/binary`) for forensic analysis, debugging, and observability.
+由于 `DomainEntity` 代表事务的完整状态，它在每个原子跨度快照处都会被序列化并提交到事件存储库中。
+这些序列化快照会直接被检索并显示在 **Trace-Window 仪表盘** (`/execution/binary`) 上，用于取证分析、调试和可观测性监控。
 
-When transactions process sensitive business data—such as passwords, authentication tokens, API keys, credit card numbers, or Personally Identifiable Information (PII)—developers must ensure that sensitive values are protected and not exposed in plain text within the Event Store or on the Trace-Window dashboard.
+当事务处理敏感业务数据时（例如密码、认证令牌、API 密钥、信用卡号或个人身份信息 PII），开发者必须确保敏感值受到保护，不会以明文形式暴露在事件存储库中或 Trace-Window 仪表盘上。
 
-Since the `DomainEntity` is a standard Java object serialized via Jackson, you can leverage Jackson annotations and custom getter/setter encapsulation to secure sensitive properties:
+由于 `DomainEntity` 是通过 Jackson 序列化的标准 Java 对象，您可以利用 Jackson 注解和自定义 getter/setter 封装来保护敏感属性：
 
-==== 1. Masking Sensitive Fields with Jackson Annotations (`@JsonIgnore`)
+==== 1. 使用 Jackson 注解 (`@JsonIgnore`) 忽略敏感字段
 
-If a field is only needed at runtime in memory and should **never** be persisted to the Event Store or shown in the Trace-Window:
+如果某个字段仅在内存运行时需要，且**绝不应**持久化到事件存储库或显示在 Trace-Window 中：
 
-* Annotate the getter method or field with `@JsonIgnore`.
-* Jackson will exclude this property from the serialized JSON payload.
+* 在 getter 方法或字段上标注 `@JsonIgnore`。
+* Jackson 将在序列化 JSON 载荷时排除此属性。
 
 [source,java]
 ----
@@ -331,7 +327,7 @@ public class OrderDomainEntity extends DomainEntity {
     @JsonProperty("card_last_four")
     private String cardLastFour;
 
-    // Ephemeral in-memory CVV: Never serialized or persisted to the Event Store
+    // 内存中的临时 CVV：绝不序列化或持久化到事件存储库
     @JsonIgnore
     private String cvv;
 
@@ -339,9 +335,9 @@ public class OrderDomainEntity extends DomainEntity {
 }
 ----
 
-==== 2. Encrypted / Obfuscated Storage with Plain-Text Business Accessors
+==== 2. 加密 / 混淆存储与明文业务访问器
 
-When sensitive data **must** be retained across saga spans (so subsequent executors can use it), store the data in an encrypted, hashed, or encoded form in the persisted property, while providing a `@JsonIgnore`-annotated helper method for your executors to decrypt or decode the actual value in memory:
+当敏感数据**必须**跨 Saga 跨度保留（以便后续执行器使用）时，在持久化属性中以加密、哈希或编码形式存储数据，同时提供标注有 `@JsonIgnore` 的辅助方法，供执行器在内存中解密或解码实际值：
 
 [source,java]
 ----
@@ -357,7 +353,7 @@ import org.stacksaga.api.DomainEntity;
 )
 public class OrderDomainEntity extends DomainEntity {
 
-    // Serialized & stored in Event Store (safe for Trace-Window dashboard)
+    // 序列化并存储在事件存储库中（对于 Trace-Window 仪表盘安全脱敏）
     @JsonProperty("token")
     private String encodedToken;
 
@@ -366,8 +362,8 @@ public class OrderDomainEntity extends DomainEntity {
     }
 
     /**
-     * Business methods / executors call this method to retrieve the real decrypted data.
-     * Annotated with @JsonIgnore so Jackson does not serialize it into the Event Store or Trace-Window.
+     * 业务方法 / 执行器调用此方法获取真实解密数据。
+     * 标注 @JsonIgnore 以免 Jackson 将其序列化到事件存储库或 Trace-Window 中。
      */
     @JsonIgnore
     public String getTokenAsString() {
@@ -386,29 +382,29 @@ public class OrderDomainEntity extends DomainEntity {
 
 [TIP]
 ====
-**Trace-Window Security Best Practice**:
-By storing only masked or encrypted values (e.g., `encodedToken`, `maskedPan`) in `@JsonProperty` fields and exposing decrypted values solely through `@JsonIgnore` accessor methods:
+**Trace-Window 安全最佳实践**：
+通过在 `@JsonProperty` 字段中仅存储脱敏或加密后的值（例如 `encodedToken`、`maskedPan`），并仅通过 `@JsonIgnore` 访问器方法暴露解密值：
 
-* The transaction state remains fully persistent and recoverable across nodes and retries.
-* The Trace-Window dashboard safely renders non-sensitive or masked payloads to developers and auditors without leaking confidential customer credentials or PII.
+* 事务状态在节点故障与重试期间保持完全持久化和可恢复。
+* Trace-Window 仪表盘可以安全地向开发人员和审计人员呈现非敏感或脱敏后的载荷，而不会泄漏机密客户凭证或 PII 数据。
 ====
 // end::creating-custom-domain-entity[]
 
 // tag::further-configurations[]
 [[further_configurations]]
-== Further Configurations
+== 高级配置 (Further Configurations)
 
-Furthermore, you can provide some additional configurations for the custom domain-entity by using the attributes of the `@SagaDomainEntity` annotation.
+此外，您可以通过 `@SagaDomainEntity` 注解的属性为自定义领域实体提供一些附加配置：
 
-. xref:#custom_mapper_provider_for_domain_entity[]
-. xref:#custom_key_generator_provider_for_domain_entity[]
+. xref:#custom_mapper_provider_for_domain_entity[领域实体自定义映射提供器]
+. xref:#custom_key_generator_provider_for_domain_entity[领域实体自定义键生成器提供器]
 
 [[custom_mapper_provider_for_domain_entity]]
-=== Custom Mapper Provider for Domain-Entity
+=== 领域实体自定义映射提供器 (Custom Mapper Provider)
 
-By default, stacksaga uses the default `ObjectMapper` that spring boot provides via `DefaultDomainEntityMapperProvider`.
-in case if you want to customize the `ObjectMapper` for your target domain-entity, you can create and provide a custom `objectMapper` object for the target Domain-Entity as a custom implementation of `AbstractDomainEntityMapperProvider`.
-It can be created any number of custom mapper providers for different domain-entities as needed as below.
+默认情况下，StackSaga 通过 `DefaultDomainEntityMapperProvider` 使用 Spring Boot 提供的默认 `ObjectMapper`。
+如果您希望针对目标领域实体自定义 `ObjectMapper`，可以作为 `AbstractDomainEntityMapperProvider` 的自定义实现为目标领域实体创建并提供专用的 `objectMapper` 对象。
+您可以根据需要为不同的领域实体创建任意数量的自定义映射提供器，如下所示：
 
 [source,java]
 ----
@@ -435,105 +431,104 @@ public class OrderDomainEntity extends DomainEntity {
 
 ----
 
-<1> *@Component*: Mark your custom object mapper implementation as a Spring bean.
-<2> Extend class by  `AbstractDomainEntityMapperProvider` abstract class. +
+<1> *@Component*：将自定义对象映射器实现声明为 Spring Bean。
+<2> 继承 `AbstractDomainEntityMapperProvider` 抽象类。 +
 +
-IMPORTANT: `provide()` method is invoked only once at the initialization phase of the framework to get the custom `ObjectMapper` object for the target domain-entity.
+IMPORTANT: `provide()` 方法仅在框架初始化阶段调用一次，以获取目标领域实体的自定义 `ObjectMapper` 对象。
 
-<3> Override the method for providing the custom `ObjectMapper` object.
-<4> return the customized `ObjectMapper` object.
-<5> *mapper*: provide your custom domain entity mapper provider class in the DomainEntity class.
+<3> 重写该方法以提供自定义的 `ObjectMapper` 对象。
+<4> 返回定制配置后的 `ObjectMapper` 对象。
+<5> *mapper*：在 DomainEntity 类中指定自定义领域实体映射器提供器类。
 
 [[custom_key_generator_provider_for_domain_entity]]
-=== Custom Key Generator Provider for Domain-Entity
+=== 领域实体自定义键生成器提供器 (Custom Key Generator Provider)
 
-The key generator is responsible for generating the transaction key prefix and the idempotency keys for each span.
-By default, StackSaga uses `DefaultDomainEntityKeyGenerator` as the key generator for all domain-entities.
-If you want to customize key generation for a specific domain-entity, you can create a custom implementation by extending `AbstractDomainEntityKeyGenerator`.
-You can create separate custom key generator providers for different domain-entities as needed.
+键生成器负责生成事务键前缀以及每个跨度的幂等键。
+默认情况下，StackSaga 使用 `DefaultDomainEntityKeyGenerator` 作为所有领域实体的键生成器。
+如果您想为特定领域实体自定义键生成规则，可以通过继承 `AbstractDomainEntityKeyGenerator` 来创建自定义实现。
+您可以按需为不同的领域实体创建独立的自定义键生成器。
 
-`AbstractDomainEntityKeyGenerator` provides two methods with default implementations that you can override:
+`AbstractDomainEntityKeyGenerator` 提供了两个带有默认实现的方法供您重写：
 
-- xref:#generateTransactionKeyPrefix[`generateTransactionKeyPrefix`] - generates the transaction key prefix.
-- xref:#generateIdempotencyKey[`generateIdempotencyKey`] - generates an idempotency key for each span of the transaction.
+- xref:#generateTransactionKeyPrefix[`generateTransactionKeyPrefix`] - 生成事务键前缀。
+- xref:#generateIdempotencyKey[`generateIdempotencyKey`] - 为事务的每个跨度生成幂等键。
 
 [[generateTransactionKeyPrefix]]
-=== Transaction Key Generation
+=== 事务键生成 (Transaction Key Generation)
 
-Every saga transaction requires a globally unique identifier represented by `SagaUUID`.
-A `SagaUUID` consists of two parts separated by a hyphen:
+每个 Saga 事务都需要一个由 `SagaUUID` 表示的全局唯一标识符。
+`SagaUUID` 由两部分组成，中间用连字符分隔：
 
 * `<prefix>-<UUIDv7>`
 
-1. **Prefix**: Generated by `generateTransactionKeyPrefix(...)` in `AbstractDomainEntityKeyGenerator`.
-2. **Suffix**: A time-based unique UUID generated automatically by the framework using the https://github.com/cowtowncoder/java-uuid-generator[java-uuid-generator] library.
+1. **前缀 (Prefix)**：由 `AbstractDomainEntityKeyGenerator` 中的 `generateTransactionKeyPrefix(...)` 生成。
+2. **后缀 (Suffix)**：由框架使用 https://github.com/cowtowncoder/java-uuid-generator[java-uuid-generator] 库自动生成的基于时间的唯一 UUIDv7。
 
-Because the framework automatically appends a high-entropy, time-based UUID suffix, uniqueness across transactions and distributed nodes is guaranteed.
-The prefix serves as a concise, human-readable qualifier for observability, tracing, and domain segmentation.
+由于框架会自动追加高熵的基于时间的 UUID 后缀，因此保证了跨事务与分布式节点的绝对唯一性。
+前缀则充当简洁、人类可读的修饰符，便于可观测性监控、链路追踪以及业务领域切分。
 
 [TIP]
 ====
-*Why UUIDv7 for Transaction Identifiers?*
+*为什么事务标识符采用 UUIDv7？*
 
-UUIDv7 embeds a high-precision epoch timestamp in its leading 48 bits, producing chronologically monotonic identifiers.
-This design provides critical architectural advantages for event sourcing and transactional storage:
+UUIDv7 在其前 48 位嵌入了高精度的纪元时间戳，生成按时间单调递增的有序标识符。
+这种设计为事件溯源和事务存储带来了关键的架构优势：
 
-* *Database Partition Pruning*: In SQL and distributed event-store implementations configured with time-range partitioning, the embedded timestamp can be extracted directly from the transaction ID to route queries straight to the relevant partition, eliminating expensive multi-partition scans.
-* *Index Locality & Write Throughput*: Unlike random UUIDv4 values that cause frequent B-Tree page splits and random I/O, sequentially ordered UUIDv7 keys append naturally to database indexes, maintaining page density and maximizing write throughput.
-* *Chronological Traceability*: Transactions are naturally sorted by creation time directly from their identifiers, simplifying time-window queries, log correlation, and audit reconciliation.
+* *数据库分区裁剪 (Partition Pruning)*：在配置了时间范围分区的 SQL 和分布式事件存储实现中，可以直接从事务 ID 中提取嵌入的时间戳，将查询直接路由至对应分区，消除开销巨大的全分区扫描。
+* *索引局部性与写入吞吐量*：与导致频繁 B-Tree 页分裂和随机 I/O 的随机 UUIDv4 不同，按顺序递增的 UUIDv7 键能自然追加到数据库索引页末尾，保持页面密度并最大化写入吞吐量。
+* *按时间顺序自然可追溯*：事务直接通过标识符即可按创建时间自然排序，极大简化了时间窗口查询、日志关联分析和审计核对。
 ====
 
-==== Default Behavior (first4)
+==== 默认行为 (first4)
 
-Providing a custom key generator is optional.
-If you do not provide a custom key generator, StackSaga uses `DefaultDomainEntityKeyGenerator`.
-By default, it extracts the **first 4 characters (`first4`)** of the domain-entity name defined in the `@SagaDomainEntity(name = "...")` annotation and converts them to **lowercase**.
+提供自定义键生成器是可选的。
+如果您未提供自定义键生成器，StackSaga 将使用 `DefaultDomainEntityKeyGenerator`。
+默认情况下，它提取 `@SagaDomainEntity(name = "...")` 注解中定义的领域实体名称的**前 4 个字符 (`first4`)** 并将其转换为**小写**。
 
-For example, with `@SagaDomainEntity(name = "OrderDomainEntity")`, the first 4 characters (`"Orde"`) are converted to lowercase (`"orde"`), resulting in transaction IDs like:
+例如，对于 `@SagaDomainEntity(name = "OrderDomainEntity")`，前 4 个字符 (`"Orde"`) 被转换为小写 (`"orde"`)，生成的事务 ID 如下：
 
 * `orde-0195655a-350f-786d-96eb-63c1dfc6e9ba`
 * `orde-0195655a-4e20-7a1b-80c2-1249fae53412`
 
-==== Prefix Constraints & Lowercase Formatting
+==== 前缀约束与小写格式要求
 
-When customizing the prefix via `generateTransactionKeyPrefix(...)`:
+通过 `generateTransactionKeyPrefix(...)` 自定义前缀时：
 
-* **Lowercase Requirement**: Developers should provide the prefix string in **lowercase**. If not provided in lowercase, the framework automatically converts it to lowercase internally.
-* **Allowed Characters**: Alphanumeric characters and hyphens only (`[a-zA-Z0-9-]`).
-* **Disallowed**: Spaces, whitespace, and special characters (such as `_`, `:`, `#`, `@`, `.`, `/`, `%`) are strictly prohibited and will cause the framework to reject the transaction ID.
+* **小写要求**：开发者应提供**全小写**的前缀字符串。如果未提供小写，框架内部也会自动将其转换为小写。
+* **允许的字符**：仅允许字母、数字和连字符 (`[a-zA-Z0-9-]`)。
+* **禁用字符**：空格、空白符以及特殊字符（例如 `_`、`:`、`#`、`@`、`.`、`/`、`%`）严禁使用，否则会导致框架拒绝该事务 ID。
 
-A custom prefix can be used to:
+自定义前缀可用于：
 
-- incorporate service name or domain namespace,
-- embed region or cluster identifiers for multi-region routing and log filtering,
-- satisfy organizational compliance or observability conventions.
+- 融入微服务名称或领域命名空间，
+- 嵌入区域 (Region) 或集群标识符以进行多区域路由和日志过滤，
+- 满足企业的合规审计或可观测性命名规范。
 
-TIP: To see how to supply a custom prefix in code, see the xref:#custom_key_generator_example[Custom Key Generator Example] below.
+TIP: 有关如何在代码中提供自定义前缀，请参阅下文的 xref:#custom_key_generator_example[自定义键生成器示例]。
 
 [[generateIdempotencyKey]]
-=== Generating Idempotency Keys for Saga Spans
+=== 为 Saga 跨度生成幂等键 (Generating Idempotency Keys)
 
-NOTE: If you are new to the concept of idempotency, refer to xref:foundations:idempotency.adoc[] first.
+NOTE: 如果您刚接触幂等性概念，请先阅读 xref:foundations:idempotency.adoc[]。
 
-
-Each span in a saga transaction (i.e., each atomic execution attempt) requires an idempotency key to ensure safe, duplicate-proof retries.
-The `generateIdempotencyKey` method receives runtime execution context divided into two input objects: `SafeIdempotentInput` and `UnSafeIdempotentInput`.
+Saga 事务中的每个跨度（即每次原子执行尝试）都需要一个幂等键，以确保安全、无重复副作用的重试。
+`generateIdempotencyKey` 方法接收运行时执行上下文，该上下文划分为两个输入对象：`SafeIdempotentInput` 与 `UnSafeIdempotentInput`。
 
 [IMPORTANT]
 ====
-Do not use properties from `UnSafeIdempotentInput` to construct idempotency keys. Values within `UnSafeIdempotentInput` may vary across retry attempts or cluster nodes, which can produce non-deterministic keys and break retry safety. `UnSafeIdempotentInput` is intended strictly for diagnostic logging and debugging.
+切勿使用 `UnSafeIdempotentInput` 中的属性来构造幂等键。`UnSafeIdempotentInput` 中的值在重试尝试或集群节点之间可能发生变化，这会导致生成非确定性键并破坏重试安全性。`UnSafeIdempotentInput` 严格用于诊断日志记录和调试目的。
 
-Always derive idempotency keys exclusively from `SafeIdempotentInput`, which provides deterministic, stable attributes guaranteed to remain consistent across retries throughout the transaction lifecycle.
+务必仅从 `SafeIdempotentInput` 派生幂等键，它提供了确定、稳定的属性，保证在事务生命周期内的重试期间始终保持完全一致。
 ====
 
-The framework's default implementation produces a fixed-length MD5 hash by concatenating the `transactionId`, `currentExecutionName`, and `executionMode` from `SafeIdempotentInput` and hashing the composite string via the provided `HashGenerator`. This ensures compact, collision-resistant idempotency keys.
+框架的默认实现通过拼接 `SafeIdempotentInput` 中的 `transactionId`、`currentExecutionName` 和 `executionMode`，并通过提供的 `HashGenerator` 对组合字符串进行哈希处理，生成固定长度的 MD5 哈希值。这确保了幂等键紧凑且抗碰撞。
 
 [[custom_key_generator_example]]
-=== Custom Key Generator Example
+=== 自定义键生成器示例 (Custom Key Generator Example)
 
-Here is an example of how to override `generateTransactionKeyPrefix` and `generateIdempotencyKey` to provide custom logic and configure it in your custom `DomainEntity` class.
+以下示例展示了如何重写 `generateTransactionKeyPrefix` 和 `generateIdempotencyKey` 以提供自定义逻辑，并在自定义 `DomainEntity` 类中进行配置：
 
-NOTE: Because `AbstractDomainEntityKeyGenerator` provides default implementations for all methods, you only need to override the specific methods you want to customize (e.g., overriding only `generateTransactionKeyPrefix` if you only need custom prefix naming, or only `generateIdempotencyKey` if you only require custom idempotency logic).
+NOTE: 由于 `AbstractDomainEntityKeyGenerator` 为所有方法提供了默认实现，您只需重写需要自定义的特定方法（例如，仅需自定义前缀命名时只重写 `generateTransactionKeyPrefix`，或者仅需自定义幂等逻辑时只重写 `generateIdempotencyKey`）。
 
 [source,java]
 ----
@@ -541,24 +536,24 @@ NOTE: Because `AbstractDomainEntityKeyGenerator` provides default implementation
 public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenerator { //<2>
 
     @Override //<3>
-    // This method is called when each transaction is initialized to supply the prefix
+    // 在每个事务初始化时调用该方法以提供前缀
     public String generateTransactionKeyPrefix(String serviceName, String applicationVersion, String instanceId, String region, String zone, SagaDomainEntity sagaDomainEntity) {
-        // Custom prefix should be lowercase (alphanumeric and hyphens only)
+        // 自定义前缀必须为全小写（仅限字母数字和连字符）
         return String.format("%s-%s", serviceName.toLowerCase(), region.toLowerCase());
     }
 
     @Override //<4>
     public String generateIdempotencyKey(SafeIdempotentInput safeIdempotentInput, UnSafeIdempotentInput unSafeIdempotentInput) {
          final String rowKey = new StringJoiner(":")
-                .add(safeIdempotentInput.transactionId().toString())
-                .add(safeIdempotentInput.currentExecutionName())
-                .add(safeIdempotentInput.executionMode().name().toLowerCase())
-                .toString();
+                 .add(safeIdempotentInput.transactionId().toString())
+                 .add(safeIdempotentInput.currentExecutionName())
+                 .add(safeIdempotentInput.executionMode().name().toLowerCase())
+                 .toString();
        return this.hashGenerator().generateHash(rowKey, HashGenerator.ALGType.MD5);
     }
 }
 
-//: Configure The custom KeyGen With Custom DomainEntity
+//: 在自定义领域实体上配置自定义 KeyGen
 
 @Getter
 @Setter
@@ -573,66 +568,65 @@ public class OrderDomainEntity extends DomainEntity {
 }
 ----
 
-<1> *@Component*: Mark your custom key generator implementation as a Spring bean.
-<2> Extend the custom class by `AbstractDomainEntityKeyGenerator`.
-<3> Override the `generateTransactionKeyPrefix` method to create your custom prefix for the transaction ID (`SagaUUID`). Developers should provide the prefix in lowercase; if uppercase characters are provided, the framework converts them to lowercase internally. +
-#The method is called when each transaction is initialized.#
-<4> Override the `generateIdempotencyKey` method and create your custom idempotency key for each span. +
-#The method is called before each span execution is invoked.#
-<5> Provide your custom class as `keyGen` of `@SagaDomainEntity` in your DomainEntity class.
+<1> *@Component*：将自定义键生成器实现声明为 Spring Bean。
+<2> 继承 `AbstractDomainEntityKeyGenerator`。
+<3> 重写 `generateTransactionKeyPrefix` 方法，为事务 ID (`SagaUUID`) 创建自定义前缀。应提供小写前缀；若传入大写字符，框架内部会自动转为小写。 +
+#该方法在每个事务初始化时被调用。#
+<4> 重写 `generateIdempotencyKey` 方法，为每个跨度生成自定义幂等键。 +
+#该方法在每个跨度执行被调用之前触发。#
+<5> 在 DomainEntity 类上的 `@SagaDomainEntity` 注解中将自定义类配置为 `keyGen`。
 
-IMPORTANT: It is highly recommended to use the base class method `hashGenerator()` to produce a fixed-length hash of a composite string for generating the idempotency key, rather than returning a raw concatenation of input values. This approach ensures that the idempotency key is compact, consistent in length, and has a low risk of collisions, even when the input values are long or contain variable content.
+IMPORTANT: 强烈建议使用基类方法 `hashGenerator()` 生成组合字符串的固定长度哈希值作为幂等键，而不是直接返回输入值的原始拼接字符串。这种方式能保证幂等键紧凑、长度统一，并在输入值较长或内容可变时将碰撞风险降至最低。
 
-WARNING: Register the implementation as a Spring bean (e.g., `@Component`) and ensure it is stateless and thread-safe.
-The framework may invoke it concurrently.
+WARNING: 将实现类注册为 Spring Bean（例如 `@Component`），并确保其为无状态且线程安全。框架可能会并发调用它。
 
 [[idempotency_key_versioning_and_inflight_transactions]]
-=== Modifying Idempotency Key Logic Across Releases & In-Flight Transactions
+=== 跨版本修改幂等键逻辑与飞行中事务 (In-Flight Transactions)
 
-In production microservice architectures, applications evolve continuously through zero-downtime rolling deployments.
-When releasing a new service version that alters how idempotency keys are constructed, you must ensure that **in-flight transactions** remain backward-compatible and deterministic.
+在生产微服务架构中，应用程序通过零停机滚动部署持续演进。
+当发布修改了幂等键构造规则的新服务版本时，必须确保**飞行中事务 (In-Flight Transactions)** 保持向后兼容性和确定性。
 
-==== The In-Flight Retry Hazard
+==== 飞行中重试危险场景
 
-Consider the following distributed scenario:
+考虑以下分布式场景：
 
-1. Service version `1.0.0` is deployed and executing transactions.
-2. An executor executes an atomic operation (e.g., calling an external payment or inventory API), dispatching a request with idempotency key `K1`.
-3. Before the response can be committed to the Event Store, a transient network error, gateway timeout, or container restart occurs. The transaction is marked for retry in the Event Store.
-4. Next, service version `1.1.0` is deployed with an updated idempotency key generation formula in `OrderDomainEntityKeyGenerator`.
-5. When the StackSaga retry subsystem or scheduler re-invokes the paused transaction under version `1.1.0`, it invokes `generateIdempotencyKey(...)`.
-6. *The Failure Mode:* If the key generator applies the *new* `1.1.0` formula to this retried transaction, it generates key `K2` instead of `K1`.
-Because `K2 != K1`, the downstream microservice cannot recognize this request as a retry of the earlier attempt. It treats `K2` as a brand-new transaction and executes the side-effect a second time (e.g., duplicate charges or double inventory reservations).
+1. 服务版本 `1.0.0` 已部署并正在执行事务。
+2. 某个执行器执行原子操作（例如调用外部支付或库存 API），派发了携带幂等键 `K1` 的请求。
+3. 在响应能够提交持久化到事件存储库之前，发生了临时网络抖动、网关超时或容器重启。该事务在事件存储库中被标记为待重试。
+4. 紧接着，部署了服务版本 `1.1.0`，其中在 `OrderDomainEntityKeyGenerator` 中更新了幂等键生成公式。
+5. 当 StackSaga 重试子系统或调度器在版本 `1.1.0` 下重新调用已暂停的事务时，它调用了 `generateIdempotencyKey(...)`。
+6. *故障模式*：如果键生成器对这个被重试的历史事务应用了*新的* `1.1.0` 公式，它将生成键 `K2` 而不是 `K1`。
+由于 `K2 != K1`，下游微服务无法将此请求识别为先前尝试的重试。它将 `K2` 视为全新事务并二次执行业务副作用（例如重复扣款或双重库存锁定）。
 
 [CAUTION]
 ====
-**Idempotency Key Invariance:**
-An idempotency key for any given execution span must remain **strictly identical** across all attempts, retries, and compensations throughout the transaction lifecycle, even across application deployments.
+**幂等键不变性 (Idempotency Key Invariance)**：
+任何给定执行跨度的幂等键在事务生命周期的所有尝试、重试与补偿中必须保持**绝对完全一致**，即便跨越了应用程序版本部署亦是如此。
 ====
 
-==== Semantic Version Branching with Object-Level Methods
+==== 基于对象级方法的语义版本分支判断
 
-To prevent this issue, increment the version in `@SagaDomainEntityVersion` when changing key generation logic and use the **`DomainEntity` object-level versioning API** to branch conditionally.
+为了防止此类问题，在更改键生成逻辑时应递增 `@SagaDomainEntityVersion` 中的版本号，并使用 **`DomainEntity` 对象级版本控制 API** 进行条件分支：
 
-The framework provides the target `DomainEntity` via `unSafeIdempotentInput.domainEntity()`. This instance preserves the transaction's **initial event version** (the version stamped when the transaction was first created in the Event Store), allowing your key generator to distinguish historical in-flight transactions from newly initiated transactions.
+框架通过 `unSafeIdempotentInput.domainEntity()` 提供目标 `DomainEntity`。该实例保留了事务的**初始事件版本**（事务最初在事件存储库中创建时盖上的版本戳记），使您的键生成器能够将历史飞行中事务与新发起的事务区分开来。
 
-`DomainEntity` exposes the following object-level version-comparison methods:
+`DomainEntity` 提供了以下对象级版本比较方法：
 
-* *`domainEntity.compare(String versionString)`*: Compares the transaction's initialized version with a semantic version string (e.g., `domainEntity.compare("1.1.0")`). Returns a negative integer if the transaction was initialized under an older version, `0` if equal, or a positive integer if newer.
-* *`domainEntity.compare(Version versionY)`*: Compares against a pre-parsed Jackson `tools.jackson.core.Version` object.
-* *`domainEntity.isInitializedVersionBetween(DomainEntityVersionDetail from, DomainEntityVersionDetail to)`*: Determines whether the transaction was initialized within a specific historical version range.
-* *`domainEntity.compareInitializedVersionToCurrentVersion()`*: Compares the transaction's initialized version from the Event Store with the version declared on the current application's `@SagaDomainEntity` annotation.
-* *`domainEntity.getInitializedVersionAsString()`*: Returns the initial version as a string (e.g., `"1.0.0"`).
+* *`domainEntity.compare(String versionString)`*：将事务的初始化版本与语义版本字符串进行比较（例如 `domainEntity.compare("1.1.0")`）。如果事务是在较早版本下初始化的，返回负整数；相等返回 `0`；较新则返回正整数。
+* *`domainEntity.compare(Version versionY)`*：与解析好的 Jackson `tools.jackson.core.Version` 对象进行比较。
+* *`domainEntity.isInitializedVersionBetween(DomainEntityVersionDetail from, DomainEntityVersionDetail to)`*：判断事务是否在特定历史版本区间内初始化。
+* *`domainEntity.compareInitializedVersionToCurrentVersion()`*：将事件存储库中记录的事务初始版本与当前运行应用 `@SagaDomainEntity` 上声明的版本进行对比。
+* *`domainEntity.getInitializedVersionAsString()`*：以字符串形式返回初始版本（例如 `"1.0.0"`）。
 
 [TIP]
 ====
-*Why use `compare(...)` instead of raw string equality?* +
-In active production systems, in-flight transactions in the Event Store may span **multiple prior versions** (e.g., `1.0.0`, `1.0.1`, `1.0.2`) when deploying `1.1.0`. Hardcoding string checks like `"1.0.0".equals(...)` is fragile and requires manually enumerating every previous version. Checking `domainEntity.compare("1.1.0") < 0` cleanly routes all historical transactions to the legacy formula in a single check.
+*为什么使用 `compare(...)` 而不是原始字符串比较？* +
+在活跃生产系统中，部署 `1.1.0` 时，事件存储库中的飞行中事务可能跨越**多个旧版本**（例如 `1.0.0`、`1.0.1`、`1.0.2`）。硬编码类似于 `"1.0.0".equals(...)` 的字符串比较非常脆弱，需要手动列出每个历史版本。而通过 `domainEntity.compare("1.1.0") < 0`，仅需一次检查即可干净利落地将所有历史事务路由至旧版逻辑。
 ====
 
-==== Multi-Version Key Generator Implementation
+==== 多版本键生成器实现示例
 
-Here is an example of an `AbstractDomainEntityKeyGenerator` that supports legacy in-flight transactions while executing the new formula for fresh transactions:
+以下展示了一个支持历史飞行中事务同时对新事务应用新公式的 `AbstractDomainEntityKeyGenerator` 实现：
 
 [source,java]
 ----
@@ -646,23 +640,23 @@ public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenera
     ) {
         DomainEntity domainEntity = unSafeIdempotentInput.domainEntity();
 
-        // Check if the transaction originated before version 1.1.0 (covers 1.0.0, 1.0.1, 1.0.2, etc.)
+        // 检查事务是否起源于 1.1.0 之前（覆盖 1.0.0、1.0.1、1.0.2 等）
         if (domainEntity != null && domainEntity.compare("1.1.0") < 0) {
             return generateLegacyIdempotencyKey(safeIdempotentInput);
         }
 
-        // Standard key generation for version 1.1.0 and above
+        // 1.1.0 及以上版本的标准键生成逻辑
         return generateModernIdempotencyKey(safeIdempotentInput);
     }
 
     private String generateLegacyIdempotencyKey(SafeIdempotentInput safeInput) {
-        // Legacy key generation formula used in releases prior to 1.1.0
+        // 1.1.0 之前版本中使用的旧版键生成公式
         final String rawKey = safeInput.transactionId().toString() + ":" + safeInput.currentExecutionName();
         return this.hashGenerator().generateHash(rawKey, HashGenerator.ALGType.MD5);
     }
 
-    private String generateModernIdempotencyKey(SafeIdempotentInput safeInput) {
-        // Updated key generation formula for 1.1.0+
+    private String generateModernIdempotencyKey(SafeInput safeInput) {
+        // 1.1.0+ 的更新版键生成公式
         final String rawKey = new StringJoiner(":")
                 .add(safeInput.transactionId().toString())
                 .add(safeInput.currentExecutionName())
@@ -676,198 +670,198 @@ public class OrderDomainEntityKeyGenerator extends AbstractDomainEntityKeyGenera
 
 // tag::domain-entity-versioning[]
 [[domain_entity_versioning]]
-== Domain-Entity Versioning & Version Casting
+== 领域实体版本控制与版本转换 (Domain-Entity Versioning & Version Casting)
 
-In enterprise microservice systems, software evolves continuously through feature additions, refactoring, and schema adjustments.
-In distributed saga workflows orchestrated by StackSaga, any structural modification to a transaction's state or execution sequence necessitates updating the version of the corresponding Domain-Entity.
+在企业微服务系统中，软件通过功能迭代、重构与模式调整持续演进。
+在 StackSaga 编排的分布式 Saga 工作流中，对事务状态或执行序列的任何结构修改都需要更新对应领域实体的版本号。
 
-Because StackSaga relies on Event Sourcing and automated transaction retry/restoration mechanisms to guarantee eventual consistency across distributed services, managing schema versions deterministically is paramount.
+由于 StackSaga 依赖事件溯源 (Event Sourcing) 和自动化事务重试/恢复机制来保证跨分布式服务的最终一致性，因此确定性地管理模型版本至关重要。
 
-=== Why Domain-Entity Versioning is Critical
+=== 为什么领域实体版本控制至关重要
 
-When an atomic span or executor encounters a transient failure (e.g., downstream timeout, network partition), the transaction is paused until the retry engine or scheduler re-invokes it.
-During this window, a new application release with updated business logic or modified entity fields may be deployed.
+当原子跨度或执行器遇到瞬态故障（例如下游超时、网络分区）时，事务会被暂停，直到重试引擎或调度器重新调用它。
+在此窗口期间，可能已经部署了具有更新业务逻辑或修改了实体字段的新应用版本。
 
-When the saga engine recovers an in-flight transaction, the historical snapshot retrieved from the Event Store may not match the Java class definition of the newly deployed application.
-The engine requires explicit version metadata to identify the exact schema under which the transaction originated, allowing it to reconstruct and reconcile historical state safely without data corruption or deserialization failure.
+当 Saga 引擎恢复飞行中的事务时，从事件存储库检索的历史快照可能与新部署应用的 Java 类定义不匹配。
+引擎需要明确的版本元数据来识别事务发起的确切模式定义，从而安全重构和协调历史状态，而不会发生数据损坏或反序列化失败。
 
 [TIP]
 ====
 [[what_is_the_events_version]]
-*What is the Event's Version?*
+*什么是事件版本？ (What is the Event's Version?)*
 
-When a saga transaction is initiated, the baseline event (snapshot) is committed to the Event Store tagged with the `@SagaDomainEntityVersion` declared on the custom `DomainEntity` class at that time.
-This initial version is termed the **Event Version** (or Transaction Real Version).
-Even as new application versions are subsequently deployed, this historical transaction retains its original event version, which executors can query at runtime via `domainEntity.getRealVersionAsString()`.
+启动 Saga 事务时，基准事件（快照）提交持久化到事件存储库，并打上当时自定义 `DomainEntity` 类上声明的 `@SagaDomainEntityVersion` 戳记。
+该初始版本称为**事件版本 (Event Version)**（或事务真实版本 / Transaction Real Version）。
+即使随后部署了新的应用版本，该历史事务仍会保留其原始事件版本，执行器可以在运行时通过 `domainEntity.getRealVersionAsString()` 查询该版本。
 ====
 
 [[when_to_update_domain_entity_version]]
-=== When to Update the Domain-Entity Version
+=== 何时需要更新领域实体版本
 
-The version declared in `@SagaDomainEntityVersion(major = ..., minor = ..., patch = ...)` must be incremented whenever changes are made that impact the transaction's state schema or execution topology:
+每当所做更改影响到事务的状态模式或执行拓扑时，必须递增在 `@SagaDomainEntityVersion(major = ..., minor = ..., patch = ...)` 中声明的版本：
 
-* xref:#domain_entity_structure_changing[Domain-Entity Structure Changes]
-** xref:#adding_new_data[Adding new fields (Up-Casting trigger)]
-** xref:#removing_existing_data[Removing existing fields (Down-Casting trigger)]
-* xref:#executor_changing[Executor Modifications]
-** xref:#changing_something_inside_the_existing_executor[Modifying existing executor logic]
-** xref:#changing_executors_count[Altering executor count (Adding or removing executors)]
-* xref:#key_generator_changing[Key Generator & Idempotency Logic Modifications]
+* xref:#domain_entity_structure_changing[领域实体结构变更]
+** xref:#adding_new_data[添加新字段（触发向上转换 Up-Casting）]
+** xref:#removing_existing_data[移除既有字段（触发向下转换 Down-Casting）]
+* xref:#executor_changing[执行器修改]
+** xref:#changing_something_inside_the_existing_executor[修改既有执行器逻辑]
+** xref:#changing_executors_count[修改执行器数量（新增或删除执行器）]
+* xref:#key_generator_changing[键生成器与幂等逻辑修改]
 
 [[domain_entity_structure_changing]]
-==== 1. Domain-Entity Structure Changes
+==== 1. 领域实体结构变更
 
-If the schema or property set of your custom `DomainEntity` class changes, the version must be updated.
+如果自定义 `DomainEntity` 类的属性模式发生变更，必须更新版本。
 
 [[adding_new_data]]
-* **Adding New Data (Up-Casting Trigger)**:
+* **添加新数据（触发向上转换 Up-Casting）**：
 +
-When new properties are added to the custom `DomainEntity`, increment the version.
-Adding fields leads to *Up-Casting* during transaction replays, where older snapshots from the Event Store are cast into the newer schema definition containing the additional fields.
+向自定义 `DomainEntity` 添加新属性时，递增版本。
+添加字段会在事务重放期间触发*向上转换 (Up-Casting)*，此时事件存储库中的旧快照会被转换为包含新增字段的新模式定义。
 +
-image:implementations:aggregator/stacksaga-diagram-aggregator-change-add-new-data.drawio.svg[alt="StackSaga Domain-Entity change - add new data",width=70%]
+image:implementations:aggregator/stacksaga-diagram-aggregator-change-add-new-data.drawio.svg[alt="StackSaga 领域实体变更 - 添加新数据",width=70%]
 
 [[removing_existing_data]]
-* **Removing Existing Data (Down-Casting Trigger)**:
+* **移除既有数据（触发向下转换 Down-Casting）**：
 +
-When obsolete fields are deleted from the custom `DomainEntity`, increment the version.
-Removing fields triggers *Down-Casting* during transaction replays, where historical snapshots in the Event Store still contain properties no longer defined in the current Java class.
+从自定义 `DomainEntity` 中删除废弃字段时，递增版本。
+删除字段会在事务重放期间触发*向下转换 (Down-Casting)*，此时事件存储库中的历史快照仍然包含当前 Java 类中不再定义的属性。
 +
-image:implementations:aggregator/stacksaga-diagram-aggregator-change-remove-data.drawio.svg[alt="StackSaga Domain-Entity change - remove data",width=70%]
+image:implementations:aggregator/stacksaga-diagram-aggregator-change-remove-data.drawio.svg[alt="StackSaga 领域实体变更 - 移除数据",width=70%]
 
 [[executor_changing]]
-==== 2. Executor Modifications
+==== 2. 执行器修改
 
-Even when the `DomainEntity` class fields remain untouched, changes to the workflow's executors can alter how transactional state is produced, consumed, or compensated, requiring a version bump.
+即使 `DomainEntity` 类的属性字段未发生改变，对工作流执行器的修改也可能改变事务状态的生成、消费或补偿方式，同样需要递增版本。
 
 [[changing_something_inside_the_existing_executor]]
-* **Modifying Existing Executor Logic**:
+* **修改既有执行器内部逻辑**：
 +
-If you modify the internal business logic of an existing executor (such as altering external API payloads or changing downstream validation criteria), determine whether the modification should apply to pending historical transactions waiting to be retried.
-Incrementing the version allows your executors to branch conditionally based on `domainEntity.getRealVersionAsString()` to apply legacy handling for in-flight transactions while executing new logic for fresh transactions.
+如果修改了现有执行器的内部业务逻辑（例如更改外部 API 请求载荷或更改下游验证标准），需要确定该修改是否应应用于等待重试的历史挂起事务。
+递增版本允许执行器根据 `domainEntity.getRealVersionAsString()` 进行条件分支，对飞行中的历史事务应用旧版处理，同时对新发起的事务执行新逻辑。
 +
-image:implementations:aggregator/stacksaga-diagram-executor-change.drawio.svg[alt="StackSaga executor modification",width=70%]
+image:implementations:aggregator/stacksaga-diagram-executor-change.drawio.svg[alt="StackSaga 执行器修改",width=70%]
 
 [[changing_executors_count]]
-* **Changing Executor Count**:
+* **修改执行器数量**：
 +
-Altering the number of executors in a saga workflow alters the execution graph:
+更改 Saga 工作流中的执行器数量会改变执行图：
 
 [[adding_new_executor]]
-** **Adding New Executors**:
-When an additional step (such as `command-executor-4`) is introduced into the sequence, increment the domain-entity version.
+** **新增执行器**：
+当在序列中引入额外步骤（例如 `command-executor-4`）时，递增领域实体版本。
 +
-image:implementations:aggregator/stacksaga-diagram-executor-adding.drawio.svg[alt="StackSaga adding new executor",width=70%]
+image:implementations:aggregator/stacksaga-diagram-executor-adding.drawio.svg[alt="StackSaga 新增执行器",width=70%]
 
 [[removing_existing_executor]]
-** **Removing Existing Executors**:
-Removing an executor from the workflow sequence requires an updated version.
+** **移除既有执行器**：
+从工作流序列中移除执行器同样需要更新版本。
 +
-image:implementations:aggregator/stacksaga-diagram-executor-removing.drawio.svg[alt="StackSaga removing executor",width=70%]
+image:implementations:aggregator/stacksaga-diagram-executor-removing.drawio.svg[alt="StackSaga 移除执行器",width=70%]
 
 [IMPORTANT]
 ====
-**Caution When Removing Executors in Live Deployments**:
-Executors participate directly in automated retries and compensations (`doRevert()`).
-If historical transactions remain pending in the Event Store at a step that references an executor you intend to delete, the saga engine cannot replay or rollback those transactions if the Java executor class has been completely removed from the codebase.
-**Best Practice**: Keep deprecated executor classes in the application until all in-flight historical transactions from previous versions have completed or terminated.
+**生产环境删除执行器的注意事项**：
+执行器直接参与自动化重试和补偿 (`doRevert()`)。
+如果事件存储库中仍有历史事务挂起在引用了您打算删除的执行器的步骤处，若从代码库中彻底删除了该 Java 执行器类，Saga 引擎将无法重放或回滚这些事务。
+**最佳实践**：在应用程序中保留已弃用的执行器类，直到旧版本的所有飞行中历史事务全部完成或终止。
 ====
 
 [NOTE]
 ====
-While upgrading an existing `QueryExecutor` to a `CommandExecutor` is theoretically possible, converting a `CommandExecutor` to a `QueryExecutor` is strictly prohibited because compensating historical commands requires rollback capabilities. The StackSaga team recommends against changing existing executor types.
+虽然理论上可以将现有的 `QueryExecutor` 升级为 `CommandExecutor`，但严禁将 `CommandExecutor` 改为 `QueryExecutor`，因为补偿历史命令必须具备回滚能力。StackSaga 官方建议尽量避免更改既有执行器类型。
 ====
 
 [[key_generator_changing]]
-==== 3. Key Generator & Idempotency Logic Changes
+==== 3. 键生成器与幂等逻辑变更
 
-If you alter how idempotency keys are generated in your custom `AbstractDomainEntityKeyGenerator` implementation, you must increment the `@SagaDomainEntityVersion`.
+如果您在自定义 `AbstractDomainEntityKeyGenerator` 实现中更改了幂等键生成规则，必须递增 `@SagaDomainEntityVersion`。
 
-Incrementing the version ensures that:
+递增版本确保：
 
-* In-flight transactions recovered from the Event Store after transient errors can be identified via `domainEntity.compare(...)` or `domainEntity.isInitializedVersionBetween(...)`.
-* The custom key generator can route historical transactions to the legacy key generation algorithm, preserving exact idempotency key invariance across retries and preventing duplicate downstream executions.
-* For a detailed architectural explanation and code sample, see xref:#idempotency_key_versioning_and_inflight_transactions[Modifying Idempotency Key Logic Across Releases & In-Flight Transactions].
+* 在瞬态错误后从事件存储库恢复的飞行中事务可以通过 `domainEntity.compare(...)` 或 `domainEntity.isInitializedVersionBetween(...)` 被识别。
+* 自定义键生成器可以将历史事务路由至旧版键生成算法，保持跨重试的完全幂等键不变性，防止下游重复执行。
+* 详细架构解释和代码示例，请参阅 xref:#idempotency_key_versioning_and_inflight_transactions[跨版本修改幂等键逻辑与飞行中事务]。
 
 [[domain_entity_version_casting]]
-=== Domain-Entity Version Casting (The SEC Replay Mechanism)
+=== 领域实体版本转换（SEC 重放机制）
 
-During rolling application updates, instances running the new version are deployed while older instances are phased out.
-In an event-sourced architecture, pending or failed events from prior application releases remain stored in the Event Store awaiting retry or compensation.
+在滚动更新应用程序期间，运行新版本的实例已上线，而旧实例正被逐步淘汰。
+在事件溯源架构中，先前应用版本中挂起或失败的事件仍存储在事件存储库中等待重试或补偿。
 
-When the Saga Execution Coordinator (SEC) recovers these transactions, it must reconstruct a live Java `DomainEntity` instance from the older serialized JSON binary payload:
+当 Saga 执行协调器 (SEC) 恢复这些事务时，必须从旧的序列化 JSON 二进制载荷中重新构造一个实时的 Java `DomainEntity` 实例：
 
-.Event rebuilding by the engine for transaction retrying
-image:implementations:aggregator/stacksaga-diagram-event-rebuiding.drawio.svg[alt="StackSaga diagram event rebuilding",width=70%]
+.引擎在事务重试时的事件重构过程
+image:implementations:aggregator/stacksaga-diagram-event-rebuiding.drawio.svg[alt="StackSaga 事件重构图",width=70%]
 
-This deserialization, mapping, and conversion process is called **Domain-Entity Version Casting**.
+这种反序列化、映射和转换过程被称为**领域实体版本转换 (Domain-Entity Version Casting)**。
 
 [WARNING]
 ====
-If schema changes between versions are not managed correctly, the engine will fail to deserialize historical events, causing in-flight transactions to halt with unrecoverable deserialization exceptions.
-Developers must maintain backward compatibility across rolling versions.
+如果跨版本的模式变更未得到正确管理，引擎将无法反序列化历史事件，导致飞行中的事务因不可恢复的反序列化异常而停滞。
+开发者必须确保跨滚动版本的向后兼容性。
 ====
 
 [[domain_entity_oriented_casting_architecture]]
-=== Casting Classifications: Up-Casting vs. Down-Casting
+=== 转换分类：向上转换 (Up-Casting) 与向下转换 (Down-Casting)
 
-Depending on how the Domain-Entity state structure evolves, version casting falls into two categories:
+根据领域实体状态结构的演变方式，版本转换分为两类：
 
-. *<<domain_entity_oriented_up_casting,Up-Casting>>*
-. *<<domain_entity_oriented_down_casting,Down-Casting>>*
+. *<<domain_entity_oriented_up_casting,向上转换 (Up-Casting)>>*
+. *<<domain_entity_oriented_down_casting,向下转换 (Down-Casting)>>*
 
 [[domain_entity_oriented_up_casting]]
-==== 1. Domain-Entity Up-Casting
+==== 1. 领域实体向上转换 (Up-Casting)
 
-Up-Casting occurs when the current application version has **more attributes** than the historical event snapshot stored in the Event Store.
-For example, the legacy event was persisted with 3 fields, while the current domain-entity class defines 4 or more fields:
+当当前应用程序版本的**属性多于**存储在事件存储库中的历史事件快照时，就会发生向上转换。
+例如，历史事件持久化时包含 3 个字段，而当前的领域实体类定义了 4 个或更多字段：
 
-image:implementations:aggregator/Architecture-Stacksaga-aggregator-oriented-up-casting-view.drawio.svg[alt="StackSaga Domain-Entity version up-casting",width=100%]
+image:implementations:aggregator/Architecture-Stacksaga-aggregator-oriented-up-casting-view.drawio.svg[alt="StackSaga 领域实体版本向上转换",width=100%]
 
-*Handling Up-Casting in StackSaga:*
-StackSaga handles Up-Casting automatically.
-The framework's default JSON serializer/deserializer (`Jackson ObjectMapper`) deserializes older JSON payloads into the newer class without error, initializing any newly added fields to their default values (`null`, `0`, or default collection instances).
-Developers do not need to write custom conversion logic for Up-Casting.
+*StackSaga 中的向上转换处理：*
+StackSaga 会自动处理向上转换。
+框架默认的 JSON 序列化器/反序列化器 (`Jackson ObjectMapper`) 可以无缝将较旧的 JSON 载荷反序列化为较新的类，而不会报错，并将任何新增字段初始化为其默认值（`null`、`0` 或默认集合实例）。
+开发者无需为向上转换编写自定义转换逻辑。
 
 [[domain_entity_oriented_down_casting]]
-==== 2. Domain-Entity Down-Casting
+==== 2. 领域实体向下转换 (Down-Casting)
 
-Down-Casting occurs when the current application version has **fewer attributes** than the historical event snapshot stored in the Event Store (e.g., obsolete properties were deleted from the Java class):
+当当前应用程序版本的**属性少于**存储在事件存储库中的历史事件快照时（例如，从 Java 类中删除了过时的废弃属性），就会发生向下转换：
 
-image:implementations:aggregator/Architecture-Stacksaga-aggregator-oriented-down-casting-view.drawio.svg[alt="StackSaga Domain-Entity version down-casting",width=100%]
+image:implementations:aggregator/Architecture-Stacksaga-aggregator-oriented-down-casting-view.drawio.svg[alt="StackSaga 领域实体版本向下转换",width=100%]
 
-When older events containing legacy fields are deserialized into the new class, standard deserializers either fail on unknown properties or discard the unrecognized data.
-In saga orchestrations, silently dropping this data is perilous because pending executors or compensations may still require those legacy values to complete their tasks.
+当包含旧字段的历史事件反序列化为新类时，标准反序列化器要么在遇到未知属性时报错失败，要么默默丢弃未识别的数据。
+在 Saga 编排中，静默丢弃这些数据是极其危险的，因为挂起的执行器或补偿回滚可能仍需要这些旧属性值来完成任务。
 
 [[domain_entity_event_casting]]
-=== Handling Down-Casting & Schema Evolution
+=== 处理向下转换与模式演进
 
-To safely manage Domain-Entity down-casting, two technical approaches exist:
+为了安全管理领域实体向下转换，存在两种技术方案：
 
 [WARNING]
 ====
-**Anti-Pattern: Ignoring Unknown Properties (`@JsonIgnoreProperties(ignoreUnknown = true)`)**:
-Disabling `FAIL_ON_UNKNOWN_PROPERTIES` or annotating classes with `@JsonIgnoreProperties(ignoreUnknown = true)` prevents deserialization errors, but permanently discards the legacy attributes from memory.
-If a retrying executor or compensating rollback needs those removed values, the transaction will fail due to missing data. This approach is strongly discouraged.
+**反模式：直接忽略未知属性 (`@JsonIgnoreProperties(ignoreUnknown = true)`)**：
+禁用 `FAIL_ON_UNKNOWN_PROPERTIES` 或在类上标注 `@JsonIgnoreProperties(ignoreUnknown = true)` 虽然可以避免反序列化报错，但会从内存中永久丢弃历史属性。
+如果正在重试的执行器或补偿回滚需要那些已删除的值，事务将因数据缺失而彻底失败。强烈不建议采用此方法。
 ====
 
 [[collect_missing_properties]]
-==== Recommended Solution: Archiving Unknown Properties via `UnknownPropertyArchive`
+==== 推荐方案：通过 `UnknownPropertyArchive` 归档未知属性
 
-Instead of discarding unknown properties, StackSaga provides the `UnknownPropertyArchive` base class (`org.stacksaga.api.UnknownPropertyArchive`).
-When the engine deserializes an older JSON payload containing fields no longer declared as Java class variables, `UnknownPropertyArchive` intercepts and stores those unrecognized key-value pairs in an internal `missingProperties` map.
+StackSaga 提供了 `UnknownPropertyArchive` 基类 (`org.stacksaga.api.UnknownPropertyArchive`)，而不是丢弃未知属性。
+当引擎反序列化包含不再声明为 Java 类变量的字段的旧 JSON 载荷时，`UnknownPropertyArchive` 会拦截并将这些未识别的键值对存储在内部的 `missingProperties` 映射中。
 
-* **Root Domain-Entity Automatic Archiving**:
-The base `DomainEntity` class in StackSaga inherently extends `UnknownPropertyArchive`. Therefore, any top-level properties removed from your custom `DomainEntity` class are automatically captured into `missingProperties` without requiring custom annotations or methods.
+* **根领域实体自动归档**：
+StackSaga 中的基类 `DomainEntity` 本身就继承了 `UnknownPropertyArchive`。因此，从自定义 `DomainEntity` 类中删除的任何顶层属性都会自动捕获到 `missingProperties` 中，无需任何自定义注解或方法。
 
-* **Nested Classes Archiving**:
-For complex nested types or inner classes (such as line items, customer details, or metadata), developers must explicitly extend `UnknownPropertyArchive` on each nested static class to capture removed child properties.
+* **嵌套类归档**：
+对于复杂的嵌套类型或内部类（例如明细行项、客户详情或元数据），开发者必须在每个嵌套静态类上显式继承 `UnknownPropertyArchive`，以捕获已删除的子属性。
 
-==== Code Walkthrough: Handling Down-Casting
+==== 代码演练：处理向下转换
 
-Consider an order processing workflow where version `1.0.0` evolves to version `1.1.0`.
+考虑一个订单处理工作流，其中版本 `1.0.0` 演进为版本 `1.1.0`。
 
-*Legacy Schema (`OrderDomainEntity` Version 1.0.0)*:
+*旧模式 (`OrderDomainEntity` 版本 1.0.0)*：
 
 [source,java]
 ----
@@ -921,13 +915,13 @@ public class OrderDomainEntity extends DomainEntity {
     }
 }
 ----
-<1> `comment` is defined on the root entity.
-<2> `ItemDetail` is a nested static class.
-<3> `note` is defined on the nested `ItemDetail` class.
+<1> `comment` 定义在根实体上。
+<2> `ItemDetail` 是一个嵌套静态类。
+<3> `note` 定义在嵌套的 `ItemDetail` 类上。
 
-*New Schema (`OrderDomainEntity` Version 1.1.0)*:
+*新模式 (`OrderDomainEntity` 版本 1.1.0)*：
 
-In the new release, business requirements change: the root property `comment` and the item property `note` are deprecated and removed from the active Java model:
+在全新发布中，业务需求发生变化：根属性 `comment` 和行项属性 `note` 已被废弃，并从活动的 Java 模型中移除：
 
 [source,java]
 ----
@@ -955,7 +949,7 @@ public class OrderDomainEntity extends DomainEntity {
     @JsonProperty("is_active")
     private Integer isActive;
 
-    // Field 'comment' removed from root class // <1>
+    // 从根类中移除了字段 'comment' // <1>
 
     @JsonProperty("item_details")
     private List<ItemDetail> itemDetails = new ArrayList<>();
@@ -975,23 +969,23 @@ public class OrderDomainEntity extends DomainEntity {
         @JsonProperty("price")
         private double price;
 
-        // Field 'note' removed from ItemDetail // <3>
+        // 从 ItemDetail 中移除了字段 'note' // <3>
     }
 }
 ----
-<1> The `comment` property is removed from the root class. Because `OrderDomainEntity` extends `DomainEntity` (which extends `UnknownPropertyArchive`), any legacy `comment` values in historical events are automatically routed to `domainEntity.getMissingProperties().get("comment")`.
-<2> `ItemDetail` now extends `UnknownPropertyArchive` to capture removed nested fields.
-<3> The `note` property is removed from `ItemDetail`. Because `ItemDetail` extends `UnknownPropertyArchive`, legacy `note` values are captured in `itemDetail.getMissingProperties().get("note")`.
+<1> 从根类中移除了 `comment` 属性。因为 `OrderDomainEntity` 继承了 `DomainEntity`（其自身继承自 `UnknownPropertyArchive`），历史事件中任何旧的 `comment` 值都会自动路由至 `domainEntity.getMissingProperties().get("comment")`。
+<2> `ItemDetail` 现在继承 `UnknownPropertyArchive`，以捕获已移除的嵌套字段。
+<3> 从 `ItemDetail` 中移除了 `note` 属性。因为 `ItemDetail` 继承了 `UnknownPropertyArchive`，旧的 `note` 值会被捕获在 `itemDetail.getMissingProperties().get("note")` 中。
 
 [WARNING]
 ====
-If an inner nested class removes properties without extending `UnknownPropertyArchive`, deserializing legacy events will fail.
-StackSaga validates domain-entity schemas against sample payloads (configured via `SagaSerializable`) during application startup, failing fast if casting incompatibilities are detected.
+如果内部嵌套类移除了属性却未继承 `UnknownPropertyArchive`，反序列化历史事件将会失败。
+StackSaga 会在应用启动时对照样本载荷（通过 `SagaSerializable` 配置）验证领域实体模式，若检测到类型转换不兼容则快速失败报错。
 ====
 
-==== Accessing Preserved Properties in Executors
+==== 在执行器中访问已保留的历史属性
 
-When an executor runs, it can check whether the transaction originated from a legacy version and retrieve preserved properties from `getMissingProperties()`:
+当执行器运行时，它可以检查事务是否源自历史旧版本，并从 `getMissingProperties()` 中检索保留的属性：
 
 [source,java]
 ----
@@ -1006,15 +1000,15 @@ public class OrderSaveExecutor implements CommandExecutor<OrderDomainEntity> {
             String idempotencyKey
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
-        // Check if the transaction originated before version 1.1.0 (covers 1.0.0, 1.0.1, etc.)
+        // 检查事务是否起源于 1.1.0 之前（覆盖 1.0.0、1.0.1 等）
         if (currentDomainEntity.compare("1.1.0") < 0) { // <1>
-            // Retrieve root missing property
+            // 检索根级缺失属性
             Object comment = currentDomainEntity.getMissingProperties().get("comment"); // <2>
             if (comment != null) {
                 log.info("Processing legacy transaction with comment: {}", comment);
             }
 
-            // Retrieve nested missing property from inner items
+            // 从内部行项中检索嵌套缺失属性
             for (OrderDomainEntity.ItemDetail itemDetail : currentDomainEntity.getItemDetails()) { // <3>
                 Object note = itemDetail.getMissingProperties().get("note");
                 if (note != null) {
@@ -1022,7 +1016,7 @@ public class OrderSaveExecutor implements CommandExecutor<OrderDomainEntity> {
                 }
             }
         } else {
-            // Standard execution path for version 1.1.0+
+            // 1.1.0+ 的标准执行路径
             log.info("Processing standard order: {}", currentDomainEntity.getOrderId());
         }
 
@@ -1036,18 +1030,17 @@ public class OrderSaveExecutor implements CommandExecutor<OrderDomainEntity> {
             RevertHintStore revertHintStore,
             String idempotencyKey
     ) throws RetryableExecutorException {
-        // Revert logic can also inspect finalDomainEntityState.compare(...) or getMissingProperties() if needed
+        // 回滚逻辑同样可以按需检查 finalDomainEntityState.compare(...) 或 getMissingProperties()
         return SagaExecutionEventName.of("REVERTED_ORDER_SAVE");
     }
 }
 ----
-<1> Use `currentDomainEntity.compare("1.1.0") < 0` (or `currentDomainEntity.getRealVersionAsString()`) to detect the transaction's baseline event version. Comparing against a cutoff threshold covers all historical releases (e.g. `1.0.0`, `1.0.1`) without requiring manual string checks for each release.
-<2> Retrieve root-level removed properties via `currentDomainEntity.getMissingProperties().get(...)`.
-<3> Retrieve nested removed properties via `itemDetail.getMissingProperties().get(...)`.
+<1> 使用 `currentDomainEntity.compare("1.1.0") < 0`（或 `currentDomainEntity.getRealVersionAsString()`）检测事务的基准事件版本。与阈值进行比较涵盖了所有历史发布版本（如 `1.0.0`、`1.0.1`），无需为每个版本手动编写字符串匹配。
+<2> 通过 `currentDomainEntity.getMissingProperties().get(...)` 检索根级被移除的属性。
+<3> 通过 `itemDetail.getMissingProperties().get(...)` 检索嵌套行项中被移除的属性。
 
 [NOTE]
 ====
-The `getMissingProperties()` map and object-level versioning methods (`compare(...)`, `isInitializedVersionBetween(...)`, `getRealVersionAsString()`) are accessible across all executor types, including `CommandExecutor`, `QueryExecutor`, and `RevertAfterExecutor`.
+`getMissingProperties()` 映射以及对象级版本控制方法（`compare(...)`、`isInitializedVersionBetween(...)`、`getRealVersionAsString()`）在所有执行器类型中均可访问，包括 `CommandExecutor`、`QueryExecutor` 和 `RevertAfterExecutor`。
 ====
 // end::domain-entity-versioning[]
-

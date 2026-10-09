@@ -1,23 +1,23 @@
-:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator — fluent API, fire-and-forget, fire-and-watch, resuming pausable transactions via correlation keys, blocking vs. reactive execution, and real-time event listeners.
+:description: 同步 StackSaga 编排器中的 SagaTemplate 与事务事件监听器参考指南 —— 流畅 API、即发即弃 (fire-and-forget)、触发并观察 (fire-and-watch)、通过关联键恢复可暂停长事务、阻塞式与响应式执行对比以及实时事件监听器。
 :keywords: StackSaga, SagaTemplate, resume, correlationKey, idempotencyKey, pausable LRT, callback webhook, fireAndForget, fireAndWatch, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
 :page-priority: 0.7
 
-= SagaTemplate and Event Listeners
+= SagaTemplate 与事件监听器 (SagaTemplate and Event Listeners)
 
 [[stacksaga-template-usage]]
 [[saga-template-usage]]
 == SagaTemplate
 
-`SagaTemplate` is the main entry point for interacting with the StackSaga engine (SEC) in an orchestrator service.
-It provides a fluent builder API to initialize transactions, configure execution modes (fire-and-forget or fire-and-watch), and query the current state and execution history of any transaction.
+`SagaTemplate` 是在编排服务中与 StackSaga 引擎 (SEC) 进行交互的核心入口点。
+它提供了流畅的构建器 API (Fluent Builder API)，用于初始化事务、配置执行模式（即发即弃 Fire-and-Forget 或触发并观察 Fire-and-Watch），并查询任何事务的当前状态与执行历史。
 
-`SagaTemplate` seamlessly supports both imperative (blocking) and reactive (non-blocking) application architectures.
+`SagaTemplate` 无缝支持命令式（阻塞，Blocking）与响应式（非阻塞，Non-Blocking）两种应用程序架构。
 
 [[stackSagaTemplate_usage_in_non_reactive_environment]]
 [[sagaTemplate_usage_in_non_reactive_environment]]
-=== SagaTemplate in a Non-Reactive Environment
+=== 非响应式环境中的 SagaTemplate (SagaTemplate in a Non-Reactive Environment)
 
-In a traditional Spring MVC or blocking environment, use `SagaTemplate` to initiate saga transactions and retrieve transaction snapshots synchronously:
+在传统的 Spring MVC 或阻塞式环境中，使用 `SagaTemplate` 可以同步发起 Saga 事务并同步检索事务快照：
 
 [source,java]
 ----
@@ -33,7 +33,7 @@ public class PlaceOrderHandler {
                 //<2>
                 .init(() -> {
                     OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
-                    {//initializing the domain entity with the required properties for the saga execution.
+                    {// 初始化用于 Saga 执行的领域实体及其属性
                         orderDomainEntity.setUsername(username);
                         orderDomainEntity.setTotalAmount(amount);
                         //...
@@ -50,7 +50,7 @@ public class PlaceOrderHandler {
                 .fireAndForget()
                 //<6>
                 .execute();
-        log.info("Started place order saga with transactionId: {}", transactionId);
+        log.info("已启动下单 Saga 事务，transactionId: {}", transactionId);
         return transactionId;
     }
 
@@ -62,44 +62,44 @@ public class PlaceOrderHandler {
                 .fetch();
 
         TransactionCompleteStatus currentStatus = state.getCurrentStatus(); //<8>
-        log.info("Current status of transaction {}: {}", transactionId, currentStatus);
+        log.info("事务 {} 当前状态: {}", transactionId, currentStatus);
         NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory(); //<9>
-        log.info("Execution history of transaction {}: {}", transactionId, executionHistory);
+        log.info("事务 {} 执行历史: {}", transactionId, executionHistory);
         OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity(); //<10>
-        log.info("Current domain entity state: {}", currentDomainEntity); //<11>
+        log.info("当前领域实体状态: {}", currentDomainEntity); //<11>
         ZonedDateTime startedDateTime = state.getStartedDateTime(); //<12>
-        log.info("Transaction {} started at: {}", transactionId, startedDateTime.toLocalDateTime());
+        log.info("事务 {} 启动于: {}", transactionId, startedDateTime.toLocalDateTime());
     }
 }
 ----
 
-<1> Inject `SagaTemplate` configured for your custom xref:stacksaga-sync/orchestrator/domain-entity.adoc#creating_custom_domain_entity[`DomainEntity`] type.
-<2> Use `init()` to provide a `Supplier` creating the initial `DomainEntity`. The framework generates and assigns the unique `transactionId` during initialization.
-<3> Use `peek()` (optional) to inspect or enrich the initialized `DomainEntity` before execution begins.
-<4> Use `startWith()` to specify the initial xref:stacksaga-sync/orchestrator/executor_architecture.adoc[executor] that starts the transaction flow.
-<5> Use `fireAndForget()` to select the fire-and-forget execution mode.
-<6> Call `execute()` to initiate the transaction in a blocking manner. It returns the generated `transactionId` once initialized.
-<7> Call `getCurrentState(transactionId).fetch()` to retrieve a synchronous snapshot of the transaction state from the event-store.
-<8> Retrieve the overall completion status (`TransactionCompleteStatus`) of the transaction.
-<9> Retrieve the chronological execution history (`NavigableMap<Integer, ? extends SyncExecutionEvent<DE>>`) containing every executed span (primary and compensation) with metadata and status.
-<10> Retrieve the current domain entity snapshot representing all state mutations applied up to this point.
-<11> Log the domain entity snapshot.
-<12> Retrieve the start timestamp of the transaction.
+<1> 注入针对自定义 xref:stacksaga-sync/orchestrator/domain-entity.adoc#creating_custom_domain_entity[`DomainEntity`] 类型配置的 `SagaTemplate`。
+<2> 使用 `init()` 提供用于创建初始 `DomainEntity` 的 `Supplier`。框架在初始化期间生成并赋予唯一的 `transactionId`。
+<3> 使用 `peek()`（可选）在执行开始前检查或丰富已初始化的 `DomainEntity`。
+<4> 使用 `startWith()` 指定启动事务流的初始 xref:stacksaga-sync/orchestrator/executor_architecture.adoc[执行器 (Executor)]。
+<5> 使用 `fireAndForget()` 选择即发即弃执行模式。
+<6> 调用 `execute()` 以阻塞方式发起事务。初始化后返回生成的 `transactionId`。
+<7> 调用 `getCurrentState(transactionId).fetch()` 从事件存储中同步检索事务状态快照。
+<8> 获取事务的总体完成状态 (`TransactionCompleteStatus`)。
+<9> 获取按时间顺序排列的执行历史记录（`NavigableMap<Integer, ? extends SyncExecutionEvent<DE>>`），包含每个已执行跨度（主执行和补偿执行）的元数据与状态。
+<10> 获取表示截至当前应用的所有状态变更的领域实体快照。
+<11> 记录领域实体快照日志。
+<12> 获取事务的启动时间戳。
 
-NOTE: For real-time updates without polling, implement a xref:#event_listener_for_stage_change_events[State Change Listener].
+NOTE: 要在不进行轮询的情况下获取实时状态更新，请实现 xref:#event_listener_for_stage_change_events[状态变更监听器]。
 
-=== SagaTemplate in a Reactive Environment
+=== 响应式环境中的 SagaTemplate (SagaTemplate in a Reactive Environment)
 
-In a reactive environment (e.g., Spring WebFlux), `SagaTemplate` provides non-blocking operators across all lifecycle phases.
+在响应式环境（例如 Spring WebFlux）中，`SagaTemplate` 在整个生命周期阶段提供完全非阻塞的操作符。
 
-There are two primary modes to execute a saga transaction reactively:
+以响应式方式执行 Saga 事务主要有两种模式：
 
-. *Fire-and-Forget* — Start the transaction and immediately receive a `Mono<String>` emitting the transaction ID once the saga is accepted. The saga executes in the background. Use this when you only need the transaction ID and will rely on `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track progress.
-. *Fire-and-Watch* — Start the transaction and observe real-time state transitions as a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`. Ideal for streaming live execution events to clients (e.g., via Server-Sent Events or WebSockets).
+. *即发即弃 (Fire-and-Forget)* —— 启动事务并在 Saga 被接受后立即接收发出事务 ID 的 `Mono<String>`。Saga 在后台持续执行。当您只需要事务 ID 并依赖 `getCurrentState(transactionId).fetchAsync()` 或 xref:#event_listener_for_stage_change_events[EventListener] 追踪进度时使用该模式。
+. *触发并观察 (Fire-and-Watch)* —— 启动事务并将实时状态转换观察为 `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`。非常适合向客户端流式传输实时执行事件（例如通过 Server-Sent Events 或 WebSockets）。
 
-==== Fire-and-Forget
+==== 即发即弃 (Fire-and-Forget)
 
-Calling `.fireAndForget().executeAsync()` hands the transaction off to the StackSaga engine and returns a `Mono<String>` emitting the generated transaction ID:
+调用 `.fireAndForget().executeAsync()` 将事务提交给 StackSaga 引擎，并返回发出生成事务 ID 的 `Mono<String>`：
 
 [source,java]
 ----
@@ -114,7 +114,7 @@ public class PlaceOrderHandler {
         return this.sagaTemplate
                 .init(() -> {
                     OrderDomainEntity orderDomainEntity = new OrderDomainEntity();
-                    {//initializing the domain entity with the required properties for the saga execution.
+                    {// 初始化用于 Saga 执行的领域实体及其属性
                         orderDomainEntity.setUsername(username);
                         orderDomainEntity.setTotalAmount(amount);
                         //...
@@ -128,16 +128,16 @@ public class PlaceOrderHandler {
                 .fireAndForget()
                 //<1>
                 .executeAsync()
-                .map(transactionId -> "Order placed successfully with transaction id: " + transactionId);
+                .map(transactionId -> "下单成功，事务 ID 为: " + transactionId);
     }
 }
 ----
 
-<1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress.
+<1> `executeAsync()` 返回一个 `Mono<String>`，一旦 Saga 初始化完成即发出事务 ID。事务继续在后台异步运行；使用 `getCurrentState(transactionId).fetchAsync()` 或 xref:#event_listener_for_stage_change_events[EventListener] 跟踪其执行进度。
 
-==== Fire-and-Watch
+==== 触发并观察 (Fire-and-Watch)
 
-Calling `.fireAndWatch(Duration waitTimeout).toFlux()` initiates the transaction and returns a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>` that emits an updated `TransactionState` snapshot after each executor span completes:
+调用 `.fireAndWatch(Duration waitTimeout).toFlux()` 启动事务并返回 `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`，在每个执行器跨度执行完成后发出更新的 `TransactionState` 快照：
 
 [source,java]
 ----
@@ -146,90 +146,88 @@ public Flux<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEn
     return sagaTemplate
             .init(OrderDomainEntity::new)
             .peek(orderDomainEntity -> {
-                log.info("Started Transaction ID: {}", orderDomainEntity.getTransactionId());
+                log.info("已启动事务 ID: {}", orderDomainEntity.getTransactionId());
             })
             .startWith(ValidateUserExecutor.class)
             .fireAndWatch(Duration.ofSeconds(40)) //<1>
             .toFlux()
             .doOnNext(state -> {
-                log.info("Received state change: {}", state);
+                log.info("收到状态变更事件: {}", state);
             });
 }
 ----
 
-<1> `waitTimeout` defines the maximum duration the subscriber will wait for execution results before the pipeline signals a `WaitTimeExceededException`.
+<1> `waitTimeout` 定义了订阅者在管道发出 `WaitTimeExceededException` 之前等待执行结果的最长等待持续时间。
 
-===== Key Behaviors and Error Handling
+===== 关键行为与错误处理 (Key Behaviors and Error Handling)
 
-* *Timeout (`WaitTimeExceededException`)*: If execution exceeds the specified `Duration waitTimeout`, the pipeline terminates with a `WaitTimeExceededException` via `onError`. This **only ends the subscription** — the saga execution continues asynchronously in the background.
-After the subscription ends, you can still observe progress in two ways:
-** If you have registered a xref:#event_listener_for_stage_change_events[State Change Listener] (`TransactionEventListener` or `ReactiveTransactionEventListener`), it continues to receive event callbacks.
-** Alternatively, query the state at any time using `getCurrentState(transactionId).fetchAsync()`.
+* *超时异常 (`WaitTimeExceededException`)*：如果执行耗时超过指定的 `Duration waitTimeout`，流式管道会通过 `onError` 以 `WaitTimeExceededException` 终止。这**仅代表订阅流的结束** —— Saga 事务本身仍在后台继续异步执行。在订阅结束后，您仍可通过两种方式观察其进展：
+** 如果您注册了 xref:#event_listener_for_stage_change_events[状态变更监听器]（`TransactionEventListener` 或 `ReactiveTransactionEventListener`），它将继续接收事件回调。
+** 或者，随时通过 `getCurrentState(transactionId).fetchAsync()` 主动查询最新状态。
 
-* *Execution Pause (`TransactionPausedException`)*: If a step encounters a retryable exception (such as a transient database failure or custom `RetryableExecutorException`), execution is paused and rescheduled. Because `TransactionState` only represents completed saga states, the live subscription halts and emits a `TransactionPausedException` via `onError`. This indicates a temporary retry pause, not a fatal failure.
-Once rescheduled and retried, state notifications continue via listeners, or you can query state using `getCurrentState(transactionId).fetchAsync()`.
+* *执行暂停异常 (`TransactionPausedException`)*：如果某一步骤遇到可重试异常（例如瞬时数据库异常或自定义 `RetryableExecutorException`），执行将被暂停并重新调度。由于 `TransactionState` 仅代表已完成的步骤状态，因此实时流订阅会暂停并通过 `onError` 发出 `TransactionPausedException`。这代表临时重试暂停，并非致命故障。一旦重试重新调度执行，状态通知将继续通过监听器推送，或者您可通过 `getCurrentState(transactionId).fetchAsync()` 查询最新状态。
 
 [[resuming-paused-transactions]]
-=== Resuming Paused Transactions (Pausable LRT)
+=== 恢复暂停的事务（可暂停长事务，Pausable LRT）
 
-When a saga executor participates in a xref:stacksaga-sync/index.adoc#pausable-lrt[*Pausable Long-Running Transaction*] and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`].
-Similarly, when a compensation step must undo a transaction via an asynchronous gateway or banking transfer, it halts compensation by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(...)`]. See xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Workflows] for the conceptual background.
+当 Saga 执行器参与 xref:stacksaga-sync/index.adoc#pausable-lrt[*可暂停长事务 (Pausable LRT)*] 并将工作委托给外部异步服务（例如异步支付网关或后厨备餐人工确认）时，它通过返回 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] 故意识别并暂停正向执行。
+类似地，当补偿步骤必须通过异步网关或银行转账撤销事务时，它通过返回 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(...)`] 暂停补偿流。有关概念背景，请参阅 xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[双向流可暂停工作流]。
 
-At the moment of pausing, the transaction enters an intentional business wait state:
-* The `SagaDomainEntity` state is persisted to the event store.
-* `es_transaction` marks `is_paused = 1` and records `current_resume_key = <idempotencyKey>`.
-* CPU worker threads are freed immediately.
+在暂停的那一刻，事务进入故意的业务等待状态：
+* `SagaDomainEntity` 状态被持久化到事件存储中。
+* `es_transaction` 将标记更新为 `is_paused = 1` 并记录 `current_resume_key = <idempotencyKey>`。
+* CPU 工作线程立即被释放回到线程池。
 
-To wake up and continue the transaction once the external system completes its task, `SagaTemplate` provides the `resume(...)` operator.
+一旦外部系统完成其异步任务，为了唤醒并继续执行事务，`SagaTemplate` 提供了 `resume(...)` 操作符。
 
 [[fluent-resume-spec]]
-==== The Fluent `ResumeSpec` Builder API
+==== Fluent `ResumeSpec` 构建器 API (The Fluent ResumeSpec Builder API)
 
-Calling `sagaTemplate.resume(...)` returns a `SagaTemplate.ResumeSpec<DE>` fluent builder that configures callback metadata and initiates transaction resumption:
+调用 `sagaTemplate.resume(...)` 返回 `SagaTemplate.ResumeSpec<DE>` 流畅构建器，用于配置回调元数据并触发事务恢复：
 
 [source,java]
 ----
-// Resuming with fluent key-value context entries:
+// 使用流畅键值上下文条目恢复执行：
 this.sagaTemplate
         .resume(transactionId, correlationKey)
         .put("status", "SUCCESS")
         .put("gatewayReference", "REF-987654")
-        .execute(); // Blocking (Spring MVC)
+        .execute(); // 阻塞式（Spring MVC）
 
-// Reactive non-blocking resumption:
+// 响应式非阻塞恢复：
 Mono<Void> resumeMono = this.sagaTemplate
         .resume(transactionId, correlationKey)
         .put("status", "SUCCESS")
         .put("gatewayReference", "REF-987654")
-        .executeAsync(); // Reactive (Spring WebFlux)
+        .executeAsync(); // 响应式（Spring WebFlux）
 ----
 
-`ResumeSpec<DE>` exposes the following fluent methods:
+`ResumeSpec<DE>` 暴露以下方法：
 
-* *`.put(String key, String value)`*: Adds an individual key-value entry to the `ResumeContext`.
-* *`.putAll(Map<String, String> map)`*: Adds all entries from the specified map to the `ResumeContext`.
-* *`.withContext(ResumeContext resumeContext)`*: Supplies or replaces a pre-built `ResumeContext` (e.g., from `DefaultResumeContext.of(map)`).
-* *`.execute()`*: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments).
-* *`.executeAsync()`*: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments).
+* *`.put(String key, String value)`*：向 `ResumeContext` 添加单个键值对。
+* *`.putAll(Map<String, String> map)`*：将指定 Map 中的所有条目批量添加到 `ResumeContext`。
+* *`.withContext(ResumeContext resumeContext)`*：提供或替换预构建的 `ResumeContext`（例如来自 `DefaultResumeContext.of(map)`）。
+* *`.execute()`*：同步阻塞，直到引擎恢复该事务（适用于 Spring MVC / 命令式环境）。
+* *`.executeAsync()`*：返回一个 `Mono<Void>`，一旦恢复被处理即异步完成（适用于 Spring WebFlux / 响应式环境）。
 
-NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(transactionId, correlationKey, resumeContext).execute()`.
+NOTE: 还提供了一个便捷的重载快捷方式：`sagaTemplate.resume(transactionId, correlationKey, resumeContext).execute()`。
 
 [[uniform-resumption]]
-==== Uniform Resumption: Seamless Handling of Forward and Compensation Flows
+==== 统一恢复：无缝处理正向与补偿流 (Uniform Resumption)
 
-A major strength of StackSaga's architecture is that **resumption is completely uniform from the orchestrator's perspective**:
+StackSaga 架构的一大突出优势在于：**从编排器的视角来看，恢复操作是完全统一的**：
 
-* You invoke the exact same method — `sagaTemplate.resume(transactionId, correlationKey)` — whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
-* The StackSaga Execution Coordinator (SEC) queries the event store, determines the transaction status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, resets `is_paused = 0` and `current_resume_key = NULL`, and dispatches the execution:
-** **If paused in forward flow**: Advances to the target `NextExecutor` specified in xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(NextExecutor.class, ...)`], invoking its `doProcess(...)` with the supplied `ResumeContext`.
-** **If paused in compensation flow**: Re-invokes the paused `CommandExecutor`'s `doRevert(...)` with the supplied `ResumeContext`, allowing it to finalize reversal actions. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[Implementing Pausable Compensation].
+* 无论 Saga 是在正向执行 (`doProcess`) 期间暂停，还是在逆向补偿 (`doRevert`) 期间暂停，您调用的都是完全相同的方法 —— `sagaTemplate.resume(transactionId, correlationKey)`。
+* StackSaga 执行协调器 (SEC) 会自动查询事件存储，确定事务当前所处的阶段（`PROCESSING` 与 `REVERTING`），将领域实体快照还原到暂停检查点，重置 `is_paused = 0` 和 `current_resume_key = NULL`，并调度恢复执行：
+** **如果在正向流中暂停**：推进到在 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(NextExecutor.class, ...)`] 中指定的目标 `NextExecutor`，携带传入的 `ResumeContext` 调用其 `doProcess(...)`。
+** **如果在补偿流中暂停**：重新调用已暂停 `CommandExecutor` 的 `doRevert(...)`，传入提供的 `ResumeContext`，使其完成冲正撤销操作。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[实现可暂停补偿]。
 
 [[callback-controller-pattern]]
-==== Webhook / Callback Controller Pattern
+==== Webhook / 回调控制器模式 (Webhook / Callback Controller Pattern)
 
-The following example demonstrates how Spring REST controllers handle external callbacks for both forward business approvals and compensating refund confirmations:
+以下示例演示 Spring REST 控制器如何处理外部回调，涵盖正向业务确认与补偿性退款确认两种场景：
 
-===== Imperative Callback Controller (Spring MVC)
+===== 命令式回调控制器 (Spring MVC)
 
 [source,java]
 ----
@@ -242,11 +240,11 @@ public class OrderCallbackController {
     private final SagaTemplate<OrderDomainEntity> sagaTemplate;
 
     /**
-     * Resumes forward execution (e.g., food preparation completed or 3D-Secure charge confirmed).
+     * 恢复正向执行（例如：后厨备餐完成或 3D-Secure 扣款确认）。
      */
     @PostMapping("/order-ready")
     public ResponseEntity<Void> onOrderReadyCallback(@RequestBody OrderReadyCallbackDto callbackDto) {
-        log.info("Received order-ready callback for transaction: {} with correlationKey: {}",
+        log.info("收到备餐完成回调，事务 ID: {} correlationKey: {}",
                 callbackDto.getTransactionId(), callbackDto.getCorrelationKey());
 
         this.sagaTemplate
@@ -259,11 +257,11 @@ public class OrderCallbackController {
     }
 
     /**
-     * Resumes compensating execution (e.g., payment gateway asynchronous refund confirmation).
+     * 恢复补偿执行（例如：支付网关异步退款确认）。
      */
     @PostMapping("/refund-confirmed")
     public ResponseEntity<Void> onRefundConfirmed(@RequestBody RefundWebhookDto refundDto) {
-        log.info("Received refund webhook for transaction: {} with correlationKey: {}",
+        log.info("收到退款 Webhook 回调，事务 ID: {} correlationKey: {}",
                 refundDto.getTransactionId(), refundDto.getCorrelationKey());
 
         this.sagaTemplate
@@ -277,7 +275,7 @@ public class OrderCallbackController {
 }
 ----
 
-===== Reactive Callback Controller (Spring WebFlux)
+===== 响应式回调控制器 (Spring WebFlux)
 
 [source,java]
 ----
@@ -293,7 +291,7 @@ public class ReactiveOrderCallbackController {
     public Mono<ResponseEntity<Void>> onRefundConfirmed(@RequestBody Mono<RefundWebhookDto> refundDtoMono) {
         return refundDtoMono
                 .flatMap(dto -> {
-                    log.info("Received reactive refund webhook for tx: {} key: {}",
+                    log.info("收到响应式退款 Webhook 回调，事务 ID: {} key: {}",
                             dto.getTransactionId(), dto.getCorrelationKey());
 
                     return this.sagaTemplate
@@ -307,107 +305,107 @@ public class ReactiveOrderCallbackController {
 }
 ----
 
-When `resume(...)` is called:
-. StackSaga validates that the supplied `correlationKey` matches the `current_resume_key` registered on `es_transaction`.
-. It stores the serialized `ResumeContext` JSON into `es_transaction_execution_tryout.resume_context`.
-. It resets `is_paused = 0` and clears `current_resume_key = NULL`.
-. It restores the `OrderDomainEntity` with its pristine checkpoint state.
-. It invokes the target executor's `doProcess(...)` or `doRevert(...)`, injecting the populated `ResumeContext`. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[Consuming ResumeContext in Executors] for how executors consume this data.
+当调用 `resume(...)` 时：
+. StackSaga 验证传入的 `correlationKey` 与 `es_transaction` 上注册的 `current_resume_key` 是否一致。
+. 将序列化后的 `ResumeContext` JSON 存储到 `es_transaction_execution_tryout.resume_context` 中。
+. 重置 `is_paused = 0` 并清空 `current_resume_key = NULL`。
+. 还原带有纯净检查点状态的 `OrderDomainEntity`。
+. 调用目标执行器的 `doProcess(...)` 或 `doRevert(...)`，注入填充好的 `ResumeContext`。有关执行器如何使用此数据，请参阅 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[在执行器中消费 ResumeContext]。
 
 [[resume-context-contract]]
-==== `ResumeContext` API & Contract
+==== `ResumeContext` API 与规范契约
 
-`ResumeContext` (`org.stacksaga.api.ResumeContext`) is the contract through which external callback data flows into executors:
+`ResumeContext` (`org.stacksaga.api.ResumeContext`) 是外部回调数据流入执行器的标准化契约：
 
-* **Key-Value Store**: Implements `java.util.Map<String, String>` and `Serializable`.
-* **Value Extraction (`get`)**: Provides `Optional<String> get(String key)` for safe retrieval:
+* **键值存储**：实现 `java.util.Map<String, String>` 与 `Serializable`。
+* **安全提取 (`get`)**：提供 `Optional<String> get(String key)` 进行安全提取：
 +
 [source,java]
 ----
 String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 ----
-* **Immutability Guarantee**: Once passed into an executor (`doProcess` or `doRevert`), the `ResumeContext` is marked read-only. Calling modifying operations (`put`, `remove`, `clear`) throws `UnsupportedOperationException`. This prevents executors from accidentally mutating callback audit records.
-* **Serialization & Event Sourcing**: Provides `prettyPrintAsString(ApplicationContext)` and `printAsString(ApplicationContext)` using the framework's configured JSON mapper bean.
-* **Deep Comparison**: Provides `deepEquals(ResumeContext obj, ApplicationContext applicationContext)` for structural JSON equality checks.
-* **Event Store Durability**: Serialized into the `resume_context` JSON column of `es_transaction_execution_tryout`, providing complete auditability for every callback payload received by the system. See xref:stacksaga-sync/index.adoc#resume-context-concept[Decoupling External Callback Payloads].
+* **不可变性保证**：一旦传入执行器（`doProcess` 或 `doRevert`），`ResumeContext` 会被标记为只读。调用修改操作（`put`、`remove`、`clear`）将抛出 `UnsupportedOperationException`。这防止执行器意外修改回调审计记录。
+* **序列化与事件溯源**：使用框架配置的 JSON 映射器 Bean 提供 `prettyPrintAsString(ApplicationContext)` 和 `printAsString(ApplicationContext)`。
+* **深度对比**：提供 `deepEquals(ResumeContext obj, ApplicationContext applicationContext)` 进行结构化 JSON 相等性比对。
+* **事件存储持久性**：被序列化到 `es_transaction_execution_tryout` 的 `resume_context` JSON 列中，为系统接收到的每个回调载荷提供完整的可审计性。参见 xref:stacksaga-sync/index.adoc#resume-context-concept[解耦外部回调载荷]。
 
 [[pausable-lrt-timeout-reexecution]]
-=== Timeout Re-Execution Mechanics (When No Callback Arrives)
+=== 超时重新执行机制（未收到回调时）
 
-When an executor pauses with a maximum duration (e.g., `stepManager.pause(DeliveryDispatchExecutor.class, "ORDER_PREPARING", Duration.ofHours(5))`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
+当执行器带着最长持续时间暂停时（例如 `stepManager.pause(DeliveryDispatchExecutor.class, "ORDER_PREPARING", Duration.ofHours(5))`），应用程序期望外部回调在 5 小时到期之前触发 `sagaTemplate.resume(...)`。
 
-However, in worst-case scenarios where the external system crashes, network connectivity is lost, or the callback is never delivered within the configured timeout:
+然而，在外部系统崩溃、网络中断或在配置的超时时间内未送达回调的最坏情况下：
 
-* **Why the Framework Re-Executes the Paused Executor:**
-The framework **cannot forcibly advance** to the next executor (`DeliveryDispatchExecutor`) because the downstream business operation was never confirmed.
-Furthermore, the logic required to invoke the external target service, verify order or payment status, and initiate callbacks resides **inside that paused executor**.
-Therefore, StackSaga's retry coordinator re-executes the transaction directly from the executor where it was paused (`MakePaymentExecutor`), even though its primary execution had previously succeeded before entering the pause.
+* **为什么框架会重新执行已暂停的执行器：**
+框架**无法强行推进**到下一个执行器 (`DeliveryDispatchExecutor`)，因为下游业务操作从未获得确认。
+此外，调用外部目标服务、核对订单或支付状态以及重新触发回调所需的逻辑完全位于**该暂停执行器内部**。
+因此，StackSaga 的重试协调器会直接从暂停的执行器 (`MakePaymentExecutor`) 重新执行事务，即使其主执行逻辑在进入暂停前已经成功过。
 
-* **Re-Invocation Flow:**
-Upon timeout expiration, the retry coordinator claims ownership of the stalled transaction, safely reconstructs the pristine `SagaDomainEntity` up to the checkpoint prior to that executor, and invokes `doProcess(...)` again. This gives the executor an opportunity to query the external system's status (e.g., checking if the payment went through), re-trigger the external call, or throw `NonRetryableExecutorException` to initiate compensation.
+* **重新调用流转：**
+超时到期后，重试协调器接管停滞事务的所有权，安全地将 `SagaDomainEntity` 还原到进入该执行器之前的检查点，并再次调用 `doProcess(...)`。这为执行器提供了查询外部系统状态（例如检查扣款是否成功）、重新发起外部调用或抛出 `NonRetryableExecutorException` 启动补偿的机会。
 
-* **Impact on State Listeners:**
-Because the paused executor is executed again, this directly affects registered state change listeners. See the detailed guidance in xref:#at-least-once-listener-semantics[At-Least-Once Notification in Pausable LRT] below.
+* **对状态监听器的影响：**
+由于已暂停的执行器被再次执行，这会直接影响已注册的状态变更监听器。请参阅下文 xref:#at-least-once-listener-semantics[可暂停长事务中的至少一次通知] 中的详细指导。
 
 [[event_listener_for_stage_change_events]]
-== Observing Transaction State Changes
+== 观察事务状态变更 (Observing Transaction State Changes)
 
-After initiating a transaction via `execute()` or `executeAsync()`, the StackSaga engine executes each step sequentially (forward commands/queries and backward compensations).
+在通过 `execute()` 或 `executeAsync()` 发起事务后，StackSaga 引擎会顺序执行每个步骤（正向命令/查询与逆向补偿）。
 
-There are two distinct mechanisms to observe state changes:
+有两种不同的机制来观察状态变化：
 
-. *xref:#state-change-listeners[State Change Listeners]* — Push-based: The engine notifies your listener callback automatically after each executor step completes. Best for real-time reactions such as dispatching notifications, updating caches, or emitting events.
-. *xref:#getcurrentstate-on-demand[`SagaTemplate.getCurrentState()`]* — Pull-based: Queries the event-store on demand to retrieve the latest state snapshot for a given transaction ID. Best for user-facing status queries and post-completion audits.
+. *xref:#state-change-listeners[状态变更监听器 (State Change Listeners)]* —— 基于推送 (Push-based)：在每个执行器步骤完成后，引擎自动通知您的监听器回调方法。最适合实时反应性动作，如发送用户通知、更新缓存或发布事件。
+. *xref:#getcurrentstate-on-demand[`SagaTemplate.getCurrentState()`]* —— 基于拉取 (Pull-based)：按需查询事件存储，以获取给定事务 ID 的最新聚合状态快照。最适合面向用户的状态查询和完成后的离线审计。
 
 [[state-change-listeners]]
-=== Using State Change Listeners (Real-time)
+=== 使用状态变更监听器（实时推流，Real-time）
 
-State Change Listeners receive push notifications directly from the engine after every executor span completes (both forward execution and compensations).
+状态变更监听器在每个执行器跨度完成后（包括正向执行与补偿），直接从引擎接收推送通知。
 
-Choose the listener interface matching your application architecture:
+选择与您的应用程序架构匹配的监听器接口：
 
-. `TransactionEventListener` — For imperative / blocking environments.
-. `ReactiveTransactionEventListener` — For reactive / non-blocking environments.
+. `TransactionEventListener` —— 适用于命令式 / 阻塞环境。
+. `ReactiveTransactionEventListener` —— 适用于响应式 / 非阻塞环境。
 
 [IMPORTANT]
 ====
-*Sequential Execution and Latency Impact:*
+*顺序执行与延迟影响 (Sequential Execution and Latency Impact)：*
 
-The `onStateChanged` callback is executed sequentially as part of the transaction lifecycle.
-Specifically, **the next span/executor step in the saga flow is triggered only after the current `onStateChanged` execution has completed**.
+`onStateChanged` 回调作为事务生命周期的一部分顺序执行。
+具体而言，**Saga 流程中的下一个跨度/执行器步骤仅在当前 `onStateChanged` 执行完成后才会被触发**。
 
-Performing heavy computations, slow I/O calls, or long-running operations inside `onStateChanged` directly blocks the progression of the transaction and increases total transaction latency.
+在 `onStateChanged` 内部执行重型计算、缓慢的 I/O 调用或耗时操作会直接阻塞事务的推进，增加事务的端到端延迟。
 
-*Best Practice:*
-Keep `onStateChanged` lightweight (e.g., publishing a quick notification or logging status). If you need to perform heavy or time-consuming operations, offload the work to an asynchronous thread pool (using a snapshot or deep copy of `TransactionState` if needed), allowing the engine to immediately proceed with the next span of the transaction.
+*最佳实践：*
+保持 `onStateChanged` 轻量化（例如快速发布通知或记录状态日志）。如果需要执行耗时任务，请将工作转交至异步线程池（必要时使用 `TransactionState` 的快照或深拷贝），从而允许引擎立即推进事务的下一个跨度。
 ====
 
 [[at-least-once-listener-semantics]]
 [WARNING]
-.At-Least-Once Notification in Pausable LRT (Duplicate Listener Invocations)
+.可暂停长事务 (Pausable LRT) 中的至少一次通知（重复调用风险）
 ====
-In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses awaiting an external callback with a timeout `Duration` (e.g., 5 hours), the listener callback (`onStateChanged`) can be invoked **multiple times** for that same executor:
+在 xref:#pausable-lrt-timeout-reexecution[可暂停长事务 (Pausable LRT)] 中，如果执行器配置了超时时长 (`Duration`)（例如 5 小时）并暂停等待外部回调，监听器回调 (`onStateChanged`) 可能会为同一个执行器被调用**多次**：
 
-. **First Invocation (Initial Success):** When the executor successfully completes its initial forward logic (such as dispatching an asynchronous request to an external payment provider) and pauses via `stepManager.pause(...)`, the engine invokes `onStateChanged`.
-. **Second Invocation (Timeout Re-Execution):** If no external callback arrives to resume the saga before the configured duration expires, the framework re-executes the paused executor. Upon successful re-execution, the engine invokes `onStateChanged` **again** for that same executor.
+. **第一次调用（初始成功）：** 当执行器成功完成其初始正向逻辑（例如向外部支付服务派发异步请求）并通过 `stepManager.pause(...)` 暂停时，引擎调用 `onStateChanged`。
+. **第二次调用（超时重新执行）：** 如果在配置的超时时间到期之前没有外部回调到达以恢复 Saga，框架将重新执行该暂停执行器。在重新执行成功后，引擎将为同一个执行器**再次**调用 `onStateChanged`。
 
-*Crucial Design Rules:*
+*至关重要的设计原则：*
 
-* **Never place critical business logic or state mutations in a listener:**
-Because listener callbacks follow at-least-once semantics and can be re-triggered during retries and timeout recoveries, placing non-idempotent business logic, state mutations, or external charges inside `onStateChanged` will cause duplicate side-effects. Listeners should be strictly reserved for observational tasks (logging, metrics, or pushing user notifications).
+* **切勿在监听器中放置关键业务逻辑或状态变更：**
+因为监听器回调遵循至少一次投递语义，并且在重试和超时恢复期间可以被重新触发，所以将非幂等业务逻辑、状态变更或外部扣款放置在 `onStateChanged` 内部会导致重复副作用。监听器应严格保留用于观察性任务（日志记录、指标采集或推送用户通知）。
 
-* **Recommended Pattern — Use a `QueryExecutor`:**
-If your workflow requires an operation to execute immediately following an executor (such as generating an internal receipt, updating a read model, or creating an audit log) that does not require compensation, **do not place it in `TransactionEventListener`**.
-Instead, model it as a formal **`QueryExecutor`** within the saga flow (e.g., chaining it via `stepManager.next(RecordAuditQueryExecutor.class, ...)`).
-As a first-class saga participant, a `QueryExecutor` guarantees:
-** Durable recording and tracking in the Event Store.
-** Deterministic execution aligned with the saga's forward progression.
-** Full idempotency protection and visibility in the transaction execution history.
+* **推荐模式 —— 使用 `QueryExecutor`：**
+如果您的工作流要求在某个执行器之后立即执行某项操作（例如生成内部收据、更新读取视图或记录审计日志）且该操作不需要补偿，**切勿将其放置在 `TransactionEventListener` 中**。
+相反，请在 Saga 流程中将其建模为合法的 **`QueryExecutor`**（例如通过 `stepManager.next(RecordAuditQueryExecutor.class, ...)` 链接）。
+作为一等 Saga 参与者，`QueryExecutor` 可保证：
+** 在事件存储中持久记录与跟踪。
+** 与 Saga 的正向推进保持确定性的一致执行。
+** 享有完整的幂等性保护以及在事务执行历史中的全链路可见性。
 ====
 
 ==== TransactionEventListener
 
-Implement `TransactionEventListener` to listen to transaction events in an imperative environment:
+实现 `TransactionEventListener` 以在命令式环境中监听事务事件：
 
 [source,java]
 ----
@@ -419,22 +417,22 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
     @Override
     public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state) {
         TransactionCompleteStatus currentStatus = state.getCurrentStatus();
-        log.info("Current status of transaction: {}", currentStatus);
+        log.info("当前事务状态: {}", currentStatus);
         NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory();
-        log.info("Execution history of transaction: {}", executionHistory);
+        log.info("事务执行历史: {}", executionHistory);
         OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
-        log.info("Current domain entity state: {}", currentDomainEntity);
+        log.info("当前领域实体状态: {}", currentDomainEntity);
         ZonedDateTime startedDateTime = state.getStartedDateTime();
-        log.info("Transaction started at: {}", startedDateTime.toLocalDateTime());
+        log.info("事务启动时间: {}", startedDateTime.toLocalDateTime());
     }
 }
 ----
 
-NOTE: Because `onStateChanged` is synchronous, blocking user code, the engine invokes it on a dedicated bounded-elastic scheduler (`blockingExecutionScheduler`) supplied by `AbstractSchedulerProvider`. This isolates listener execution from the engine's core reactive threads. The thread cap, queue capacity, and TTL can be tuned via the `stacksaga.scheduler.blocking-execution.*` configuration properties. See xref:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties].
+NOTE: 由于 `onStateChanged` 是同步阻塞的用户代码，引擎会在由 `AbstractSchedulerProvider` 提供的专用有界弹性调度器 (`blockingExecutionScheduler`) 上调用它。这隔离了监听器执行与引擎的核心响应式线程。线程上限、队列容量和 TTL 可通过 `stacksaga.scheduler.blocking-execution.*` 配置属性进行调优。参见 xref:stacksaga-sync/orchestrator/properties.adoc[配置属性]。
 
 ==== ReactiveTransactionEventListener
 
-Implement `ReactiveTransactionEventListener` to listen to transaction events in a reactive environment:
+实现 `ReactiveTransactionEventListener` 以在响应式环境中监听事务事件：
 
 [source,java]
 ----
@@ -449,41 +447,41 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
                 .just(transactionState)
                 .doOnNext(state -> {
                     TransactionCompleteStatus currentStatus = state.getCurrentStatus();
-                    log.info("Current status of transaction: {}", currentStatus);
+                    log.info("当前事务状态: {}", currentStatus);
                     NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory();
-                    log.info("Execution history of transaction: {}", executionHistory);
+                    log.info("事务执行历史: {}", executionHistory);
                     OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity();
-                    log.info("Current domain entity state: {}", currentDomainEntity);
+                    log.info("当前领域实体状态: {}", currentDomainEntity);
                     ZonedDateTime startedDateTime = state.getStartedDateTime();
-                    log.info("Transaction started at: {}", startedDateTime.toLocalDateTime());
+                    log.info("事务启动时间: {}", startedDateTime.toLocalDateTime());
                 })
                 .flatMap(state -> {
-                    // simulate async non-blocking processing
+                    // 模拟异步非阻塞处理
                     return Mono.delay(Duration.ofSeconds(1)).then();
                 });
     }
 }
 ----
 
-NOTE: Unlike `TransactionEventListener`, `ReactiveTransactionEventListener#onStateChanged` runs on the shared non-blocking `executionScheduler`. The returned `Mono<Void>` must be fully non-blocking; any blocking calls will starve worker threads and affect other concurrent transactions. Parallelism can be tuned via `stacksaga.scheduler.execution.parallelism`. See xref:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties].
+NOTE: 与 `TransactionEventListener` 不同，`ReactiveTransactionEventListener#onStateChanged` 运行在共享的非阻塞 `executionScheduler` 上。返回的 `Mono<Void>` 必须完全非阻塞；任何阻塞调用都会使工作线程发生饥饿，并影响其他并发事务。并发度可通过 `stacksaga.scheduler.execution.parallelism` 进行调优。参见 xref:stacksaga-sync/orchestrator/properties.adoc[配置属性]。
 
 [[getcurrentstate-on-demand]]
-=== Using SagaTemplate.getCurrentState() (On-demand)
+=== 使用 SagaTemplate.getCurrentState()（按需拉取，On-demand）
 
-`SagaTemplate.getCurrentState(String transactionId)` provides pull-based access to the complete state snapshot and execution history of any transaction by its ID.
+`SagaTemplate.getCurrentState(String transactionId)` 提供基于拉取的途径，通过事务 ID 访问任何事务的完整状态快照和执行历史。
 
-Calling `getCurrentState(transactionId)` returns a `SagaTemplate.StateSpec<DE>` specification that provides two methods:
+调用 `getCurrentState(transactionId)` 返回一个 `SagaTemplate.StateSpec<DE>` 规范，该规范提供两个方法：
 
-* *`fetch()`* — Synchronous retrieval returning `TransactionState<DE, SyncExecutionEvent<DE>>`.
+* *`fetch()`* —— 同步检索，返回 `TransactionState<DE, SyncExecutionEvent<DE>>`。
 +
 [WARNING]
 ====
-Do not call `fetch()` on non-blocking Reactor or Netty event loop threads. The method performs a thread check (`Schedulers.isInNonBlockingThread()`) and throws an `IllegalStateException` if invoked from a non-blocking thread. In reactive applications, always use `fetchAsync()`.
+切勿在非阻塞 Reactor 或 Netty 事件循环线程上调用 `fetch()`。该方法会执行线程检查 (`Schedulers.isInNonBlockingThread()`)，如果从非阻塞线程调用会抛出 `IllegalStateException`。在响应式应用中，请始终使用 `fetchAsync()`。
 ====
 
-* *`fetchAsync()`* — Asynchronous retrieval returning `Mono<TransactionState<DE, SyncExecutionEvent<DE>>>`. Safe for use in Spring WebFlux and reactive event-loop threads.
+* *`fetchAsync()`* —— 异步检索，返回 `Mono<TransactionState<DE, SyncExecutionEvent<DE>>>`。在 Spring WebFlux 和响应式事件循环线程中使用是完全安全的。
 
-==== Blocking State Retrieval (Imperative / Spring MVC)
+==== 阻塞式状态检索 (Spring MVC / 命令式)
 
 [source,java]
 ----
@@ -497,7 +495,7 @@ NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> history =
 OrderDomainEntity entity = state.getCurrentDomainEntity();
 ----
 
-==== Reactive State Retrieval (Reactive / Spring WebFlux)
+==== 响应式状态检索 (Spring WebFlux / 响应式)
 
 [source,java]
 ----
@@ -507,18 +505,18 @@ Mono<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>>>
                 .fetchAsync();
 
 stateMono.subscribe(state -> {
-    log.info("Transaction status: {}", state.getCurrentStatus());
+    log.info("事务状态: {}", state.getCurrentStatus());
 });
 ----
 
-NOTE: Unlike State Change Listeners which receive pushed state events in memory as execution proceeds, `getCurrentState(transactionId)` queries the underlying event-store on every call. It is designed for on-demand queries, rather than high-frequency polling during active execution.
+NOTE: 与在执行推进过程中在内存中接收推送状态事件的状态变更监听器不同，`getCurrentState(transactionId)` 在每次调用时都会查询底层的事件存储。它专为按需查询而设计，而不是在活跃执行期间进行高频轮询。
 
 [[recommended-handler-pattern]]
-== Recommended Handler Pattern
+== 推荐的处理程序模式 (Recommended Handler Pattern)
 
-The StackSaga team recommends organizing saga transaction logic inside a dedicated `Handler` component that encapsulates transaction initiation, state queries, and lifecycle event observation.
+StackSaga 团队建议在专用的 `Handler` 组件中组织 Saga 事务逻辑，该组件封装了事务发起、状态查询以及生命周期事件观察。
 
-=== Imperative Handler Pattern
+=== 命令式处理程序模式 (Imperative Handler Pattern)
 
 [source,java]
 ----
@@ -552,18 +550,18 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 
     @Override
     public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) { //<3>
-        log.info("Transaction {} updated to status {}", 
+        log.info("事务 {} 状态已更新为 {}", 
                 transactionState.getTransactionId(), 
                 transactionState.getCurrentStatus());
     }
 }
 ----
 
-<1> The `handle` method initiates the saga transaction using `SagaTemplate` and returns the generated transaction ID.
-<2> Retrieve the current transaction state on demand using `.getCurrentState(orderId).fetch()`.
-<3> Implement `onStateChanged` from `TransactionEventListener` to handle real-time lifecycle notifications.
+<1> `handle` 方法使用 `SagaTemplate` 发起 Saga 事务并返回生成的事务 ID。
+<2> 使用 `.getCurrentState(orderId).fetch()` 按需检索当前事务状态。
+<3> 实现 `TransactionEventListener` 的 `onStateChanged` 以处理实时生命周期通知。
 
-=== Reactive Handler Pattern
+=== 响应式处理程序模式 (Reactive Handler Pattern)
 
 [source,java]
 ----
@@ -597,7 +595,7 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
     @Override
     public Mono<Void> onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) { //<3>
         return Mono.fromRunnable(() -> 
-                log.info("Transaction {} updated to status {}", 
+                log.info("事务 {} 状态已更新为 {}", 
                         transactionState.getTransactionId(), 
                         transactionState.getCurrentStatus())
         );
@@ -605,6 +603,6 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
 }
 ----
 
-<1> Non-blocking transaction initiation returning `Mono<String>` with the transaction ID.
-<2> Non-blocking state query using `.getCurrentState(orderId).fetchAsync()`.
-<3> Implement `onStateChanged` from `ReactiveTransactionEventListener` returning `Mono<Void>` for non-blocking event handling.
+<1> 非阻塞事务发起，返回包含事务 ID 的 `Mono<String>`。
+<2> 非阻塞状态查询，使用 `.getCurrentState(orderId).fetchAsync()`。
+<3> 实现 `ReactiveTransactionEventListener` 的 `onStateChanged`，返回 `Mono<Void>` 实现非阻塞事件处理。

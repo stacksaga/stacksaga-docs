@@ -1,42 +1,42 @@
-:description: Configuration reference for stacksaga-kafka-orchestrator-spring-boot-starter — the per-domain callback topic and its listener-container models (SHARED_GLOBAL, SHARED_GROUP, ISOLATED) and group protocol, declarative properties, and programmatic bean overrides such as a custom response ConsumerFactory.
-:keywords: StackSaga-Kafka, configuration, stacksaga-kafka-orchestrator, callback topic, callback listener, OrchestratorListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, share group, KIP-932, concurrency, domain-entity-scan, instance cluster, region, zone, ConsumerFactory, OrchestratorResponsePayloadConsumerFactoryProvider, SagaResponsePayloadDeserializer, bean override, programmatic configuration, AbstractSchedulerProvider, executionScheduler, blockingExecutionScheduler, scheduler, parallelism, thread-cap, KafkaTransactionEventListener, ReactiveKafkaTransactionEventListener
+:description: stacksaga-kafka-orchestrator-spring-boot-starter 配置参考 — 基于领域的专用回调主题及其监听器容器模型 (SHARED_GLOBAL, SHARED_GROUP, ISOLATED) 与消费组协议、声明式属性及编程式 Bean 重写（如自定义响应 ConsumerFactory）。
+:keywords: StackSaga-Kafka, 配置, stacksaga-kafka-orchestrator, 回调主题, callback listener, OrchestratorListenerScope, SHARED_GLOBAL, SHARED_GROUP, ISOLATED, groupType, 共享组, share group, KIP-932, 并发度, concurrency, domain-entity-scan, instance cluster, region, zone, ConsumerFactory, OrchestratorResponsePayloadConsumerFactoryProvider, SagaResponsePayloadDeserializer, bean override, 编程式配置, AbstractSchedulerProvider, executionScheduler, blockingExecutionScheduler, 调度器, parallelism, 线程上限, KafkaTransactionEventListener, ReactiveKafkaTransactionEventListener
 :page-priority: 0.7
 
-= Configuration
+= 编排器配置手册 (Configuration)
 
 [.lead]
-Every worker reply flows back to the orchestrator through a per-domain *callback topic*, consumed by a Spring for Apache Kafka *listener container*.
-How those containers are allocated and tuned — together with the declarative properties and the overridable provider beans — governs the orchestrator's callback throughput, latency, resource footprint, and fault isolation.
-This page collects everything you configure on the orchestrator side.
+每个 Worker 服务的应答均通过基于领域的专用*回调主题 (Callback Topic)* 流回编排器，并由 Spring for Apache Kafka *监听器容器 (Listener Container)* 消费。
+这些容器的分配与调优方式 — 连同声明式配置属性与可重写的 Provider Bean — 决定了编排器的回调吞吐量、响应延迟、系统资源占用以及故障隔离边界。
+本页汇集了编排器端可配置的所有核心要素。
 
-By default, every `SHARED_GLOBAL` event manager's callback topic is consumed by a *single* global callback container, which keeps consumer-thread usage low and suits most services.
-But a high-volume or latency-sensitive saga can be given its own container so it neither suffers nor causes head-of-line blocking, and the group protocol (`groupType`) decides whether parallelism is capped by the partition count.
-Tuning is about matching each event manager's *isolation*, *protocol*, and *concurrency* to its real load.
+默认情况下，每个 `SHARED_GLOBAL` 事件管理器的回调主题都由*单个*全局回调容器统一消费，这能保持极低的消费者线程开销，并适用于大多数微服务。
+但对于高吞吐或对延迟敏感的关键 Saga，可以为其分配独立的专属容器以避免发生队头阻塞 (Head-of-Line Blocking)；而消费组协议 (`groupType`) 则决定了并行度是否受限于分区数量。
+调优的核心在于将每个事件管理器的*隔离级别 (Isolation)*、*通信协议 (Protocol)* 和*并发度 (Concurrency)* 与其实际业务负载精确匹配。
 
-This page covers, from the highest-level choice down to the finest:
+本页内容从顶层核心决策逐步递进到细节配置：
 
-. *Callback topic and listener models* — the per-domain callback topic, the `listenerScope` container allocation (`SHARED_GLOBAL`, `SHARED_GROUP`, `ISOLATED`), and the `groupType` protocol.
-See xref:#topic_model_stacksaga_kafka_orchestrator[].
-. *Configuration properties* — the declarative `stacksaga.kafka.orchestrator.*` and `stacksaga.instance.*` settings.
-See xref:#configuration_properties_for_stacksaga_kafka_orchestrator[].
-. *Programmatic configuration* — replacing the framework's provider beans (such as a custom `ConsumerFactory`) when properties alone are not enough.
-See xref:#programmatic_configuration_stacksaga_kafka_orchestrator[].
+. *回调主题与监听器模型* — 基于领域的回调主题、`listenerScope` 容器分配策略 (`SHARED_GLOBAL`、`SHARED_GROUP`、`ISOLATED`) 以及 `groupType` 协议。
+详见 xref:#topic_model_stacksaga_kafka_orchestrator[]。
+. *配置属性参考* — 声明式的 `stacksaga.kafka.orchestrator.*` 与 `stacksaga.instance.*` 配置项。
+详见 xref:#configuration_properties_for_stacksaga_kafka_orchestrator[]。
+. *编程式配置与 Bean 重写* — 当单纯属性配置无法满足需求时，替换框架底层 Provider Bean（如自定义 `ConsumerFactory`）。
+详见 xref:#programmatic_configuration_stacksaga_kafka_orchestrator[]。
 
 [[topic_model_stacksaga_kafka_orchestrator]]
-== Callback Topic and Listener Models
+== 回调主题与监听器模型 (Callback Topic & Listener Models)
 
-=== Per-Domain Callback Topic
+=== 基于领域的专用回调主题 (Per-Domain Callback Topic)
 
-In `stacksaga-kafka-orchestrator`, a dedicated topic is created for each `EventManager` of the `DomainEntity` to receive the response messages from the Kafka worker endpoints.
+在 `stacksaga-kafka-orchestrator` 中，为每个 `DomainEntity` 对应的 `EventManager` 均会创建一个专用主题，用于接收来自 Kafka Worker 端点的响应应答消息。
 
-The topic name is built as `saga.callback.\{appName\}.\{domainCallbackTopicSuffix\}`, where:
+主题名称遵循如下命名规范：`saga.callback.\{appName\}.\{domainCallbackTopicSuffix\}`，其中：
 
-* `\{appName\}` is the application's service name, lowercased with any non-alphanumeric character collapsed to `-`.
-* `\{domainCallbackTopicSuffix\}` is appended as-is from the `@SagaEventManager` annotation.
+* `\{appName\}` 是应用程序的服务名，全部小写并将任何非字母数字字符合并替换为 `-`。
+* `\{domainCallbackTopicSuffix\}` 从 `@SagaEventManager` 注解中原样追加。
 
-For instance, a `SHARED_GLOBAL` event manager in the `order-service` application with `domainCallbackTopicSuffix = "place-order"` resolves to the real topic `saga.callback.order-service.place-order`;
+例如，在应用名为 `order-service` 的微服务中，一个声明了 `domainCallbackTopicSuffix = "place-order"` 的 `SHARED_GLOBAL` 事件管理器将解析为真实的 Kafka 主题名：`saga.callback.order-service.place-order`。
 
-the `domainCallbackTopicSuffix` is configured in the `@SagaEventManager` annotation of the EventManager as below.
+`domainCallbackTopicSuffix` 在 EventManager 的 `@SagaEventManager` 注解中配置，如下所示：
 
 [source,java]
 ----
@@ -45,58 +45,54 @@ the `domainCallbackTopicSuffix` is configured in the `@SagaEventManager` annotat
 )
 ----
 
-*Listener Container Scopes*
+*监听器容器作用域 (Listener Container Scopes)*
 
-Even though a dedicated callback topic is created for each `EventManager`, the container that *consumes* those callback topics is allocated according to the `listenerScope` configured in the `@SagaEventManager` annotation.
-There are three scopes:
+尽管为每个 `EventManager` 创建了独立的回调主题，但实际*消费*这些回调主题的底层容器则是根据 `@SagaEventManager` 注解中配置的 `listenerScope` 进行分配的。
+共有三种作用域：
 
-. xref:#shared_global_listener_models_for_orchestrator[]
-. xref:#shared_group_listener_models_for_orchestrator[]
-. xref:#isolated_listener_models_for_orchestrator[]
+. xref:#shared_global_listener_models_for_orchestrator[SHARED_GLOBAL (全局共享)]
+. xref:#shared_group_listener_models_for_orchestrator[SHARED_GROUP (分组共享)]
+. xref:#isolated_listener_models_for_orchestrator[ISOLATED (完全隔离)]
 
-Independently of the scope, each container consumes using the Kafka group protocol chosen with the `groupType` attribute — `GroupType.CONSUMER` (classic consumer group, backed by a `ConcurrentMessageListenerContainer`) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption backed by a `ShareKafkaMessageListenerContainer`, whose parallelism is not capped by the partition count).
+独立于作用域之外，每个容器均采用通过 `groupType` 属性指定的 Kafka 消费组协议进行消息拉取 — `GroupType.CONSUMER`（经典消费者组，底层由 `ConcurrentMessageListenerContainer` 支撑）或 `GroupType.SHARE`（Kafka 4 共享组 / KIP-932，队列式消费，底层由 `ShareKafkaMessageListenerContainer` 支撑，其并行度不受分区数限制）。
 
-IMPORTANT: A single container speaks only one protocol, so every event manager that shares a container — all `SHARED_GLOBAL` managers, or all members of a given `SHARED_GROUP` — must declare the *same* `groupType`.
-A mismatch fails fast at startup. `GroupType.SHARE` requires a Kafka 4.x broker with share groups enabled.
+IMPORTANT: 单个监听器容器只能运行一种消费协议，因此共享同一个容器的所有事件管理器（无论是全部 `SHARED_GLOBAL` 管理器，还是指定 `SHARED_GROUP` 的所有成员）都必须声明*相同*的 `groupType`。
+若协议不一致，应用将在启动时快速失败报错。启用 `GroupType.SHARE` 必须使用开启了共享组特性的 Kafka 4.x Broker。
 
 [[orchestrator_auto_start]]
-Whether a container starts automatically on application startup is controlled by the `autoStart` attribute of `SagaEventManagerListener` (used via `isolatedExecutionListener`/`sharedGroupExecutionListener`; `boolean`, default `true`).
+容器是否在应用启动时自动启动由 `SagaEventManagerListener` 的 `autoStart` 属性控制（通过 `isolatedExecutionListener`/`sharedGroupExecutionListener` 声明；`boolean` 类型，默认为 `true`）。
 
-IMPORTANT: A single container has only one lifecycle, so every event manager sharing one — all members of a given `SHARED_GROUP` — must declare the *same* `autoStart`.
-A mismatch fails fast at startup with a `ValidationException`. This restriction does not apply to `SHARED_GLOBAL`, whose auto-start behaviour is instead controlled application-wide by `stacksaga.kafka.orchestrator.global-callback-listener.auto-start` (see xref:#configuration_properties_for_stacksaga_kafka_orchestrator[]).
+IMPORTANT: 单个容器具有统一的生命周期，因此共享容器的所有事件管理器（指定 `SHARED_GROUP` 的全部成员）必须声明*相同*的 `autoStart`。
+若出现冲突，应用会在启动时抛出 `ValidationException` 快速失败。此限制不适用于 `SHARED_GLOBAL`，后者的自启行为由全局配置属性 `stacksaga.kafka.orchestrator.global-callback-listener.auto-start` 统一管控（参见 xref:#configuration_properties_for_stacksaga_kafka_orchestrator[]）。
 
-Let's dive into details of each listener scope.
+以下深入剖析各个监听器作用域的架构细节：
 
 [[shared_global_listener_models_for_orchestrator]]
-=== SHARED_GLOBAL
+=== SHARED_GLOBAL（全局共享）
 
-If the `@SagaEventManager` is configured with `listenerScope = OrchestratorListenerScope.SHARED_GLOBAL`, the framework binds that event manager's callback topic to a single, global callback listener container shared by *all* `SHARED_GLOBAL` event managers.
-This is the default and the right choice for most sagas: it pools every callback topic into one container instead of spinning up a container per orchestrator, keeping consumer-thread usage low.
+若 `@SagaEventManager` 配置为 `listenerScope = OrchestratorListenerScope.SHARED_GLOBAL`，框架会将该事件管理器的回调主题绑定到一个由*所有* `SHARED_GLOBAL` 事件管理器共享的全局单一回调监听器容器上。
+这是默认行为，也是绝大多数 Saga 场景的推荐选择：它将所有回调主题汇聚到单一容器中，而非为每个编排器分别启动容器，从而大幅节约消费者线程与内存开销。
 
-Here is the architecture for the shared listener model in `stacksaga-kafka-orchestrator`.
+下图展示了 `stacksaga-kafka-orchestrator` 中共享监听器模型的架构流转：
 
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Shared listener container in stacksaga kafka orchestrator,width=800]
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-shared-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[stacksaga-kafka 编排器中的共享监听器容器,width=800]
 
-* The *group protocol* and *concurrency* of the global container are configured application-wide via `stacksaga.kafka.orchestrator.global-callback-listener.group-type` and `stacksaga.kafka.orchestrator.global-callback-listener.concurrency` (see xref:#configuration_properties_for_stacksaga_kafka_orchestrator[]).
-The default group protocol is `SHARE`.
-* The consumer group follows the convention `saga-os-\{serviceName\}-…` where `os` stands for *Orchestration Service*.
-* For `GroupType.CONSUMER`, the listener is configured with `auto.offset.reset=earliest`, so previously published messages can be consumed after a service restart when no committed offset is available.
-For `GroupType.SHARE`, this property does not apply — share consumers manage offsets at the broker (KIP-932) rather than via the classic per-consumer `auto.offset.reset`, and the framework does not currently configure the share-group equivalent (`share.auto.offset.reset`).
-* Regardless of `groupType`, the container acknowledges/commits a reply record as soon as its listener callback returns — `EventPreparationManager.prepare()` resolves every outcome (successful step advancement, a paused/retryable transaction, or a terminated transaction) internally rather than letting an exception propagate to Kafka, so the callback always returns normally.
-A retryable failure therefore does not by itself cause Kafka to redeliver the reply.
-With `GroupType.SHARE` specifically, the container uses Spring's `ShareAckMode.IMPLICIT` and never calls the share-group's `RELEASE`/`REJECT` outcomes — the only capability the framework draws from `GroupType.SHARE` is queue-style concurrency past the partition-count ceiling, not its redelivery semantics.
-* At-Least-Once processing of a saga step is instead guaranteed by the framework's own retry system, independent of whether Kafka ever redelivers the original reply.
-When a worker reports `RetryableExecutorException`, the orchestrator persists the transaction as paused rather than retrying it inline; a completely separate module — the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Ring Coordinator] — later re-invokes the stalled span on whichever orchestrator instance currently owns that transaction's token sub-range (see that module's documentation for the full retry architecture).
-Genuine Kafka-level redelivery can still occur in its own right (e.g. a process crash before the listener callback returns), which is why the framework still provides a per-span *idempotency key* on each message.
-The framework does *not* discard duplicates automatically — guarding against processing the same reply twice, from either cause, must be handled by idempotent handling logic that uses that key.
+* 全局容器的*消费组协议*与*并发度*通过 `stacksaga.kafka.orchestrator.global-callback-listener.group-type` 与 `stacksaga.kafka.orchestrator.global-callback-listener.concurrency` 全局统一配置（参见 xref:#configuration_properties_for_stacksaga_kafka_orchestrator[]）。默认组协议为 `SHARE`。
+* 消费者组遵循命名约定：`saga-os-\{serviceName\}-…`，其中 `os` 代表*编排服务 (Orchestration Service)*。
+* 对于 `GroupType.CONSUMER`，监听器配置了 `auto.offset.reset=earliest`，以便服务重启且没有可用已提交偏移量时仍能消费历史消息。对于 `GroupType.SHARE`，该属性不适用 — 共享组消费者在 Broker 端管理偏移量 (KIP-932)，而非传统的单消费者 `auto.offset.reset`。
+* 无论采用何种 `groupType`，容器在监听器回调返回后立即确认/提交应答记录 — `EventPreparationManager.prepare()` 在内部处理所有状态流转（成功推进、暂停/待重试或已终止事务），绝不会将异常泄露至 Kafka 容器，因此回调始终正常返回。
+因此，可重试的业务失败本身不会促使 Kafka 重新投递该应答。
+对于 `GroupType.SHARE`，容器使用 Spring 的 `ShareAckMode.IMPLICIT` 隐式确认，从不调用共享组的 `RELEASE`/`REJECT` 动作 — 框架利用 `GroupType.SHARE` 的唯一诉求是突破分区上限的队列式并发，而非其消息重试语义。
+* Saga 步骤的“至少一次 (At-Least-Once)”处理完全由框架自身的重试系统提供担保，与 Kafka 是否重投递原始应答无关。当 Worker 报告 `RetryableExecutorException` 时，编排器将事务持久化为已暂停状态；随后完全独立的模块 — xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[环形协调器 (Ring Coordinator)] — 会在持有该事务令牌区间的编排器实例上重新调用停滞的跨度。
+在发生真实 Kafka 级别重投递时（例如监听器回调返回前容器崩溃），框架在每条消息上附带的基于跨度的*幂等键 (idempotency key)* 会确保安全防御。框架*不会*自动丢弃重复消息，利用该幂等键防止重复执行是业务开发者的责任。
 
 [[shared_group_listener_models_for_orchestrator]]
-=== SHARED_GROUP
+=== SHARED_GROUP（分组共享）
 
-If the `@SagaEventManager` is configured with `listenerScope = OrchestratorListenerScope.SHARED_GROUP`, its callback topic is consumed by a container shared only with *other* event managers that declare the same listener container name.
-This pools a specific subset of event managers into their own container, separate from the global one, when they benefit from dedicated concurrency or should be isolated from the load of unrelated managers.
+若 `@SagaEventManager` 配置为 `listenerScope = OrchestratorListenerScope.SHARED_GROUP`，其回调主题将由仅与声明了相同监听容器名称的*其他*事件管理器共享的专属容器消费。
+当一组特定的事件管理器需要专属的高并发度，或需要与全局其他管理器的负载相互隔离时，此模式可将它们归入独立的容器池中。
 
-The container is configured through the `sharedGroupExecutionListener` attribute of `@SagaEventManager`:
+该容器通过 `@SagaEventManager` 的 `sharedGroupExecutionListener` 属性进行配置：
 
 [source,java]
 ----
@@ -106,31 +102,30 @@ The container is configured through the `sharedGroupExecutionListener` attribute
         listenerScope = OrchestratorListenerScope.SHARED_GROUP,
         groupType = GroupType.SHARE,
         sharedGroupExecutionListener = @SagaEventManagerListener(
-                listenerContainerName = "order-group", // required: the group key other managers repeat to join
+                listenerContainerName = "order-group", // 必填：其他管理器声明相同的组名以加入该共享容器
                 concurrency = 10,
                 autoStart = true
         )
 )
 ----
 
-* `listenerContainerName` is *required* here — it is the group key that other event managers repeat to share this container.
-Registration fails if it is left blank.
-* All members must declare the *same* `groupType` (validated at startup).
-* All members must declare the *same* `autoStart` (validated at startup) — a shared container has a single lifecycle, so a mismatch fails fast with a `ValidationException`.
-* The container's concurrency is the *maximum* concurrency declared across all members of the group.
+* 此处 `listenerContainerName` 是*必填项* — 它是其他事件管理器复用以加入该共享容器的组标识键。若留空则注册失败。
+* 所有加入成员必须声明*相同*的 `groupType`（启动期强制校验）。
+* 所有加入成员必须声明*相同*的 `autoStart`（启动期强制校验） — 共享容器具有统一生命周期，配置不一致将抛出 `ValidationException` 快速失败。
+* 共享容器的并发度为该组所有成员中声明的*最大并发度 (Maximum Concurrency)*。
 
 [[isolated_listener_models_for_orchestrator]]
-=== ISOLATED
+=== ISOLATED（完全隔离）
 
-If the `@SagaEventManager` is configured with `listenerScope = OrchestratorListenerScope.ISOLATED`, the framework creates a dedicated callback listener container for that event manager's callback topic, consumed by no other manager.
-Use it for orchestrators with distinct performance or reliability requirements — e.g. a high-throughput or latency-sensitive saga — where sharing a container could cause head-of-line blocking or contention over consumer threads.
-It provides the best isolation at the cost of higher resource usage.
+若 `@SagaEventManager` 配置为 `listenerScope = OrchestratorListenerScope.ISOLATED`，框架将为该事件管理器的回调主题创建独占的专用回调监听器容器，不与其他任何管理器共享。
+适用于具有极端严苛性能或高可用要求的核心 Saga（如超高吞吐或对延迟极敏感的支付工作流），避免共享容器发生排队队头阻塞或消费者线程争抢。
+它提供了最极致的资源隔离，代价是占用稍多的系统资源。
 
-Here is the architecture for the isolated-listener model in `stacksaga-kafka-orchestrator`.
+下图展示了 `stacksaga-kafka-orchestrator` 中隔离监听器模型的架构：
 
-image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[Isolated listener container in stacksaga kafka orchestrator,width=800]
+image::implementations:stacksaga-kafka/stacksaga-kafka-engine-isolated-kafka-receiver-in-stacksaga-kafka-orchestrator.svg[stacksaga-kafka 编排器中的隔离监听器容器,width=800]
 
-The dedicated container is configured through the `isolatedExecutionListener` attribute of `@SagaEventManager`:
+该专用容器通过 `@SagaEventManager` 的 `isolatedExecutionListener` 属性进行配置：
 
 [source,java]
 ----
@@ -140,114 +135,110 @@ The dedicated container is configured through the `isolatedExecutionListener` at
         listenerScope = OrchestratorListenerScope.ISOLATED,
         groupType = GroupType.SHARE,
         isolatedExecutionListener = @SagaEventManagerListener(
-                listenerContainerName = "", // optional: defaults to {beanName}ListenerContainer
+                listenerContainerName = "", // 选填：默认为 {beanName}ListenerContainer
                 concurrency = 5,
                 autoStart = true
         )
 )
 ----
 
-* `listenerContainerName` is optional; if left blank, the container is named `\{beanName\}ListenerContainer`, where `\{beanName\}` is the event manager's `value`.
-* `concurrency` and `autoStart` come from this `@SagaEventManagerListener`.
-* The consumer group follows the same `saga-os-\{serviceName\}-…` convention, and the same `auto.offset.reset=earliest` and At-Least-Once semantics as SHARED_GLOBAL.
+* `listenerContainerName` 为选填项；若留空，容器命名默认为 `\{beanName\}ListenerContainer`，其中 `\{beanName\}` 为事件管理器的 `value` 标识。
+* `concurrency` 与 `autoStart` 来自该 `@SagaEventManagerListener` 声明。
+* 消费者组遵循与 SHARED_GLOBAL 相同的 `saga-os-\{serviceName\}-…` 命名约定，并具有相同的 `auto.offset.reset=earliest` 及至少一次语义。
 
 [[configuration_properties_for_stacksaga_kafka_orchestrator]]
-== Configuration Properties Of `stacksaga-kafka-orchestrator-spring-boot-starter`
+== `stacksaga-kafka-orchestrator-spring-boot-starter` 配置属性参考
 
 [cols="5,1,1,3",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Property
-| DataType
-| Default Value
-| Description
+| 配置属性 | 数据类型 | 默认值 | 说明描述
 
 | `stacksaga.kafka.orchestrator.domain-entity-scan`
 | `String[]`
 | `[]`
-| A comma-separated list of package names to scan for `@SagaDomainEntity` annotated classes. for instance, `com.example.domain,com.example.anotherdomain`.
+| 扫描标注有 `@SagaDomainEntity` 注解的类的包名列表，以逗号分隔。例如：`com.example.domain,com.example.anotherdomain`。
 
 | `stacksaga.kafka.orchestrator.global-callback-listener.group-type`
 | `GroupType`
 | `SHARE`
-| The Kafka group protocol used by the global callback listener container that consumes the callback topics of all `SHARED_GLOBAL` event managers. `SHARE` uses the Kafka 4 share-group protocol (KIP-932, queue-style consumption); `CONSUMER` uses the classic consumer-group protocol. xref:#topic_model_stacksaga_kafka_orchestrator[See more] about the listener models.
+| 消费所有 `SHARED_GLOBAL` 事件管理器回调主题的全局监听器容器所使用的 Kafka 消费组协议。`SHARE` 使用 Kafka 4 共享组协议 (KIP-932，队列式消费)；`CONSUMER` 使用传统消费者组协议。详见 xref:#topic_model_stacksaga_kafka_orchestrator[监听器模型]。
 
 | `stacksaga.kafka.orchestrator.global-callback-listener.concurrency`
 | `int`
 | `20`
-| The concurrency level of the global callback listener container. With `group-type: SHARE`, this can be set to any desired value because share groups are not limited by the partition count. With `group-type: CONSUMER`, it should not exceed the total number of partitions of the callback topics bound to the global container.
+| 全局回调监听器容器的并发级别。对于 `group-type: SHARE`，可根据需要设置任意并发值，因为共享组不受分区数限制。对于 `group-type: CONSUMER`，该值不应超过绑定到全局容器的回调主题的分区总数。
 
 | `stacksaga.kafka.orchestrator.global-callback-listener.auto-start`
 | `boolean`
 | `true`
-| Whether the global callback listener container that consumes the callback topics of all `SHARED_GLOBAL` event managers starts automatically on application startup. See xref:#orchestrator_auto_start[].
+| 全局回调监听器容器是否在应用启动时自动开启消费。参见 xref:#orchestrator_auto_start[]。
 
 | `stacksaga.kafka.orchestrator.scheduler.execution.parallelism`
 | `int`
 | `Runtime.getRuntime().availableProcessors()`
-| The number of worker threads backing the framework's shared, non-blocking `executionScheduler` — the parallel `reactor.core.scheduler.Scheduler` (created as `Schedulers.newParallel("saga-exe", parallelism)`) that drives ongoing reactive/saga processing, such as new-transaction dispatch and transaction-state lookups, and that a `ReactiveKafkaTransactionEventListener#onStateChanged` implementation runs on. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#event_listener_for_stage_change_events[Transaction State Change Listeners].
+| 支撑框架共享非阻塞 `executionScheduler` 的工作线程数 — 即用于驱动日常响应式/Saga 处理（如新事务调度派发和事务状态查询，以及运行 `ReactiveKafkaTransactionEventListener#onStateChanged`）的并行调度器（通过 `Schedulers.newParallel("saga-exe", parallelism)` 创建）。参见 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#event_listener_for_stage_change_events[事务状态变更监听器]。
 
 | `stacksaga.kafka.orchestrator.scheduler.blocking-execution.thread-cap`
 | `int`
 | `Runtime.getRuntime().availableProcessors() * 10`
-| The maximum number of threads the `blockingExecutionScheduler` — a bounded-elastic `reactor.core.scheduler.Scheduler` dedicated to invoking blocking, non-reactive user code such as `KafkaTransactionEventListener#onStateChanged` — may create.
+| `blockingExecutionScheduler` 允许创建的最大线程上限 — 这是一个专用于调用阻塞式非响应式业务用户代码（如 `KafkaTransactionEventListener#onStateChanged`）的弹性有界调度器。
 
 | `stacksaga.kafka.orchestrator.scheduler.blocking-execution.queued-task-cap`
 | `int`
 | `100000`
-| The maximum number of tasks the `blockingExecutionScheduler` may queue once every thread up to `thread-cap` is busy, before further submissions are rejected.
+| 当达到 `thread-cap` 线程上限且所有线程繁忙时，`blockingExecutionScheduler` 在拒绝新任务之前允许排队的最大任务容量。
 
 | `stacksaga.kafka.orchestrator.scheduler.blocking-execution.ttl-seconds`
 | `int`
 | `60`
-| The idle time-to-live, in seconds, before an unused `blockingExecutionScheduler` worker thread is reclaimed.
+| 未使用的 `blockingExecutionScheduler` 空闲工作线程在被回收前的存活时间（秒）。
 
 | `stacksaga.kafka.orchestrator.scheduler.blocking-execution.daemon`
 | `boolean`
 | `false`
-| Whether `blockingExecutionScheduler` worker threads are created as daemon threads. Left `false` by default so the JVM does not exit while a listener invocation is still in flight.
+| `blockingExecutionScheduler` 的工作线程是否创建为守护线程 (Daemon Thread)。默认为 `false`，以防 JVM 在监听器执行尚未完成时非预期退出。
 
 | `stacksaga.kafka.orchestrator.scheduler.graceful-shutdown-timeout-seconds`
 | `int`
 | `30`
-| How long, in seconds, shutdown gives each scheduler's in-flight/queued tasks to finish before forcing an immediate disposal. Applies to both `executionScheduler` and `blockingExecutionScheduler`.
+| 应用优雅停机时，在强制销毁之前给予每个调度器处理飞行中/排队任务的等待超时时间（秒）。同时适用于 `executionScheduler` 与 `blockingExecutionScheduler`。
 
 |`stacksaga.instance.cluster`
 |`String`
-|-
-|The cluster this instance belongs to. Components only connect to one another when their `cluster` values match, so it must be identical across every Master, Slave, and Orchestrator that needs to connect.
+|`-`
+|当前实例所属的集群名称。各组件仅在 `cluster` 匹配时建立互联通信，因此需要互联的所有 Master、Slave 和编排器节点必须配置完全一致的集群名。
 
 |`stacksaga.instance.region`
 |`String`
 |`default`
-|The operational deployment region this instance belongs to. Used to identify transaction origins, attach regional routing headers to Kafka command envelopes, and coordinate retries.
+|当前实例所属的运维部署区域。用于标识事务发起地、向 Kafka 命令封装头注入区域路由元数据以及协调分布式重试。
 +
-NOTE: Defaults to `default` (region code `0`). If a custom region is configured (e.g., `us-east-1`), you must declare a custom xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring bean; otherwise, application startup fails fast with a `ValidationException`.
+NOTE: 默认为 `default`（区域代码 `0`）。如果配置了自定义区域（如 `us-east-1`），必须显式声明自定义的 xref:ROOT:saga-region-resolver.adoc[`SagaRegionResolver`] Spring Bean；否则应用启动时将抛出 `ValidationException` 快速失败。
 
 |`stacksaga.instance.zone`
 |`String`
-|-
-|The zone this instance belongs to. It has no functional impact here, but should be set as per the StackSaga core specification.
+|`-`
+|当前实例所属的可用区 (Zone)。此处无额外功能影响，但建议遵循 StackSaga 规范统一配置。
 
 |===
 
 [[programmatic_configuration_stacksaga_kafka_orchestrator]]
-== Programmatic Configuration (Bean Overrides)
+== 编程式配置（Bean 重写）
 
-The properties above cover declarative tuning.
-Beyond them, several StackSaga-Kafka infrastructure components are exposed as *overridable Spring beans* for advanced, in-code customization.
-Each component ships with a framework-provided default that is registered with `@ConditionalOnMissingBean`, so simply declaring your own bean of the same provider type *replaces* the default — no property flag is required.
+上述配置属性涵盖了常规的声明式调优。
+除此之外，StackSaga-Kafka 多个底层基础设施组件均作为*可重写的 Spring Bean* 暴露，供高级代码级定制。
+每个组件均提供了带有 `@ConditionalOnMissingBean` 注解的框架内置默认实现，因此只需在应用中声明您自己的同类型 Provider Bean，即可无缝*替换*默认实现 — 无需额外配置任何属性开关。
 
-This section documents these customization points.
-The first is the *response consumer factory*.
+本节详细介绍这些关键定制切入点。首先是*响应消费者工厂 (Response Consumer Factory)*：
 
 [[custom_response_consumer_factory]]
-=== Custom Response `ConsumerFactory`
+=== 自定义响应 `ConsumerFactory`
 
-The orchestrator consumes the workers' reply messages through a `ConsumerFactory<String, SagaResponsePayload>` supplied by an `OrchestratorResponsePayloadConsumerFactoryProvider` bean.
-By default the framework builds this factory from your existing Spring Boot Kafka configuration (`spring.kafka.*`, via `KafkaProperties.buildConsumerProperties()`) and then plugs in the two deserializers StackSaga requires — a `StringDeserializer` for the key and a `SagaResponsePayloadDeserializer` for the value.
+编排器通过由 `OrchestratorResponsePayloadConsumerFactoryProvider` Bean 提供的 `ConsumerFactory<String, SagaResponsePayload>` 消费 Worker 的应答消息。
+默认情况下，框架根据您现有的 Spring Boot Kafka 配置（通过 `KafkaProperties.buildConsumerProperties()` 解析 `spring.kafka.*`）构建该工厂，并插入 StackSaga 所需的两个核心反序列化器 — 键的 `StringDeserializer` 与值的 `SagaResponsePayloadDeserializer`。
 
-To supply your own factory — for example to tune fetch sizes, security settings, or client properties that are not exposed through `spring.kafka.*` — extend the abstract `OrchestratorResponsePayloadConsumerFactoryProvider`, implement `consumerFactory()`, and register it as a bean:
+若需提供自定义工厂（例如微调抓取批量大小、安全认证或 `spring.kafka.*` 未暴露的高级客户端属性），继承抽象类 `OrchestratorResponsePayloadConsumerFactoryProvider`，实现 `consumerFactory()` 并将其注册为 Spring Bean：
 
 [source,java]
 ----
@@ -267,7 +258,7 @@ public class CustomResponseConsumerFactoryProvider extends OrchestratorResponseP
     @Override
     protected ConsumerFactory<String, SagaResponsePayload> consumerFactory() {
         Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties()); //<2>
-        // your custom tuning:
+        // 您的自定义高级调优：
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 250); //<3>
         props.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, 5 * 1024 * 1024);
         return new DefaultKafkaConsumerFactory<>(
@@ -279,33 +270,31 @@ public class CustomResponseConsumerFactoryProvider extends OrchestratorResponseP
 }
 ----
 
-<1> Inject the framework's `SagaResponsePayloadDeserializer` bean rather than constructing your own — it is already registered as a `@Component` and wired with the correct `JsonMapper`.
-<2> Starting from `KafkaProperties.buildConsumerProperties()` is optional but recommended, so your `spring.kafka.consumer.*` settings still apply.
-You may instead start from an empty map and set every property explicitly.
-<3> Apply whatever custom consumer tuning you need.
-<4> The key deserializer *must* be a `StringDeserializer` — the message key is the transaction id, sent as a string.
-<5> The value deserializer *must* be the `SagaResponsePayloadDeserializer` — StackSaga's reply payloads are typed via a message header and can only be reconstructed by this deserializer.
+<1> 注入框架自带的 `SagaResponsePayloadDeserializer` Bean，无需自行实例化 — 它已被注册为 `@Component` 并预先装配好了正确的 `JsonMapper`。
+<2> 从 `KafkaProperties.buildConsumerProperties()` 开始构建是可选但推荐的做法，以便使您的 `spring.kafka.consumer.*` 配置继续生效。您也可以从空 Map 开始并显式设置每一项属性。
+<3> 应用您所需的任何自定义消费者调优参数。
+<4> 键反序列化器*必须*为 `StringDeserializer` — 消息键为以字符串传输的事务 ID。
+<5> 值反序列化器*必须*为 `SagaResponsePayloadDeserializer` — StackSaga 应答载荷通过消息头携带类型标识，只能由该反序列化器进行精准重构。
 
 [IMPORTANT]
 ====
-Registering your own `OrchestratorResponsePayloadConsumerFactoryProvider` bean replaces the framework default *entirely* (it is `@ConditionalOnMissingBean`).
-You must therefore keep the two required deserializers exactly as shown — a different key or value deserializer will break reply deserialization.
+注册自定义 `OrchestratorResponsePayloadConsumerFactoryProvider` Bean 会*完全替换*框架默认实现（因其标注了 `@ConditionalOnMissingBean`）。
+因此，必须如上所示严格保留这两个必需的反序列化器 — 采用不兼容的反序列化器将导致应答反序列化彻底崩溃。
 ====
 
-Even when you supply a custom factory, the framework still *enforces a few settings internally* so the required consumption invariants hold.
-These are applied on top of whatever you configure, so you neither need to set them yourself nor can override them:
+即使您提供了自定义工厂，框架仍会在*内部强制执行少量关键设置*，以保证消费行为的不变性。这些设置会叠加在您的配置之上，您无需自行设置也无法强行覆盖：
 
 [cols="1,3",options="header"]
 [.google-anno-skip]
 |===
-| When the container's `groupType` is… | The framework forces…
+| 当容器的 `groupType` 为… | 框架强制约束…
 
 | `GroupType.CONSUMER`
-| `auto.offset.reset=earliest` on the consumer factory.
+| 在消费者工厂上强制设置 `auto.offset.reset=earliest`。
 
 | `GroupType.SHARE`
-| The share consumer factory is *derived* from the one above with the consumer-group-only keys removed — `partition.assignment.strategy`, `enable.auto.commit`, `auto.commit.interval.ms`, `auto.offset.reset`, and `isolation.level` (share groups do not use them) — and the share acknowledgement mode forced to *implicit* (`ShareAckMode.IMPLICIT`). See xref:#shared_global_listener_models_for_orchestrator[the listener models] for what these mean.
+| 共享组消费者工厂*派生自*上述工厂，但移除了仅适用于消费者组的专有键 — 包括 `partition.assignment.strategy`、`enable.auto.commit`、`auto.commit.interval.ms`、`auto.offset.reset` 以及 `isolation.level`（共享组不使用这些属性） — 并将共享确认模式强制设为*隐式确认* (`ShareAckMode.IMPLICIT`)。含义参见 xref:#shared_global_listener_models_for_orchestrator[监听器模型]。
 |===
 
-NOTE: The same override idiom applies to the other StackSaga-Kafka provider beans on the orchestrator — the producer factory (`OrchestratorPayloadProducerFactoryProvider`), the `KafkaTemplate` (`OrchestratorKafkaTemplateProvider`), and the saga execution scheduler (`AbstractSchedulerProvider`) — each registered with `@ConditionalOnMissingBean` and replaceable the same way.
-Dedicated guides for these follow in later sections.
+NOTE: 相同的 Bean 重写范式同样适用于编排器上的其他 StackSaga-Kafka Provider Bean — 包括生产者工厂 (`OrchestratorPayloadProducerFactoryProvider`)、`KafkaTemplate` (`OrchestratorKafkaTemplateProvider`) 以及 Saga 执行调度器 (`AbstractSchedulerProvider`) — 每个 Bean 均通过 `@ConditionalOnMissingBean` 注册并支持相同方式的重写。
+后续章节将提供专属指南。

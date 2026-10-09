@@ -1,20 +1,20 @@
-:description: StackSaga Kafka Topics and EventManager specifications — defining topics, naming rules, topic keys, and EventManager routing with onNext/onNextRevert.
-:keywords: StackSaga, AbstractTopic, EventManager, onNext, onNextRevert, topic name, topic key, registerTopics, SagaEventType
-= Topics and EventManager
+:description: StackSaga Kafka 主题与 EventManager 规范指南 — 定义主题、命名规则、主题键以及基于 onNext/onNextRevert 的 EventManager 动态路由。
+:keywords: StackSaga, AbstractTopic, EventManager, onNext, onNextRevert, 主题名称, topic name, 主题键, topic key, registerTopics, SagaEventType
+= 主题与事件管理器 (Topics and EventManager)
 :page-priority: 0.7
 
 [.lead]
-With the xref:stacksaga-kafka-implementation/orchestrator/domain-entity.adoc[Domain-Entity] defined, the next step is to describe the saga itself: the *Topics* that name each step and the *EventManager* that routes between them. This page covers defining topics (with their naming rules and keys) and wiring the `EventManager` that drives the forward (`onNext()`) and compensation (`onNextRevert()`) flow. How the per-domain callback topic is then consumed and tuned is covered separately in xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[Configuration].
+在定义了 xref:stacksaga-kafka-implementation/orchestrator/domain-entity.adoc[领域实体 (Domain-Entity)] 之后，下一步是描述 Saga 本身的执行拓扑：命名每个执行步骤的*主题 (Topics)* 以及在步骤之间进行动态路由编排的*事件管理器 (EventManager)*。本页涵盖主题的定义（包括命名规范与主题键）以及编排驱动前向流 (`onNext()`) 与补偿流 (`onNextRevert()`) 的 `EventManager` 实现。关于基于领域的回调主题如何消费与调优，在 xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[配置手册] 中单独说明。
 
 [[custom_topic_implementation]]
-== StackSaga Topic
+== StackSaga 主题 (StackSaga Topic)
 
-StackSaga Topics are constant values that are used to identify the execution endpoint in StackSaga.
-Topic are nothing but the kafka topics that are used to send the command messages to the worker services.
-Stacksaga topics contains additional metadata such as the name of the topic, the type of the topic (primary or compensation), and the span name that is used to identify the execution point.
-Stacksaga topics are used in the `EventManager` to determine which topic should be triggered next based on the execution flow.
+StackSaga 主题是用于在 StackSaga 中标识执行端点的常量对象。
+主题本质上就是用于向 Worker 服务发送命令消息的 Kafka 主题。
+StackSaga 主题包含附加元数据，例如主题名称、主题类型（主执行或补偿执行）以及用于标识执行节点的跨度 (Span) 名称。
+在 `EventManager` 中使用 StackSaga 主题来根据执行流转动态决定下一步应触发哪个主题。
 
-As per the place-order example, there were 4 atomic executions (Spans) in the primary flow like fetching user's details, initialize order, make the payment,and inventory update. and also there were 3 atomic executions in the compensation flow like cancel order, refund payment, and release inventory. so there are 7 spans in total. here is the sample topics that are used in the place-order example,
+以下单业务为例，在主执行流程中包含 4 个原子执行（跨度 / Spans）：获取用户详情、初始化订单、执行支付以及更新库存；在补偿执行流程中包含 3 个原子补偿：取消订单、退款以及释放库存。因此共计 7 个跨度。以下是下单示例中使用的自定义主题类实现：
 
 [source,java]
 ----
@@ -32,113 +32,109 @@ class PlaceOrderTopic extends AbstractTopic<PlaceOrderTopic> {//<1>
     }
 
     //<4>
-    //primary execution topics.
+    //主执行主题 (Primary execution topics)
     public static final PlaceOrderTopic DO_FETCH_USER_DETAILS = new PlaceOrderTopic("user-service.fetch-user-details", 1, SagaEventType.QUERY_DO_ACTION, "user-service");
     public static final PlaceOrderTopic DO_INITIALIZE_ORDER = new PlaceOrderTopic("order-service.initialize-order", 2, SagaEventType.COMMAND_DO_ACTION, "order-service");
     public static final PlaceOrderTopic DO_MAKE_PAYMENT = new PlaceOrderTopic("payment-service.make-payment", 3, SagaEventType.COMMAND_DO_ACTION, "payment-service");
     public static final PlaceOrderTopic DO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory-service.update-inventory", 4, SagaEventType.COMMAND_DO_ACTION, "inventory-service");
 
     //<5>
-    //revert/compensation topics.
+    //补偿/回滚主题 (Revert/compensation topics)
     public static final PlaceOrderTopic UNDO_INITIALIZE_ORDER = new PlaceOrderTopic("order-service.initialize-order", -2, SagaEventType.COMMAND_UNDO_ACTION, "order-service", DO_INITIALIZE_ORDER);
     public static final PlaceOrderTopic UNDO_MAKE_PAYMENT = new PlaceOrderTopic("payment-service.make-payment", -3, SagaEventType.COMMAND_UNDO_ACTION, "payment-service", DO_MAKE_PAYMENT);
     public static final PlaceOrderTopic UNDO_INVENTORY_UPDATE = new PlaceOrderTopic("inventory-service.update-inventory", -4, SagaEventType.COMMAND_UNDO_ACTION, "inventory-service", DO_INVENTORY_UPDATE);
 }
 ----
 
-<1> Create the custom topic class by extending the `AbstractTopic` class.
-<2> Override the constructors for primary execution topic instantiation. +
-*`topicName`*: the name of the topic that is used in the kafka. see xref:#topic_name_specification[Topic Name Specification] for more details +
-*`topicKey`*: the constant and unique (withing the domain) float value to represent the topic. see xref:#topic_key_specification[Topic Key Specification] for more details. +
-*`sagaEventType`*: the type of the topic. it can be either `SagaEventType.QUERY_DO_ACTION` for query execution or `SagaEventType.COMMAND_DO_ACTION` for command execution. +
-*`targetService`*: the name of the target service that is responsible for executing the command. this is used for logging and debugging purposes.
-<3> Override the constructors for compensation execution topic instantiation. +
-the parameters are the same as the primary execution topic constructor with an additional parameter for the parent topic. +
-*`parent`*: the primary execution topic that is related to the compensation topic. this is used to indicate the relationship between the primary execution and the compensation execution. for instance, in the place-order example, the compensation topic `UNDO_INITIALIZE_ORDER` is related to the primary execution topic `DO_INITIALIZE_ORDER`.
-<4> Create the primary execution topics as static final fields in the custom topic class by fallowing the conventions.
-<5> Create the compensation execution topics as static final fields in the custom topic class by fallowing the conventions.
+<1> 继承 `AbstractTopic` 类创建自定义主题类。
+<2> 重写用于主执行主题实例化的构造函数。 +
+*`topicName`*：Kafka 中使用的主题名称。详见 xref:#topic_name_specification[主题命名规范]。 +
+*`topicKey`*：代表该主题的常量且（领域内）唯一的 float 浮点数值。详见 xref:#topic_key_specification[主题键规范]。 +
+*`sagaEventType`*：主题类型。查询执行为 `SagaEventType.QUERY_DO_ACTION`，命令执行为 `SagaEventType.COMMAND_DO_ACTION`。 +
+*`targetService`*：负责执行该命令的目标服务名称，用于日志记录与调试取证。
+<3> 重写用于补偿执行主题实例化的构造函数。 +
+参数与主执行构造函数一致，额外增加了父级主题参数： +
+*`parent`*：与该补偿主题相关联的主执行主题。用于指明主执行与补偿执行之间的逆向对应关系。例如在下单示例中，补偿主题 `UNDO_INITIALIZE_ORDER` 关联至主执行主题 `DO_INITIALIZE_ORDER`。
+<4> 遵循约定，在自定义主题类中将主执行主题声明为 `public static final` 静态常量字段。
+<5> 遵循约定，在自定义主题类中将补偿执行主题声明为 `public static final` 静态常量字段。
 
-IMPORTANT: The custom topic class is not a spring bean at all. make sure not to annotate it with any spring annotations.
+IMPORTANT: 自定义主题类**不是** Spring Bean。切勿为其添加任何 Spring 组件注解。
 
 [[topic_name_specification]]
-== Topic Name Specification In StackSaga-Kafka
+== StackSaga-Kafka 中的主题命名规范 (Topic Name Specification)
 
-IMPORTANT: Endpoint topics are *owned and defined by the worker applications*, not by the orchestrator.
-A topic exists to feed a worker endpoint (`@SagaEndpoint`), so the worker is its authoritative source.
-Here in the orchestrator you declare the same topic in the `AbstractTopic` class only to *address* it when routing command messages — the orchestrator publishes to the topic but never owns or consumes it.
-For the full explanation of endpoint topics — ownership, the service-qualified naming best practice, and the auto-added `saga.` prefix — see xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#endpoint-topics[Endpoint Topics] on the worker page.
-The topic name you write in the `AbstractTopic` class must match the worker's `topicNameSuffix` *exactly*.
+IMPORTANT: 端点主题由 *Worker 应用程序拥有并定义*，而不是编排器。
+主题的存在是为了向 Worker 端点 (`@SagaEndpoint`) 输送消息，因此 Worker 是其权威事实来源。
+在编排器端，在 `AbstractTopic` 类中声明相同的主题仅仅是为了在路由命令消息时进行*寻址* — 编排器向该主题发布消息，但绝不拥有或消费它。
+有关端点主题的完整解析（归属权、服务限定命名最佳实践以及框架自动追加的 `saga.` 前缀），请参阅 Worker 页面上的 xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#endpoint-topics[端点主题]。
+您在 `AbstractTopic` 类中声明的主题名称必须与 Worker 的 `topicNameSuffix` **完全匹配**。
 
-The rules below apply to the topic name you provide when declaring each topic in the `AbstractTopic` class:
+在 `AbstractTopic` 类中声明每个主题时，请遵循以下命名规则：
 
-. *Name a topic after the service and action it targets* — the form `\{service-name\}.\{action\}` (e.g. `user-service.fetch-user-details`, `payment-service.make-payment`), not after the saga domain, because the endpoint is a worker-service capability that other saga domains can reuse. See xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#endpoint-topics-naming[Naming an endpoint topic].
-. Use `.` as the hierarchical segment separator (e.g. `order-service.initialize-order`). Hyphens (`-`) are permitted *within* a segment (e.g. `user-service`, `fetch-user-details`) but not *as* the separator; underscores (`_`) are not permitted anywhere.
-. For a compensation topic, reuse the *same* name as the primary topic it reverses — e.g. `UNDO_INITIALIZE_ORDER` reuses `order-service.initialize-order`. They are told apart by the `SagaEventType` and the sign of the xref:#topic_key_specification[topic key].
-. Do *not* write the `saga.` prefix — the framework adds it automatically to build the real Kafka topic (e.g. `order-service.initialize-order` → `saga.order-service.initialize-order`). If you *do* include the `saga.` prefix yourself, the framework keeps it as-is and does not add it again.
+. *以其针对的服务和动作命名主题* — 采用 `\{service-name\}.\{action\}` 形式（如 `user-service.fetch-user-details`、`payment-service.make-payment`），而非以 Saga 领域命名，因为该端点是 Worker 服务的核心能力，其他 Saga 领域完全可以复用它。参见 xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#endpoint-topics-naming[端点主题命名]。
+. 使用英文句点 `.` 作为分层分段分隔符（例如 `order-service.initialize-order`）。连字符 (`-`) 允许在分段*内部*使用（例如 `user-service`、`fetch-user-details`），但不能*作为*分段分隔符；严禁在任何位置使用下划线 (`_`)。
+. 对于补偿主题，复用其所逆转的主执行主题的*相同*名称 — 例如 `UNDO_INITIALIZE_ORDER` 复用 `order-service.initialize-order`。它们通过 `SagaEventType` 以及 xref:#topic_key_specification[主题键] 的正负符号进行严格区分。
+. **切勿**自行书写 `saga.` 前缀 — 框架构建实际 Kafka 主题时会自动追加该前缀（例如 `order-service.initialize-order` → `saga.order-service.initialize-order`）。若您*确实*自行包含了 `saga.` 前缀，框架会原样保留，不会重复追加。
 
 [[topic_key_specification]]
-== Topic Key Specification In StackSaga-Kafka
+== StackSaga-Kafka 中的主题键规范 (Topic Key Specification)
 
-The topic key is used for serialization and deserialization process.
-The row topic names are not passed via the header of the kafka messages, instead, the topic key is used for that purpose. therefore, the keys can not be changed once it is used in the system. therefore, it is highly recommended to use a constant and unique float value for each topic within the same domain. for instance, in the place-order example, the topic key for `DO_FETCH_USER_DETAILS` is 1, the topic key for `DO_INITIALIZE_ORDER` is 2, the topic key for `DO_MAKE_PAYMENT` is 3, and the topic key for `DO_INVENTORY_UPDATE` is 4. and also for compensation topics, it is recommended to use negative float values to differentiate them from primary execution topics. for instance, in the place-order example, the topic key for `UNDO_INITIALIZE_ORDER` is -2, the topic key for `UNDO_MAKE_PAYMENT` is -3, and the topic key for `UNDO_INVENTORY_UPDATE` is -4.
+主题键用于序列化与反序列化的高性能索引。
+Kafka 消息头中不传输冗长的原始主题字符串，而是使用紧凑的主题键代表。因此，键一旦在生产系统中使用即**不可变更**。强烈建议在同一领域内为每个主题分配常量且唯一的 float 浮点数值。例如在下单示例中，`DO_FETCH_USER_DETAILS` 的主题键为 1，`DO_INITIALIZE_ORDER` 为 2，`DO_MAKE_PAYMENT` 为 3，`DO_INVENTORY_UPDATE` 为 4。对于补偿主题，推荐使用对应的负浮点数值以与主执行区分，例如 `UNDO_INITIALIZE_ORDER` 为 -2，`UNDO_MAKE_PAYMENT` 为 -3，`UNDO_INVENTORY_UPDATE` 为 -4。
 
-NOTE: Decimal topic key values (e.g., `1.1`, `1.2`, `-1.1`) are reserved for the upcoming sub-execution feature, which will allow additional before/after sub-steps to be attached to a primary or compensation execution.
-Avoid using decimal keys in the current version to prevent conflicts with that future capability.
+NOTE: 小数主题键值（例如 `1.1`、`1.2`、`-1.1`）为未来的子执行 (Sub-Execution) 特性预留，该特性将允许向主执行或补偿执行挂载额外的前置/后置子步骤。在当前版本中请避免使用小数键，以免与未来能力产生冲突。
 
-As per the custom topic class that is mentioned above, here is the list of topics with their keys and names that are used in the place-order example,
+对照上述自定义主题类，下单示例中使用的主题名称、键值与实际 Kafka 主题映射表如下：
 
 [cols="2,2,2,3",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Execution
-| Topic Type
-| Mentioned Topic Name
-| Real Topic Name
+| 执行动作 | 主题类型 | 声明的主题名称 | 真实 Kafka 主题名称
 
-| Fetch User Details
+| 获取用户详情
 | `QUERY_DO_ACTION`
 | `user-service.fetch-user-details`
 | `saga.user-service.fetch-user-details`
 
-| Initialize Order
+| 初始化订单
 | `COMMAND_DO_ACTION`
 | `order-service.initialize-order`
 | `saga.order-service.initialize-order`
 
-| Make Payment
+| 执行支付扣款
 | `COMMAND_DO_ACTION`
 | `payment-service.make-payment`
 | `saga.payment-service.make-payment`
 
-| Inventory Update
+| 库存更新
 | `COMMAND_DO_ACTION`
 | `inventory-service.update-inventory`
 | `saga.inventory-service.update-inventory`
 
-| Cancel Order
+| 取消订单
 | `COMMAND_UNDO_ACTION`
 | `order-service.initialize-order`
 | `saga.order-service.initialize-order`
 
-| Refund Payment
+| 退还款项
 | `COMMAND_UNDO_ACTION`
 | `payment-service.make-payment`
 | `saga.payment-service.make-payment`
 
-| Release Inventory
+| 释放库存
 | `COMMAND_UNDO_ACTION`
 | `inventory-service.update-inventory`
 | `saga.inventory-service.update-inventory`
 
 |===
 
-NOTE: A primary topic and its compensation resolve to the *same* real Kafka topic — e.g. both `DO_INITIALIZE_ORDER` and `UNDO_INITIALIZE_ORDER` map to `saga.order-service.initialize-order`. There is a single topic per endpoint; the framework tells the primary command apart from its compensation by the `SagaEventType` and the sign of the topic key, not by the topic name.
+NOTE: 主执行主题与其补偿主题解析为*相同*的实际 Kafka 主题 — 例如 `DO_INITIALIZE_ORDER` 与 `UNDO_INITIALIZE_ORDER` 均映射至 `saga.order-service.initialize-order`。每个端点对应单一主题；框架通过 `SagaEventType` 和主题键的正负符号区分主执行命令与补偿命令，而非依赖不同主题名称。
 
 [[event_manager]]
-== EventManager
+== 事件管理器 (EventManager)
 
-Stacksaga-Kafka supports fully runtime dynamic execution navigation based on your conditions and the state of the transaction.
-So the EventManager is the component that is responsible for that. let's create a custom EventManager for the `OrderDomainEntity` as below.
+StackSaga-Kafka 支持基于业务条件和事务实时状态的完全运行时动态执行导航。
+`EventManager` 正是承担此职责的核心组件。以下为 `OrderDomainEntity` 创建自定义 EventManager 的示例：
 
 [source,java]
 ----
@@ -197,7 +193,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
             Supplier<NavigableMap<Integer, PlaceOrderTopic>> remainingReverts
     ) {
 
-        {//sample usage of revert hint store and next topic in the onNextRevert method.
+        {//onNextRevert 方法中 revertHintStore 与 nextTopic 参数的示例用法
             if (nextTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) { //<9>
                 revertHintStore.put("BEFORE_NOTE:UNDO_MAKE_PAYMENT", "Sample value before reverting UNDO_MAKE_PAYMENT");
             }
@@ -206,7 +202,7 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
             }
         }
 
-        {//sample usage of remaining reverts and recentExecutedTopic
+        {//remainingReverts 与 recentExecutedTopic 的示例用法
             if (recentExecutedTopic.equals(PlaceOrderTopic.UNDO_MAKE_PAYMENT)) { //<10>
                 log.info("Remaining reverts after reverting UNDO_MAKE_PAYMENT: {}", remainingReverts);
             }
@@ -219,59 +215,55 @@ public class PlaceOrderEventManager extends AbstractEventManager<OrderDomainEnti
 }
 ----
 
-<1> Annotate the custom EventManager class with `@SagaEventManager` annotation. It primarily marks the class as a Spring bean.
-<2> *value*: provide the name of the Spring bean for the custom EventManager. It is used for identification of the EventManager by name.
-<3> *listenerScope* and *groupType*: Configure how this event manager's callback (reply) topic is consumed. +
-*`listenerScope`* selects the container allocation — `OrchestratorListenerScope.SHARED_GLOBAL` (pool into the single global container, the default choice), `OrchestratorListenerScope.SHARED_GROUP` (share a named container with other managers), or `OrchestratorListenerScope.ISOLATED` (a dedicated container). For `SHARED_GROUP` and `ISOLATED`, the container's `concurrency` and `autoStart` are configured via the `sharedGroupExecutionListener`/`isolatedExecutionListener` attributes (`@SagaEventManagerListener`); every event manager sharing a `SHARED_GROUP` container must declare the *same* `autoStart`, or registration fails fast with a `ValidationException`. +
-*`groupType`* selects the Kafka group protocol — `GroupType.CONSUMER` (classic consumer group) or `GroupType.SHARE` (Kafka 4 share group / KIP-932, queue-style consumption not capped by partition count). +
-See xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[] for full details.
-<4> *domainCallbackTopicSuffix*: provide the common suffix for the topics that are related to the same domain. This is used internally by the framework to build the domain's *callback topic* — the topic on which it receives response messages from the Kafka worker endpoints. See xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[Per-Domain Callback Topic] for the exact naming format.
-<5> Create a custom EventManager class by extending the `AbstractEventManager` class and providing your custom DomainEntity and Topic class as generic parameters.
-<6> Override the `registerTopics()` method to register the topics that are used in the transaction. This method is invoked by the framework at the startup phase to register the topics regarding the CustomDomainEntity. You should return the list of topics via a supplier.
-<7> Override the `onNext()` method to determine the next topic based on the recently completed topic, the current state of the domain entity, and the provided `SagaPrimaryEventActionUtil` (`actionUtil`).
-This method is invoked by the framework after each successful execution in the primary flow and its primary responsibility is *routing* — deciding which topic to trigger next.
-Lightweight orchestrator-side bookkeeping is also permitted here: for example, recording a navigation timestamp in the domain entity metadata (as shown above) is a safe, low-cost operation that will be included in the persisted domain entity snapshot for traceability.
-However, business logic, database calls, external HTTP requests, or any other blocking I/O must not be placed here, because this method runs on the callback listener container's processing threads (a bounded pool sized by the container's concurrency); blocking them reduces callback throughput and can stall other sagas that share the container.
-Use the `actionUtil` factory parameter to return the routing decision:
-* `actionUtil.next(topic)` to route the workflow to the next step/topic.
-* `actionUtil.complete()` when all steps have been processed successfully to finish the Long-Running Transaction (LRT).
-* `actionUtil.error(exception)` to abort the forward execution and initiate the compensation (rollback) flow.
-<8> Override the `onNextRevert()` (Optional) method to perform any action at each step of the compensation flow.
-*Call timing*: this method is called *after* `recentExecutedTopic` has completed its compensation successfully and *before* `nextTopic` is dispatched to the worker.
-Both parameters are therefore available at the same time — you can react to what just finished and prepare context for what is about to run.
-<9> Sample usage of the `RevertHintStore` and the `nextTopic` parameters in the `onNextRevert()` method.
-Use `nextTopic` to determine which compensation topic is about to be dispatched, and use `revertHintStore` to store any metadata that the upcoming compensation execution will need.
-See the Javadoc of the class for full details about all parameters.
-<10> Sample usage of the `remainingReverts` and the `recentExecutedTopic` parameters in the `onNextRevert()` method.
-Use `recentExecutedTopic` to identify which compensation step just completed, and `remainingReverts` to inspect the full set of compensation steps still pending.
+<1> 使用 `@SagaEventManager` 注解标记自定义 EventManager 类，将其注册为 Spring Bean。
+<2> *value*：自定义 EventManager 的 Spring Bean 名称，用于按名称全局标识。
+<3> *listenerScope* 与 *groupType*：配置如何消费该事件管理器的回调（应答）主题。 +
+*`listenerScope`* 选择容器分配策略 — `OrchestratorListenerScope.SHARED_GLOBAL`（汇入单个全局共享容器，默认之选）、`OrchestratorListenerScope.SHARED_GROUP`（与其他管理器共享具名容器）或 `OrchestratorListenerScope.ISOLATED`（专属独立容器）。对于 `SHARED_GROUP` 与 `ISOLATED`，容器的 `concurrency` 与 `autoStart` 通过 `sharedGroupExecutionListener`/`isolatedExecutionListener` 属性 (`@SagaEventManagerListener`) 配置；共享 `SHARED_GROUP` 容器的每个事件管理器必须声明*相同*的 `autoStart`，否则注册时抛出 `ValidationException` 快速失败。 +
+*`groupType`* 选择 Kafka 消费组协议 — `GroupType.CONSUMER`（传统消费者组）或 `GroupType.SHARE`（Kafka 4 共享组 / KIP-932，不受分区数限制的队列式消费）。 +
+详见 xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[]。
+<4> *domainCallbackTopicSuffix*：为同一领域相关主题提供通用后缀。框架内部利用此后缀构建该领域的*回调主题* — 用于接收来自 Kafka Worker 端点的响应应答消息。确切命名规则参见 xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[基于领域的专用回调主题]。
+<5> 继承 `AbstractEventManager` 类创建自定义 EventManager，并提供自定义 DomainEntity 与 Topic 类作为泛型参数。
+<6> 重写 `registerTopics()` 方法以注册事务中涉及的主题。该方法由框架在启动期调用，以注册与 CustomDomainEntity 相关的全量主题列表。需通过 Supplier 返回主题列表。
+<7> 重写 `onNext()` 方法，根据最近刚完成的主题、领域实体的当前状态以及提供的 `SagaPrimaryEventActionUtil` (`actionUtil`) 决定下一步触发的主题。
+该方法在主流程中每次执行成功后由框架自动调用，其首要职责是**路由 (Routing)** — 决定下一个触发哪个主题。
+此处允许执行轻量级的编排器端薄记操作：例如在领域实体元数据中记录导航时间戳（如上所示），这是一项安全且低开销的操作，会被持久化到领域实体快照中以供追溯。
+但是，业务处理、数据库调用、外部 HTTP 请求或任何阻塞式 I/O 绝不能在此处执行，因为该方法运行在回调监听器容器的工作线程上；阻塞这些线程将降低回调吞吐量，并可能阻塞共享该容器的其他 Saga。
+使用 `actionUtil` 工厂参数返回路由裁决：
+* `actionUtil.next(topic)` 将工作流路由推进至下一步/主题。
+* `actionUtil.complete()` 当所有步骤均成功处理完毕时，结束长事务 (LRT)。
+* `actionUtil.error(exception)` 中断前向执行并启动补偿（回滚）流程。
+<8> 重写 `onNextRevert()`（可选）方法，以便在补偿流程的每个步骤执行附加动作。
+*调用时机*：该方法在 `recentExecutedTopic` 成功完成其补偿**之后**、且在 `nextTopic` 被派发给 Worker **之前**被调用。
+因此两个参数同时可用 — 您既可以对刚完成的补偿做出响应，也可以为即将运行的下一个补偿准备上下文。
+<9> `onNextRevert()` 方法中 `RevertHintStore` 与 `nextTopic` 参数的使用示例。
+利用 `nextTopic` 判断即将派发的补偿主题，并利用 `revertHintStore` 存储后续补偿执行所需的任何上下文元数据。
+<10> `onNextRevert()` 方法中 `remainingReverts` 与 `recentExecutedTopic` 参数的使用示例。
+利用 `recentExecutedTopic` 标识刚完成的补偿步骤，利用 `remainingReverts` 审查仍挂起待执行的完整补偿步骤集合。
 
-NOTE: The `nextTopic` parameter was introduced in preparation for an upcoming sub-execution feature that will allow additional before/after sub-steps to be attached to a compensation execution.
-In the current version it reflects the next top-level compensation topic.
+NOTE: `nextTopic` 参数是为了即将推出的子执行 (Sub-Execution) 特性而引入的，该特性将允许向补偿执行挂载额外的前置/后置子步骤。在当前版本中，它反映了下一个顶层补偿主题。
 
-WARNING: As a best practice, avoid performing any I/O-intensive or high-CPU operations inside the event navigator.
-These methods should be used only to evaluate routing conditions based on the provided parameters. +
-`onNext()` and `onNextRevert()` execute on the callback listener container's processing threads — a limited pool shared by the sagas bound to that container.
-Executing expensive operations here occupies those threads, leading to head-of-line blocking, reduced callback throughput, and degraded performance across the application.
+WARNING: 作为生产最佳实践，避免在事件导航器内部执行任何 I/O 密集型或高 CPU 消耗操作。这些方法应仅用于根据传入参数计算评估路由条件。 +
+`onNext()` 与 `onNextRevert()` 运行在回调监听器容器的处理线程上。在此处执行耗时操作会占用这些有限的线程，引发排队队头阻塞并降低全系统吞吐量。
 
-.Quick Reference: Exception Behavior in `onNext()` and `onNextRevert()`
+.速查表：`onNext()` 与 `onNextRevert()` 中的异常行为机制
 [cols="2,2,2",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Thrown / Returned From | Immediate Effect | Resulting State Transition
+| 抛出 / 返回自 | 即时效应 | 产生的状态流转
 
-| `onNext()` — any exception (including `actionUtil.error(...)`)
-| Compensation begins
+| `onNext()` — 任何异常（包括 `actionUtil.error(...)`）
+| 启动补偿回滚
 | `IN_PROGRESS` → `FAILED` → `COMPENSATING`
 
-| `onNextRevert()` — any exception
-| Compensation terminates
-| `COMPENSATING` → Compensation Failed
+| `onNextRevert()` — 任何异常
+| 终止补偿流程
+| `COMPENSATING` → 补偿失败 (Compensation Failed)
 
 |===
 
-NOTE: Any exception thrown from `onNext()` — or returned via `actionUtil.error(...)` — is treated by the framework as a non-retryable failure and immediately transitions the saga to `FAILED`, triggering the compensation sequence.
-This means `onNext()` can be used *intentionally* to start compensation based on orchestrator-side conditions: for instance, if a business rule evaluated after receiving a worker reply determines the saga should not proceed further. +
-Similarly, any exception thrown from `onNextRevert()` causes the compensation sequence to terminate immediately and the transaction is marked as compensation-failed.
-See the xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#exception-handling-reference[Exception Handling Reference] for the full breakdown across all methods.
+NOTE: 从 `onNext()` 抛出的任何异常 — 或通过 `actionUtil.error(...)` 返回的异常 — 均被框架视为不可重试故障，并立即将 Saga 状态置为 `FAILED`，触发逆向补偿序列。
+这意味着 `onNext()` 可以被*主动用于*基于编排器端条件触发补偿：例如，在收到 Worker 应答后评估的业务规则判定该 Saga 不应继续向前推进。 +
+类似地，从 `onNextRevert()` 抛出的任何异常都会导致补偿序列立即终止，事务被永久标记为补偿失败。
+关于所有方法的完整异常行为明细，请参阅 xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc#exception-handling-reference[异常处理参考手册]。
 
-NOTE: Each `EventManager` receives worker replies through a dedicated *per-domain callback topic*, and the listener container that consumes it is allocated by the `listenerScope` (`SHARED_GLOBAL`, `SHARED_GROUP`, or `ISOLATED`) and `groupType` declared on `@SagaEventManager`. The callback-topic naming, the three listener scopes, and the group-protocol behaviour are all documented in xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[Callback Topic and Listener Models].
+NOTE: 每个 `EventManager` 均通过专用的*基于领域的专属回调主题*接收 Worker 应答，消费该主题的监听器容器由 `@SagaEventManager` 上声明的 `listenerScope`（`SHARED_GLOBAL`、`SHARED_GROUP` 或 `ISOLATED`）与 `groupType` 共同分配。关于回调主题命名规范、三种监听器作用域及消费组协议行为的完整说明，请参阅 xref:stacksaga-kafka-implementation/orchestrator/properties.adoc#topic_model_stacksaga_kafka_orchestrator[回调主题与监听器模型]。
