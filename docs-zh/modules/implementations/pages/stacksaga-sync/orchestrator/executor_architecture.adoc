@@ -211,6 +211,14 @@ image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg
 
 IMPORTANT: 上述每种执行器类型均提供了阻塞式 (Imperative / Blocking) 与非阻塞响应式 (Reactive via Project Reactor) 两种实现。您可以在同一个 Saga 中根据技术栈自由选用或混合搭配。
 
+[TIP]
+.密封接口架构与编译期类型安全 (Sealed Interface Foundation)
+====
+StackSaga 的所有执行器契约均建立在现代 Java 21 **密封接口 (sealed interfaces)** 体系之上，以 `SagaExecutor<DE>` 为根契约。
+中间层契约如 `SagaCommandExecutor<DE>` 统一了同步 (`CommandExecutor`) 与响应式 (`ReactiveCommandExecutor`) 命令，并作为子执行器钩子 (`@RevertBefore` 与 `@RevertAfter`) 的通用目标泛型上限 `<E extends SagaCommandExecutor<DE>>`。
+同理，`SagaQueryExecutor<DE>` 统一定义只读查询，而 `SagaReactiveExecutor<DE>` 标识所有基于 Project Reactor `Mono` 的非阻塞流。
+====
+
 === 标准方法签名与参数解构
 
 StackSaga 为所有执行器提供了编译期类型安全、统一清晰的方法签名。
@@ -353,8 +361,11 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
             throw RetryableExecutorException.of(unavailableException);
 
         } catch (FeignException.BadRequest badRequestException) {
+            // 不可恢复的补偿异常：记录至提示存储并平稳推进回滚，避免挂起事务
             revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
-            throw new RuntimeException("补偿异常终止");
+            return stepManager
+                    .success("CANCEL_ORDER_TOLERATED")
+                    .noPause();
         }
     }
 }
@@ -720,7 +731,7 @@ SEC 引擎再次唤醒长事务，将执行链准确流转至终态执行器 (`e
 | **7**
 | `exe-5 (complete)` +
 `FinalizeOrder (no pause)`
-| **终态确认执行 (Terminal Completion)**：最终的命令执行器更新本地订单状态为 `CONFIRMED` 和 `DISPATCHED`，记录审计指标，返回 `.noPause().noMoreExecutors()`。跨越 4 个微服务的分布式长事务全链路圆满完成，全局数据严格最终一致。
+| **终态确认执行 (Terminal Completion)**：最终的命令执行器更新本地订单状态为 `CONFIRMED` 和 `DISPATCHED`，记录审计指标，返回 `.noPause().complete()`。跨越 4 个微服务的分布式长事务全链路圆满完成，全局数据严格最终一致。
 |===
 
 [NOTE]
@@ -1087,4 +1098,4 @@ _或_ +
 . **严格保证幂等性**：始终向下游透传 `idempotencyKey`，并将重复执行响应作为正常成功处理。
 . **清晰解耦连续与可暂停模式**：在可暂停流程中，将发起暂停的步骤与接收恢复的步骤作为独立执行器在 Saga DAG 中组织。
 . **切勿使用 `resumeContext.isEmpty()` 做阶段分支**：依靠 Saga 拓扑与领域实体状态跟踪业务进度，依靠 `RevertHintStore` 跟踪补偿阶段。
-. **遵循命名规范**：事件名称必须符合标准格式 (`^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$`)。
+. **遵循命名规范**：事件名称必须符合框架正则标准 (`^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$`)，即由单下划线分隔的字母数字标识（如 `ORDER_CREATED`、`PAYMENT_SUCCESS`、`STOCK_RESERVED`）。禁止使用连字符、空格或连续下划线（如 `ORDER__CREATED`）。记录所有外部调用异常与重试策略。

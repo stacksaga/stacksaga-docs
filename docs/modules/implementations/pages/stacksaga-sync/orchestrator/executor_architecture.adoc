@@ -211,6 +211,14 @@ image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg
 
 IMPORTANT: Each executor interface provides both blocking (imperative) and non-blocking (reactive via Project Reactor) implementations. You can freely choose or mix both paradigms within the same saga.
 
+[TIP]
+.Sealed Interface Foundation & Type Safety
+====
+All executor contracts in StackSaga are defined as modern Java 21 **sealed interfaces** rooted at `SagaExecutor<DE>`.
+Intermediate contracts like `SagaCommandExecutor<DE>` unify synchronous (`CommandExecutor`) and reactive (`ReactiveCommandExecutor`) implementations, and serve as the generic target bound `<E extends SagaCommandExecutor<DE>>` for sub-executor hooks (`@RevertBefore` and `@RevertAfter`).
+Similarly, `SagaQueryExecutor<DE>` unifies read-only queries, and `SagaReactiveExecutor<DE>` marks non-blocking Project Reactor pipelines.
+====
+
 === Method Parameter Anatomy
 
 StackSaga provides clean, compile-time typed method signatures across all executors.
@@ -353,8 +361,11 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
             throw RetryableExecutorException.of(unavailableException);
 
         } catch (FeignException.BadRequest badRequestException) {
+            // Unrecoverable compensation error: log to revertHintStore and proceed without stalling rollback
             revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
-            throw new RuntimeException("Compensation failed unexpectedly");
+            return stepManager
+                    .success("CANCEL_ORDER_TOLERATED")
+                    .noPause();
         }
     }
 }
@@ -729,7 +740,7 @@ The SEC wakes up the transaction and routes execution directly to the final exec
 | **7**
 | `exe-5 (complete)` +
 `FinalizeOrder (no pause)`
-| **Terminal Completion**: The final command executor updates the order aggregate in the local database to `CONFIRMED` and `DISPATCHED`, logs audit metrics, and returns `.noPause().noMoreExecutors()`. The entire distributed saga completes with full consistency across all four involved microservices.
+| **Terminal Completion**: The final command executor updates the order aggregate in the local database to `CONFIRMED` and `DISPATCHED`, logs audit metrics, and returns `.noPause().complete()`. The entire distributed saga completes with full consistency across all four involved microservices.
 |===
 
 [NOTE]
@@ -1102,4 +1113,4 @@ When designing saga executors, follow these core architectural guidelines:
 . **Enforce Idempotency**: Always forward `idempotencyKey` to downstream APIs and handle already-executed responses as successful steps without throwing errors.
 . **Separate Continuous vs Pausable Concerns**: In pausable transactions, keep the pausing executor (`Initiate...`) and the resumed executor (`Confirm...`) distinct in the Saga DAG.
 . **Never Inspect `resumeContext.isEmpty()` for Lifecycle Phase**: Use flow topology and `currentDomainEntityState` for forward phase tracking, and `RevertHintStore` for compensation phase tracking.
-. **Maintain Documentation Integrity**: Ensure event names match the standard format (`^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$`) and document all external failure modes.
+. **Maintain Documentation Integrity**: Ensure event names match the framework regex format (`^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$`): alphanumeric tokens separated by single underscores (e.g. `ORDER_CREATED`, `PAYMENT_SUCCESS`, `STOCK_RESERVED`). Hyphens, spaces, leading/trailing underscores, and consecutive underscores (e.g. `ORDER__CREATED`) are rejected by the framework. Document all external failure modes and retry policies.
