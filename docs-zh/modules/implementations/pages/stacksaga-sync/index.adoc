@@ -27,7 +27,7 @@ NOTE: 尽管引擎在底层采用响应式机制运行，但它完全兼容*响�
 * *下游实用服务零依赖 (Zero-dependency utility services)* —— 仅编排器持有 StackSaga 依赖。参与的实用微服务保留其既有端点，完全不需要编写任何 StackSaga 代码，因此采纳过程是渐进且非侵入性的。
 * *基于事件溯源的持久化状态 (Durable state via event sourcing)* —— 完整的 `SagaDomainEntity` 载荷和状态（`STARTED → IN_PROGRESS → COMPLETED | FAILED → COMPENSATING → COMPENSATED`）在每次状态转换时持久化，支持时间点恢复与完整审计追踪。
 * *基于令牌环分区的分布式重试 (Distributed retry with token ring partitioning)* —— 失败或停滞的事务由所属的编排器实例进行重试，由 `stacksaga-ring-coordinator` 协调的 Murmur3 令牌环切片决定归属权。
-* *双重长事务 (LRT) 执行模型* —— 一等支持*连续型长事务 (Continuous LRT)*（微服务间不间断的直通执行）与*可暂停长事务 (Pausable LRT)*（等待异步回调、Webhook 或通过 `stepManager.pause()` 与 `SagaTemplate.resume()` 进行人工确认的业务条件等待状态）。
+* *双重长事务 (LRT) 执行模型* —— 一等支持*连续型长事务 (Continuous LRT)*（微服务间不间断的直通执行）与*可暂停长事务 (Pausable LRT)*（等待异步回调、Webhook 或通过 `.pause(duration)` 与 `SagaTemplate.resume()` 进行人工确认的业务条件等待状态）。
 * *响应式与命令式双重支持* —— 面向开发者的 `SagaTemplate` / `ReactiveSagaTemplate` 以及 `CommandExecutor` / `QueryExecutor` 抽象同时支持阻塞与响应式（`Mono`/`Flux`）处理实现，使应用开发者可以自由选择编程模型，而不影响底层 Saga 协调逻辑。
 
 == 术语表 (Glossary)
@@ -68,18 +68,16 @@ Saga 在主流程中由一个或多个连续跨度组成，每个跨度都具有
 实现为 `QueryExecutor`（只读，无补偿）、`CommandExecutor`（改变状态，具有 `doRevert()` 补偿）或 *子执行器 (Sub Executor)*（在命令执行器回滚之前/之后运行的额外补偿步骤）。
 
 | [[glossary-step-manager]]*步骤管理器 (Step Manager)*
-| 传递给每个执行器用于驱动 Saga 流程流转的导航工具类：
-
-* *前向导航 (`ProcessStepManagerUtil`)*：`stepManager.next(NextExecutor.class, ...)` 前进到下一个跨度，`stepManager.pause(...)` 在业务里程碑处暂停执行等待外部回调，`stepManager.complete(...)` 完成 Saga。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[前向导航] 和 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[前向暂停]。
-* *补偿导航 (`RevertStepManagerUtil`)*：`stepManager.done(...)` 完成补偿步骤，而 `stepManager.pause(...)` 暂停回滚等待外部逆向冲正确认。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[补偿导航]。
-
+| 传递给每个执行器用于驱动 Saga 流程流转的阶段式流式构建器： +
+**前向导航 (`ProcessStepManager<DE>`)**：`.success(event).noPause().nextExecutor(...)` 前进到下一个跨度，`.success(event).pause(duration).nextExecutor(...)` 在业务里程碑处暂停执行等待外部回调，`.success(event).noPause().complete()` 完成 Saga。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[前向导航] 和 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[前向暂停]。 +
+**补偿导航 (`RevertStepManager`)**：`.success(event).noPause()` 完成补偿步骤，而 `.success(event).pause(duration)` 暂停回滚等待外部逆向冲正确认。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[补偿导航]。 +
 前向路由是在执行器内部通过代码编程式表达的，而不是在中央静态路由表中配置。
 
 | *连续型长事务 (Continuous LRT)*
 | 按顺序连续执行所有参与微服务且无故意业务等待状态的长事务。暂停仅由重试子系统处理的瞬时基础设施错误引发。等同于*直通处理 (Straight-Through Processing, STP)* 或*无等待状态事务 (Non-Wait-State Transaction)*。
 
 | *可暂停长事务 (Pausable LRT)*
-| 在业务里程碑处故意进入等待状态 (`stepManager.pause(...)`) 的长事务，持久化其状态并释放执行线程，直到外部回调或事件通过 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`SagaTemplate.resume(...)`] 触发恢复。**正向执行 (`doProcess`) 和逆向补偿 (`doRevert`) 均支持等待状态**。参见 xref:#pausable-lrt[可暂停长事务架构] 和 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[执行器中的可暂停补偿]。
+| 在业务里程碑处故意进入等待状态 (`.pause(duration)`) 的长事务，持久化其状态并释放执行线程，直到外部回调或事件通过 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`SagaTemplate.resume(...)`] 触发恢复。**正向执行 (`doProcess`) 和逆向补偿 (`doRevert`) 均支持等待状态**。参见 xref:#pausable-lrt[可暂停长事务架构] 和 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[执行器中的可暂停补偿]。
 
 | [[glossary-resume-context]]*恢复上下文 (Resume Context)*
 | 键值元数据存储 (`ResumeContext`)，捕获在通过 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`SagaTemplate.resume()`] 恢复事务期间提供的外部回调或 Webhook 载荷数据。与执行跨度一起持久化在事件存储中，并直接传递给目标恢复执行器，而不会向执行器边界外部暴露核心领域实体的修改。参见 xref:#resume-context-concept[ResumeContext 架构] 和 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[在执行器中消费 ResumeContext]。
@@ -121,10 +119,10 @@ Saga 在主流程中由一个或多个连续跨度组成，每个跨度都具有
 在分布式微服务架构中，业务事务在操作连续性上有着本质的不同。
 StackSaga 将长事务划分为两种主要的执行模型：
 
-. xref:#continuous-lrt[*连续型长事务 (Continuous Long-Running Transactions, Continuous LRT)*]
-. xref:#pausable-lrt[*可暂停长事务 (Pausable Long-Running Transactions, Pausable LRT)*]
+. *xref:#continuous-lrt[连续型长事务 (Continuous Long-Running Transactions, Continuous LRT)]*
+. *xref:#pausable-lrt[可暂停长事务 (Pausable Long-Running Transactions, Pausable LRT)]*
 
-理解这两种模型之间的区别，有助于开发者选择合适的导航模式（xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.next`] 与 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause`]）并正确配置回调端点。
+理解这两种模型之间的区别，有助于开发者选择合适的导航模式（xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[连续推进 `.noPause()`] 与 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[业务暂停 `.pause(duration)`]）并正确配置回调端点。
 
 [[continuous-lrt]]
 === 1. 连续型长事务 (Continuous LRT)
@@ -137,7 +135,7 @@ StackSaga 将长事务划分为两种主要的执行模型：
 在银行、金融科技和资本市场中，无需人工干预即可端到端执行的事务通常被称为**直通处理 (Straight-Through Processing, STP)**：
 
 * *作为纯 STP 的连续型长事务*：当付款、订单结算或交易需要跨微服务全自动化执行时，StackSaga 的 Continuous LRT 充当理想的 STP 流水线。
-* *通过 Pausable LRT 超越传统 STP 局限*：传统的 STP 架构在发生业务异常、涉及异步清算或结算 Webhook、或强制要求合规人工审批时，通常难以支撑甚至直接中断。在 StackSaga 中，开发者可以无缝将直通流扩展为**可暂停长事务 (Pausable LRT)** (`stepManager.pause(...)`)。这使得事务能够干净平稳地进入等待状态，而不会破坏 Saga 或长期霸占计算资源，完美兼顾纯 STP 与复杂的人工介入 / 异步协同需求。
+* *通过 Pausable LRT 超越传统 STP 局限*：传统的 STP 架构在发生业务异常、涉及异步清算或结算 Webhook、或强制要求合规人工审批时，通常难以支撑甚至直接中断。在 StackSaga 中，开发者可以无缝将直通流扩展为**可暂停长事务 (Pausable LRT)** (`.pause(duration)`)。这使得事务能够干净平稳地进入等待状态，而不会破坏 Saga 或长期霸占计算资源，完美兼顾纯 STP 与复杂的人工介入 / 异步协同需求。
 ====
 
 image::implementations:stacksaga-sync/continuous-lrt-flow.svg[Continuous LRT 流转图,width=1000]
@@ -152,8 +150,8 @@ image::implementations:stacksaga-sync/continuous-lrt-flow.svg[Continuous LRT 流
 . `payment-service` 同步向客户的付款方式扣款。
 . `delivery-service` 调度并派发物流配送。
 
-从客户提交订单的那一刻起，编排器通过 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.next(...)`] 一个接一个地顺序执行每个执行器跨度。
-事务持续运行，直到 `stepManager.complete(...)` 将 Saga 标记为成功完成。
+从客户提交订单的那一刻起，编排器通过 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.success(...).noPause().nextExecutor(...)`] 一个接一个地顺序执行每个执行器跨度。
+事务持续运行，直到 `stepManager.success(...).noPause().complete()` 将 Saga 标记为成功完成。
 
 ==== 瞬时基础设施错误与业务暂停的对比 (Transient Errors vs. Business Pauses)
 
@@ -176,29 +174,32 @@ image::implementations:stacksaga-sync/pausable-lrt-flow.svg[Pausable LRT 流转�
 ==== 真实业务场景 (Real-World Use Cases)
 
 * *外卖 / 按需配送平台 (Uber Eats, DoorDash 等)*：
++
 . 顾客下单；预留商品并进行支付预授权。
 . 编排器通知餐馆 (`restaurant-service`)。
-. *故意的业务暂停*：Saga 无法立即调度骑手配送，因为备餐需要 20–40 分钟。执行器调用 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(DeliveryDispatchExecutor.class, "ORDER_PREPARING", Duration.ofHours(2))`]。编排器持久化事务并释放所有工作线程。
+. *故意的业务暂停*：Saga 无法立即调度骑手配送，因为备餐需要 20–40 分钟。执行器调用 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success("ORDER_PREPARING").pause(Duration.ofHours(2)).nextExecutor(DeliveryDispatchExecutor.class)`]。编排器持久化事务并释放所有工作线程。
 . *通过回调恢复*：后厨将餐品标记为“制作完成”时，餐馆系统向编排器触发回调 Webhook。编排器调用 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(transactionId, correlationKey).execute()`]。
 . Saga 唤醒，从事件存储中恢复领域实体状态，并向前推进到 `DeliveryDispatchExecutor` 以分配并派送骑手。
 
 * *异步支付网关 / Webhook (Asynchronous Payment Gateways)*：
 支付网关（例如 3D-Secure 银行重定向、异步 SEPA/ACH 转账、加密货币链上确认）无法同步完成。
-支付执行器发起扣款，附带其 `idempotencyKey`，并调用 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`]。
+支付执行器发起扣款，附带其 `idempotencyKey`，并调用 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`.pause(duration)`]。
 一旦支付网关通知编排器的 Webhook 端点，编排器通过 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(...)`] 携带回调载荷恢复 Saga。
 
 * [[async-compensation-refund]]*异步补偿与退款（回滚等待状态，Rollback Wait States)*：
 当下游步骤失败（例如库存耗尽或配送调度失败）时，StackSaga 以逆序回滚 Saga。然而，撤销金融或物流操作通常需要异步处理：
++
 . 编排器触发支付执行器 (`PaymentCommandExecutor`) 的 `doRevert()`。
-. 由于银行网关通过 Webhook 异步处理冲正退款，`doRevert()` 使用其 `idempotencyKey` 调用退款 API，并通过 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause("REFUND_INITIATED", Duration.ofHours(24))`]。
+. 由于银行网关通过 Webhook 异步处理冲正退款，`doRevert()` 使用其 `idempotencyKey` 调用退款 API，并通过 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success("REFUND_INITIATED").pause(Duration.ofHours(24))`]。
 . 当支付提供商通过 Webhook 确认退款时，编排器调用 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey).put("refundStatus", "SUCCESS").execute()`]。
-. 恢复后的 `doRevert()` 从 `ResumeContext` 中验证退款状态并调用 `stepManager.done("REFUND_COMPLETED")`，允许 Saga 继续向前补偿更早的步骤。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation-example[退款执行器示例] 与 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#callback-controller-pattern[在控制器中处理 Webhook]。
+. 恢复后的 `doRevert()` 从 `ResumeContext` 中验证退款状态并调用 `stepManager.success("REFUND_COMPLETED").noPause()`，允许 Saga 继续向前补偿更早的步骤。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation-example[退款执行器示例] 与 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#callback-controller-pattern[在控制器中处理 Webhook]。
 
 * *人工介入 (HITL, Human-in-the-Loop) Sagas*：
 许多关键的企业级工作流无法 100% 自动化，因为它们在推进之前必须经过人工裁量、授权审批或实体操作。StackSaga 的 Pausable LRT 原生支持 **人工介入 (HITL)** 工作流，无线程饥饿或内存泄漏风险：
 +
 --
-** **主管与财务审批**：超过业务阈值的交易（例如企业报销 > $10,000、信用额度调整或大额贷款发放）通过 `stepManager.pause(DisburseFundsExecutor.class, "AWAITING_MANAGER_APPROVAL", Duration.ofDays(3))` 暂停。主管在管理后台审查案件并点击“批准”，从而调用回调端点恢复 Saga。
+
+** **主管与财务审批**：超过业务阈值的交易（例如企业报销 > \$10,000、信用额度调整或大额贷款发放）通过 `stepManager.success("AWAITING_APPROVAL").pause(Duration.ofDays(3)).nextExecutor(DisburseFundsExecutor.class)` 暂停。主管在管理后台审查案件并点击“批准”，从而调用回调端点恢复 Saga。
 ** **现场运营与实体操作**：在按需平台中，后厨工作人员或仓库分拣员在终端机上点击“已接单”或“包裹已打包”，触发 Webhook 以恢复后续的配送派单。
 ** **合规与人工 KYC 审查**：当自动化文档 OCR 或风控引擎标记出边缘可疑案件时，Saga 在事件存储中安全暂停等待人工合规官员审查，而不会长期占据服务器线程或系统连接池。
 --
@@ -222,8 +223,8 @@ image::implementations:stacksaga-sync/pausable-lrt-flow.svg[Pausable LRT 流转�
 | `CommandExecutor.doRevert(...)`、`RevertBeforeExecutor.doProcess(...)` 或 `RevertAfterExecutor.doProcess(...)`
 
 | *步骤管理器动作*
-| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(NextExecutor.class, event, duration)`]
-| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(event, duration)`] 或 `pauseWithNext(...)` / `pauseWithComplete(...)`
+| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success(event).pause(duration).nextExecutor(Next.class)`]
+| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success(event).pause(duration)`]
 
 | *恢复触发机制*
 | 回调 Webhook 调用 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey).execute()`]
@@ -254,18 +255,18 @@ StackSaga 将该键值元数据存储在事件存储字段 `es_transaction_execu
 // 正向执行：
 public ProcessStepManager<OrderDomainEntity> doProcess(
         OrderDomainEntity currentDomainEntity,
-        ProcessStepManagerUtil<OrderDomainEntity> stepManager,
         String idempotencyKey,
-        ResumeContext resumeContext) { ... }
+        ResumeContext resumeContext,
+        ProcessStepManager<OrderDomainEntity> stepManager) { ... }
 
 // 补偿执行：
 public RevertStepManager doRevert(
-        NonRetryableExecutorException primaryExecutionException,
+        ProcessException processException,
         OrderDomainEntity finalDomainEntityState,
         RevertHintStore revertHintStore,
         String idempotencyKey,
-        RevertStepManagerUtil stepManager,
-        ResumeContext resumeContext) { ... }
+        ResumeContext resumeContext,
+        RevertStepManager stepManager) { ... }
 ----
 +
 这保证了**仅有执行器包含解释和验证外部回调载荷的业务逻辑**，使 `SagaDomainEntity` 聚合根保持纯净并受到严格保护。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[在执行器中消费 ResumeContext]。
@@ -281,11 +282,15 @@ public RevertStepManager doRevert(
 [source,java]
 ----
 // 正向暂停：
-return stepManager.pause(DeliveryDispatchExecutor.class, "ORDER_PREPARING", Duration.ofHours(2));
+return stepManager.success("ORDER_PREPARING")
+        .pause(Duration.ofHours(2))
+        .nextExecutor(DeliveryDispatchExecutor.class);
 
 // 补偿暂停：
-return stepManager.pause("REFUND_INITIATED", Duration.ofHours(24));
+return stepManager.success("REFUND_INITIATED")
+        .pause(Duration.ofHours(24));
 ----
+
 . 当下游服务完成其异步任务时，它调用编排器的回调端点（例如 `POST /orders/callback`），提供 `transactionId` 和完全相同的 `idempotencyKey`。
 . 编排器的控制器提取这些键并恢复 Saga：
 +
@@ -301,21 +306,23 @@ this.sagaTemplate.resume(transactionId, correlationKey)
         .put("status", "SUCCESS")
         .executeAsync();
 ----
+
 . StackSaga 验证传入的 `correlationKey` 与事件存储中活动的 `current_resume_key` 匹配，安全地还原 `SagaDomainEntity`，并直接从暂停的执行器恢复执行。
 
 ==== 可配置的超时处理 (`Duration`)
 
-`stepManager.pause(...)` 的持续时间参数控制框架如何处理潜在的回调丢失情况：
+`.pause(Duration retentionDuration)` 的持续时间参数控制框架如何处理潜在的回调丢失情况：
 
-* *传入 `null`*：事务无限期保持暂停，不会暴露给自动重试调度器。当业务流程没有固定截止时间且必须严格等待外部回调或人工操作时使用此选项。
-* *传入 `Duration`（例如 `Duration.ofHours(2)`）*：如果外部系统未能在指定时间内提供回调，StackSaga 的重试引擎会将暂停的执行器暴露出来进行重新调用。这允许执行器检查外部系统的状态、重新发起请求，或在超过时限时发起补偿回滚。参见 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#pausable-lrt-timeout-reexecution[超时重新执行机制与监听器考量]。
+* *严格的非空要求*：框架严格校验超时保留时长参数（`Assert.notNull(retentionDuration, "retentionDuration is required")`）。传入 `null` 会直接抛出 `IllegalArgumentException`。
+* *长期保留等待（例如 `Duration.ofDays(365)`）*：对于人工审核任务、合规审批或无固定截止时间的业务，若不希望被重试引擎自动重新调用，开发者应传入较长的保留时长（如 1 年）。需要考虑的架构权衡是：如果外部回调令牌意外丢失，该事务将持续休眠直到人工干预或重新触发。
+* *传入 SLA 超时时长（例如 `Duration.ofHours(2)`）*：如果外部系统未能在指定时间内提供回调，StackSaga 的重试引擎会将暂停的执行器暴露出来进行重新调用。这允许执行器检查外部系统的状态、重新发起请求，或在超过时限时发起补偿回滚。参见 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#pausable-lrt-timeout-reexecution[超时重新执行机制与监听器考量]。
 
 [IMPORTANT]
 .事件溯源优势：重新执行时的原始状态还原
 ====
 StackSaga **事件溯源 (Event Sourcing)** 引擎的一大底层架构优势在于：当执行器在超时后被重新调用时，`SagaDomainEntity` 会被精确还原到**进入该执行器之前的原始状态**：
 
-* 假设在最初的执行尝试中，执行器接收了 `currentDomainEntity` 并在调用 `stepManager.pause(...)` 之前在内存中修改了部分字段。
+* 假设在最初的执行尝试中，执行器接收了 `currentDomainEntity` 并在调用 `.pause(...)` 之前在内存中修改了部分字段。
 * 如果在配置的 `Duration` 内未收到回调，StackSaga 的重试引擎会重新调用该暂停的执行器。
 * 在重新执行时，框架会**丢弃在先前尝试期间所做的所有内存中修改**，并从事件存储中干净利落地重建领域实体，直到该执行器之前的检查点。
 * 因此，重新调用的执行器针对完全全新、未受污染的快照运行 —— 防止了脏状态泄漏，保证了确定性且幂等的重新执行。
@@ -337,10 +344,10 @@ StackSaga **事件溯源 (Event Sourcing)** 引擎的一大底层架构优势在
 | 等待状态事务 (BPMN)、回调模式 (`waitForTaskToken`)、信号驱动工作流、人工介入 (HITL)。
 
 | *执行器导航*
-| 正向：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.next(...)`] / `complete(...)` +
-回滚：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[`stepManager.done(...)`]
-| 正向：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(NextExecutor.class, event, duration)`] +
-回滚：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(event, duration)`]
+| 正向：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.success(...).noPause().nextExecutor(...)`] / `.complete()` +
+回滚：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[`stepManager.success(...).noPause()`]
+| 正向：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success(...).pause(duration).nextExecutor(...)`] +
+回滚：xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success(...).pause(duration)`]
 
 | *恢复触发机制*
 | 内部 SEC 线程即时调度推进。
@@ -445,7 +452,7 @@ StackSaga **事件溯源 (Event Sourcing)** 引擎的一大底层架构优势在
 
 * xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[`SagaTemplate` / `ReactiveSagaTemplate`] —— 启动新 Saga 执行或恢复事务的统一入口点。接收初始化的 `SagaDomainEntity` 和第一个执行器，随后将控制权交由 Saga 引擎接管。
 * xref:stacksaga-sync/orchestrator/domain-entity.adoc[`SagaDomainEntity`] —— Saga 实例的聚合根。承载累积的业务载荷和当前执行状态，在每次状态转换时被序列化并持久化到事件存储中。
-* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[执行器 (Executors)] —— 封装每个原子步骤的 `CommandExecutor`、`QueryExecutor` 以及子执行器 (Sub Executors)。每个执行器通过同步端点调用目标微服务，通过 `stepManager.next(...)` 向前导航，并（对于命令执行器）在 `doRevert()` 中定义其补偿逻辑。
+* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[执行器 (Executors)] —— 封装每个原子步骤的 `CommandExecutor`、`QueryExecutor` 以及子执行器 (Sub Executors)。每个执行器通过同步端点调用目标微服务，通过阶段式构建器（`stepManager.success(...).noPause().nextExecutor(...)`）向前导航，并（对于命令执行器）在 `doRevert()` 中定义其补偿逻辑。
 * xref:stacksaga-sync/orchestrator/event-listener.adoc[`TransactionEventListener` / `ReactiveTransactionEventListener`] —— 实时观察单笔事务的状态变更，用于监控、通知以及业务副作用联动。
 
 要将您的 Spring Boot 应用作为编排器服务运行，请在项目中添加 `stacksaga-spring-boot-starter` 依赖项：
@@ -496,6 +503,6 @@ NOTE: 因为 Saga 逻辑（前向调用、导航和补偿）完全驻留在编�
 
 * xref:stacksaga-sync/architecture.adoc[架构 (Architecture)] —— 分阶段部署模型（基础搭建、重试就绪与监控集成）以及编排器与实用服务如何协同工作。
 * xref:stacksaga-sync/orchestrator/Saga-CHES-architecture.adoc[CHES & D 分层架构] —— StackSaga 在 Spring 传统分层架构之上引入的设计模式。
-* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Saga 执行器 (Saga Executors)] —— 学习如何实现 `CommandExecutor` 和 `QueryExecutor`，使用 `stepManager.next(...)` 向前导航，以及使用 `stepManager.pause(...)` 暂停等待回调。
+* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Saga 执行器 (Saga Executors)] —— 学习如何实现 `CommandExecutor` 和 `QueryExecutor`，使用阶段式构建器向前导航，以及使用 `.pause(duration)` 暂停等待回调。
 * xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[SagaTemplate 与事件监听器] —— 学习如何发起 Saga、流式传输实时事件以及通过 `sagaTemplate.resume(...)` 恢复暂停的 Saga。
 * xref:stacksaga-sync/overview.adoc[组件与高级配置] —— StackSaga 生态系统组件与高级配置选项（如 Saga 调度器）。

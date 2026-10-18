@@ -1,4 +1,4 @@
-:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator — fluent API, fire-and-forget, fire-and-watch, resuming pausable transactions via correlation keys, blocking vs. reactive execution, and real-time event listeners.
+:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, fire-and-forget, fire-and-watch, resuming pausable transactions via correlation keys, blocking vs. reactive execution, and real-time event listeners.
 :keywords: StackSaga, SagaTemplate, resume, correlationKey, idempotencyKey, pausable LRT, callback webhook, fireAndForget, fireAndWatch, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
 :page-priority: 0.7
 
@@ -94,8 +94,8 @@ In a reactive environment (e.g., Spring WebFlux), `SagaTemplate` provides non-bl
 
 There are two primary modes to execute a saga transaction reactively:
 
-. *Fire-and-Forget* — Start the transaction and immediately receive a `Mono<String>` emitting the transaction ID once the saga is accepted. The saga executes in the background. Use this when you only need the transaction ID and will rely on `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track progress.
-. *Fire-and-Watch* — Start the transaction and observe real-time state transitions as a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`. Ideal for streaming live execution events to clients (e.g., via Server-Sent Events or WebSockets).
+. *Fire-and-Forget* -- Start the transaction and immediately receive a `Mono<String>` emitting the transaction ID once the saga is accepted. The saga executes in the background. Use this when you only need the transaction ID and will rely on `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track progress.
+. *Fire-and-Watch* -- Start the transaction and observe real-time state transitions as a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`. Ideal for streaming live execution events to clients (e.g., via Server-Sent Events or WebSockets).
 
 ==== Fire-and-Forget
 
@@ -161,8 +161,8 @@ public Flux<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEn
 
 ===== Key Behaviors and Error Handling
 
-* *Timeout (`WaitTimeExceededException`)*: If execution exceeds the specified `Duration waitTimeout`, the pipeline terminates with a `WaitTimeExceededException` via `onError`. This **only ends the subscription** — the saga execution continues asynchronously in the background.
-After the subscription ends, you can still observe progress in two ways:
+* *Timeout (`WaitTimeExceededException`)*: If execution exceeds the specified `Duration waitTimeout`, the pipeline terminates with a `WaitTimeExceededException` via `onError`. This **only ends the subscription** -- the saga execution continues asynchronously in the background. After the subscription ends, you can still observe progress in two ways:
++
 ** If you have registered a xref:#event_listener_for_stage_change_events[State Change Listener] (`TransactionEventListener` or `ReactiveTransactionEventListener`), it continues to receive event callbacks.
 ** Alternatively, query the state at any time using `getCurrentState(transactionId).fetchAsync()`.
 
@@ -172,10 +172,11 @@ Once rescheduled and retried, state notifications continue via listeners, or you
 [[resuming-paused-transactions]]
 === Resuming Paused Transactions (Pausable LRT)
 
-When a saga executor participates in a xref:stacksaga-sync/index.adoc#pausable-lrt[*Pausable Long-Running Transaction*] and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`].
+When a saga executor participates in a *xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transaction]* and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`].
 Similarly, when a compensation step must undo a transaction via an asynchronous gateway or banking transfer, it halts compensation by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(...)`]. See xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Workflows] for the conceptual background.
 
 At the moment of pausing, the transaction enters an intentional business wait state:
+
 * The `SagaDomainEntity` state is persisted to the event store.
 * `es_transaction` marks `is_paused = 1` and records `current_resume_key = <idempotencyKey>`.
 * CPU worker threads are freed immediately.
@@ -206,11 +207,11 @@ Mono<Void> resumeMono = this.sagaTemplate
 
 `ResumeSpec<DE>` exposes the following fluent methods:
 
-* *`.put(String key, String value)`*: Adds an individual key-value entry to the `ResumeContext`.
-* *`.putAll(Map<String, String> map)`*: Adds all entries from the specified map to the `ResumeContext`.
-* *`.withContext(ResumeContext resumeContext)`*: Supplies or replaces a pre-built `ResumeContext` (e.g., from `DefaultResumeContext.of(map)`).
-* *`.execute()`*: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments).
-* *`.executeAsync()`*: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments).
+* **`.put(String key, String value)`**: Adds an individual key-value entry to the `ResumeContext`.
+* **`.putAll(Map<String, String> map)`**: Adds all entries from the specified map to the `ResumeContext`.
+* **`.withContext(ResumeContext resumeContext)`**: Supplies or replaces a pre-built `ResumeContext` (e.g., from `DefaultResumeContext.of(map)`).
+* **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments).
+* **`.executeAsync()`**: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments).
 
 NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(transactionId, correlationKey, resumeContext).execute()`.
 
@@ -219,9 +220,9 @@ NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(t
 
 A major strength of StackSaga's architecture is that **resumption is completely uniform from the orchestrator's perspective**:
 
-* You invoke the exact same method — `sagaTemplate.resume(transactionId, correlationKey)` — whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
+* You invoke the exact same method -- `sagaTemplate.resume(transactionId, correlationKey)` -- whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
 * The StackSaga Execution Coordinator (SEC) queries the event store, determines the transaction status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, resets `is_paused = 0` and `current_resume_key = NULL`, and dispatches the execution:
-** **If paused in forward flow**: Advances to the target `NextExecutor` specified in xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(NextExecutor.class, ...)`], invoking its `doProcess(...)` with the supplied `ResumeContext`.
+** **If paused in forward flow**: Advances to the target `NextExecutor` designated by xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).pause(duration).nextExecutor(NextExecutor.class)`], invoking its `doProcess(...)` with the supplied `ResumeContext`.
 ** **If paused in compensation flow**: Re-invokes the paused `CommandExecutor`'s `doRevert(...)` with the supplied `ResumeContext`, allowing it to finalize reversal actions. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[Implementing Pausable Compensation].
 
 [[callback-controller-pattern]]
@@ -308,11 +309,12 @@ public class ReactiveOrderCallbackController {
 ----
 
 When `resume(...)` is called:
+
 . StackSaga validates that the supplied `correlationKey` matches the `current_resume_key` registered on `es_transaction`.
 . It stores the serialized `ResumeContext` JSON into `es_transaction_execution_tryout.resume_context`.
 . It resets `is_paused = 0` and clears `current_resume_key = NULL`.
 . It restores the `OrderDomainEntity` with its pristine checkpoint state.
-. It invokes the target executor's `doProcess(...)` or `doRevert(...)`, injecting the populated `ResumeContext`. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[Consuming ResumeContext in Executors] for how executors consume this data.
+. It invokes the target executor's `doProcess(...)` or `doRevert(...)`, injecting the populated `ResumeContext`. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[Pausable Long-Running Transactions in Executor Architecture] for how executors consume this data.
 
 [[resume-context-contract]]
 ==== `ResumeContext` API & Contract
@@ -326,6 +328,7 @@ When `resume(...)` is called:
 ----
 String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 ----
+
 * **Immutability Guarantee**: Once passed into an executor (`doProcess` or `doRevert`), the `ResumeContext` is marked read-only. Calling modifying operations (`put`, `remove`, `clear`) throws `UnsupportedOperationException`. This prevents executors from accidentally mutating callback audit records.
 * **Serialization & Event Sourcing**: Provides `prettyPrintAsString(ApplicationContext)` and `printAsString(ApplicationContext)` using the framework's configured JSON mapper bean.
 * **Deep Comparison**: Provides `deepEquals(ResumeContext obj, ApplicationContext applicationContext)` for structural JSON equality checks.
@@ -334,7 +337,7 @@ String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 [[pausable-lrt-timeout-reexecution]]
 === Timeout Re-Execution Mechanics (When No Callback Arrives)
 
-When an executor pauses with a maximum duration (e.g., `stepManager.pause(DeliveryDispatchExecutor.class, "ORDER_PREPARING", Duration.ofHours(5))`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
+When an executor pauses with a maximum duration (e.g., `stepManager.success("ORDER_PREPARING").pause(Duration.ofHours(5)).nextExecutor(DeliveryDispatchExecutor.class)`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
 
 However, in worst-case scenarios where the external system crashes, network connectivity is lost, or the callback is never delivered within the configured timeout:
 
@@ -356,8 +359,8 @@ After initiating a transaction via `execute()` or `executeAsync()`, the StackSag
 
 There are two distinct mechanisms to observe state changes:
 
-. *xref:#state-change-listeners[State Change Listeners]* — Push-based: The engine notifies your listener callback automatically after each executor step completes. Best for real-time reactions such as dispatching notifications, updating caches, or emitting events.
-. *xref:#getcurrentstate-on-demand[`SagaTemplate.getCurrentState()`]* — Pull-based: Queries the event-store on demand to retrieve the latest state snapshot for a given transaction ID. Best for user-facing status queries and post-completion audits.
+. *xref:#state-change-listeners[State Change Listeners]* -- Push-based: The engine notifies your listener callback automatically after each executor step completes. Best for real-time reactions such as dispatching notifications, updating caches, or emitting events.
+. *xref:#getcurrentstate-on-demand[`SagaTemplate.getCurrentState()`]* -- Pull-based: Queries the event-store on demand to retrieve the latest state snapshot for a given transaction ID. Best for user-facing status queries and post-completion audits.
 
 [[state-change-listeners]]
 === Using State Change Listeners (Real-time)
@@ -366,8 +369,8 @@ State Change Listeners receive push notifications directly from the engine after
 
 Choose the listener interface matching your application architecture:
 
-. `TransactionEventListener` — For imperative / blocking environments.
-. `ReactiveTransactionEventListener` — For reactive / non-blocking environments.
+. `TransactionEventListener` -- For imperative / blocking environments.
+. `ReactiveTransactionEventListener` -- For reactive / non-blocking environments.
 
 [IMPORTANT]
 ====
@@ -396,10 +399,11 @@ In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses
 * **Never place critical business logic or state mutations in a listener:**
 Because listener callbacks follow at-least-once semantics and can be re-triggered during retries and timeout recoveries, placing non-idempotent business logic, state mutations, or external charges inside `onStateChanged` will cause duplicate side-effects. Listeners should be strictly reserved for observational tasks (logging, metrics, or pushing user notifications).
 
-* **Recommended Pattern — Use a `QueryExecutor`:**
+* **Recommended Pattern -- Use a `QueryExecutor`:**
 If your workflow requires an operation to execute immediately following an executor (such as generating an internal receipt, updating a read model, or creating an audit log) that does not require compensation, **do not place it in `TransactionEventListener`**.
 Instead, model it as a formal **`QueryExecutor`** within the saga flow (e.g., chaining it via `stepManager.next(RecordAuditQueryExecutor.class, ...)`).
 As a first-class saga participant, a `QueryExecutor` guarantees:
++
 ** Durable recording and tracking in the Event Store.
 ** Deterministic execution aligned with the saga's forward progression.
 ** Full idempotency protection and visibility in the transaction execution history.
@@ -474,14 +478,14 @@ NOTE: Unlike `TransactionEventListener`, `ReactiveTransactionEventListener#onSta
 
 Calling `getCurrentState(transactionId)` returns a `SagaTemplate.StateSpec<DE>` specification that provides two methods:
 
-* *`fetch()`* — Synchronous retrieval returning `TransactionState<DE, SyncExecutionEvent<DE>>`.
+* **`fetch()`** -- Synchronous retrieval returning `TransactionState<DE, SyncExecutionEvent<DE>>`.
 +
 [WARNING]
 ====
 Do not call `fetch()` on non-blocking Reactor or Netty event loop threads. The method performs a thread check (`Schedulers.isInNonBlockingThread()`) and throws an `IllegalStateException` if invoked from a non-blocking thread. In reactive applications, always use `fetchAsync()`.
 ====
 
-* *`fetchAsync()`* — Asynchronous retrieval returning `Mono<TransactionState<DE, SyncExecutionEvent<DE>>>`. Safe for use in Spring WebFlux and reactive event-loop threads.
+* **`fetchAsync()`** -- Asynchronous retrieval returning `Mono<TransactionState<DE, SyncExecutionEvent<DE>>>`. Safe for use in Spring WebFlux and reactive event-loop threads.
 
 ==== Blocking State Retrieval (Imperative / Spring MVC)
 

@@ -162,6 +162,7 @@ public Flux<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEn
 ===== 关键行为与错误处理 (Key Behaviors and Error Handling)
 
 * *超时异常 (`WaitTimeExceededException`)*：如果执行耗时超过指定的 `Duration waitTimeout`，流式管道会通过 `onError` 以 `WaitTimeExceededException` 终止。这**仅代表订阅流的结束** —— Saga 事务本身仍在后台继续异步执行。在订阅结束后，您仍可通过两种方式观察其进展：
++
 ** 如果您注册了 xref:#event_listener_for_stage_change_events[状态变更监听器]（`TransactionEventListener` 或 `ReactiveTransactionEventListener`），它将继续接收事件回调。
 ** 或者，随时通过 `getCurrentState(transactionId).fetchAsync()` 主动查询最新状态。
 
@@ -170,10 +171,11 @@ public Flux<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEn
 [[resuming-paused-transactions]]
 === 恢复暂停的事务（可暂停长事务，Pausable LRT）
 
-当 Saga 执行器参与 xref:stacksaga-sync/index.adoc#pausable-lrt[*可暂停长事务 (Pausable LRT)*] 并将工作委托给外部异步服务（例如异步支付网关或后厨备餐人工确认）时，它通过返回 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] 故意识别并暂停正向执行。
+当 Saga 执行器参与 *xref:stacksaga-sync/index.adoc#pausable-lrt[可暂停长事务 (Pausable LRT)]* 并将工作委托给外部异步服务（例如异步支付网关或后厨备餐人工确认）时，它通过返回 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`] 故意识别并暂停正向执行。
 类似地，当补偿步骤必须通过异步网关或银行转账撤销事务时，它通过返回 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(...)`] 暂停补偿流。有关概念背景，请参阅 xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[双向流可暂停工作流]。
 
 在暂停的那一刻，事务进入故意的业务等待状态：
+
 * `SagaDomainEntity` 状态被持久化到事件存储中。
 * `es_transaction` 将标记更新为 `is_paused = 1` 并记录 `current_resume_key = <idempotencyKey>`。
 * CPU 工作线程立即被释放回到线程池。
@@ -204,11 +206,11 @@ Mono<Void> resumeMono = this.sagaTemplate
 
 `ResumeSpec<DE>` 暴露以下方法：
 
-* *`.put(String key, String value)`*：向 `ResumeContext` 添加单个键值对。
-* *`.putAll(Map<String, String> map)`*：将指定 Map 中的所有条目批量添加到 `ResumeContext`。
-* *`.withContext(ResumeContext resumeContext)`*：提供或替换预构建的 `ResumeContext`（例如来自 `DefaultResumeContext.of(map)`）。
-* *`.execute()`*：同步阻塞，直到引擎恢复该事务（适用于 Spring MVC / 命令式环境）。
-* *`.executeAsync()`*：返回一个 `Mono<Void>`，一旦恢复被处理即异步完成（适用于 Spring WebFlux / 响应式环境）。
+* **`.put(String key, String value)`**：向 `ResumeContext` 添加单个键值对。
+* **`.putAll(Map<String, String> map)`**：将指定 Map 中的所有条目批量添加到 `ResumeContext`。
+* **`.withContext(ResumeContext resumeContext)`**：提供或替换预构建的 `ResumeContext`（例如来自 `DefaultResumeContext.of(map)`）。
+* **`.execute()`**：同步阻塞，直到引擎恢复该事务（适用于 Spring MVC / 命令式环境）。
+* **`.executeAsync()`**：返回一个 `Mono<Void>`，一旦恢复被处理即异步完成（适用于 Spring WebFlux / 响应式环境）。
 
 NOTE: 还提供了一个便捷的重载快捷方式：`sagaTemplate.resume(transactionId, correlationKey, resumeContext).execute()`。
 
@@ -219,7 +221,7 @@ StackSaga 架构的一大突出优势在于：**从编排器的视角来看，�
 
 * 无论 Saga 是在正向执行 (`doProcess`) 期间暂停，还是在逆向补偿 (`doRevert`) 期间暂停，您调用的都是完全相同的方法 —— `sagaTemplate.resume(transactionId, correlationKey)`。
 * StackSaga 执行协调器 (SEC) 会自动查询事件存储，确定事务当前所处的阶段（`PROCESSING` 与 `REVERTING`），将领域实体快照还原到暂停检查点，重置 `is_paused = 0` 和 `current_resume_key = NULL`，并调度恢复执行：
-** **如果在正向流中暂停**：推进到在 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(NextExecutor.class, ...)`] 中指定的目标 `NextExecutor`，携带传入的 `ResumeContext` 调用其 `doProcess(...)`。
+** **如果在正向流中暂停**：推进到在 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).pause(duration).nextExecutor(NextExecutor.class)`] 中指定的目标 `NextExecutor`，携带传入的 `ResumeContext` 调用其 `doProcess(...)`。
 ** **如果在补偿流中暂停**：重新调用已暂停 `CommandExecutor` 的 `doRevert(...)`，传入提供的 `ResumeContext`，使其完成冲正撤销操作。参见 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[实现可暂停补偿]。
 
 [[callback-controller-pattern]]
@@ -306,11 +308,12 @@ public class ReactiveOrderCallbackController {
 ----
 
 当调用 `resume(...)` 时：
+
 . StackSaga 验证传入的 `correlationKey` 与 `es_transaction` 上注册的 `current_resume_key` 是否一致。
 . 将序列化后的 `ResumeContext` JSON 存储到 `es_transaction_execution_tryout.resume_context` 中。
 . 重置 `is_paused = 0` 并清空 `current_resume_key = NULL`。
 . 还原带有纯净检查点状态的 `OrderDomainEntity`。
-. 调用目标执行器的 `doProcess(...)` 或 `doRevert(...)`，注入填充好的 `ResumeContext`。有关执行器如何使用此数据，请参阅 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[在执行器中消费 ResumeContext]。
+. 调用目标执行器的 `doProcess(...)` 或 `doRevert(...)`，注入填充好的 `ResumeContext`。有关执行器如何使用此数据，请参阅 xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[执行器架构中的可暂停长事务]。
 
 [[resume-context-contract]]
 ==== `ResumeContext` API 与规范契约
@@ -324,6 +327,7 @@ public class ReactiveOrderCallbackController {
 ----
 String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 ----
+
 * **不可变性保证**：一旦传入执行器（`doProcess` 或 `doRevert`），`ResumeContext` 会被标记为只读。调用修改操作（`put`、`remove`、`clear`）将抛出 `UnsupportedOperationException`。这防止执行器意外修改回调审计记录。
 * **序列化与事件溯源**：使用框架配置的 JSON 映射器 Bean 提供 `prettyPrintAsString(ApplicationContext)` 和 `printAsString(ApplicationContext)`。
 * **深度对比**：提供 `deepEquals(ResumeContext obj, ApplicationContext applicationContext)` 进行结构化 JSON 相等性比对。
@@ -332,7 +336,7 @@ String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 [[pausable-lrt-timeout-reexecution]]
 === 超时重新执行机制（未收到回调时）
 
-当执行器带着最长持续时间暂停时（例如 `stepManager.pause(DeliveryDispatchExecutor.class, "ORDER_PREPARING", Duration.ofHours(5))`），应用程序期望外部回调在 5 小时到期之前触发 `sagaTemplate.resume(...)`。
+当执行器带着最长持续时间暂停时（例如 `stepManager.success("ORDER_PREPARING").pause(Duration.ofHours(5)).nextExecutor(DeliveryDispatchExecutor.class)`），应用程序期望外部回调在 5 小时到期之前触发 `sagaTemplate.resume(...)`。
 
 然而，在外部系统崩溃、网络中断或在配置的超时时间内未送达回调的最坏情况下：
 
@@ -398,6 +402,7 @@ String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 如果您的工作流要求在某个执行器之后立即执行某项操作（例如生成内部收据、更新读取视图或记录审计日志）且该操作不需要补偿，**切勿将其放置在 `TransactionEventListener` 中**。
 相反，请在 Saga 流程中将其建模为合法的 **`QueryExecutor`**（例如通过 `stepManager.next(RecordAuditQueryExecutor.class, ...)` 链接）。
 作为一等 Saga 参与者，`QueryExecutor` 可保证：
++
 ** 在事件存储中持久记录与跟踪。
 ** 与 Saga 的正向推进保持确定性的一致执行。
 ** 享有完整的幂等性保护以及在事务执行历史中的全链路可见性。
@@ -472,14 +477,14 @@ NOTE: 与 `TransactionEventListener` 不同，`ReactiveTransactionEventListener#
 
 调用 `getCurrentState(transactionId)` 返回一个 `SagaTemplate.StateSpec<DE>` 规范，该规范提供两个方法：
 
-* *`fetch()`* —— 同步检索，返回 `TransactionState<DE, SyncExecutionEvent<DE>>`。
+* **`fetch()`** —— 同步检索，返回 `TransactionState<DE, SyncExecutionEvent<DE>>`。
 +
 [WARNING]
 ====
 切勿在非阻塞 Reactor 或 Netty 事件循环线程上调用 `fetch()`。该方法会执行线程检查 (`Schedulers.isInNonBlockingThread()`)，如果从非阻塞线程调用会抛出 `IllegalStateException`。在响应式应用中，请始终使用 `fetchAsync()`。
 ====
 
-* *`fetchAsync()`* —— 异步检索，返回 `Mono<TransactionState<DE, SyncExecutionEvent<DE>>>`。在 Spring WebFlux 和响应式事件循环线程中使用是完全安全的。
+* **`fetchAsync()`** —— 异步检索，返回 `Mono<TransactionState<DE, SyncExecutionEvent<DE>>>`。在 Spring WebFlux 和响应式事件循环线程中使用是完全安全的。
 
 ==== 阻塞式状态检索 (Spring MVC / 命令式)
 

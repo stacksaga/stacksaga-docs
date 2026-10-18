@@ -1,5 +1,5 @@
-:description: StackSaga 执行器 (Saga Executors) 架构指南 — 命令执行器与查询执行器、导航模式 (stepManager.next, pause, complete)、事件溯源状态恢复以及面向弹性分布式微服务的补偿事务。
-:keywords: StackSaga, saga executors, CommandExecutor, QueryExecutor, stepManager, pause, next, complete, event sourcing, idempotencyKey, correlationKey, compensation, doRevert, doProcess, Spring Boot, 分布式事务, distributed transactions
+:description: StackSaga 执行器 (Saga Executors) 架构指南 — 命令执行器与查询执行器、阶段式流式导航 (.success().noPause().nextExecutor())、事件溯源状态恢复、可暂停 LRT 生命周期以及面向弹性分布式微服务的补偿事务。
+:keywords: StackSaga, saga executors, CommandExecutor, QueryExecutor, stepManager, pause, noPause, nextExecutor, complete, event sourcing, idempotencyKey, correlationKey, compensation, doRevert, doProcess, Spring Boot, 分布式事务, distributed transactions
 :page-priority: 0.7
 
 = Saga 执行器 (Saga Executors)
@@ -8,55 +8,265 @@
 
 在 StackSaga 中，Saga 执行器 (Saga Executor) 是一个专用组件，负责在分布式 Saga 工作流中封装并执行单个原子事务 (Atomic Transaction)。
 它充当业务逻辑与 Saga 编排引擎之间的桥梁，确保长事务 (LRT - Long-Running Transaction) 中的每个步骤都能可靠且一致地执行。
-Saga 执行器分为两类：命令执行器 (Command Executors，处理修改状态的操作，同时支持主执行与补偿执行) 与查询执行器 (Query Executors，处理只读操作)。
-通过将每个原子事务隔离在独立的执行器中，StackSaga 实现了精确的控制、重试与补偿机制，降低了数据异常的风险，并保证了跨微服务的最终一致性 (Eventual Consistency)。
+
+Saga 执行器分为两类：**命令执行器 (Command Executors)**（处理修改状态的操作，同时支持主执行与补偿执行）与 **查询执行器 (Query Executors)**（处理只读操作）。
+通过将每个原子事务隔离在独立的执行器中，StackSaga 实现了精确的控制、自动重试与补偿机制，彻底消除了分布式数据异常，并保证了跨微服务的最终一致性 (Eventual Consistency)。
 
 IMPORTANT: 如果您刚接触 Saga 模式，建议先阅读 xref:foundations:idempotency.adoc[]，了解分布式系统中的幂等性 (Idempotency) 和原子操作概念。
 
-通常，一个原子执行包含两个阶段：*主执行 (Primary Execution)* 与 *补偿执行 (Compensating Execution)*。
+通常，一个原子执行包含两个阶段：**主执行 (Primary Execution)** 与 **补偿执行 (Compensating Execution)**。
 
-. *主执行 (Primary Execution / Main Execution)*
-- 主执行代表长事务中的核心业务操作。
+1. **主执行 (Primary Execution / Main Forward Execution)**：
+主执行代表长事务中的核心业务前向操作。
 每个主执行都是整体业务工作流中的独立步骤，推动流程向最终完成演进。
-这些操作通常是幂等且隔离的，确保它们可以独立执行而不会产生意外的副作用。
+这些操作具备幂等性与隔离性，确保它们可以独立且安全地执行，不会产生意外的副作用。
 +
 例如，在下单工作流中，主执行可能包括获取用户详情、初始化订单、进行预授权、扣减库存以及处理最终支付。
++
+这些主执行推动流程向前演进。[icon:arrow-circle-right[1x,role=green]]
 
-- 这些主执行推动流程向前演进。[icon:arrow-circle-right[1x,role=green]]
+2. **补偿执行 (Compensating Execution / Revert Execution)**：
+补偿执行旨在当后续步骤发生失败时，撤销先前已成功完成的主执行所产生的影响。
+每个命令执行都有一个对应的补偿动作来逆转其影响，确保系统在发生故障时能够恢复到一致状态。
++
+补偿执行推动流程向后回滚。[icon:arrow-circle-left[1x,role=green]]
 
-. *补偿执行 (Compensating Execution / Revert Execution)*
-- 补偿执行旨在当后续步骤发生失败时，撤销先前已成功完成的主执行所产生的影响。
-每个主执行都有一个对应的补偿动作来逆转其影响，确保系统在发生故障时能够恢复到一致状态。
+[[conceptual-foundation]]
+== 核心概念：原子边界与流程编排 (Conceptual Foundation: Atomic Boundaries & Flow Management)
 
-- 补偿执行推动流程向后回滚。[icon:arrow-circle-left[1x,role=green]]
+在深入研究 Java 接口与方法签名之前，首先必须建立坚实的架构认知：**为什么** 需要 Saga 执行器、它们 **如何** 管理分布式工作流调用链，以及 **原子事务的边界** 应如何划分。
 
-== 执行器类型 (Executor Types)
+=== 真实业务场景：电商下单 Saga 工作流
 
-基于上述分类，Saga 执行器主要分为两种类型。但除了命令执行器与查询执行器之外，StackSaga 还提供了一种特殊的执行器类型——子执行器 (Sub Executor)，用于处理额外扩展的补偿执行。
+以典型的电商下单场景为例：顾客购买一台价值 \$1,500 的笔记本电脑。为了完成这一笔业务请求，编排器必须按序协同 4 个相互独立的微服务：
 
-下图展示了 StackSaga 中的执行器类型及其包含的方法：
+1. **用户服务** (`CheckCustomerEligibilityExecutor`)：验证客户账户状态并检查授信额度（只读查询）。
+2. **订单服务** (`CreateOrderCommandExecutor`)：在数据库中创建处于 `PENDING`（待处理）状态的订单并保存商品条目。
+3. **支付服务** (`ProcessPaymentCommandExecutor`)：与外部支付网关或银行对接，对客户的信用卡进行预授权并完成扣款。
+4. **库存服务** (`ReserveStockCommandExecutor`)：在仓库数据库中扣减并锁定实物库存。
+
+image:implementations:executor/stacksaga-orchestrator-atomic-transactions.drawio.svg[alt="Saga 编排器服务与原子事务边界",width=100%,opts=interactive,scaledwidth=100%]
+
+.编排器服务与原子边界参考指南（图示编号详解）
+[cols="1,3,6",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| 编号 | 流程组件与目标服务 | 架构职责与执行机制
+
+| **1**
+| **订单服务应用** +
+_(Saga 编排器服务)_
+| **Saga 编排器服务**：发起分布式业务流的微服务本身充当 **Saga 编排器**。在当前电商下单场景中，**订单服务应用程序** 托管 StackSaga 框架并封装 4 个独立的 Saga 执行器组件。每个执行器作为独立的 Spring Bean，各司其职，专门负责单个原子业务事务。
+
+| **2**
+| `CheckCustomerEligibility` +
+➔ `用户服务` +
+_(只读查询边界)_
+| **目标服务**：用户服务（`GET /users/{userId}/eligibility`）。 +
+**前向主执行（`doProcess`）**：在用户数据库中查询客户账户状态与授信额度。 +
+**逆向补偿（`doRevert`）**：_自动跳过_。因本步骤仅执行只读查询、绝不修改任何外部持久化状态，故实现 `QueryExecutor` 接口，无补偿回滚方法。
+
+| **3**
+| `CreateOrderCommand` +
+➔ `订单服务本地库` +
+_(本地命令边界)_
+| **目标服务**：订单服务自身的持久化层（`OrderRepository`）。 +
+**前向主执行（`doProcess`）**：使用 Spring Data JPA / JDBC 在本地 PostgreSQL 数据库中插入一条处于 `PENDING` 待处理状态的订单记录。 +
+**逆向补偿（`doRevert`）**：若后续任何步骤失败，SEC 引擎自动回调 `doRevert()`，执行本地更新将该订单状态变更为 `CANCELLED`（已取消）。
+
+| **4**
+| `ProcessPaymentCommand` +
+➔ `支付服务与网关` +
+_(远程命令边界)_
+| **目标服务**：支付服务（`POST /api/payments/charge`）。 +
+**前向主执行（`doProcess`）**：通过 HTTP/REST 远程调用支付服务（或 Stripe/PayPal/银行网关）进行信用卡预授权并扣款。 +
+**逆向补偿（`doRevert`）**：若后续步骤失败（如库存不足），SEC 引擎自动回调 `doRevert()`，调用支付服务退款接口（`POST /api/payments/refund`）撤销扣款或发起原路退回。
+
+| **5**
+| `ReserveStockCommand` +
+➔ `库存服务` +
+_(远程命令边界)_
+| **目标服务**：库存服务（`POST /api/inventory/reserve`）。 +
+**前向主执行（`doProcess`）**：向库存服务发送锁定请求，扣减仓库 MySQL 数据库中的实物库存。 +
+**逆向补偿（`doRevert`）**：若当前步骤部分失败或系统异常中断，SEC 引擎自动回调 `doRevert()`，调用库存服务释放接口（`POST /api/inventory/release`）将已锁定的库存原样归还。
+|===
+
+=== 为什么单体 `@Transactional` 在分布式微服务中失效
+
+在传统的单体架构中，整个流程往往被包裹在一个单一的 Spring `@Transactional` 本地事务方法中。
+若步骤 3 的支付网关拒绝了扣款，本地数据库事务会自动回滚：订单记录被丢弃，库存未曾变动，数据一致性自然得到保障。
+
+然而，在现代分布式微服务架构中：
+
+* 订单服务写入自身独立的 **PostgreSQL** 数据库。
+* 库存服务写入自身独立的 **Oracle** 或 **MySQL** 数据库。
+* 支付服务通过 HTTP 调用外部第三方 API（**Stripe、PayPal 或核心银行清算网关**）。
+
+由于每个微服务均拥有完全隔离的私有持久化存储，**跨服务的单一数据库事务在物理上是无法成立的**。
+传统的分布式事务方案（如两阶段提交 2PC 或 XA 事务）需要在所有参与者之间维持全局悲观锁，导致极高的网络延迟、单点故障隐患，并且在跨公网网络时极其脆弱。
+
+这正是 **StackSaga 执行器 (Executors)** 旨在彻底解决的核心问题。
+
+=== 原子事务的边界法则：“一个执行器 = 一个原子操作”
+
+在 StackSaga 中，一个 **Saga 执行器 (Executor)** 被严格定义为：**在单个微服务边界内封装的一笔原子事务**。
+
+[IMPORTANT]
+.基本架构法则：一个执行器 = 一个原子操作
+====
+一个执行器应当且仅应当与**一个微服务或一个数据库边界**交互。
+绝不要在单个执行器内部混合多个修改外部状态的动作（例如：在同一个 `doProcess()` 方法中既创建订单记录又调用信用卡扣款）。
+====
+
+为什么必须严格执行原子边界划分？
+
+1. **故障隔离与爆炸半径控制 (Blast Radius Control)**：
+若某个执行器在同一个方法内先在订单服务创建了记录，随后调用外部 Stripe 扣款，一旦在调用 Stripe 时发生网络超时，系统将陷入不可知的“灰度状态”（无法确定卡到底扣成功没有）。
+将其拆解为 `CreateOrderCommandExecutor` 与 `ProcessPaymentCommandExecutor` 两个执行器后，StackSaga 能以 100% 的确定性得知：步骤 2 已成功提交，而步骤 3 失败。
+
+2. **细粒度幂等性与重试机制 (Granular Idempotency)**：
+每个执行器在运行时都会获得一个为该次执行跨度专门生成的确定性 `idempotencyKey`。
+若支付服务由于瞬时网络抖动发生超时，StackSaga 的重试引擎可以安全地利用该稳定的 `idempotencyKey` 重试 `ProcessPaymentCommandExecutor`，而绝不会意外重走一遍订单服务造成重复下单。
+
+3. **边界清晰的反向补偿 (Clean Compensating Boundaries)**：
+当发生故障触发补偿时，StackSaga 只需补偿那些**已经成功提交**的步骤。
+若步骤 3（支付）失败，库存服务（步骤 4）由于从未被执行，因而完全不需要任何库存回滚。SEC 引擎只需调用 `CreateOrderCommandExecutor.doRevert()` 来取消待处理订单即可。
+
+=== 执行器如何构建并主导 Saga 链路
+
+在 StackSaga 中，执行链路不需要配置在沉重的外部 XML 文件、静态数据表或中心化的 BPMN 编排器中。相反，Saga 链路是由执行器**以类型安全、去中心化且编程式的方式动态驱动的**：
+
+==== 1. 前向链路编排 (去中心化流式路由)
+每一个执行器通过 `ProcessStepManager` 自主指定前向流程中的下一个接棒者：
+
+[source,java]
+----
+// 前向交接：步骤 2 移交至步骤 3
+return stepManager
+        .success("ORDER_INITIALIZED")
+        .noPause()
+        .nextExecutor(ProcessPaymentCommandExecutor.class);
+----
+
+==== 2. 动态条件分支路由 (Dynamic Branching)
+由于路由逻辑是编程式的，执行器可以直接读取 `currentDomainEntity` 中的最新聚合状态，并在运行时做出动态条件分支决策：
+
+[source,java]
+----
+// 基于聚合状态做出的运行时动态路由：
+if (currentDomainEntity.isVipCustomer()) {
+    // VIP 优质客户走极速专属扣款通道：
+    return stepManager
+            .success("ORDER_INITIALIZED")
+            .noPause()
+            .nextExecutor(ExpressPaymentCommandExecutor.class);
+} else {
+    return stepManager
+            .success("ORDER_INITIALIZED")
+            .noPause()
+            .nextExecutor(StandardPaymentCommandExecutor.class);
+}
+----
+
+==== 3. 终结完成 (Terminal Completion)
+正向链路中的最后一个执行器通过调用 `.complete()` 通知 SEC 引擎该长事务已圆满结束：
+
+[source,java]
+----
+// 终结成功：在事件存储中将整个长事务标记为已完成
+return stepManager
+        .success("STOCK_RESERVED")
+        .noPause()
+        .complete();
+----
+
+==== 4. 逆向补偿链路的自动化协调 (由 SEC 全权接管)
+StackSaga 最具颠覆性的架构优势之一在于：**开发者永远不需要编写反向补偿的路由跳转代码**。
+您**不需要**在配置中声明“若支付失败，请跳转至取消订单”。
+
+**StackSaga 引擎如何自动调度回滚？**
+
+1. 当事务向前推进时，Saga 执行协调器 (SEC) 会在事件存储表 (`es_transaction_execution_tryout`) 中为每一个成功提交的命令执行器追加写入不可变的溯源日志。
+2. 若任何步骤抛出 `NonRetryableExecutorException`（如支付被拒），SEC 会立即刹车，终结正向推进。
+3. SEC 引擎逆序读取历史执行日志，并**按照严格的时间逆序**依次调用各个命令执行器的 `doRevert()` 方法：
++
+[source,text]
+----
+Failed Step N (失败步骤 N) ──> doRevert(步骤 N-1) ──> doRevert(步骤 N-2) ... ──> doRevert(步骤 1)
+----
++
+4. 在调用每一个 `doRevert()` 之前，SEC 会精准还原该执行器当时运行前夕的领域实体聚合快照，确保补偿逻辑基于纯净、准确的历史事实运行。
+
+== 执行器类型与参数解构 (Executor Types & Method Parameters)
+
+基于执行性质，StackSaga 中的 Saga 执行器主要分为核心执行器与专用子执行器：
 
 image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg[alt="Stacksaga 执行器类型",width=100%,opts=interactive,scaledwidth=100%]
 
-* xref:#command-executors[命令执行器 (Command Executors)]
-* xref:query-executors[查询执行器 (Query Executors)]
-* xref:#sub-executors[子执行器 (Sub Executors)]
-** xref:#sub-before-executors[前置补偿子执行器 (Sub-Before-Executors)]
-** xref:#sub-after-executors[后置补偿子执行器 (Sub-After-Executors)]
+* **xref:#command-executors[命令执行器]** (`CommandExecutor` / `ReactiveCommandExecutor`)：用于修改业务状态且需要补偿的操作。
+* **xref:#query-executors[查询执行器]** (`QueryExecutor` / `ReactiveQueryExecutor`)：用于无需补偿的只读操作。
+* **xref:#sub-executors[子执行器]**：用于将复杂的多阶段补偿拆分为原子步骤：
+** **xref:#sub-before-executors[前置补偿子执行器]** (`RevertBeforeExecutor` / `ReactiveRevertBeforeExecutor`)
+** **xref:#sub-after-executors[后置补偿子执行器]** (`RevertAfterExecutor` / `ReactiveRevertAfterExecutor`)
 
-IMPORTANT: 上述每种执行器类型均提供了阻塞式 (Blocking) 与非阻塞响应式 (Reactive) 两种实现。您可以根据技术栈需求自由选择。
+IMPORTANT: 上述每种执行器类型均提供了阻塞式 (Imperative / Blocking) 与非阻塞响应式 (Reactive via Project Reactor) 两种实现。您可以在同一个 Saga 中根据技术栈自由选用或混合搭配。
+
+=== 标准方法签名与参数解构
+
+StackSaga 为所有执行器提供了编译期类型安全、统一清晰的方法签名。
+所有前向主执行 (`doProcess`) 统一接收 4 个参数，所有命令补偿执行 (`doRevert`) 统一接收 6 个参数：
+
+.标准方法签名结构
+[source,java]
+----
+// 前向执行 (CommandExecutor 与 QueryExecutor):
+ProcessStepManager<DE> doProcess(
+        @NonNull DE currentDomainEntity,
+        @NonNull String idempotencyKey,
+        @NonNull ResumeContext resumeContext,
+        @NonNull ProcessStepManager<DE> stepManager
+) throws RetryableExecutorException, NonRetryableExecutorException;
+
+// 补偿执行 (CommandExecutor):
+RevertStepManager doRevert(
+        @NonNull NonRetryableExecutorException processException,
+        @NonNull DE finalDomainEntityState,
+        @NonNull RevertHintStore revertHintStore,
+        @NonNull String idempotencyKey,
+        @NonNull ResumeContext resumeContext,
+        @NonNull RevertStepManager stepManager
+) throws RetryableExecutorException;
+----
+
+* **`currentDomainEntity` / `finalDomainEntityState`**：事件存储 (Event Store) 还原至当前执行步骤的聚合根状态快照。
+* **`idempotencyKey`**：框架为当前执行跨度 (Execution Span) 生成的确定性、重试稳定的全局唯一幂等键。调用下游服务时透传该键（通过 Header、Body 或 Query 参数），以保证跨服务调用的幂等性。
+* **`resumeContext`**：当暂停的事务通过 `sagaTemplate.resume(...)` 恢复时，用于安全传递外部回调 Webhook 载荷的只读键值存储 (`Map<String, String>`)。
+* **`revertHintStore`** _(仅在补偿中有效)_：在补偿步骤之间传递诊断线索与追踪标识（例如外部退款请求会话 ID）的持久化键值存储。
+* **`stepManager`**：阶段式流式构建器接口，用于声明本步骤的执行结果并精确引导 Saga 引擎的下一步路由。
+
+为了清晰解耦设计，StackSaga 将执行器的应用划分为两大核心模式：
+
+1. *xref:#usage-1-continuous-lrt[模式 1：连续长事务 (Continuous LRT)]* -- 无断点、直通式的顺序编排（绝大多数业务场景）。
+2. *xref:#usage-2-pausable-lrt[模式 2：可暂停长事务 (Pausable LRT / Wait-State / Callback-Driven)]* -- 涉及外部异步回调、人工介入的主动等待状态。
+
+'''
+
+[[usage-1-continuous-lrt]]
+== 模式 1：连续长事务 (Continuous Long-Running Transactions)
+
+在 **连续长事务 (Continuous LRT)** 中，所有步骤自始至终无中断顺序执行，无需进入持久化等待状态。
+这代表了微服务编排中最常见的主流场景（例如订单同步创建、账户扣款、库存预留）。
+
+在连续长事务中：
+
+* **主执行 (Primary Execution)**：完成业务后，直接调用 `.noPause().nextExecutor(...)` 或 `.noPause().complete()`。
+* **补偿执行 (Compensating Execution)**：撤销业务后，直接调用 `.noPause()`。
+* **恢复上下文 (Resume Context)**：由于事务未曾暂停，`resumeContext` 参数自然为空 (`resumeContext.isEmpty() == true`)。
 
 [[command-executors]]
-=== 命令执行器 (Command Executors)
+=== 连续 LRT 中的命令执行器 (Command Executors)
 
-如果某个原子执行同时包含主执行与补偿执行，该类原子事务必须在命令执行器 (Command Executor) 中实现。 +
-*命令执行器* 包含两个核心方法：分别用于执行主流程与执行补偿回滚流程。
-
-*命令执行器的典型示例*：
-
-* 初始化订单 (Initialize order)
-* 预留库存商品 (Reserve the items)
-* 处理支付扣款 (Make the payment)
+如果某个原子操作修改了系统状态，且在下游步骤失败时必须执行逆向补偿，请实现 `CommandExecutor`（阻塞式）或 `ReactiveCommandExecutor`（响应式）。
 
 [[blocking-command-executors]]
 ==== 阻塞式命令执行器 (Blocking Command-Executor)
@@ -70,10 +280,11 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
     private final OrderService orderService;
 
     @Override //<3>
-    public ProcessStepManager<OrderDomainEntity> doProcess(
-            OrderDomainEntity currentDomainEntity,
-            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
-            String idempotencyKey
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
         try {
@@ -85,13 +296,24 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
                     idempotencyKey
             );
             currentDomainEntity.setOrderId(orderId);
-            return stepManager.next(RserveItemsExecutor.class, "INITIALIZED_ORDER"); //<5>
+
+            //<5>
+            return stepManager
+                    .success("INITIALIZED_ORDER")
+                    .noPause()
+                    .nextExecutor(ReserveItemsExecutor.class);
+
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             //<6>
-            return stepManager.next(RserveItemsExecutor.class, "INITIALIZED_ORDER");
+            return stepManager
+                    .success("INITIALIZED_ORDER")
+                    .noPause()
+                    .nextExecutor(ReserveItemsExecutor.class);
+
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<7>
             throw RetryableExecutorException.of(unavailableException);
+
         } catch (FeignException.BadRequest badRequestException) {
             //<8>
             throw NonRetryableExecutorException
@@ -105,177 +327,76 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
     @Override
     @RevertBefore(startFrom = OrderInitializeSubBeforeExecutor.class) //<12>
     @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<13>
-    public RevertStepManager doRevert(
-            NonRetryableExecutorException processException,
-            OrderDomainEntity finalDomainEntityState,
-            RevertHintStore revertHintStore,
-            String idempotencyKey,
-            RevertStepManagerUtil stepManager
+    public @NonNull RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException processException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
     ) throws RetryableExecutorException {
+
         try {
             //<9>
             this.orderService.cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager.done("CANCELLED_ORDER");
+            return stepManager
+                    .success("CANCELLED_ORDER")
+                    .noPause(); //<10>
+
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
-            //<10>
-            return stepManager.done("CANCELLED_ORDER");
+            return stepManager
+                    .success("CANCELLED_ORDER")
+                    .noPause(); //<10>
+
         } catch (FeignException.ServiceUnavailable unavailableException) {
             //<11>
             throw RetryableExecutorException.of(unavailableException);
+
         } catch (FeignException.BadRequest badRequestException) {
             revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
-            throw new RuntimeException();
+            throw new RuntimeException("补偿异常终止");
         }
     }
 }
 ----
 
-<1> 执行器使用 `@SagaExecutor` 注解声明为 Spring Bean，并提供必要的元数据（如该执行器所属的目标服务名称以及执行器的全局唯一标识名称）。
-<2> 执行器实现 `CommandExecutor` 接口以声明为命令执行器。
-<3> 重写 `doProcess` 方法以实现主执行逻辑。 +
-StackSaga 会自动将 `idempotencyKey`（幂等键）作为第三个参数传入。该键在重试该原子执行时保持确定且稳定。您应将此键透传给下游服务（或放入 HTTP/消息头中），当下游服务收到重试请求时便能识别出重复请求。 +
-NOTE: 了解 StackSaga 如何生成此键或如何自定义生成规则，请参阅 xref:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[领域实体中的幂等键生成]。
-<4> 在 `doProcess` 方法内实现主执行业务逻辑。调用下游服务时，连同业务参数一并透传 `idempotencyKey`。
+<1> `@SagaExecutor` 将执行器注册为 Spring Bean 并声明元数据（`executeFor` 目标服务与执行器全局唯一标识）。
+<2> 实现 `CommandExecutor<OrderDomainEntity>` 并绑定对应的领域聚合实体类型。
+<3> 重写 `doProcess`，接收标准的 4 个参数。
+<4> 执行主业务逻辑，并将 `idempotencyKey` 透传给下游接口。
 [[stepManager_navigation]]
-<5> **通过 `stepManager` 导航、暂停或完成事务：** +
-`stepManager` 是传入 `doProcess` 的核心流程控制工具类。它提供了三个关键方法来控制 Saga 的生命周期流转：
-
-* *`stepManager.next(...)`（连续向前导航）*： +
-用于 xref:stacksaga-sync/index.adoc#continuous-lrt[连续型长事务 (Continuous LRT)]。在当前步骤成功完成后，立即将 Saga 推进到下一个执行器跨度 (Span)：
-+
-[source,java]
-----
-return stepManager.next(ReserveItemsExecutor.class, "INITIALIZED_ORDER");
-----
-
-[[stepManager_pause]]
-* *`stepManager.pause(...)`（面向可暂停 LRT 的业务等待状态）*： +
-用于 xref:stacksaga-sync/index.adoc#pausable-lrt[可暂停长事务 (Pausable LRT)]。进入预期的业务等待状态，此时执行挂起，领域状态安全持久化至事件存储库，工作线程被释放，直到外部回调 (Callback) 或 Webhook 恢复该事务：
-+
-[source,java]
-----
-// 无限期等待外部回调（不暴露给自动重试引擎）：
-return stepManager.pause(DeliveryExecutor.class, "ORDER_PREPARING", null);
-
-// 或者在重新调用已暂停执行器之前等待指定的超时时长：
-return stepManager.pause(DeliveryExecutor.class, "ORDER_PREPARING", Duration.ofHours(5));
-----
-+
-[IMPORTANT]
-.关联键与 `pause(...)` 中的超时处理：
-====
-* **`idempotencyKey` 作为 `correlationKey`（关联键）**：在可暂停步骤中，将 `idempotencyKey`（作为 `doProcess` 的第 3 个参数提供）传递给下游异步服务（放在请求体、查询参数或 HTTP 标头中）。当下游服务稍后调用您的 Webhook/回调端点时，必须回传此完全相同的键。然后您将其作为 `correlationKey` 传入 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(transactionId, correlationKey)`] 以安全恢复执行。详见 xref:stacksaga-sync/index.adoc#pausable-lrt[可暂停 LRT 架构]。
-* **超时时长 (Timeout Duration)**：第三个参数 (`Duration`) 指定引擎在将已暂停的执行器暴露给重试重新调用之前，应等待外部回调的时长。如果传入 `null`，事务将无限期保持暂停，不会暴露给自动重试。如果指定了时长（例如 `Duration.ofHours(5)`），若 5 小时内未收到回调，框架将重新调用该暂停的执行器跨度，允许应用程序重新查询外部系统或触发补偿。
-* **通过事件溯源恢复原始干净状态 (Pristine State Restoration)**：超时重新调用执行器时，StackSaga 的事件溯源引擎会从事件存储库中重构 `currentDomainEntity`，将其精确恢复到进入该执行器之前的初始状态。上一次暂停尝试期间所做的任何内存中修改都将被丢弃。执行器将作为一次全新调用针对原始状态执行，彻底防止跨重试的脏状态泄漏。
-====
-
-* *`stepManager.complete(...)`（终态完成）*： +
-在执行完当前执行器后，成功将整个长事务标记为终态完成：
-+
-[source,java]
-----
-return stepManager.complete("INITIALIZED_ORDER");
-----
-
-[TIP]
-====
-*`stepManager` 方法与事件动作最佳实践：*
-
-`stepManager` 为导航 (`next`)、暂停 (`pause`) 和完成 (`complete`) 事务提供了重载方法签名：
-
-. *直接以 `String` 传递事件名称（直接便捷）*： +
-您可以直接将事件动作名称作为 `String` 传递（例如 `stepManager.next(ReserveItemsExecutor.class, "INITIALIZED_ORDER")`、`stepManager.pause(DeliveryExecutor.class, "ORDER_PREPARING", null)` 或 `stepManager.complete("INITIALIZED_ORDER")`）。底层 StackSaga 会自动将此事件动作持久化到事件存储库中。
-
-. *以 `SagaExecutionEventName` 传递事件名称（集中式枚举 - 强烈推荐）*： +
-相比于在各个执行器中散落硬编码字符串，框架推荐的最佳实践是为每个自定义 LRT 领域实体（如 `OrderDomainEntity`）维护一个实现 `SagaExecutionEventName` 的集中式枚举 (`enum`)：
-+
-[source,java]
-----
-public enum OrderExecutionEvent implements SagaExecutionEventName {
-    INITIALIZED_ORDER,
-    CANCELLED_ORDER,
-    FETCHED_USER_DETAILS,
-    ORDER_PREPARING,
-    MADE_PAYMENT,
-    REFUNDED_PAYMENT,
-}
-----
-+
-这在编译期提供了类型安全以及跨整个 Saga 的集中可追溯性：
-+
-[source,java]
-----
-// doProcess 中的向前导航（连续型 LRT）：
-return stepManager.next(ReserveItemsExecutor.class, OrderExecutionEvent.INITIALIZED_ORDER);
-
-// doProcess 中的预期业务暂停（可暂停 LRT）：
-return stepManager.pause(DeliveryExecutor.class, OrderExecutionEvent.ORDER_PREPARING, Duration.ofHours(5));
-
-// doProcess 中完成整个事务：
-return stepManager.complete(OrderExecutionEvent.INITIALIZED_ORDER);
-
-// doRevert 中的补偿完成：
-return stepManager.done(OrderExecutionEvent.CANCELLED_ORDER);
-----
-
-. *动作事件命名规范 (Naming Convention)*：
-* **首词**：必须是过去分词动词（例如 `INITIALIZED`, `CANCELLED`, `FETCHED`, `MADE`, `REFUNDED`, `REVERTED`, `EXECUTED`）。
-* **次词**：代表真实的业务主体或领域实体（例如 `ORDER`, `USER_DETAILS`, `PAYMENT`）。
-+
-_示例_：`INITIALIZED_ORDER`, `CANCELLED_ORDER`, `FETCHED_USER_DETAILS`, `MADE_PAYMENT`, `REFUNDED_PAYMENT`。
-
-. *通过 `RevertStepManagerUtil` 在 `doRevert(...)` 中返回 `RevertStepManager`*： +
-在返回 `RevertStepManager` 的补偿方法（如 `doRevert(...)`）中，您使用 `stepManager.done(...)` 来完成当前补偿步骤（例如 `return stepManager.done(OrderExecutionEvent.CANCELLED_ORDER);` 或 `return stepManager.done("CANCELLED_ORDER");`），或者使用 `stepManager.pause(...)` 进入等待异步回调的业务等待状态（例如 `return stepManager.pause("REFUND_INITIATED", Duration.ofHours(24));`）。详见 xref:#pausable-compensation[doRevert 中的可暂停补偿]。
-====
-+
-<6> **处理已执行的幂等响应（开发者职责）：**
-+
-[IMPORTANT]
-====
-*对已执行过的操作返回成功步骤 — 切勿抛出异常：* +
-请注意，此代码片段中的 `OperationAlreadyExecutedException` 是纯粹为了演示而创建的自定义异常。在生产实践中，下游微服务如何指示操作已被处理完全取决于具体的架构——例如 Feign 客户端抛出 HTTP `409 Conflict`、自定义领域异常、或是 API 响应体中包含 `"ALREADY_PROCESSED"` 状态码。
-
-*作为开发者，您有责任在执行器内部捕获或识别该重复执行信号，并进行恰当处理：*
-
-* 您**必须将其视为一次正常的成功执行**并返回下一步骤 (`stepManager.next(...)`)，**切勿向外抛出错误**。
-* 因为目标微服务在先前的尝试中已经持久化了预期的业务状态，返回下一步骤会通知 StackSaga 该原子工作单元已成功达成，从而允许工作流向前推进。如果抛出异常或任由异常向外冒泡，框架将错误地把该已完成的步骤判定为失败，进而触发非必要且灾难性的补偿回滚！
-====
-+
-<7> 捕获可重试的资源不可用异常，通知 SEC 将事务保持在重试模式，并按照配置暴露给下一个重试调度周期。 +
-您可以使用 `RetryableExecutorException.of(Exception e)` 方法包装原始异常，创建 `RetryableExecutorException` 的新实例。 +
-如果您抛出自定义异常且未包装在 `RetryableExecutorException` 中，SEC 将其视为不可重试异常，立即停止向前执行，并立即以逆序触发补偿执行。
-<8> 捕获不可重试异常，通知 SEC 终止前向执行，并立即以逆序启动补偿回滚流程。 +
-您可以使用 `NonRetryableExecutorException.buildWith(Exception e)` 包装原始异常，并通过 `put(String key, Object value)` 将任何业务上下文元数据持久化到事件存储库中。这些元数据稍后可以在补偿执行中通过 `RevertHintStore` 提取使用。
-<9> 重写 `doRevert` 方法以实现补偿回滚业务逻辑。 +
-该方法接收 `idempotencyKey` 以透传给下游补偿端点确保逆向动作幂等，并接收 `RevertStepManagerUtil stepManager` 以导航或暂停回滚流程。恢复执行时还可选接收 `ResumeContext`。
-<10> **补偿执行中的幂等返回（开发者职责）：** +
-与 `doProcess` 完全一致，在补偿期间处理重复执行同样是开发者的核心职责。如果下游服务指示取消或回滚动作在先前的重试尝试中已经执行完毕（此处通过捕获 `OperationAlreadyExecutedException` 表示），必须返回成功步骤 (`stepManager.done("CANCELLED_ORDER")`)。这向 SEC 确认该步骤的补偿已圆满完成，允许框架继续按逆序补偿上一个历史步骤（或者在所有补偿完成后圆满结束回滚）。
-<11> 捕获补偿过程中可重试的临时资源不可用异常，以保持事务处于重试模式。 +
-如果补偿过程中遇到可以安全忽略的不可重试异常，应捕获该异常并通过 `put(String key, Object value)` 将元数据存储到 `RevertHintStore` 中，避免事务异常终止。
-<12> `@RevertBefore` 注解用于指定一个前置补偿子执行器 (Sub-Before-Executor)，该子执行器将在当前命令执行器的主补偿执行之前运行。
-<13> `@RevertAfter` 注解用于指定一个后置补偿子执行器 (Sub-After-Executor)，该子执行器将在当前命令执行器的主补偿执行完成之后运行。
+<5> **阶段式流式 Step Manager 导航 (`stepManager`)**： +
+*阶段 1*：`.success("INITIALIZED_ORDER")` 记录业务执行成功的事件名称。 +
+*阶段 2*：`.noPause()` 声明本次执行为直通式连续推进，不进入暂停状态。 +
+*阶段 3*：`.nextExecutor(ReserveItemsExecutor.class)` 指定下一个要调用的执行器类。若该步骤为 Saga 的最后一步，调用 `.complete()` 终结事务。
+<6> **妥善处理幂等重复执行**：当下游微服务返回操作已执行的标识（例如 HTTP `409 Conflict`）时，**必须视为成功**并返回 `stepManager.success(...).noPause().nextExecutor(...)`。切勿在已完成的操作上抛出错误。
+<7> 捕获瞬时网络抖动并包装为 `RetryableExecutorException.of(...)`，触发重试调度器自动重试。
+<8> 捕获不可恢复的业务失败（例如数据不合法、余额不足）并包装为 `NonRetryableExecutorException`，触发逆向回滚。
+<9> 在 `doRevert` 中实现回滚补偿逻辑：反向撤销 `doProcess` 所做的修改。
+<10> 调用 `stepManager.success("CANCELLED_ORDER").noPause()` 结束当前步骤的补偿。SEC 引擎将自动按照逆序调用前一个命令执行器的补偿。
+<11> 补偿中的瞬时故障通过 `RetryableExecutorException` 触发自动重试。
+<12> `@RevertBefore`：声明在调用当前执行器的 `doRevert()` 之前执行的前置子补偿执行器。
+<13> `@RevertAfter`：声明在调用当前执行器的 `doRevert()` 之后执行的后置子补偿执行器。
 
 [[reactive-command-executors]]
-==== 非阻塞响应式命令执行器 (Non-Blocking Command-Executor)
-
-NOTE: 相比阻塞式示例，此处仅针对响应式特性高亮说明。
+==== 非阻塞响应式命令执行器 (Non-Blocking Reactive Command-Executor)
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "order-service", value = "initializeOrderExecutor")
+@SagaExecutor(executeFor = "order-service", value = "reactiveInitializeOrderExecutor")
 @AllArgsConstructor
-public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<OrderDomainEntity> { //<1>
+public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<OrderDomainEntity> {
 
     private final OrderService orderService;
 
-    @Override //<2>
+    @Override
     @NonNull
     public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
-            OrderDomainEntity currentDomainEntity,
-            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
-            String idempotencyKey
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) {
-        //<3>
         return this.orderService
                 .createOrder(
                         currentDomainEntity.getUserData(),
@@ -284,12 +405,17 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
                 )
                 .map(orderId -> {
                     currentDomainEntity.setOrderId(orderId);
-                    return stepManager.next(ReactiveRserveItemsExecutor.class, "INITIALIZED_ORDER");
+                    return stepManager
+                            .success("INITIALIZED_ORDER")
+                            .noPause()
+                            .nextExecutor(ReactiveReserveItemsExecutor.class);
                 })
                 .onErrorResume(throwable -> {
                     if (throwable instanceof OperationAlreadyExecutedException) {
-                        // 对于已执行的操作返回正常成功步骤 — 切勿报错
-                        return Mono.just(stepManager.next(ReactiveRserveItemsExecutor.class, "INITIALIZED_ORDER"));
+                        return Mono.just(stepManager
+                                .success("INITIALIZED_ORDER")
+                                .noPause()
+                                .nextExecutor(ReactiveReserveItemsExecutor.class));
                     } else if (throwable instanceof ResourceUnavailableException) {
                         return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
@@ -301,234 +427,78 @@ public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<
                 });
     }
 
-
-    @Override //<4>
+    @Override
     @NonNull
     public Mono<RevertStepManager> doRevert(
-            NonRetryableExecutorException processException,
-            OrderDomainEntity finalDomainEntityState,
-            RevertHintStore revertHintStore,
-            String idempotencyKey,
-            RevertStepManagerUtil stepManager
+            @NonNull NonRetryableExecutorException processException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
     ) {
-        //<5>
         return this.orderService
                 .cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey)
-                .thenReturn(stepManager.done("REVERTED_ORDER_INITIALIZATION"))
+                .thenReturn(stepManager
+                        .success("REVERTED_ORDER_INITIALIZATION")
+                        .noPause())
                 .onErrorResume(throwable -> {
                     if (throwable instanceof OperationAlreadyExecutedException) {
-                        // 对于已执行的补偿操作返回成功步骤
-                        return Mono.just(stepManager.done("REVERTED_ORDER_INITIALIZATION"));
+                        return Mono.just(stepManager
+                                .success("REVERTED_ORDER_INITIALIZATION")
+                                .noPause());
                     } else if (throwable instanceof ResourceUnavailableException) {
                         return Mono.error(RetryableExecutorException.of(throwable));
                     } else {
                         revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
-                        return Mono.just(stepManager.done("IGNORED"));
+                        return Mono.just(stepManager
+                                .success("IGNORED")
+                                .noPause());
                     }
                 });
     }
 }
 ----
 
-<1> 执行器实现 `ReactiveCommandExecutor<OrderDomainEntity>` 接口以声明为响应式命令执行器。泛型类型为您在执行器中使用的领域实体类。
-<2> 重写 `doProcess` 方法，以响应式管道方式实现主执行逻辑。
-<3> 主执行业务逻辑在 `doProcess` 内利用响应式管道执行。 +
-请注意 `idempotencyKey` 被透传给下游服务调用 (`createOrder`)。在 `onErrorResume` 中，如果发生重复执行异常（如 `OperationAlreadyExecutedException`），管道通过返回 `Mono.just(stepManager.next(...))` 恢复并将其视为成功，而不是向外传播错误。
-+
-IMPORTANT: 异常不能传递到管道外部（例如命令式抛出），且方法绝对不能返回 `null` 或 `Mono.empty()`。否则会被视为非预期主执行异常，终止前向执行并立即启动逆向补偿回滚。
-+
-<4> 重写 `doRevert` 方法，以响应式方式实现补偿执行逻辑并返回 `Mono<RevertStepManager>`。
-<5> 补偿执行逻辑在 `doRevert` 内利用响应式管道实现。 +
-应用相同的幂等策略：将 `idempotencyKey` 传递给 `cancelOrder`，并在 `onErrorResume` 中识别已执行异常，返回包含成功补偿步骤的 `Mono.just(stepManager.done(...))`，以便框架确认该步骤已成功补偿。 +
-补偿执行期间绝不能发生未处理的不可重试异常。若存在可安全忽略的异常，必须将其捕获并持久化到 `RevertHintStore`，然后返回 `Mono.just(stepManager.done("IGNORED"))` 以避免整个事务非正常终止。
-
-[[resume-context-in-executors]]
-==== 在前向执行 (`doProcess`) 中消费 `ResumeContext`
-
-当执行器暂停等待外部回调（例如 3D-Secure 支付确认、商户接单审批或 KYC 人工审核）时，外部 Webhook 会通过 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey).put(...)`] 传递载荷数据。
-
-为了安全消费此外部载荷，而不将核心领域聚合暴露给未经校验的直接变更，请实现接收 `ResumeContext` 的重载 `doProcess(...)` 方法：
-
-[source,java]
-----
-@Override
-public ProcessStepManager<OrderDomainEntity> doProcess(
-        OrderDomainEntity currentDomainEntity,
-        ProcessStepManagerUtil<OrderDomainEntity> stepManager,
-        String idempotencyKey,
-        ResumeContext resumeContext //<1>
-) throws RetryableExecutorException, NonRetryableExecutorException {
-
-    // 标准分支模式：
-    if (resumeContext.isEmpty()) { //<2>
-        // --- 1. 首次执行尝试 ---
-        // 向下游系统派发异步请求，透传 idempotencyKey
-        this.paymentGateway.initiateAsyncCharge(
-                currentDomainEntity.getTotalAmount(),
-                idempotencyKey
-        );
-
-        // 暂停前向执行，等待外部回调 Webhook：
-        return stepManager.pause(
-                DispatchDeliveryExecutor.class,
-                "PAYMENT_INITIATED",
-                Duration.ofHours(2)
-        );
-    }
-
-    // --- 2. 恢复执行尝试 ---
-    // 回调已到达！从只读 ResumeContext 中提取并校验载荷参数
-    String paymentStatus = resumeContext.get("paymentStatus").orElse("FAILED"); //<3>
-    String gatewayRef = resumeContext.get("gatewayTransactionId").orElse(null);
-
-    if ("SUCCESS".equalsIgnoreCase(paymentStatus)) {
-        // 基于已验证的回调数据安全更新领域实体
-        currentDomainEntity.setPaymentRef(gatewayRef);
-        return stepManager.next(DispatchDeliveryExecutor.class, "PAYMENT_CONFIRMED"); //<4>
-    } else {
-        // 前向执行失败并触发补偿回滚
-        throw NonRetryableExecutorException
-                .buildWith(new PaymentDeclinedException("Payment rejected: " + paymentStatus))
-                .put("paymentStatus", paymentStatus)
-                .build();
-    }
-}
-----
-
-<1> 同时接收 `ResumeContext` 与 `currentDomainEntity`、`stepManager` 和 `idempotencyKey`。
-<2> 检查 `resumeContext.isEmpty()` 以区分**初始执行**（触发异步请求并暂停）与**恢复执行**（处理回调数据）。
-<3> 通过 `resumeContext.get(key)` 安全查询上下文条目。该上下文在执行器内严格为只读模式；调用修改方法将抛出 `UnsupportedOperationException`。详见 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resume-context-contract[ResumeContext 契约]。
-<4> 使用 `stepManager.next(...)` 推进到下一个执行器 (`DispatchDeliveryExecutor`)。
-
-完整生命周期请参阅 xref:stacksaga-sync/index.adoc#resume-context-concept[解耦外部回调载荷] 与 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#callback-controller-pattern[回调控制器摄入模式]。
-
-[[pausable-compensation]]
-==== `doRevert(...)` 中的可暂停补偿（回滚等待状态）
-
-在企业级微服务（尤其在银行、金融科技与电商领域）中，回滚操作通常无法同步完成。
-例如，取消已授权交易通常需要向上游收单行发起**异步退款**，银行将在数小时或数天后通过 Webhook 通知系统结果。
-
-StackSaga 通过 `RevertStepManagerUtil.pause(...)` 支持在补偿事务中进行暂停。当暂停时：
-* 事务在事件存储库中保持 `REVERTING` 状态且 `is_paused = 1`。
-* 该补偿步骤的 `idempotencyKey` 被注册为 `current_resume_key`。
-* CPU 线程被释放，直至 Webhook 调用 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey)`]。
-* 恢复执行时，StackSaga 会携带填充好的 `ResumeContext` 重新调用 `doRevert(...)`。
-
-[[pausable-compensation-example]]
-===== 生产示例：异步支付退款补偿
-
-[source,java]
-----
-@SagaExecutor(executeFor = "payment-service", value = "paymentCommandExecutor")
-@AllArgsConstructor
-public class PaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
-
-    private final PaymentGatewayClient paymentGatewayClient;
-
-    @Override
-    public ProcessStepManager<OrderDomainEntity> doProcess(
-            OrderDomainEntity currentDomainEntity,
-            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
-            String idempotencyKey
-    ) throws RetryableExecutorException, NonRetryableExecutorException {
-        // 前向同步扣款
-        String paymentRef = this.paymentGatewayClient.charge(
-                currentDomainEntity.getTotalAmount(),
-                idempotencyKey
-        );
-        currentDomainEntity.setPaymentRef(paymentRef);
-        return stepManager.next(ReserveStockExecutor.class, "PAYMENT_CHARGED");
-    }
-
-    @Override
-    public RevertStepManager doRevert(
-            NonRetryableExecutorException primaryExecutionException,
-            OrderDomainEntity finalDomainEntityState,
-            RevertHintStore revertHintStore,
-            String idempotencyKey,
-            RevertStepManagerUtil stepManager,
-            ResumeContext resumeContext //<1>
-    ) throws RetryableExecutorException {
-
-        // 检查是首次补偿执行还是恢复后的回调执行
-        if (resumeContext.isEmpty()) { //<2>
-            // --- 1. 首次补偿尝试 ---
-            // 向外部支付网关发起异步退款
-            String refundSessionId = this.paymentGatewayClient.initiateAsyncRefund(
-                    finalDomainEntityState.getPaymentRef(),
-                    idempotencyKey //<3>
-            );
-            revertHintStore.put("refundSessionId", refundSessionId);
-
-            // 暂停补偿流程，等待退款确认 Webhook：
-            return stepManager.pause("REFUND_INITIATED", Duration.ofHours(24)); //<4>
-        }
-
-        // --- 2. 恢复补偿尝试 ---
-        // Webhook 到达！从 ResumeContext 中摄入退款结果
-        String refundStatus = resumeContext.get("refundStatus").orElse("FAILED"); //<5>
-
-        if ("SUCCESS".equalsIgnoreCase(refundStatus)) {
-            // 逆向回滚完成：完成当前补偿步骤
-            return stepManager.done("REFUND_COMPLETED"); //<6>
-        } else {
-            // 临时网关延迟或待结算清算：触发重试
-            throw new RetryableExecutorException("Refund processing in banking gateway, retrying verification");
-        }
-    }
-}
-----
-
-<1> 实现接收 `ResumeContext` 的 6 参数重载 `doRevert`。
-<2> 使用 `if (resumeContext.isEmpty())` 区分初始退款请求与恢复后的 Webhook 结果处理。
-<3> 将框架提供的 `idempotencyKey` 透传给外部退款 API。当网关向您的 Webhook 回调时，此完全相同的键将充当 `correlationKey`。
-<4> 调用 `stepManager.pause("REFUND_INITIATED", Duration.ofHours(24))` 将补偿流程置于预期的业务等待状态。
-<5> 当 Webhook 到达并调用 `sagaTemplate.resume(txId, correlationKey).put("refundStatus", ...).execute()` 时，框架唤醒 Saga 并通过 `ResumeContext` 传递参数。
-<6> 返回 `stepManager.done("REFUND_COMPLETED")` 确认该步骤补偿圆满完成。StackSaga 随后自动以逆序推进补偿上一个历史执行器。
-
-详见 xref:stacksaga-sync/index.adoc#async-compensation-refund[index.adoc 中的异步补偿] 与 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#uniform-resumption[统一恢复流程]。
+IMPORTANT: 在响应式执行器中，Reactive 流决不能返回 `null` 或 `Mono.empty()`。必须始终通过 `Mono.just(stepManager...)` 或 `Mono.error(...)` 返回。
 
 [[query-executors]]
-=== 查询执行器 (Query Executors)
+=== 连续 LRT 中的查询执行器 (Query Executors)
 
-如果某个原子执行仅包含主执行（无需补偿回滚），此类执行应在查询执行器 (Query Executor) 中实现。
-
-*查询执行器* 仅包含一个用于执行主流程的方法。
-
-*查询执行器的典型示例*：
-
-* 收集用户送货详情 +
-因为它不会对用户服务的数据库产生任何状态修改，是一项纯只读操作。
+查询执行器用于执行只读操作（例如查询用户资料、校验授信额度、检查库存目录）。
+由于只读操作不会修改外部系统状态，因此不需要补偿：查询执行器仅实现 `doProcess`。
 
 [[blocking-query-executors]]
-==== 阻塞式查询执行器 (Blocking Query Executor)
+==== 阻塞式查询执行器
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "user-service", value = "chekUserDetailsExecutor") //<1>
+@SagaExecutor(executeFor = "user-service", value = "checkUserDetailsExecutor")
 @AllArgsConstructor
-public class ChekUserDetailsExecutor implements QueryExecutor<OrderDomainEntity> { //<2>
+public class CheckUserDetailsExecutor implements QueryExecutor<OrderDomainEntity> {
 
     private final UserService userService;
 
-    @Override //<3>
-    public ProcessStepManager<OrderDomainEntity> doProcess(
-            OrderDomainEntity currentDomainEntity,
-            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
-            String idempotencyKey
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
         try {
-            //<4>
             UserDetailDto userDetail = this.userService.getUserDetails(currentDomainEntity.getUsername());
             currentDomainEntity.setUserDetail(userDetail);
 
-            return stepManager.next(InitializeOrderExecutor.class, "FETCHED_USER_DETAILS"); //<5>
+            return stepManager
+                    .success("FETCHED_USER_DETAILS")
+                    .noPause()
+                    .nextExecutor(InitializeOrderExecutor.class);
+
         } catch (FeignException.ServiceUnavailable unavailableException) {
-            //<6>
             throw RetryableExecutorException.of(unavailableException);
         } catch (FeignException.BadRequest badRequestException) {
-            //<7>
             throw NonRetryableExecutorException
                     .buildWith(badRequestException)
                     .put("time", LocalDateTime.now())
@@ -539,54 +509,35 @@ public class ChekUserDetailsExecutor implements QueryExecutor<OrderDomainEntity>
 }
 ----
 
-<1> 执行器使用 `@SagaExecutor` 注解声明为 Spring Bean，并配置目标服务名及全局唯一执行器标识。
-<2> 执行器实现 `QueryExecutor` 接口以声明为查询执行器。
-<3> 重写 `doProcess` 方法以实现主执行逻辑。 +
-它接收领域实体的当前状态、步骤管理工具类以及框架生成的 `idempotencyKey`。由于查询是纯只读操作（天然具备幂等性），因此查询执行器无需专门捕获已执行异常。
-<4> 在 `doProcess` 方法内实现主执行业务逻辑。在此处您可以按需读取或更新领域实体。它包含了截至目前先前所有执行器所做的全部状态变更。
-<5> 如果执行成功，使用 `stepManager.next` 导航至下一个执行器。 +
-需传入下一个目标执行器类以及用于在事件存储库中记录当前步骤成功事件的事件名称供应源。 +
-此外还提供了 `stepManager.complete` 方法，用于在当前执行器执行完毕后成功结束整个长事务：
-+
-[source,java]
-----
-stepManager.complete("INITIALIZED_ORDER");
-----
-+
-<6> 捕获可重试的临时资源不可用异常，通知 SEC 将事务保持在重试模式，并按调度配置重新执行。 +
-您可以使用 `RetryableExecutorException.of(Exception e)` 包装原始异常。 +
-如果抛出未包装的自定义异常，SEC 会将其视为不可重试异常，立即终止前向推进并逆向启动补偿。
-<7> 捕获不可重试异常，通知 SEC 终止前向执行并立即启动逆序补偿执行。 +
-您可以使用 `NonRetryableExecutorException.buildWith(Exception e)` 包装原始异常，并使用 `put(String key, Object value)` 附加异常元数据到事件存储库中。 +
-这些元数据后续可以在命令执行器的 `doRevert` 方法中通过 `RevertHintStore` 提取。 +
-如果在此处直接抛出未经包装的异常，SEC 也会在内部将其视为不可重试异常并触发补偿回滚。
-
 [[non-blocking-query-executors]]
-==== 非阻塞响应式查询执行器 (Non-Blocking Query-Executor)
+==== 响应式查询执行器
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "user-service", value = "reactiveChekUserDetailsExecutor")
+@SagaExecutor(executeFor = "user-service", value = "reactiveCheckUserDetailsExecutor")
 @AllArgsConstructor
-public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<OrderDomainEntity> { //<1>
+public class ReactiveCheckUserDetailsExecutor implements ReactiveQueryExecutor<OrderDomainEntity> {
 
     private final UserService userService;
 
-    @Override //<2>
+    @Override
+    @NonNull
     public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
-            OrderDomainEntity currentDomainEntity,
-            ProcessStepManagerUtil<OrderDomainEntity> stepManager,
-            String idempotencyKey
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) {
-        //<3>
-        return this
-                .userService
+        return this.userService
                 .getUserDetails(currentDomainEntity.getUsername())
                 .map(userData -> {
                     currentDomainEntity.setTel(userData.getPhoneNumber());
                     currentDomainEntity.setEmail(userData.getEmail());
                     currentDomainEntity.setAddress(userData.getEmail());
-                    return stepManager.next(ReactiveInitializeOrderExecutor.class, "FETCHED_USER_DETAILS");
+                    return stepManager
+                            .success("FETCHED_USER_DETAILS")
+                            .noPause()
+                            .nextExecutor(ReactiveInitializeOrderExecutor.class);
                 })
                 .onErrorResume(throwable -> {
                     if (throwable instanceof ResourceUnavailableException) {
@@ -602,411 +553,538 @@ public class ReactiveChekUserDetailsExecutor implements ReactiveQueryExecutor<Or
 }
 ----
 
-<1> 执行器实现 `ReactiveQueryExecutor<OrderDomainEntity>` 接口以声明为响应式查询执行器。泛型参数指定为要在执行器中使用的领域实体类。
-<2> 重写 `doProcess` 方法，以响应式流方式实现主执行逻辑。
-<3> 主执行业务逻辑在响应式管道中执行。
-+
-IMPORTANT: 异常不能传递到管道外部（例如命令式抛出），且方法绝对不能返回 `null` 或 `Mono.empty()`。这会导致未捕获的主执行异常，立即终止前向推进并启动逆向补偿回滚。
-
 [[sub-executors]]
-=== 子执行器 (Sub Executors)
+=== 连续 LRT 中的子执行器 (Sub-Executors)
 
-除了查询执行器与命令执行器之外，StackSaga 还提供了一种特殊的执行器类型——子执行器 (Sub Executor)。
-它用于在主补偿事务之外，执行额外的辅助原子补偿事务。
+子执行器是 StackSaga 中专门用于在父命令执行器的主要补偿 (`doRevert`) 之外，执行**额外原子补偿操作**的专用组件。
 
-如前所述，一个执行器内部只能封装一个原子事务。
-该规则对主执行和补偿执行同等适用。
-但有时，当某个补偿执行触发时，您可能还需要执行另一个伴随的额外执行动作。
+牢记核心法则：**一个执行器 = 一个原子事务**。
+若取消订单需要执行两个彼此独立的外部操作（例如：(1) 取消内部预约，(2) 通知外部第三方快递服务），将它们混在一个 `doRevert()` 中将违背原子性边界。
+子执行器完美解决了这一难题：
 
-例如，假定业务需求规定：当订单取消执行时，还必须向另一个独立的外部服务同步通知或做状态更新。
-根据执行器的原子性原则，您不能在 `doRevert` 方法内部同时实现取消订单和通知第三方这两个操作，因为它们是两个完全独立的原子操作。
-在这种场景下，子执行器正是为此而设计的解耦利器。
-根据子执行执行的时机，子执行器分为两类：
+[source,text]
+----
+前置子执行器 Sub-Before (1..N) ──> 父执行器 Parent doRevert() ──> 后置子执行器 Sub-After (1..N)
+----
+
+image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.drawio.svg[alt="Stacksaga 执行器架构",width=100%,opts=interactive,scaledwidth=100%]
 
 [[sub-before-executors]]
-. *前置补偿子执行器 (Sub-Before-Executors)*
-- 如果子执行器必须在主补偿事务执行**之前**运行，应使用前置补偿子执行器。
-根据业务需求，一个命令执行器可以配置任意数量的前置补偿子执行器。
-SEC 将依次按序导航并执行它们。
-参见代码实现。
-+
-[[sub-after-executors]]
-. *后置补偿子执行器 (Sub-After-Executors)*
-- 如果子执行器必须在主补偿事务执行**之后**运行，应使用后置补偿子执行器。
-根据业务需求，一个命令执行器可以配置任意数量的后置补偿子执行器。
-SEC 将依次按序导航并执行它们。
-参见代码实现。
+==== 前置补偿子执行器 (Sub-Before-Executor)
 
-如果业务需要同时配置前置与后置补偿子执行器，完全支持。
-当同时配置了前置和后置子执行器时，整体补偿执行的执行顺序如下：
-
-首先，按配置顺序依次执行该命令执行器的所有前置补偿子执行器；完成前置子执行器后，接着执行命令执行器的默认补偿执行（主补偿）；
-主补偿执行完成后，最后执行配置的所有后置补偿子执行器。
-下图清晰展示了前置子执行器、主补偿执行与后置子执行器之间的执行时序与协作关系：
-
-image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.drawio.svg[alt="Stacksaga 执行器",width=100%,opts=interactive,scaledwidth=100%]
-
-==== 阻塞式前置补偿子执行器 (Blocking Sub-Before-Executor)
+在父命令执行器的 `doRevert()` 运行*之前*执行：
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubBeforeExecutor") //<1>
+@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubBeforeExecutor")
 @AllArgsConstructor
-public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<OrderDomainEntity, InitializeOrderExecutor> { //<2>
+public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<OrderDomainEntity, InitializeOrderExecutor> {
 
     private final OrderService orderService;
-
-    @Override //<3>
-    public RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
-            OrderDomainEntity finalDomainEntityState,
-            NonRetryableExecutorException nonRetryableExecutorException,
-            RevertHintStore revertHintStore,
-            RevertBeforeStepManagerUtil<OrderDomainEntity, InitializeOrderExecutor> stepManager,
-            String idempotencyKey)
-    throws RetryableExecutorException {
-        try {
-            this.orderService.preCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE"); //<4>
-        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
-            // 如果在先前的重试尝试中已执行，返回成功状态
-            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE");
-        } catch (FeignException.ServiceUnavailable unavailableException) {
-            throw RetryableExecutorException.of(unavailableException);
-        }
-    }
-}
-----
-
-<1> 使用 `@SagaExecutor` 声明为 Spring Bean 并配置元数据（目标服务名与全局唯一标识）。
-<2> 实现 `RevertBeforeExecutor<A, C>` 接口以声明为前置补偿子执行器。 +
-第一个泛型参数为全局长事务使用的领域实体类，第二个泛型参数为在其主补偿执行之前触发的目标命令执行器类。
-<3> 重写 `doProcess` 方法，其实现逻辑与命令执行器的 `doRevert` 方法一致。它接收 `idempotencyKey` 透传给下游微服务，并捕获重复执行异常以返回成功状态。
-<4> 执行成功后，通过 `stepManager.complete` 导航至主（父级）`doRevert` 方法。 +
-需提供用于在事件存储库中记录成功事件的事件名称供应源。 +
-如果配置了多个前置子执行器，可以通过 `stepManager.next` 链式导航至下一个前置子执行器。
-
-==== 非阻塞响应式前置补偿子执行器 (Non-Blocking Sub-Before-Executor)
-
-[source,java]
-----
-@SagaExecutor(executeFor = "order-service", value = "reactiveRevertBeforeExecutor") //<1>
-@RequiredArgsConstructor
-public class ReactiveOrderInitializeSubBeforeExecutor implements ReactiveRevertBeforeExecutor<OrderDomainEntity, ReactiveInitializeOrderExecutor> { //<2>
-
-    private final ReactiveOrderService reactiveOrderService;
-
-    @Override //<3>
-    @NonNull
-    public Mono<RevertBeforeStepManager<OrderDomainEntity, ReactiveInitializeOrderExecutor>> doProcess(
-            OrderDomainEntity domainEntity,
-            NonRetryableExecutorException processException,
-            RevertHintStore revertHintStore,
-            RevertBeforeStepManagerUtil<OrderDomainEntity, ReactiveInitializeOrderExecutor> stepManager,
-            String idempotencyKey
-    ) {
-        //<4>
-        return this.reactiveOrderService
-                .doSomething(idempotencyKey)
-                .thenReturn(stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE"))
-                .onErrorResume(throwable -> {
-                    if (throwable instanceof OperationAlreadyExecutedException) {
-                        return Mono.just(stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE"));
-                    } else if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.of(throwable));
-                    } else {
-                        revertHintStore.put("ReactiveOrderInitializeSubBeforeExecutor:FAILED", processException.getMessage());
-                        return Mono.just(stepManager.complete("IGNORED"));
-                    }
-                });
-    }
-}
-
-----
-
-<1> 使用 `@SagaExecutor` 声明为 Spring Bean 并配置元数据。
-<2> 实现 `ReactiveRevertBeforeExecutor<A, C>` 接口以声明为响应式前置补偿子执行器。泛型 `A` 为长事务领域实体类，泛型 `C` 为主命令执行器类。
-<3> 重写 `doProcess` 方法，以响应式流方式实现前置补偿逻辑。
-<4> 在 `doProcess` 内利用响应式管道执行前置补偿逻辑。
-+
-IMPORTANT: 异常不能传递到管道外部，且方法不能返回 `null` 或 `Mono.empty()`，否则会被判定为非重试致命错误导致事务终止。 +
-若存在不可重试异常，应捕获并持久化至 `RevertHintStore`，然后返回虚拟事件名称以避免事务异常终止。
-+
-当前置子执行器成功执行完毕且没有更多前置子执行器时，使用 `stepManager.complete` 导航至父级 `doRevert` 方法。 +
-如果存在后续的前置子执行器，可以使用 `stepManager.next` 推进到链中的下一个前置子执行器。
-
-==== 阻塞式后置补偿子执行器 (Blocking Sub-After-Executor)
-
-[source,java]
-----
-@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubAfterExecutor") //<1>
-@AllArgsConstructor
-public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<OrderDomainEntity, InitializeOrderExecutor> { //<2>
-
-    private final OrderService orderService;
-
-    @Override //<3>
-    public RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
-            OrderDomainEntity finalDomainEntityState,
-            NonRetryableExecutorException processException,
-            RevertHintStore revertHintStore,
-            RevertAfterStepManagerUtil<OrderDomainEntity, InitializeOrderExecutor> stepManager,
-            String idempotencyKey
-    ) throws RetryableExecutorException {
-        try {
-            this.orderService.postCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_AFTER"); //<4>
-        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
-            // 如果在先前的重试尝试中已执行，返回成功状态
-            return stepManager.complete("REVERTED_ORDER_INITIALIZATION_SUB_AFTER");
-        } catch (FeignException.ServiceUnavailable unavailableException) {
-            throw RetryableExecutorException.of(unavailableException);
-        }
-    }
-}
-----
-
-<1> 使用 `@SagaExecutor` 声明为 Spring Bean 并配置元数据。
-<2> 实现 `RevertAfterExecutor<A, C>` 接口以声明为后置补偿子执行器。泛型参数分别为领域实体类与对应的主命令执行器类。
-<3> 重写 `doProcess` 方法，以与命令执行器 `doRevert` 一致的方式实现后置补偿逻辑。
-<4> 执行成功后，通过 `stepManager.complete` 结束当前后置补偿步骤。若存在多个后置子执行器，可通过 `stepManager.next` 推进到下一个。
-
-==== 非阻塞响应式后置补偿子执行器 (Non-Blocking Sub-After-Executor)
-
-[source,java]
-----
-@SagaExecutor(executeFor = "order-service", value = "reactiveOrderInitializeSubAfterExecutor") //<1>
-public class ReactiveOrderInitializeSubAfterExecutor implements ReactiveRevertAfterExecutor<OrderDomainEntity, ReactiveInitializeOrderExecutor> { //<2>
-
-    private final ReactiveOrderService reactiveOrderService;
 
     @Override
-    @NonNull //<3>
-    public Mono<RevertAfterStepManager<OrderDomainEntity, ReactiveInitializeOrderExecutor>> doProcess(
-            OrderDomainEntity finalDomainEntityState,
-            NonRetryableExecutorException processException,
-            RevertHintStore revertHintStore,
-            RevertAfterStepManagerUtil<OrderDomainEntity, ReactiveInitializeOrderExecutor> stepManager,
-            String idempotencyKey
-    ) {
-        //<4>
-        return this.reactiveOrderService
-                .doSomething(idempotencyKey)
-                .thenReturn(stepManager.complete("EXECUTED_ORDER_INITIALIZATION_SUB_AFTER"))
-                .onErrorResume(throwable -> {
-                    if (throwable instanceof OperationAlreadyExecutedException) {
-                        return Mono.just(stepManager.complete("EXECUTED_ORDER_INITIALIZATION_SUB_AFTER"));
-                    } else if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.of(throwable));
-                    } else {
-                        revertHintStore.put("ReactiveOrderInitializeSubAfterExecutor:FAILED", processException.getMessage());
-                        return Mono.just(stepManager.complete("IGNORED"));
-                    }
-                });
+    public @NonNull RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull NonRetryableExecutorException processException,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
+    ) throws RetryableExecutorException {
+
+        try {
+            this.orderService.preCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
+            return stepManager
+                    .success("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE")
+                    .noPause()
+                    .noMoreRevertBeforeExecutors(); // 结束前置子链，移交父命令执行器的 doRevert()
+        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
+            return stepManager
+                    .success("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE")
+                    .noPause()
+                    .noMoreRevertBeforeExecutors();
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            throw RetryableExecutorException.of(unavailableException);
+        }
     }
 }
 ----
 
-<1> 使用 `@SagaExecutor` 声明为 Spring Bean 并配置元数据。
-<2> 实现 `ReactiveRevertAfterExecutor<A, C>` 接口以声明为响应式后置补偿子执行器。
-<3> 重写 `doProcess` 方法以实现响应式后置补偿逻辑。
-<4> 在响应式管道中执行业务逻辑。
-+
-IMPORTANT: 异常不能传递到管道外部，且方法不能返回 `null` 或 `Mono.empty()`。
-+
-如果后置补偿成功且没有更多后置执行器，使用 `stepManager.complete` 结束该命令执行器的整体补偿流程。 +
-如果存在多个后置执行器，可使用 `stepManager.next` 导航至下一个。 +
-此外，后置子执行器还支持通过 `stepManager.pauseWithNext(...)` 或 `stepManager.pauseWithComplete(...)` 暂停等待外部回调。
+[[sub-after-executors]]
+==== 后置补偿子执行器 (Sub-After-Executor)
 
-=== 汇总对比 (Summary)
+在父命令执行器的 `doRevert()` 运行*之后*执行：
 
-下列执行器允许抛出 *可重试异常 (Retryable Executor Exceptions)*：
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubAfterExecutor")
+@AllArgsConstructor
+public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<OrderDomainEntity, InitializeOrderExecutor> {
 
-[cols="*,*,*"]
-[.google-anno-skip]
-|===
-|执行器类型 |DoProcess() 方法|doRevert() 方法
+    private final OrderService orderService;
 
-|查询执行器 (Query Executor)
-|✔
-|✔
+    @Override
+    public @NonNull RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull NonRetryableExecutorException processException,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
+    ) throws RetryableExecutorException {
 
-|命令执行器 (Command Executor)
-|✔
-|✔
+        try {
+            this.orderService.postCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
+            return stepManager
+                    .success("REVERTED_ORDER_INITIALIZATION_SUB_AFTER")
+                    .noPause()
+                    .noMoreRevertAfterExecutors(); // 结束该步骤的后置补偿，SEC 将推进至上一个命令执行器
+        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
+            return stepManager
+                    .success("REVERTED_ORDER_INITIALIZATION_SUB_AFTER")
+                    .noPause()
+                    .noMoreRevertAfterExecutors();
+        } catch (FeignException.ServiceUnavailable unavailableException) {
+            throw RetryableExecutorException.of(unavailableException);
+        }
+    }
+}
+----
 
-|前置补偿子执行器 (Revert Before Executor)
-|✔
-|
+'''
 
-|后置补偿子执行器 (Revert After Executor)
-|✔
-|
+[[usage-2-pausable-lrt]]
+== 模式 2：可暂停长事务 (Pausable LRT / Wait-State / Callback-Driven)
 
-|===
+在企业级微服务中，分布式事务往往无法自始至终不间断地执行完毕。现实业务强制要求持久化的等待状态：
 
-下列执行器允许抛出 *不可重试异常 (Non-Retryable Executor Exceptions)*：
+* **支付网关 (Payment Gateways)**：3D-Secure 异步银行重定向或跨行结算延迟。
+* **人工介入 (Human-in-the-Loop)**：异步人工审批（KYC 实名审查、信贷审批、主管授权）。
+* **实体操作 (Physical Operations)**：物理线下操作（后厨备餐、仓库拣货打包）。
 
-[cols="*,*,*"]
-[.google-anno-skip]
-|===
-|执行器类型 |DoProcess() 方法|doRevert() 方法
+StackSaga 通过 `stepManager` 上的 `.pause(Duration retentionDuration)` 操作符，为**可暂停长事务 (Pausable LRT)** 提供了原生一等公民支持。
 
-|查询执行器 (Query Executor)
-|✔
-|✖
+[[pausable_lrt_lifecycle]]
+=== 生产实战混合流程：连续与可暂停执行器统一编排
 
-|命令执行器 (Command Executor)
-|✔
-|✖
+在企业级生产架构中，同一个业务长事务往往在同一个编排器微服务内同时涵盖同步连续执行与异步等待状态。
 
-|前置补偿子执行器 (Revert Before Executor)
-|✖
-|
+下图清晰展示了 `Order-service` 作为编排器，如何借助 StackSaga 将本地/远程同步执行步骤与外部第三方异步回调无缝融合：
 
-|后置补偿子执行器 (Revert After Executor)
-|✖
-|
+image:implementations:executor/stacksaga-pausable-lrt-lifecycle.drawio.svg[alt="连续与可暂停 LRT 混合生命周期",width=100%,opts=interactive,scaledwidth=100%]
 
-|===
-
-[[step-manager-navigation-reference]]
-[[revert-step-manager-util]]
-== 步骤管理器导航参考手册 (Step Manager Navigation Reference)
-
-StackSaga 为每个执行阶段提供了专门的步骤管理器工具类 (Step Manager Utilities)。
-这些工具类允许开发者以编程式精准控制 Saga 执行协调器 (SEC) 的流转，无需维护集中式静态路由表：
-
-[cols="1,2,2,2",options="header"]
+.生产实战长事务流程参考指南（图示编号详解）
+[cols="1,3,6",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| 工具类接口 | 主推进方法 | 暂停方法 | 终态 / 链式方法
+| 编号 | 流程组件 | 架构角色与执行机制
 
-| *`ProcessStepManagerUtil<DE>`* +
-_(前向主流程)_
-| `next(Class nextStep, event)` +
-推进至主工作流中的下一个执行器跨度。
-| `pause(Class nextStep, event, duration)` +
-在前向流程中进入预期的业务等待状态，等待外部回调。详见 xref:#stepManager_pause[前向暂停]。
-| `complete(event)` +
-终态完成：在事件存储库中将整个 Saga 标记为已完成。
+| **1**
+| `exe-1 (no pause)` +
+`CheckCustomerEligibility`
+| **连续查询执行 (Continuous Query)**：`Order-service` 编排器调用 `service-1` (`User Service`) 校验客户状态、授信额度与下单资格。作为只读操作，其实现为 `QueryExecutor`。步骤同步执行完毕，直接返回 `.noPause().nextExecutor(CreateOrderCommandExecutor.class)`，无任何等待阻塞，立即连续推进至步骤 2。
 
-| *`RevertStepManagerUtil`* +
-_(补偿回滚流程)_
-| 不适用 _(逆序回滚由 SEC 引擎根据历史事件自动判定推进)_
-| `pause(event, duration)` +
-在回滚等待状态中暂停补偿，等待外部逆向 Webhook。详见 xref:#pausable-compensation[可暂停补偿]。
-| `done(event)` +
-标记当前命令执行器的补偿圆满完成，驱动 SEC 逆向回滚上一历史步骤。
+| **2**
+| `exe-2 (no pause)` +
+`CreateOrder`
+| **连续命令执行 (Continuous Command)**：编排器通过本地 JPA 在本地数据库 (`service-2: Order DB`) 中创建状态为 `PENDING` 的初始订单。涉及本地状态持久化，其实现为 `CommandExecutor`（具备 `doRevert` 以备补偿）。本地事务提交后返回 `.noPause().nextExecutor(ProcessPaymentCommandExecutor.class)`。
 
-| *`RevertBeforeStepManagerUtil<DE, E>`* +
-_(前置补偿子流程)_
-| `next(Class nextSubBefore, event)` +
-推进至链中的下一个前置补偿子执行器。
-| `pauseWithNext(Class, event, duration)` 或 `pauseWithComplete(event, duration)` +
-暂停前置补偿回滚，等待异步 Webhook。
-| `complete(event)` +
-完成前置子执行器链，将执行权移交至父级命令执行器的 `doRevert()`。
+| **3**
+| `exe-3 (pause)` +
+`ProcessPayment`
+| **可暂停等待状态发起 (Wait-State Initiation)**：编排器向外部支付网关 (`service-3: Payment Gateway API`) 发起异步支付请求，透传 `idempotencyKey` 作为幂等关联键。执行完成后声明暂停： +
+`stepManager.success("PAYMENT_DISPATCHED").pause(Duration.ofMinutes(15)).nextExecutor(DispatchDeliveryCommandExecutor.class)`。 +
+*线程即时释放*：SEC 引擎将事务快照持久化至事件存储后，**立即将工作线程和数据库连接归还线程池**。在等待外部网关回调期间，StackSaga 在内存中零线程挂起、零连接占用，轻松支撑海量并发。
 
-| *`RevertAfterStepManagerUtil<DE, E>`* +
-_(后置补偿子流程)_
-| `next(Class nextSubAfter, event)` +
-推进至链中的下一个后置补偿子执行器。
-| `pauseWithNext(Class, event, duration)` 或 `pauseWithComplete(event, duration)` +
-暂停后置补偿回滚，等待异步 Webhook。
-| `complete(event)` +
-完成整个后置子执行器链，圆满结束该命令执行器的整体补偿。
+| **4**
+| **Webhook 接入端点 (胶囊形)** +
+`/resume-to 4` +
+`sagaTemplate.resume()`
+| **异步 Webhook 回调握手 (Callback Handshake)**：在图示中采用紧凑的胶囊形状呈现，用于将外部 HTTP 控制器端点与内部 Saga 执行器鲜明区分。客户完成支付后，支付网关向 `/resume-to 4` 接口发起异步 HTTP POST 回调。Controller 执行： +
+`sagaTemplate.resume(transactionId, resumeKey).put("authCode", authCode).execute();` +
+SEC 引擎严格校验关联密钥，将 `is_paused` 重置为 `0`，把回调数据注入 `ResumeContext`，分配新的工作线程调度激活 `exe-4`。
+
+| **5**
+| `exe-4 (pause)` +
+`DispatchDelivery`
+| **可暂停等待状态续接 (Wait-State Continuation)**：`exe-4` 被唤醒后从 `ResumeContext` 提取 `authCode`，向第三方物流服务商 (`service-4: Delivery Partner Service`) 发起派送预约。由于线下司机调度与揽件需要时间，`exe-4` 声明二次等待：`.pause(Duration.ofHours(2)).nextExecutor(FinalizeOrderCommandExecutor.class)`。工作线程再次被立即释放。
+
+| **6**
+| **Webhook 接入端点 (胶囊形)** +
+`/resume-to 5` +
+`sagaTemplate.resume()`
+| **物流 Webhook 回调握手 (Delivery Webhook Handshake)**：同样采用胶囊形状呈现。物流平台完成排班揽件后，通过 Webhook 触发 `/resume-to 5` 接口。Controller 调用： +
+`sagaTemplate.resume(transactionId, resumeKey).put("trackingNumber", trackingNumber).execute();` +
+SEC 引擎再次唤醒长事务，将执行链准确流转至终态执行器 (`exe-5`)。
+
+| **7**
+| `exe-5 (complete)` +
+`FinalizeOrder (no pause)`
+| **终态确认执行 (Terminal Completion)**：最终的命令执行器更新本地订单状态为 `CONFIRMED` 和 `DISPATCHED`，记录审计指标，返回 `.noPause().noMoreExecutors()`。跨越 4 个微服务的分布式长事务全链路圆满完成，全局数据严格最终一致。
 |===
 
-有关这些工具类如何与生态其他模块集成的详细信息，请参阅 xref:stacksaga-sync/index.adoc#glossary-step-manager[术语表中的步骤管理器]、xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[双流向可暂停架构] 以及 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[通过 SagaTemplate 恢复执行]。
+[NOTE]
+.对称等待状态架构：补偿流程中的可暂停执行 (`doRevert()`)
+====
+上述图表展示的 **“执行 -> 暂停 / 等待 -> 回调恢复 (Process -> Pause / Wait -> Resumption)”** 模式并不仅限于正向业务流程 (`doProcess()`)。
+StackSaga 为逆向回滚补偿流程 (`doRevert()`) 提供了完全对称的等待状态支持：
 
-== 执行器设计准则 (Guidelines for Creating Executors)
+* **回滚中的等待状态**：若某个原子补偿步骤需要依赖外部异步操作（例如向银行网关提交异步退款清算申请，或向航空 GDS 系统提交取消客票申请），`doRevert()` 同样可以声明暂停：
++
+[source,java]
+----
+return stepManager.success("REFUND_DISPATCHED").pause(Duration.ofHours(24));
+----
 
-每个 Saga 执行器应当封装且仅封装单个原子事务。
-这意味着您绝不能在同一个执行器内部实现多个原子事务。
+* **立即释放线程与连接**：如同正向流程一样，StackSaga 会立即将事务快照持久化为暂停回滚状态 (`is_paused = 1`)，释放所有的工作线程与数据库连接，等待外部回调结果。
+* **自动逆向链条续接**：当外部系统推送退款完成 Webhook 时，Controller 调用 `sagaTemplate.resume(txId, resumeKey).put("refundStatus", "SUCCESS").execute()`。SEC 引擎在 `ResumeContext` 中校验回调载荷，完成当前补偿步骤，并**自动驱动逆向链路继续向前续推执行此前各步骤的补偿**（如 `exe-2` -> `exe-1`）。
 
-实施这一限制的核心原因在于：执行器是 Saga 编排引擎 (SEC) 管理的最小重试单元。
-如果一个执行器包含了多个原子事务且发生故障，SEC 无法识别具体是哪一个子事务失败了。
-例如，如果一个执行器执行了三个原子事务，而在执行第三个事务时发生失败，SEC 重试该执行器将会重新执行第一和第二个事务；如果这些步骤不具备幂等性，将导致重复操作。
+有关回滚等待状态的完整实现细节与生产级代码示例，请参阅 xref:#pausable-compensation[doRevert() 中的可暂停补偿]。
+====
 
-这种做法极易引发数据冗余、完整性破坏以及一致性冲突等数据异常。
-此外，当需要执行补偿（回滚）时，SEC 缺乏足够的粒度来识别需要逆转哪一个原子事务，因为引擎将该执行器视为不可分割的单一原子单元。
+[[resume-context-in-executors]]
+=== 正向等待状态 (`doProcess`)
 
-== 执行类型划分指南 (Executions Classifying Tips)
+在正向流程中，等待状态通过 **Saga 流程拓扑分离设计 (Topology Separation)** 实现：
 
-在创建执行器时，必须决定该执行器是 *命令执行器 (Command-Executor)* 还是 *查询执行器 (Query-Executor)*。
-以下从数据库状态变更视角整理的图表可作为设计参考：
+1. **暂停步骤 (`InitiatePaymentCommandExecutor`)**：负责发起外部异步请求，并声明进入持久化等待。
+2. **恢复步骤 (`ConfirmPaymentCommandExecutor`)**：在 Saga DAG 中被指定为暂停后的下游步骤，在事务恢复时被调度执行。
 
-总结原则：如果该原子执行是*纯只读操作*，应实现为*查询执行器*；如果该原子操作会对任何数据库产生*状态变更*，则必须实现为*命令执行器*。
+==== 步骤 A：发起并暂停的执行器 (`InitiatePaymentCommandExecutor`)
 
+[source,java]
+----
+@SagaExecutor(executeFor = "payment-service", value = "initiatePaymentCommandExecutor")
+@AllArgsConstructor
+public class InitiatePaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentGatewayClient paymentGateway;
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. 发起外部异步支付请求，透传 idempotencyKey 作为关联标识
+        String intentId = this.paymentGateway.initiatePaymentIntent(
+                currentDomainEntity.getOrderId(),
+                currentDomainEntity.getTotalAmount(),
+                idempotencyKey //<1>
+        );
+
+        // 2. 将支付意图 ID 持久化记录到聚合实体中
+        currentDomainEntity.setPaymentIntentId(intentId);
+
+        // 3. 暂停前向执行，等待外部 Webhook 回调
+        return stepManager
+                .success("PAYMENT_INTENT_DISPATCHED")
+                .pause(Duration.ofHours(2)) //<2>
+                .nextExecutor(ConfirmPaymentCommandExecutor.class); //<3>
+    }
+
+    @Override
+    public @NonNull RevertStepManager doRevert(...) {
+        return stepManager.success("PAYMENT_INTENT_CANCELLED").noPause();
+    }
+}
+----
+
+<1> 将 `idempotencyKey` 透传给外部支付网关，作为回调握手的凭证。
+<2> `.pause(Duration.ofHours(2))` 将事务在事件存储中标记为 `PAUSED`，并立即释放线程。
+<3> `.nextExecutor(ConfirmPaymentCommandExecutor.class)` 明确指定事务恢复时将由哪个执行器接管。
+
+==== 步骤 B：恢复接管的执行器 (`ConfirmPaymentCommandExecutor`)
+
+当外部网关回调且应用调用 `sagaTemplate.resume(...)` 后，SEC 引擎调度执行 `ConfirmPaymentCommandExecutor`：
+
+[source,java]
+----
+@SagaExecutor(executeFor = "payment-service", value = "confirmPaymentCommandExecutor")
+@AllArgsConstructor
+public class ConfirmPaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentGatewayClient paymentGateway;
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext, //<1>
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. 从 ResumeContext 中提取 Webhook 回调可能携带的参数
+        Optional<String> authCode = resumeContext.get("authCode"); //<2>
+        Optional<String> status = resumeContext.get("status");
+
+        // 2. 验证支付结果（优先从载荷提取，或基于已有的 paymentIntentId 查询网关确认）
+        boolean isSuccess = status
+                .map("SUCCESS"::equalsIgnoreCase)
+                .orElseGet(() -> this.paymentGateway.verifyPaymentStatus(currentDomainEntity.getPaymentIntentId()));
+
+        if (isSuccess) {
+            authCode.ifPresent(currentDomainEntity::setPaymentAuthCode);
+
+            // 3. 推进至下一前向步骤
+            return stepManager
+                    .success("PAYMENT_CONFIRMED")
+                    .noPause()
+                    .nextExecutor(DispatchDeliveryExecutor.class); //<3>
+        } else {
+            // 支付被拒：触发补偿
+            throw NonRetryableExecutorException
+                    .buildWith(new PaymentDeclinedException("网关支付失败"))
+                    .put("intentId", currentDomainEntity.getPaymentIntentId())
+                    .build();
+        }
+    }
+
+    @Override
+    public @NonNull RevertStepManager doRevert(...) {
+        this.paymentGateway.refundPayment(currentDomainEntity.getPaymentAuthCode());
+        return stepManager.success("PAYMENT_REFUNDED").noPause();
+    }
+}
+----
+
+<1> `resumeContext` 包含恢复时传入的键值参数。
+<2> 通过 `resumeContext.get(key)` 安全提取。执行器内部对该上下文严格只读。
+<3> 成功确认后，通过 `.noPause().nextExecutor(...)` 连续推进后续流程。
+
+[CAUTION]
+.架构反模式警示：切勿使用 `resumeContext.isEmpty()` 判断执行阶段！
+====
+绝不要使用 `if (resumeContext.isEmpty())` 来判断执行器是“首次运行”还是“被恢复执行”。
+
+*为什么？* 外部 Webhook 或人工恢复操作完全可能**不包含任何有效载荷**（例如管理员仅在后台点击了“批准”按钮，或者 Webhook 是一个无 Body 的简单 HTTP 200 Ping）。
+在这种情况下，`resumeContext.isEmpty()` 为 `true`，**但它仍然是一次真正的恢复执行**！
+
+*执行器应如何感知自身阶段？*
+1. **基于 Saga 流程拓扑设计**：放置在 pause 步骤之后的执行器（如 `ConfirmPaymentCommandExecutor`）生来就是为了处理恢复后的验证。
+2. **基于领域聚合根状态**：如需防范超时重入，直接检查 `currentDomainEntity.getPaymentIntentId() != null` 等业务状态，而非检查 Map 是否为空。
+====
+
+=== 保留期超时与幂等性管理 (Retention Timeout & Idempotency)
+
+若外部系统故障或在配置的 `retentionDuration` 内始终未发送回调，将发生什么？
+
+1. **自动重新触发暂停步骤执行器**：
++
+* 超时到期后，StackSaga 重试环调度器将自动暴露该停滞事务。
+* 引擎将**自动重新调用先前暂停的那个执行器 (`InitiatePaymentCommandExecutor`)**，并注入其初始的 `in_data` 聚合快照。
+* *原因*：下游并未确认完成，而核实外部状态、重发通知或取消业务的逻辑全都封装在该暂停执行器内。
+
+2. **严格的幂等性要求**：
++
+* 由于该执行器在先前已成功返回 pause 的情况下被再次调用，执行器**必须严格保证幂等性**。
+* 在发起新的外部调用前，必须先核查 `currentDomainEntity` 中是否已有外部单据号，或使用 `idempotencyKey` 先向外部查询。
+
+3. **并发回调与防重竞态保护**：
++
+* 若在超时重试触发的同时或之后，迟到的第一个 Webhook 回调抵达，会发生什么？
+* StackSaga 提供了内建的并发控制：**仅接收并处理第一个有效的恢复请求；后续的迟到请求或重复请求将被安全拒绝**。
+
+4. **针对人工介入的长周期等待**：
++
+* 若业务涉及长时间的人工审批且不希望自动重试介入，可指定超长保留期，例如 `Duration.ofDays(365)`。
+
+[[pausable-compensation]]
+=== 逆向补偿中的等待状态 (`doRevert`)
+
+在分布式事务回滚中，退款等操作往往需要与银行清算机构进行异步交互，可能需要数小时或数天才能确认。
+
+StackSaga 原生支持在 `doRevert(...)` 中调用 `stepManager.success(...).pause(Duration retentionDuration)`：
+
+[[pausable-compensation-example]]
+[source,java]
+----
+@SagaExecutor(executeFor = "payment-service", value = "paymentCommandExecutor")
+@AllArgsConstructor
+public class PaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentGatewayClient paymentGatewayClient;
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+        String paymentRef = this.paymentGatewayClient.charge(currentDomainEntity.getTotalAmount(), idempotencyKey);
+        currentDomainEntity.setPaymentRef(paymentRef);
+        return stepManager.success("PAYMENT_CHARGED").noPause().nextExecutor(ReserveStockExecutor.class);
+    }
+
+    @Override
+    public @NonNull RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore, //<1>
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        // 检查持久化的 RevertHintStore 以明确当前的补偿阶段：
+        if (!revertHintStore.containsKey("refundSessionId")) { //<2>
+            // --- 1. 首次补偿执行 ---
+            // 发起异步退款请求，透传 idempotencyKey
+            String refundSessionId = this.paymentGatewayClient.initiateAsyncRefund(
+                    finalDomainEntityState.getPaymentRef(),
+                    idempotencyKey
+            );
+            revertHintStore.put("refundSessionId", refundSessionId); //<3>
+
+            // 暂停补偿，等待银行清算回调：
+            return stepManager
+                    .success("REFUND_INITIATED")
+                    .pause(Duration.ofHours(24)); //<4>
+        }
+
+        // --- 2. 恢复补偿执行 ---
+        // Webhook 回调到达！从 resumeContext 或向网关查询确认退款状态：
+        String refundStatus = resumeContext.get("refundStatus")
+                .orElseGet(() -> this.paymentGatewayClient.checkRefundStatus(revertHintStore.get("refundSessionId")));
+
+        if ("SUCCESS".equalsIgnoreCase(refundStatus)) {
+            // 退款成功，终结当前步骤的补偿
+            return stepManager
+                    .success("REFUND_COMPLETED")
+                    .noPause(); //<5>
+        } else {
+            // 外部处理中：触发重试核验
+            throw new RetryableExecutorException("银行网关清算中，稍后重试核验");
+        }
+    }
+}
+----
+
+<1> `revertHintStore` 是在补偿重试和暂停之间持久保存线索的可靠存储。
+<2> 使用 `!revertHintStore.containsKey("refundSessionId")`（而不是 `resumeContext.isEmpty()`）明确区分是首次发起退款还是回调恢复。
+<3> 将退款会话 ID 存入 `revertHintStore`。
+<4> 调用 `.pause(Duration.ofHours(24))` 暂停补偿。
+<5> 确认退款完成后，调用 `.noPause()` 结束该步骤补偿，SEC 将自动调度前一步骤的回滚。
+
+'''
+
+[[exceptions]]
+== 异常分类与规则 (Exceptions)
+
+执行器通过抛出特定异常向 SEC 汇报执行结果并触发相应的故障自愈机制：
+
+=== 可重试与不可重试异常对照表
+
+*可重试异常* (`RetryableExecutorException`)：
+适用于瞬时基础设施故障（网络抖动、服务 503、数据库行锁争用）。由重试调度器在限定次数内自动重试。
+
+[cols="*,*,*"]
 [.google-anno-skip]
 |===
-|操作类型 (Operation) |是否存在补偿 (Has a Revert) | 执行器类型 (Executor Type)
+|执行器类型 |doProcess() 方法 |doRevert() 方法
 
-|*C* - 创建 (Create)
-|*是 (YES)*
-|命令执行器 (Command-Executor)
+|查询执行器 (Query Executor)
+|✔
+|N/A
 
+|命令执行器 (Command Executor)
+|✔
+|✔
 
-|*R* - 读取 (Read)
-|*否 (NO)*
-|查询执行器 (Query-Executor)
+|前置补偿子执行器 (Revert Before)
+|✔
+|N/A
 
-|*U* - 更新 (Update)
-|*是 (YES)*
-|命令执行器 (Command-Executor)
-
-|*D* - 删除 (Delete)
-|*是 (YES)*
-|命令执行器 (Command-Executor)
+|后置补偿子执行器 (Revert After)
+|✔
+|N/A
 |===
 
-例如，让我们对订单结算示例中的各个执行操作进行归类：
+*不可重试异常* (`NonRetryableExecutorException`)：
+适用于确定性业务失败（输入非法、用户不存在、账户余额不足）。立即终止前向推进并触发逆向补偿。
 
+[cols="*,*,*"]
 [.google-anno-skip]
 |===
-|执行操作 (Execution) |执行器类型 (Executor Type) | 划分依据 (Reason)
+|执行器类型 |doProcess() 方法 |doRevert() 方法
 
-|收集用户送货详情
-|查询执行器 (Query-Executor)
-|提取用户数据不会对用户服务数据库造成任何状态变更。
+|查询执行器 (Query Executor)
+|✔
+|N/A
 
-|初始化订单
-|命令执行器 (Command-Executor)
-|初始化订单后，如果后续任何原子事务失败，该订单必须被取消回滚。
+|命令执行器 (Command Executor)
+|✔
+|✖ _(补偿阶段禁止抛出未捕获的不可重试异常)_
 
-|执行预授权
-|命令执行器 (Command-Executor)
-|完成预授权后，如果后续任何原子事务失败，该预授权必须被解冻取消。
+|前置补偿子执行器 (Revert Before)
+|✖
+|N/A
 
-|扣减更新库存
-|命令执行器 (Command-Executor)
-|库存扣减后，如果后续任何原子事务失败，预留库存必须原样恢复。
-
-|执行实际支付
-|命令执行器 (Command-Executor)
-|支付扣款后，如果后续任何原子事务失败，扣减金额必须执行退款。
-
+|后置补偿子执行器 (Revert After)
+|✖
+|N/A
 |===
 
-NOTE: 在下单示例中，执行实际支付操作之后没有后续原子操作。
-但从理论与规范角度出发，执行支付操作仍应在命令执行器中执行。
-因为如果未来在支付之后扩展了新的原子流程，您必须具备并执行支付的补偿动作。
+NOTE: 补偿期间禁止抛出未处理的非重试异常，否则会导致回滚停滞。如遇到可容忍的非重试异常，应将其记录在 `revertHintStore` 中，并返回 `.success("IGNORED").noPause()`。
 
-== 合并多个原子执行 (Combine Multiple Atomic Executions)
+[[step-manager-navigation-reference]]
+== Step Manager 阶段式导航参考表
 
-TIP: 在 Saga 执行器中有两种合并多个原子操作的实现可能。
-我们已知 StackSaga 中有两种原子执行：命令执行与查询执行。
-根据具体业务场景，有时可以将多个查询执行合并到同一个执行器中。 +
+StackSaga 为每个执行阶段提供了编译期类型安全的流式构建器：
 
-在同一个执行器中执行多个只读原子操作可以有效减少事件溯源 (Event Sourcing) 的持久化开销。
-因为在每个执行器执行完毕后，Saga 引擎都会将领域实体的最新状态作为一个新事件持久化到数据库中。
-例如，如果您在同一个执行器中合并实现 3 个只读原子操作，就可以减少 2 次事件溯源的数据库写入开销。
-否则，若将这 3 个操作拆分到 3 个独立执行器中，每次执行后都会更新一次事件存储库（共计 3 次）。 +
+[cols="2,2,2,3",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Step Manager 接口 | 阶段 1：事件记录 | 阶段 2：LRT 生命周期 | 阶段 3：目标导航 / 动作
 
-*第一种方式 (First way)*：
+| **`ProcessStepManager<DE>`** +
+_(正向前向执行 `doProcess`)_
+| `.success(event)` +
+_(字符串或枚举)_
+| `.noPause()` _(连续 LRT)_ +
+_或_ +
+`.pause(duration)` _(可暂停 LRT)_
+| `.nextExecutor(Next.class)` +
+_或_ +
+`.complete()` _(终结成功；仅在 `.noPause()` 后允许)_
 
-image:executor/stacksaga-diagram-combine-multiple-executor-option-1.drawio.svg[]
+| **`RevertStepManager`** +
+_(命令补偿执行 `doRevert`)_
+| `.success(event)` +
+_(字符串或枚举)_
+| `.noPause()` _(终结本步补偿)_ +
+_或_ +
+`.pause(duration)` _(异步补偿暂停)_
+| N/A +
+_(SEC 引擎自动按逆序反向推进)_
 
-*第二种方式 (Second way)*：
+| **`RevertBeforeStepManager<DE, E>`** +
+_(前置子补偿流程)_
+| `.success(event)`
+| `.noPause()` +
+_或_ +
+`.pause(duration)`
+| `.setNextRevertBeforeExecutor(Next.class)` +
+_或_ +
+`.noMoreRevertBeforeExecutors()` _(移交父命令执行器)_
 
-image:executor/stacksaga-diagram-combine-multiple-executor-option-2.drawio.svg[]
+| **`RevertAfterStepManager<DE, E>`** +
+_(后置子补偿流程)_
+| `.success(event)`
+| `.noPause()` +
+_或_ +
+`.pause(duration)`
+| `.setNextRevertAfterExecutor(Next.class)` +
+_或_ +
+`.noMoreRevertAfterExecutors()` _(终结后置补偿)_
+|===
+
+详见 xref:stacksaga-sync/index.adoc#glossary-step-manager[术语表中的 Step Manager]、xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[双向可暂停架构] 以及 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[通过 SagaTemplate 恢复事务]。
+
+== 执行器设计原则
+
+在设计 Saga 执行器时，请遵循以下核心准则：
+
+. **一个执行器 = 一个原子事务**：绝不在单个执行器中混合多个外部写操作。将其拆分为独立的命令执行器或子执行器。
+. **严格保证幂等性**：始终向下游透传 `idempotencyKey`，并将重复执行响应作为正常成功处理。
+. **清晰解耦连续与可暂停模式**：在可暂停流程中，将发起暂停的步骤与接收恢复的步骤作为独立执行器在 Saga DAG 中组织。
+. **切勿使用 `resumeContext.isEmpty()` 做阶段分支**：依靠 Saga 拓扑与领域实体状态跟踪业务进度，依靠 `RevertHintStore` 跟踪补偿阶段。
+. **遵循命名规范**：事件名称必须符合标准格式 (`^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$`)。
