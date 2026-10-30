@@ -172,12 +172,12 @@ Once rescheduled and retried, state notifications continue via listeners, or you
 [[resuming-paused-transactions]]
 === Resuming Paused Transactions (Pausable LRT)
 
-When a saga executor participates in a *xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transaction]* and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`].
-Similarly, when a compensation step must undo a transaction via an asynchronous gateway or banking transfer, it halts compensation by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(...)`]. See xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Workflows] for the conceptual background.
+When a saga executor participates in a *xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transaction]* and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pauseUntilResume(...)`].
+Similarly, when a compensation step must undo a transaction via an asynchronous gateway or banking transfer, it halts compensation by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pauseUntilResume(...)`]. See xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Workflows] for the conceptual background.
 
 At the moment of pausing, the transaction enters an intentional business wait state:
 
-* The `SagaDomainEntity` state is persisted to the event store.
+* The `DomainEntity` state is persisted to the event store.
 * `es_transaction` marks `is_paused = 1` and records `current_resume_key = <idempotencyKey>`.
 * CPU worker threads are freed immediately.
 
@@ -222,7 +222,7 @@ A major strength of StackSaga's architecture is that **resumption is completely 
 
 * You invoke the exact same method -- `sagaTemplate.resume(transactionId, correlationKey)` -- whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
 * The StackSaga Execution Coordinator (SEC) queries the event store, determines the transaction status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, resets `is_paused = 0` and `current_resume_key = NULL`, and dispatches the execution:
-** **If paused in forward flow**: Advances to the target `NextExecutor` designated by xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).pause(duration).nextExecutor(NextExecutor.class)`], invoking its `doProcess(...)` with the supplied `ResumeContext`.
+** **If paused in forward flow**: Advances to the target `NextExecutor` designated by xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).asSync().pauseUntilResume(duration).resumeToNextExecutor(NextExecutor.class)`] (or `asAsync()`), invoking its `doProcess(...)` with the supplied `ResumeContext`.
 ** **If paused in compensation flow**: Re-invokes the paused `CommandExecutor`'s `doRevert(...)` with the supplied `ResumeContext`, allowing it to finalize reversal actions. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[Implementing Pausable Compensation].
 
 [[callback-controller-pattern]]
@@ -234,7 +234,7 @@ The following example demonstrates how Spring REST controllers handle external c
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @RestController
 @RequestMapping("/orders/callbacks")
 @RequiredArgsConstructor
@@ -282,7 +282,7 @@ public class OrderCallbackController {
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @RestController
 @RequestMapping("/orders/callbacks")
 @RequiredArgsConstructor
@@ -337,7 +337,7 @@ String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 [[pausable-lrt-timeout-reexecution]]
 === Timeout Re-Execution Mechanics (When No Callback Arrives)
 
-When an executor pauses with a maximum duration (e.g., `stepManager.success("ORDER_PREPARING").pause(Duration.ofHours(5)).nextExecutor(DeliveryDispatchExecutor.class)`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
+When an executor pauses with a maximum duration (e.g., `stepManager.success("ORDER_PREPARING").asSync().pauseUntilResume(Duration.ofHours(5)).resumeToNextExecutor(DeliveryDispatchExecutor.class)`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
 
 However, in worst-case scenarios where the external system crashes, network connectivity is lost, or the callback is never delivered within the configured timeout:
 
@@ -347,7 +347,7 @@ Furthermore, the logic required to invoke the external target service, verify or
 Therefore, StackSaga's retry coordinator re-executes the transaction directly from the executor where it was paused (`MakePaymentExecutor`), even though its primary execution had previously succeeded before entering the pause.
 
 * **Re-Invocation Flow:**
-Upon timeout expiration, the retry coordinator claims ownership of the stalled transaction, safely reconstructs the pristine `SagaDomainEntity` up to the checkpoint prior to that executor, and invokes `doProcess(...)` again. This gives the executor an opportunity to query the external system's status (e.g., checking if the payment went through), re-trigger the external call, or throw `NonRetryableExecutorException` to initiate compensation.
+Upon timeout expiration, the retry coordinator claims ownership of the stalled transaction, safely reconstructs the pristine `DomainEntity` up to the checkpoint prior to that executor, and invokes `doProcess(...)` again. This gives the executor an opportunity to query the external system's status (e.g., checking if the payment went through), re-trigger the external call, or throw `NonRetryableExecutorException` to initiate compensation.
 
 * **Impact on State Listeners:**
 Because the paused executor is executed again, this directly affects registered state change listeners. See the detailed guidance in xref:#at-least-once-listener-semantics[At-Least-Once Notification in Pausable LRT] below.
@@ -391,7 +391,7 @@ Keep `onStateChanged` lightweight (e.g., publishing a quick notification or logg
 ====
 In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses awaiting an external callback with a timeout `Duration` (e.g., 5 hours), the listener callback (`onStateChanged`) can be invoked **multiple times** for that same executor:
 
-. **First Invocation (Initial Success):** When the executor successfully completes its initial forward logic (such as dispatching an asynchronous request to an external payment provider) and pauses via `stepManager.pause(...)`, the engine invokes `onStateChanged`.
+. **First Invocation (Initial Success):** When the executor successfully completes its initial forward logic (such as dispatching an asynchronous request to an external payment provider) and pauses via `stepManager.pauseUntilResume(...)`, the engine invokes `onStateChanged`.
 . **Second Invocation (Timeout Re-Execution):** If no external callback arrives to resume the saga before the configured duration expires, the framework re-executes the paused executor. Upon successful re-execution, the engine invokes `onStateChanged` **again** for that same executor.
 
 *Crucial Design Rules:*
@@ -415,7 +415,7 @@ Implement `TransactionEventListener` to listen to transaction events in an imper
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @Component
 @RequiredArgsConstructor
 public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
@@ -442,7 +442,7 @@ Implement `ReactiveTransactionEventListener` to listen to transaction events in 
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @Component
 @RequiredArgsConstructor
 public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {
@@ -526,7 +526,7 @@ The StackSaga team recommends organizing saga transaction logic inside a dedicat
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @Component
 @RequiredArgsConstructor
 public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
@@ -571,7 +571,7 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 
 [source,java]
 ----
-@Slf4j
+@Slf4log
 @Component
 @RequiredArgsConstructor
 public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {

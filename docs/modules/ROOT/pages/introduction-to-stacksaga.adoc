@@ -7,6 +7,12 @@
 
 == Overview
 
+[TIP]
+.New to Microservices or Distributed Transactions?
+====
+If you are new to microservices architecture or the Saga pattern, we recommend starting with the xref:foundations:index.adoc[Foundations & Core Concepts] guide. It provides a concrete foundation on microservices, database-per-service isolation, the CAP theorem, and distributed consistency challenges before diving into the StackSaga framework.
+====
+
 StackSaga is an enterprise-grade, orchestrator-based Saga ecosystem designed to solve distributed transaction consistency across microservice architectures.
 
 In distributed systems, traditional single-database transactions (ACID / 2-Phase Commit) cannot scale across autonomous microservices.
@@ -17,8 +23,8 @@ Beyond basic orchestration, StackSaga delivers a comprehensive cloud-native plat
 
 StackSaga is an entire ecosystem rather than just a single library, engineered to implement, observe, and maintain Saga-based distributed transactions in production environments:
 
-. *xref:implementations:engine-overview.adoc[Multi-Transport Orchestration Engines]* +
-Pluggable orchestration engines supporting both synchronous request/response (REST, gRPC, GraphQL) and asynchronous event-driven (Apache Kafka) communication styles.
+. *xref:implementations:stacksaga-sync/index.adoc[Unified Saga Orchestration Engine (SEC)]* +
+A unified orchestration engine natively supporting both synchronous request/response (REST, gRPC, GraphQL, local DB) and asynchronous event-driven messaging (Apache Kafka, RabbitMQ) within the exact same saga flow.
 . *xref:stacksaga-database-support:overview/database-support-overview.adoc[Zero-Infrastructure Event Sourcing]* +
 Built-in event-sourcing capabilities that use your existing relational database (MySQL, PostgreSQL, Oracle) as the event store—eliminating the need to deploy and manage a dedicated event-store cluster.
 . *xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Distributed Retry Subsystem]* +
@@ -32,7 +38,7 @@ When transitioning to microservices, organizations encounter the **Distributed C
 
 StackSaga provides distinct advantages over DIY solutions and traditional workflow engines:
 
-=== 1. Domain-Centric Orchestration (No Dedicated Orchestrator Infrastructure)
+=== Domain-Centric Orchestration (No Dedicated Orchestrator Infrastructure)
 Traditional orchestration systems often require deploying a heavy, centralized external server or dedicated "orchestrator service" that acts as an enterprise bottleneck and single point of failure.
 
 StackSaga eliminates this anti-pattern completely through **Domain-Centric (Service-Embedded) Orchestration**:
@@ -41,55 +47,44 @@ StackSaga eliminates this anti-pattern completely through **Domain-Centric (Serv
 * **Per-Domain Centralization**: For example, `order-service` embeds StackSaga to orchestrate the "Place Order" saga across downstream services. If `payment-service` has its own complex multi-step clearing or settlement workflow, `payment-service` independently embeds StackSaga to orchestrate that payment domain. A single microservice can orchestrate one or multiple business domains.
 * **Zero-Dependency Downstream Utility Services**: Only the microservice acting as the domain orchestrator carries the StackSaga framework dependency. Downstream participating services (e.g., `inventory-service`, `user-service`) remain standard microservices exposing ordinary REST, gRPC, or GraphQL APIs without a single line of StackSaga code. Adoption is clean, incremental, and non-invasive.
 
-=== 2. Dual Long-Running Transaction (LRT) Models
-Real-world enterprise processes require different execution dynamics:
-* *Continuous LRT (Straight-Through Processing - STP)*: For fully automated, high-throughput workflows that run unbroken from start to finish (e.g. e-commerce checkout, financial payment processing).
-* *Pausable LRT (Wait-States & Human-in-the-Loop - HITL)*: Intentionally pauses transactions at business milestones—such as waiting for external asynchronous payment webhooks, restaurant physical order confirmations, or manager/KYC manual approvals—releasing 100% of CPU worker threads while safely sleeping in the Event Store.
+=== Unified Hybrid Approach for Mixed-Style LRTs
+Real-world enterprise processes are rarely purely automated or purely asynchronous.
+StackSaga introduces an innovative **Unified Hybrid Approach for Mixed-Style LRTs**, seamlessly orchestrating both execution dynamics within the **exact same saga workflow**:
 
-NOTE: Both Continuous LRT (STP) and Pausable LRT (HITL) execution models are first-class capabilities across *both* the *Synchronous (REST/HTTP)* and *StackSaga-Kafka (Event-Driven)* implementations.
+* *Continuous STP (Straight-Through Processing)*: For fully automated, high-throughput workflows that run unbroken from start to finish (e.g. instant checkout, ledger updates, and stock reservations).
+* *Pausable HITL (Wait-States & Human-in-the-Loop)*: Intentionally pauses transactions at business milestones—such as waiting for external payment webhooks, physical restaurant food preparation, or manager/KYC manual approvals—releasing 100% of CPU worker threads while safely sleeping in the Event Store.
 
-=== 3. Durable Event Sourcing & Pristine State Restoration
+NOTE: In StackSaga, developers never have to choose between a "continuous mode" and a "pausable mode." Every saga natively supports mixed-style execution out-of-the-box.
+
+=== Durable Event Sourcing & Pristine State Restoration
 Every state transition of the `SagaDomainEntity` is immutably recorded in the Event Store.
 If an orchestrator node crashes or is redeployed mid-transaction, execution is resumed with zero data loss.
 Furthermore, if a paused executor re-executes after a timeout, the engine discards uncommitted in-memory mutations and restores the domain entity to its pristine original snapshot, guaranteeing deterministic idempotency.
 
-=== 4. Self-Healing Distributed Retries
+=== Self-Healing Distributed Retries
 Transient network blips and downstream service downtime are handled automatically.
 The Ring Coordinator partition topology coordinates retry schedules across all active orchestrator nodes, ensuring that stalled spans are self-healed without duplicate execution or thread starvation.
 
-=== 5. Spring Boot Native (Imperative & Reactive)
+=== Spring Boot Native (Imperative & Reactive)
 StackSaga is purpose-built for the Spring Boot ecosystem.
 It offers first-class support for both imperative (Spring MVC / blocking) and reactive (Spring WebFlux / Project Reactor `Mono`/`Flux`) paradigms through unified, fluent APIs (`SagaTemplate`).
 
-=== 6. Enterprise Observability & Compliance
+=== Enterprise Observability & Compliance
 Every transaction carries a complete audit trail: which service was invoked, what payload was sent, exact timestamps, and compensation logs.
 With the built-in Trace Window dashboard, operations and support teams gain instant visibility into live distributed transactions.
 
-== Summary: StackSaga at a Glance
+== Next Steps & Learning Paths
 
-[cols="1,2",options="header"]
-[.properties-table.google-anno-skip]
-|===
-| Dimension | StackSaga Advantage
+Depending on your architecture and operational requirements, continue your journey through the following guides:
 
-| *Architecture*
-| Domain-Centric Orchestration: Embedded directly in standard domain microservices without dedicated orchestration servers; downstream services remain zero-dependency.
+. *xref:architecture.adoc[1. Explore System Architecture]* +
+Learn about the 3-Stage Evolutionary Architecture (Basic Setup, Retry-Ready Cluster, and Observability) and service classifications.
 
-| *Execution Models*
-| Supports both Continuous LRT (STP) and Pausable LRT (Human-in-the-Loop / Webhooks) natively across both Synchronous and Kafka implementations.
+. *xref:lrt-transaction-models.adoc[2. Understand Transaction Execution Models]* +
+Discover how straight-through processing (Continuous STP) and intentional wait-states (Pausable HITL) are orchestrated across microservices.
 
-| *State Management*
-| Native Event Sourcing using existing relational databases (MySQL, PostgreSQL, Oracle).
+. *xref:implementations:stacksaga-sync/index.adoc[3. Master the Orchestration Engine (SEC)]* +
+Deep dive into the SEC execution loop, staged builders, `CommandExecutor`, and callback resumption with `ResumeContext`.
 
-| *Fault Tolerance*
-| Automatic backward compensation (`doRevert`) and forward self-healing retries.
-
-| *Cluster Resiliency*
-| Token ring partitioning ensures conflict-free retry execution across orchestrator instances.
-
-| *Developer Experience*
-| Spring Boot starter with type-safe `CommandExecutor` and `QueryExecutor` abstractions.
-
-| *Observability*
-| Real-time visual tracing, timeline inspection, and manual operator interventions via Trace Window.
-|===
+. *xref:demo:page$stacksaga-synchronous-impl-examples/mysql/stacksaga-synchronous-impl-mysql-quick-example.adoc[4. Hands-on Quickstart Tutorial]* +
+Follow a step-by-step tutorial building a complete E-Commerce Order Placement saga with MySQL and Spring Boot.

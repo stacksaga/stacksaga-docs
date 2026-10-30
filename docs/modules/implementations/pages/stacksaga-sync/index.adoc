@@ -1,39 +1,119 @@
-:description: Technical reference for StackSaga Framework (Synchronous) -- enterprise saga orchestration in Spring Boot microservices for Banking, Fintech, and distributed systems. Supports Straight-Through Processing (STP), Pausable LRTs, Human-in-the-Loop (HITL) approvals, Event Sourcing auditability, and financial transaction compensation over REST, gRPC, and GraphQL.
-:keywords: StackSaga, saga orchestration, banking microservices, fintech distributed transactions, straight-through processing, STP, human-in-the-loop, HITL, event sourcing, Spring Boot, Java, payment orchestration, financial audit trail, idempotency, fault tolerance, transaction compensation, long-running transactions, LRT, REST, gRPC, GraphQL
+:description: Technical reference & architectural core concepts for the StackSaga Orchestration Engine (SEC) -- unified enterprise saga orchestration in Spring Boot microservices. Combines Straight-Through Processing (STP), Pausable LRTs, Human-in-the-Loop (HITL) workflows, Two-Stage Asynchronous Execution (Apache Kafka, RabbitMQ), Event Sourcing state restoration, and distributed compensation across REST, gRPC, and messaging brokers.
+:keywords: StackSaga, SEC, Saga Execution Coordinator, saga orchestration, banking microservices, fintech distributed transactions, straight-through processing, STP, human-in-the-loop, HITL, event sourcing, Spring Boot, Java, payment orchestration, idempotency, fault tolerance, transaction compensation, long-running transactions, LRT, REST, gRPC, Apache Kafka, RabbitMQ, two-stage async, asAsync, asSync, ResumeContext
 :page-priority: 1.0
 
-= StackSaga Framework (Synchronous)
+= StackSaga Orchestration Engine (SEC): Overview & Core Concepts
 
-== Overview
+== Executive Overview & Mental Model
 
-*StackSaga Framework (Synchronous)* (`stacksaga-spring-boot-starter`) is the synchronous transport implementation of the StackSaga ecosystem.
-It coordinates long-running distributed transactions (LRT) across microservices that already communicate over synchronous protocols -- REST (over HTTP), gRPC (over HTTP/2), or GraphQL (over HTTP) -- without introducing a message broker into your topology.
+The **StackSaga Orchestration Engine** (`stacksaga-spring-boot-starter`) is the reactive distributed execution platform at the core of the StackSaga ecosystem.
+It coordinates distributed transactions across microservices by executing Saga workflows — sequences of local atomic transactions and their automated compensating actions — to guarantee eventual consistency across distributed boundaries.
 
-Unlike choreography approaches where each service reacts to broadcast events independently, StackSaga follows a **domain-centric orchestration** model:
-instead of deploying a heavy, dedicated external orchestration server, you embed StackSaga directly into the standard microservice that naturally owns the business domain (for example, `order-service` for order placement, or `payment-service` for multi-step payment clearance).
-That domain service acts as the orchestrator for its own saga lifecycle -- invoking required operations on participating utility services through their existing synchronous endpoints (REST, gRPC, GraphQL) and advancing or compensating the workflow deterministically.
-This gives you centralized control and complete auditability for the domain while letting all participating downstream services keep their existing APIs untouched with zero StackSaga dependencies.
+The engine natively unifies **both synchronous execution (REST over HTTP, gRPC over HTTP/2, GraphQL, local database operations) and asynchronous event-driven messaging (Apache Kafka, RabbitMQ, AWS SQS)** within the **exact same saga workflow**.
 
-The framework is built on top of Spring Boot and integrates with StackSaga's core engine for event sourcing, state management, retry scheduling, and cluster coordination.
-Each saga execution is fully persisted -- every state transition of the `SagaDomainEntity` (the saga's aggregate root and payload carrier) is written to the event store through `stacksaga-database-support` -- so that any in-progress transaction can be recovered, retried, or inspected at any point in time.
+```
+                        [Inbound Client Request]
+                                   │
+                                   ▼
+                    Order Service (Saga Orchestrator)
+                embedded with stacksaga-spring-boot-starter
+                                   │
+        ┌──────────────────────────┴──────────────────────────┐
+        ▼                                                     ▼
+[Synchronous Spans: .asSync()]              [Asynchronous Spans: .asAsync()]
+• Direct REST / gRPC call                   • Apache Kafka / RabbitMQ Produce
+• Local Database (JPA/R2DBC)                • Two-Stage Model: Commit State First
+• Immediate .noPause() or .pauseUntilResume • Mandatory .pauseUntilResume()
+        │                                                     │
+        │                                               [Broker Topic]
+        │                                                     │
+        │                                           [Downstream Consumer]
+        │                                                     │
+        │                                              [Event Callback]
+        │                                                     │
+        ▼                                                     ▼
+[Next Synchronous Step] ◄────────────────────── [sagaTemplate.resume(txId, key)]
+```
 
-NOTE: Even though the engine runs reactively under the hood, it is fully compatible with both *reactive* and *non-reactive* (imperative) Spring environments.
-You choose your programming model with the `SagaTemplate` (blocking) or `ReactiveSagaTemplate` (reactive) entry point; the saga coordination behaves identically either way.
+=== The Domain-Centric Orchestration Principle
 
-*Key capabilities:*
+Traditional orchestration systems typically require deploying heavy, centralized external orchestration servers (such as BPMN engines or standalone workflow servers) that introduce single points of failure, network bottlenecks, and administrative overhead.
 
-* *Synchronous saga orchestration* -- the orchestrator invokes each step against a utility service through its existing REST/gRPC/GraphQL endpoint and advances the saga state based on the returned result, all coordinated by the Saga Execution Coordinator (SEC).
-* *Forward and backward recovery* -- built-in support for compensating transactions: when a step fails, the framework invokes `doRevert()` on each previously completed executor in reverse step order, triggering the rollback action for each affected service.
-* *Zero-dependency utility services* -- only the orchestrator carries a StackSaga dependency. Participating utility services keep their existing endpoints and need no StackSaga code at all, so adoption is incremental and non-invasive.
-* *Durable state via event sourcing* -- the full `SagaDomainEntity` payload and status (`STARTED -> IN_PROGRESS -> COMPLETED | FAILED -> COMPENSATING -> COMPENSATED`) is persisted on every state transition, enabling point-in-time recovery and complete audit trails.
-* *Distributed retry with token ring partitioning* -- failed or stalled transactions are retried by the owning orchestrator instance as determined by Murmur3-based token ring partitioning, coordinated through the `stacksaga-ring-coordinator`.
-* *Dual LRT execution models* -- first-class support for both *Continuous LRT* (unbroken, straight-through execution across microservices) and *Pausable LRT* (business-condition wait states awaiting asynchronous callbacks, webhooks, or manual confirmations via `stepManager.pause()` and `SagaTemplate.resume()`).
-* *Reactive and imperative support* -- the developer-facing `SagaTemplate` / `ReactiveSagaTemplate` and the `CommandExecutor` / `QueryExecutor` abstractions support both blocking and reactive (`Mono`/`Flux`) handler implementations, giving application developers freedom to choose their programming model without affecting saga coordination.
+StackSaga replaces this anti-pattern with **Domain-Centric (Embedded) Orchestration**:
 
-== Glossary
+* **No Dedicated Orchestrator Servers**: You do not build or manage dedicated orchestration server clusters. Any standard microservice simply adds `stacksaga-spring-boot-starter` to orchestrate sagas for its own business domain (e.g. `order-service` for order fulfillment, or `payment-service` for multi-step clearing and settlement).
+* **Zero-Dependency Downstream Utility Services**: Downstream participating services (such as `inventory-service` or `user-service`) remain standard microservices exposing ordinary REST, gRPC, or message-driven endpoints. They have **zero StackSaga dependencies** and require no saga awareness.
+* **Reactive & Non-Reactive Parity**: While the engine operates reactively under the hood using Project Reactor, it offers first-class support for both imperative (blocking/Spring MVC) and reactive (WebFlux) applications via the `SagaTemplate` and `ReactiveSagaTemplate` entry points.
 
-The following terms are used throughout this documentation.
-Familiarising yourself with them before reading the technical sections will significantly reduce the learning curve.
+---
+
+== The StackSaga Execution Coordinator (SEC) [[SEC]]
+
+Because StackSaga follows the Saga orchestration pattern, a central runtime component drives workflow progression, span dispatch, commit barriers, reverse compensation, and transient fault recovery.
+In StackSaga, this engine component is called the **StackSaga Execution Coordinator (SEC)**.
+
+=== The SEC Execution Loop
+
+At every step of a transaction, the SEC enforces a deterministic two-step reliability loop:
+
+1. **Execute Span**: The active executor runs its atomic business operation against a utility service, local database, or message broker.
+2. **Event-Store Commit Barrier**: The SEC records the domain entity mutation, span status, and navigation instructions into the Event Store *before* advancing to the next step.
+
+=== The 7-Step SEC Execution Lifecycle
+
+Consider a distributed E-Commerce checkout saga coordinating across `user-service`, `inventory-service`, `payment-service`, and message brokers:
+
+[cols="1,2,3",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Phase | Action | SEC Engine Behavior
+
+| **Inbound Trigger**
+| `POST /orders` request arrives at `order-service`.
+| Controller initializes an `OrderDomainEntity` and invokes: +
+`sagaTemplate.process(domainEntity).startWith(CheckEligibilityExecutor.class).execute();`
+
+| **Initial Span Dispatch**
+| SEC kicks off the saga.
+| SEC instantiates `CheckEligibilityExecutor`, validates the starting contract, and creates the root transaction record in the Event Store.
+
+| **Programmatic Navigation**
+| Executor queries customer credit limits.
+| The executor executes business logic and returns staged navigation instructions via `ProcessStepManager`: +
+`return stepManager.success("ELIGIBILITY_CONFIRMED").asSync().noPause().nextExecutor(ReserveInventoryExecutor.class);`
+
+| **Hybrid Execution**
+| Direct RPC vs Message Broker.
+| *Synchronous Spans (`.asSync()`)* execute inline. +
+*Asynchronous Spans (`.asAsync()`)*: For external brokers (Kafka/RabbitMQ), the executor registers an `AsyncInvoker`. The SEC commits state to the Event Store *first*, lazily fires the broker message, and marks the transaction `PAUSED`.
+
+| **Intentional Pausable Sleep**
+| Business wait-state reached.
+| The SEC releases 100% of CPU worker threads while the transaction safely sleeps in the Event Store awaiting external confirmation.
+
+| **Callback Resumption**
+| Webhook or Kafka consumer receives reply.
+| Controller or message listener invokes `sagaTemplate.resume(txId, idempotencyKey)`, and the SEC restores the domain entity and resumes execution directly at the designated target executor.
+
+| **Symmetrical Rollback**
+| Permanent failure occurs.
+| If any executor throws `NonRetryableExecutorException`, the SEC halts forward progress and executes `doRevert()` on all previously completed command executors in reverse chronological order.
+|===
+
+[TIP]
+====
+**How Step-Level Commit Timing Drives the Integration Patterns** +
+The two-step loop above — *Execute → Persist* — is the foundation of the xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[Unified Saga Integration Patterns (USIP)].
+The exact moment the SEC commits the span status to the Event Store relative to when the external call is made determines which of the 11 integration patterns applies.
+See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[Unified Saga Orchestration Patterns (USIP & USNP)] for the complete catalog.
+====
+
+---
+
+== Core Terminology & Building Blocks (Glossary)
+
+The following terms represent the architectural building blocks of StackSaga.
+Familiarizing yourself with them will make understanding the technical guides seamless:
 
 [cols="1,3",options="header"]
 [.properties-table.google-anno-skip]
@@ -41,293 +121,67 @@ Familiarising yourself with them before reading the technical sections will sign
 | Term | Definition
 
 | *LRT (Long-Running Transaction)*
-| A business transaction that spans multiple services and may take seconds, minutes, or longer to complete.
-LRTs require durable state management, distributed coordination, and compensation support for partial failures.
+| A business transaction that spans multiple services or systems and may take milliseconds, minutes, hours, or days to complete.
+LRTs require durable state persistence, distributed coordination, and automated compensation for partial failures.
 
 | *Saga Domain*
-| A specific type of LRT identified by its `DomainEntity` subclass.
-All saga instances of the same type (e.g., every `PlaceOrder` transaction) belong to the same saga domain.
-The class type itself -- not any field value -- is the discriminator used to identify the domain.
+| A specific category of LRT identified by its `DomainEntity` subclass (e.g. all order fulfillments belong to `OrderDomainEntity`).
+The class type itself serves as the discriminator in the Event Store.
 
 | *Span*
 | A single atomic execution step within a saga.
-Each span is performed by one executor on the orchestrator, which invokes a single operation on a target utility service.
-A saga is composed of one or more sequential spans in the primary flow, each with an optional corresponding compensation.
+Each span is performed by one executor on the orchestrator, invoking an operation on a downstream utility service, local database, or message broker.
 
 | *SEC (Saga Execution Coordinator)*
-| The internal engine component responsible for driving a saga forward: invoking each executor, navigating to the next step, persisting state transitions, and triggering compensation when needed.
-`SagaTemplate` / `ReactiveSagaTemplate` is the developer-facing entry point to the SEC.
+| The internal engine component responsible for driving the saga: invoking executors, navigating transitions, persisting state, lazily firing asynchronous invokers, and triggering compensations.
 
 | *Domain Entity*
-| The aggregate root for a single saga instance.
-Carries the full accumulated business payload and current execution state throughout the saga lifecycle.
-Every state transition is persisted as a snapshot to the event store.
-The framework uses the terms *Domain Entity* (`SagaDomainEntity`) as the core model representing the saga's domain state.
+| The aggregate root and payload carrier for a saga instance.
+Annotated with `@SagaDomainEntity`, it carries all accumulated business data. Every state transition immutably records a domain snapshot to the Event Store.
 
 | *Executor*
-| The orchestrator-side handler that executes the business logic for a single saga step.
-Implemented as a `QueryExecutor` (read-only, no compensation), a `CommandExecutor` (state-changing, has a `doRevert()` compensation), or a *Sub Executor* (extra compensation steps that run before/after a command executor's revert).
+| The orchestrator-side handler encapsulating the logic for a single span: +
+• `CommandExecutor`: State-changing operations requiring compensation (`doProcess()` and `doRevert()`). +
+• `QueryExecutor`: Read-only queries with zero side effects; has no `doRevert()` compensation. +
+• `Pre-Executor / Post-Executor`: Additional rollback steps executed before (`PreExecutor`) or after (`PostExecutor`) a command executor's core revert.
 
 | [[glossary-step-manager]]*Step Manager*
-| The staged fluent navigation builder passed into each executor to drive saga progression: +
-**Forward Navigation (`ProcessStepManager<DE>`)**: `.success(event).noPause().nextExecutor(...)` advances to the next span, `.success(event).pause(duration).nextExecutor(...)` halts execution at a business milestone awaiting an external callback, and `.success(event).noPause().complete()` finishes the saga. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[Forward Navigation] and xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[Forward Pausing]. +
-**Compensation Navigation (`RevertStepManager`)**: `.success(event).noPause()` completes the compensation step, while `.success(event).pause(duration)` halts rollback awaiting an external reversal confirmation. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[Compensation Navigation]. +
-Forward routing is expressed programmatically inside the executors rather than in a central routing table.
+| The staged fluent builder passed into each executor to drive execution and routing: +
+• **Forward Navigation (`ProcessStepManager<DE>`)**: `.success(event).asSync().noPause().nextExecutor(...)` or `.pauseUntilResume(duration)` or `.complete()`. +
+• **Compensation Navigation (`RevertStepManager`)**: `.success(event).asSync().noPause().resumeToNextDefaultExecutor()` or `.pauseUntilResume(duration)`. +
+• **Pre-Compensation Navigation (`PreStepManager<DE, E>`)**: `.success(event).asSync().noPause().toNextDefaultExecutor()` or `.toNextPreExecutor(...)`. +
+• **Post-Compensation Navigation (`PostStepManager<DE, E>`)**: `.success(event).asSync().noPause().toNextDefaultExecutor()` or `.toNextPostExecutor(...)`.
 
-| *Continuous LRT*
-| A long-running transaction that executes through all participating microservices sequentially without intentional business wait states. Pauses occur solely due to transient infrastructure errors handled by the retry subsystem. Equivalent to *Straight-Through Processing (STP)* or a *Non-Wait-State Transaction*.
-
-| *Pausable LRT*
-| A long-running transaction that intentionally enters a wait state (`.pause(duration)`) at a business milestone, persisting its state and releasing execution threads until an external callback or event triggers resumption via xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`SagaTemplate.resume(...)`]. Wait states are supported in **both forward execution (`doProcess`) and backward compensation (`doRevert`)**. See xref:#pausable-lrt[Pausable LRT Architecture] and xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[Pausable Compensation in Executors].
+| *Idempotency Key & Correlation Key*
+| A deterministic, stable unique key generated per span.
+Guarantees that retrying an executor invocation produces zero duplicate side effects.
+In Pausable LRTs, this key also serves as the `correlationKey` sent to external systems and brokers.
 
 | [[glossary-resume-context]]*Resume Context*
-| A key-value metadata store (`ResumeContext`) capturing external callback or webhook payload data supplied during transaction resumption via xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`SagaTemplate.resume()`]. Persisted alongside the execution span in the event store and passed directly to the target resumed executor without exposing the core domain entity to mutations outside the executor boundary. See xref:#resume-context-concept[ResumeContext Architecture] and xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[Consuming ResumeContext in Executors].
-
-| *Correlation Key*
-| The unique token used to correlate an incoming asynchronous callback with a paused transaction span. In StackSaga, the executor's deterministic `idempotencyKey` serves as the `correlationKey`.
-
-| *Compensation*
-| The reverse process that undoes previously completed steps when a saga fails.
-Executed in reverse order via `doRevert()` on each completed `CommandExecutor`, optionally extended by sub-before and sub-after executors.
+| A key-value metadata store (`ResumeContext`) capturing external callback or webhook payload data supplied during transaction resumption via `sagaTemplate.resume()`, delivered directly into the resumed executor.
 
 | *Event Store*
-| The persistent storage layer for all saga state transitions and domain entity snapshots.
-Provided by `stacksaga-database-support`.
-Enables point-in-time recovery, retry, and full audit trails.
-
-| *Revert Hint Store*
-| A key-value store that carries metadata forward through the compensation sequence.
-Values written during one `doRevert()` call are available to subsequent compensation steps.
-
-| *Idempotency Key*
-| A stable key generated per span so that re-invoking the same executor for the same transaction is safe.
-The key is identical across every retry of the same executor invocation within a transaction.
-In Pausable LRTs, this key also doubles as the `correlationKey` sent to downstream asynchronous services.
+| The persistent storage layer holding all state transitions and domain entity snapshots, provided by `stacksaga-database-support` using your primary database (MySQL, PostgreSQL, Oracle, Cassandra).
 
 | *Ring Coordinator*
-| A standalone service (`stacksaga-ring-coordinator`) that manages token ring partitioning for retry ownership.
-Distributes Murmur3 token sub-ranges among orchestrator instances so each stalled transaction is retried by exactly one instance without distributed locking.
-
-| *CHES & D Layered Architecture*
-| The StackSaga design pattern that extends Spring's layered architecture with a *Handler* layer and an *Executor* layer -- *C*ontroller, *H*andler, *E*xecutor, *S*ervice, and *D*ata Access.
-See xref:stacksaga-sync/orchestrator/Saga-CHES-architecture.adoc[CHES & D layered architecture].
-
+| A standalone service (`stacksaga-ring-coordinator`) managing Murmur3 token ring partitioning, distributing retry ownership across orchestrator instances without distributed locks.
 |===
 
-[[supported-lrt-models]]
-== Supported Long-Running Transaction (LRT) Models
+---
 
-In distributed microservice architectures, business transactions differ fundamentally in their operational continuity.
-StackSaga categorizes long-running distributed transactions into two primary execution models:
+== Long-Running Transaction (LRT) Models: The Unified Hybrid Approach
 
-. *xref:#continuous-lrt[Continuous Long-Running Transactions (Continuous LRT)]*
-. *xref:#pausable-lrt[Pausable Long-Running Transactions (Pausable LRT)]*
-
-Understanding the distinction between these two models ensures that developers choose the appropriate navigation pattern (xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[Continuous `.noPause()`] vs. xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[Pausable `.pause(duration)`]) and configure callback endpoints correctly.
-
-[[continuous-lrt]]
-=== 1. Continuous Long-Running Transactions (Continuous LRT)
-
-A *Continuous Long-Running Transaction (Continuous LRT)* is an end-to-end workflow designed to progress sequentially through every participating microservice without any intentional business pauses.
+In enterprise microservice architectures, real-world business workflows naturally exhibit two behavioral patterns:
+* **Continuous LRT (Straight-Through Processing - STP)**: Automated, unbroken pipelines progressing sequentially through microservices without intentional delays. Transient infrastructure faults are automatically retried by the Ring Coordinator.
+* **Pausable LRT (Wait-States, Callbacks & Human-in-the-Loop - HITL)**: Workflows with intentional business wait states (e.g. 3D-Secure bank redirects, Kafka worker replies, Uber food preparation delays, KYC officer approvals, or pausable refunds). The SEC commits state to the Event Store and releases 100% of CPU worker threads while sleeping.
 
 [NOTE]
-.Banking & Financial Systems: Straight-Through Processing (STP) and Moving Beyond It
 ====
-In banking, fintech, and capital markets, transactions executed without manual intervention are commonly referred to as **Straight-Through Processing (STP)**:
-
-* *Continuous LRT as Pure STP*: When a payment, order settlement, or trade requires fully automated execution across microservices, StackSaga's Continuous LRT functions as an ideal STP pipeline.
-* *Overcoming STP Limitations with Pausable LRT*: Traditional STP architectures often struggle or fail outright when an exception occurs, when asynchronous clearing or settlement webhooks are involved, or when manual compliance approval is mandated. In StackSaga, developers can seamlessly extend straight-through flows into **Pausable LRTs** (`.pause(duration)`). This allows the transaction to transition cleanly into a wait state without breaking the saga or holding resources, accommodating both pure STP and complex human-in-the-loop / asynchronous requirements.
+**A Unified Engine for Mixed-Style LRTs**: Continuous vs. Pausable is an industry mental model, **not an either/or framework choice**.
+StackSaga is an innovative industry solution engineered to manage **Mixed-Style LRTs** — seamlessly executing unbroken STP spans and pausable wait-states within the **exact same saga workflow** without any mode switches.
 ====
 
-image::implementations:stacksaga-sync/continuous-lrt-flow.svg[Continuous LRT Flow,width=1000]
-
-==== Execution Flow Example: E-Commerce Checkout
-
-Consider a typical online order checkout that spans four microservices:
-
-. `order-service` initializes the order and creates the domain state.
-. `user-service` verifies customer account status and purchasing limits.
-. `inventory-service` reserves the ordered product items.
-. `payment-service` synchronously charges the customer's payment method.
-. `delivery-service` schedules and dispatches the delivery.
-
-From the moment the customer submits the order, the orchestrator executes each executor span one after another via xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.success(...).noPause().nextExecutor(...)`].
-The transaction runs continuously until `stepManager.success(...).noPause().complete()` marks the saga as successfully finished.
-
-==== Transient Infrastructure Errors vs. Business Pauses
-
-Even in a continuous transaction, execution may temporarily halt if a downstream service times out or the network blips.
-However:
-
-* This delay is an *infrastructure pause*, not a business pause.
-* When an executor catches a transient fault and throws `RetryableExecutorException`, StackSaga persists the transaction state in the event store.
-* The xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Ring Coordinator] retry subsystem automatically re-invokes the stalled span according to the configured backoff schedule.
-* No external callback or manual business signal is required; the framework self-heals the transaction automatically once the downstream service recovers.
-
-[[pausable-lrt]]
-=== 2. Pausable Long-Running Transactions (Wait-State / Callback-Driven LRT)
-
-A *Pausable Long-Running Transaction* (known in workflow theory as a *Wait-State Transaction*, or the *Callback Pattern / Task Token* in cloud orchestrators) is a workflow designed with *deliberate business wait states*.
-In this model, a step initiates an asynchronous process that cannot complete immediately, requiring the saga to intentionally pause and release compute resources until an external confirmation, webhook, or human action resumes it.
-
-image::implementations:stacksaga-sync/pausable-lrt-flow.svg[Pausable LRT Flow,width=1000]
-
-==== Real-World Use Cases
-
-* *Uber / On-Demand Food Delivery*:
-+
-. Customer places an order; items and payment pre-authorization are reserved.
-. The orchestrator notifies the restaurant (`restaurant-service`).
-. *Intentional Business Pause*: The saga cannot dispatch a delivery driver immediately because food preparation takes 20–40 minutes. The executor calls xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success("ORDER_PREPARING").pause(Duration.ofHours(2)).nextExecutor(DeliveryDispatchExecutor.class)`]. The orchestrator persists the transaction and releases all worker threads.
-. *Resumption via Callback*: When the kitchen marks the food "Ready", the restaurant system fires a callback webhook to the orchestrator. The orchestrator calls xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(transactionId, correlationKey).execute()`].
-. The saga wakes up, restores domain entity state from the event store, and advances forward to `DeliveryDispatchExecutor` to assign and dispatch a courier.
-
-* *Asynchronous Payment Gateways / Webhooks*:
-A payment gateway (e.g., 3D-Secure bank redirects, asynchronous SEPA/ACH transfers, crypto confirmations) does not finalize synchronously.
-The payment executor initiates the charge, forwards its `idempotencyKey`, and calls xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`.pause(duration)`].
-Once the payment gateway notifies the orchestrator's webhook endpoint, the orchestrator resumes the saga with the callback payload via xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(...)`].
-
-* [[async-compensation-refund]]*Asynchronous Compensation & Payment Refunds (Rollback Wait States)*:
-When a downstream step fails (such as inventory exhaustion or delivery dispatch failure), StackSaga rolls back the saga in reverse order. However, undoing financial or logistical operations frequently requires asynchronous processing:
-+
-. The orchestrator triggers `doRevert()` on the payment executor (`PaymentCommandExecutor`).
-. Because banking gateways process reversals asynchronously via webhooks, `doRevert()` calls the refund API with its `idempotencyKey` and pauses compensation via xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success("REFUND_INITIATED").pause(Duration.ofHours(24))`].
-. When the payment provider confirms the refund via webhook, the orchestrator calls xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey).put("refundStatus", "SUCCESS").execute()`].
-. The resumed `doRevert()` verifies the refund status from `ResumeContext` and calls `stepManager.success("REFUND_COMPLETED").noPause()`, allowing the saga to proceed with compensating earlier steps. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation-example[Payment Refund Executor Example] and xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#callback-controller-pattern[Handling Webhooks in Controller].
-
-* *Human-in-the-Loop (HITL) Sagas*:
-Many critical enterprise workflows cannot be 100% automated because they mandate human judgment, authorization, or physical operational action before proceeding. StackSaga's Pausable LRT natively supports **Human-in-the-Loop (HITL)** workflows without thread starvation or memory leaks:
-+
---
-
-** **Manager & Financial Approvals**: Transactions exceeding business thresholds (e.g., corporate expenses > \$10,000, credit lines, or high-value loan disbursements) pause via `stepManager.success("AWAITING_APPROVAL").pause(Duration.ofDays(3)).nextExecutor(DisburseFundsExecutor.class)`. A manager reviews the case on an administrative dashboard and clicks "Approve", which invokes the callback endpoint to resume the saga.
-** **Operational & Physical Actions**: In on-demand platforms (such as Uber Eats, DoorDash, or logistics warehousing), human kitchen staff or package sorters physically tap a terminal to signal "Order Accepted" or "Package Prepared", triggering the webhook to resume courier dispatch.
-** **Compliance & Manual KYC Review**: When automated document OCR or fraud detection flags an edge case, the saga pauses safely in the Event Store for human compliance officer review without holding server threads or blocking system resources.
---
-
-[[dual-flow-pausable-lrt]]
-==== Dual-Flow Pausable Support: Forward Execution & Compensation
-
-Unlike traditional orchestration engines that only support pausing during forward execution, StackSaga natively supports **Dual-Flow Pausable Long-Running Transactions**:
-
-[cols="1,2,2",options="header"]
-[.properties-table.google-anno-skip]
-|===
-| Dimension | Forward Flow Pausing (`doProcess`) | Compensation Flow Pausing (`doRevert`)
-
-| *Phase*
-| Primary execution moving forward toward business completion.
-| Rollback execution moving backward to undo previous steps after a failure.
-
-| *Execution Method*
-| `CommandExecutor.doProcess(...)` or `QueryExecutor.doProcess(...)`
-| `CommandExecutor.doRevert(...)`, `RevertBeforeExecutor.doProcess(...)`, or `RevertAfterExecutor.doProcess(...)`
-
-| *Step Manager Action*
-| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success(event).pause(duration).nextExecutor(Next.class)`]
-| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success(event).pause(duration)`]
-
-| *Resumption Trigger*
-| Callback webhook calls xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey).execute()`]
-| Callback webhook calls xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(txId, correlationKey).execute()`]
-
-| *Resumption Engine Routing*
-| Resumes target `NextExecutor.doProcess(...)` with `ResumeContext`.
-| Resumes paused `CommandExecutor.doRevert(...)` with `ResumeContext`.
-|===
-
-See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#uniform-resumption[Uniform Forward/Revert Resumption Engine] for how `SagaTemplate` seamlessly resumes both flows.
-
-[[resume-context-concept]]
-==== Decoupling External Callback Payloads via `ResumeContext`
-
-A critical architectural consideration in Pausable LRTs is how external callback data (e.g., payment transaction IDs, gateway verification codes, fraud scores, kitchen preparation timestamps) is ingested into the saga.
-
-* **The Problem with Direct Entity Mutation**:
-Allowing callback endpoints or webhook controllers to directly mutate fields on the `SagaDomainEntity` breaks domain encapsulation and invites race conditions, as external payloads would bypass the executor's state transition validation.
-
-* **StackSaga's Solution -- `ResumeContext`**:
-When an external system fires a callback, the controller attaches the raw payload parameters to xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`SagaTemplate.resume(...).put(key, value)`] or `.withContext(resumeContext)`.
-StackSaga stores this key-value metadata in the event store column `es_transaction_execution_tryout.resume_context` alongside the paused step's tryout row.
-When the paused executor is resumed, the framework passes this `ResumeContext` directly into the executor method arguments:
-+
-[source,java]
-----
-// Forward execution:
-public ProcessStepManager<OrderDomainEntity> doProcess(
-        OrderDomainEntity currentDomainEntity,
-        String idempotencyKey,
-        ResumeContext resumeContext,
-        ProcessStepManager<OrderDomainEntity> stepManager) { ... }
-
-// Compensating execution:
-public RevertStepManager doRevert(
-        ProcessException processException,
-        OrderDomainEntity finalDomainEntityState,
-        RevertHintStore revertHintStore,
-        String idempotencyKey,
-        ResumeContext resumeContext,
-        RevertStepManager stepManager) { ... }
-----
-+
-This guarantees that **only the executor contains the domain logic to interpret and validate the external callback payload**, keeping the `SagaDomainEntity` aggregate clean and strictly guarded. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#resume-context-in-executors[Consuming ResumeContext in Executors].
-
-==== Key Architectural Mechanism: `idempotencyKey` as the `correlationKey`
-
-To prevent race conditions, mismatched resumes, and duplicate callback processing, StackSaga integrates idempotency directly with correlation:
-
-. In `doProcess(...)` (or `doRevert(...)`), the framework generates a deterministic, stable `idempotencyKey` for the executor span.
-. The developer forwards this `idempotencyKey` to the downstream asynchronous service (in the request body or HTTP header).
-. The executor pauses the transaction:
-+
-[source,java]
-----
-// Forward pause:
-return stepManager.success("ORDER_PREPARING")
-        .pause(Duration.ofHours(2))
-        .nextExecutor(DeliveryDispatchExecutor.class);
-
-// Compensation pause:
-return stepManager.success("REFUND_INITIATED")
-        .pause(Duration.ofHours(24));
-----
-
-. When the downstream service completes its asynchronous task, it invokes the orchestrator's callback endpoint (e.g., `POST /orders/callback`), supplying the `transactionId` and that exact `idempotencyKey`.
-. The orchestrator's controller extracts the keys and resumes the saga:
-+
-[source,java]
-----
-// Blocking (Imperative):
-this.sagaTemplate.resume(transactionId, correlationKey)
-        .put("status", "SUCCESS")
-        .execute();
-
-// Non-blocking (Reactive):
-this.sagaTemplate.resume(transactionId, correlationKey)
-        .put("status", "SUCCESS")
-        .executeAsync();
-----
-
-. StackSaga validates that the supplied `correlationKey` matches the active `current_resume_key` in the event store, safely restores the `SagaDomainEntity`, and resumes execution directly from the paused executor.
-
-==== Configurable Timeout Handling (`Duration`)
-
-The duration parameter of `.pause(Duration retentionDuration)` controls how the framework handles potential callback loss:
-
-* *Strictly Non-Null Requirement*: The `retentionDuration` argument is mandatory and strictly asserted by the framework (`Assert.notNull(retentionDuration, "retentionDuration is required")`). Passing `null` causes an immediate `IllegalArgumentException`.
-* *Retaining Indefinitely (e.g., `Duration.ofDays(365)`)*: For long-running business processes, manual review tasks, or workflows with no fixed deadline where auto-retry is undesirable, developers should configure an extended duration (such as 1 year). The trade-off to consider is that if the external callback is lost, the transaction remains paused until manually inspected or re-triggered.
-* *Passing an SLA Duration (e.g., `Duration.ofHours(2)`)*: If the external system fails to deliver the callback within the specified duration, StackSaga's retry engine exposes the paused executor for re-invocation. This allows the executor to check the external system's status, re-trigger the request, or initiate compensation if the deadline expired. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#pausable-lrt-timeout-reexecution[Timeout Re-Execution Mechanics & Listener Considerations] for detailed execution semantics.
-
-[IMPORTANT]
-.Event Sourcing Advantage: Pristine State Restoration on Re-Execution
-====
-A fundamental architectural advantage of StackSaga's **Event Sourcing** engine is that when an executor is re-invoked following a timeout, the `SagaDomainEntity` is restored to its **exact original state prior to entering that executor**:
-
-* Suppose during the initial execution attempt, the executor receives `currentDomainEntity` and mutates some of its fields in-memory before calling `.pause(...)`.
-* If the callback is not received within the configured `Duration`, StackSaga's retry engine re-invokes the paused executor.
-* Upon re-execution, the framework **discards all in-memory mutations** made during the previous attempt and reconstructs the domain entity cleanly from the event store up to the checkpoint preceding this executor.
-* Consequently, the re-invoked executor runs against a completely fresh, uncorrupted snapshot -- preventing dirty state leakage and guaranteeing deterministic, idempotent re-executions.
-====
+TIP: For the comprehensive architectural deep dive, full flow diagrams, and 5 enterprise real-world domain use cases, see the dedicated platform guide: **xref:ROOT:lrt-transaction-models.adoc[Transaction Execution Models: Continuous (STP) & Pausable (HITL)]**.
 
 === Comparison: Continuous vs. Pausable LRT
 
@@ -337,177 +191,115 @@ A fundamental architectural advantage of StackSaga's **Event Sourcing** engine i
 | Dimension | Continuous Long-Running Transaction | Pausable Long-Running Transaction
 
 | *Execution Continuity*
-| Unbroken; moves from step to step sequentially without intentional delay.
-| Suspended at business milestones; enters a dormant wait state until an external trigger arrives.
+| Unbroken; advances sequentially from span to span without intentional delay.
+| Suspended at business milestones; sleeps safely in the Event Store until resumed.
 
 | *Industry Equivalents*
-| Straight-Through Processing (STP), Non-Wait-State Transaction, Request-Response Flow.
+| Straight-Through Processing (STP), Non-Wait-State Flow, Synchronous Pipeline.
 | Wait-State Transaction (BPMN), Callback Pattern (`waitForTaskToken`), Signal-Driven Workflow, Human-in-the-Loop (HITL).
 
-| *Executor Navigation*
-| Forward: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.success(...).noPause().nextExecutor(...)`] / `.complete()` +
-Revert: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[`stepManager.success(...).noPause()`]
-| Forward: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success(...).pause(duration).nextExecutor(...)`] +
-Revert: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success(...).pause(duration)`]
-
-| *Resumption Trigger*
-| Immediate internal SEC thread scheduling.
-| External API callback calling xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[`sagaTemplate.resume(transactionId, correlationKey).withContext(...).execute()`].
-
-| *Correlation Requirement*
-| None (handled internally by SEC execution context).
-| Downstream service must return the span's `idempotencyKey` as the `correlationKey`.
-
 | *Pause Nature*
-| *Infrastructure Pause*: Only occurs on transient errors (`RetryableExecutorException`) handled by the Ring Coordinator.
-| *Business Condition Pause*: Intentional domain requirement in forward flow (e.g. food preparation, payment webhook, KYC approval) or backward compensation (e.g. async refund, ACH chargeback).
+| **Infrastructure Pause**: Only occurs on transient network faults (`RetryableExecutorException`), recovered automatically by the Ring Coordinator.
+| **Business Pause**: Intentional domain requirement (broker callbacks, customer 3D-Secure redirects, kitchen prep, compliance reviews).
+
+| *Thread Utilization*
+| Worker threads held only for the duration of the active span.
+| 100% of CPU worker threads released during wait states; zero thread starvation.
+
+| *Executor Navigation*
+| Forward: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.success(...).asSync().noPause().nextExecutor(...)`] +
+Revert: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[`stepManager.success(...).asSync().noPause().resumeToNextDefaultExecutor()`]
+| Forward: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success(...).pauseUntilResume(duration)`] +
+Revert: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success(...).pauseUntilResume(duration)`]
 |===
 
-== Why StackSaga Over Direct Service-to-Service Calls?
+---
 
-Wiring microservices together with direct synchronous calls (REST, gRPC, or GraphQL) does not by itself give you saga orchestration.
-A hand-rolled topology requires every participating service -- or the calling service -- to understand the broader transaction context: which step it is in, what has already succeeded, what to roll back if something goes wrong, and how to track overall saga progress.
-This logic inevitably leaks across services, making the system fragile and difficult to evolve.
+== State Decoupling & Ingestion: `ResumeContext` & Correlation
 
-The following comparison explains the specific gaps StackSaga closes.
+A critical architectural consideration in Pausable LRTs is how external callback data (e.g. payment gateway transaction IDs, webhook verification codes, fraud scores) is ingested into the saga.
 
-=== Centralized Transaction State Management
+=== The Problem with Direct Entity Mutation
+Allowing external webhook controllers or Kafka listeners to directly mutate fields on the `DomainEntity` breaks domain encapsulation and invites race conditions, as external payloads would bypass the executor's state transition validation.
 
-[cols="1,2",options="header"]
-[.properties-table.google-anno-skip]
-|===
-| Concern
-| Detail
+=== StackSaga's Solution: `ResumeContext`
+When an external system fires a callback, the controller or event listener attaches the raw payload to `sagaTemplate.resume()`:
 
-| *Raw synchronous calls*
-| A direct call returns a response, but there is no concept of a business transaction that spans many calls. Nothing tracks that "step 2 of 5 has completed" or that a transaction is in a compensating state.
-
-| *StackSaga*
-| The orchestrator tracks the full saga lifecycle through well-defined states: `STARTED -> IN_PROGRESS -> COMPLETED \| FAILED -> COMPENSATING -> COMPENSATED`. The `SagaDomainEntity` is the single source of truth: it carries the transaction payload (all accumulated data from previous steps) and the current execution cursor. State transitions are persisted atomically to the event store on every step completion or failure.
-
-| *Advantage*
-| No saga coordination logic needs to be implemented in the participating utility services. The orchestrator is the sole authority on saga state.
-|===
-
-=== Resilience and Fault Tolerance
-
-[cols="1,2",options="header"]
-[.properties-table.google-anno-skip]
-|===
-| Concern
-| Detail
-
-| *Raw synchronous calls*
-| When a downstream call fails or times out, the caller is left holding a partially completed transaction. Retry logic, timeout handling, and compensation decisions must be built -- and kept consistent -- by hand in every flow.
-
-| *StackSaga*
-| The framework implements configurable retry windows and automatic compensation invocation. If an executor signals a non-retryable failure, the saga engine immediately begins the reverse traversal, calling `doRevert()` for each completed forward step in reverse order. For transient failures (timeouts, resource unavailability) wrapped in a `RetryableExecutorException`, the retry subsystem re-invokes the saga from the last unacknowledged step using the Murmur3 token ring scheduler.
-
-| *Advantage*
-| Data consistency is maintained across services even under partial failures, without embedding retry or rollback logic in each service.
-|===
-
-=== Simplified Development
-
-[cols="1,2",options="header"]
-[.properties-table.google-anno-skip]
-|===
-| Concern
-| Detail
-
-| *Raw synchronous calls*
-| Developers must implement state machine logic, idempotency checks, saga step routing, and compensation orchestration by hand in the service that drives the transaction.
-
-| *StackSaga*
-| The orchestrator-side abstractions (`SagaTemplate` / `ReactiveSagaTemplate`, `SagaDomainEntity`, and the `Executor` family) provide clear contracts for each role. Developers define what each step *does*, its compensation, and which step comes next; the framework handles persistence, retrying, and compensation sequencing. The xref:stacksaga-sync/orchestrator/Saga-CHES-architecture.adoc[CHES & D layered architecture] keeps these concerns in dedicated layers.
-
-| *Advantage*
-| Reduces boilerplate significantly and confines distributed transaction concerns to a small, testable layer.
-|===
-
-=== Operational Observability
-
-[cols="1,2",options="header"]
-[.properties-table.google-anno-skip]
-|===
-| Concern
-| Detail
-
-| *Raw synchronous calls*
-| Per-service logs and metrics are available, but there is no concept of "transaction X is stuck at step 3" or "compensation for order Y failed" across the whole flow.
-
-| *StackSaga*
-| The `stacksaga-trace-window-connector` exposes APIs consumed by the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] UI, providing per-transaction step-level traces, execution timelines, failure points, retry counts, and compensation status.
-
-| *Advantage*
-| Operations teams can diagnose stalled or failed sagas at the business-transaction level, not just at the level of an individual service call.
-|===
-
-== Components
-
-The synchronous framework overlays the *orchestrator* role onto an existing service via a single dependency.
-In contrast to the StackSaga-Kafka transport -- which adds a dependency to both the orchestrator and every worker -- a synchronous deployment requires the StackSaga dependency only on the orchestrator.
-The participating *utility services* are invoked through their existing synchronous endpoints and need no StackSaga dependency at all.
-
-[[stacksaga-spring-boot-starter]]
-=== stacksaga-spring-boot-starter
-
-`stacksaga-spring-boot-starter` is the core runtime dependency added to the *orchestrator service* -- the single service responsible for initiating and driving the saga lifecycle.
-It provides the saga engine (SEC) and the developer-facing abstractions below.
-
-* xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[`SagaTemplate` / `ReactiveSagaTemplate`] -- the entry point for starting a new saga execution or resuming a recovered one. Accepts an initialized `SagaDomainEntity` and the first executor, then hands control to the saga engine.
-* xref:stacksaga-sync/orchestrator/domain-entity.adoc[`SagaDomainEntity`] -- the aggregate root for a saga instance. Carries the accumulated business payload and the current execution state, and is serialized and persisted to the event store on every state transition.
-* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Executors] -- `CommandExecutor`, `QueryExecutor`, and Sub Executors that encapsulate each atomic step. Each executor invokes the target utility service through its synchronous endpoint, navigates forward via staged builders (`stepManager.success(...).noPause().nextExecutor(...)`), and (for command executors) defines its compensation in `doRevert()`.
-* xref:stacksaga-sync/orchestrator/event-listener.adoc[`TransactionEventListener` / `ReactiveTransactionEventListener`] -- observe per-transaction state changes in real time for monitoring, notifications, and side effects.
-
-To run your application as an orchestrator service, add the `stacksaga-spring-boot-starter` dependency to your project.
-
-[source,xml,subs="attributes+"]
+[source,java]
 ----
-<dependencyManagement>
-    <dependencies>
-        <dependency> <!--Only for stacksaga dependencies version management-->
-            <groupId>org.stacksaga</groupId>
-            <artifactId>stacksaga-bom</artifactId>
-            <version>{stacksaga-version}</version>
-            <type>pom</type>
-            <scope>import</scope>
-        </dependency>
-    </dependencies>
-</dependencyManagement>
-
-<dependencies>
-    <dependency>
-        <groupId>org.stacksaga</groupId>
-        <artifactId>stacksaga-spring-boot-starter</artifactId>
-    </dependency>
-</dependencies>
+// Webhook Controller:
+@PostMapping("/callbacks/payment")
+public ResponseEntity<Void> handlePaymentCallback(@RequestBody PaymentCallbackDTO callback) {
+    this.sagaTemplate.resume(callback.getTransactionId(), callback.getCorrelationKey())
+            .put("gatewayPaymentId", callback.getGatewayPaymentId())
+            .put("settlementStatus", callback.getStatus())
+            .execute();
+    return ResponseEntity.ok().build();
+}
 ----
 
-IMPORTANT: The engine is built internally using reactive programming principles, ensuring high scalability and performance.
-Even though the framework operates reactively under the hood, it fully supports both reactive and non-reactive (imperative) application models through the `ReactiveSagaTemplate` and `SagaTemplate` entry points respectively.
+StackSaga persists this metadata in the Event Store alongside the paused tryout row.
+When the paused executor is resumed, the framework passes this `ResumeContext` directly into the executor method parameters:
 
-Additionally, the orchestrator service must (or may) include:
+[source,java]
+----
+public ProcessStepManager<OrderDomainEntity> doProcess(
+        OrderDomainEntity currentDomainEntity,
+        String idempotencyKey,
+        ResumeContext resumeContext,
+        ProcessStepManager<OrderDomainEntity> stepManager) {
 
-* xref:stacksaga-database-support:overview/database-support-overview.adoc[stacksaga-database-support] _(required)_ -- provides the event store integration (MySQL, Cassandra, or ScyllaDB depending on configuration) for persisting `SagaDomainEntity` snapshots and state transitions.
-* xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[stacksaga-ring-coordinator-connector] _(optional, required for retry)_ -- connects the orchestrator instance to the `Ring Coordinator Service`, registers it as a retry node, and receives its assigned Murmur3 token sub-range. Enables the retry subsystem to re-invoke failed transactions owned by this instance.
-* xref:trace-window:stacksaga-trace-window.adoc[stacksaga-trace-window-connector] _(optional, required for monitoring)_ -- exposes the internal APIs consumed by the StackSaga Trace Window UI for per-transaction traces, timelines, and compensation status.
-* `stacksaga-env-support` _(optional)_ -- provides environment-related geographical metadata (region, zone, instance ID, etc.) to the SEC, selected per deployment target (see xref:ROOT:saga-region-resolver.adoc[Instance Region Resolution & SagaRegionResolver]).
+    // Safely extract and validate external callback data
+    String gatewayId = resumeContext.get("gatewayPaymentId", String.class);
+    currentDomainEntity.setPaymentReference(gatewayId);
 
-[[utility-services]]
-=== Utility services
+    return stepManager.success("PAYMENT_CONFIRMED")
+            .asSync()
+            .noPause()
+            .nextExecutor(DispatchOrderExecutor.class);
+}
+----
 
-A *utility service* is any service invoked by the orchestrator as a step in a saga -- for example `user-service`, `payment-service`, or `inventory-service`.
+This guarantees that **only the executor contains the domain logic to interpret and validate external callback payloads**, keeping the domain aggregate strictly guarded.
 
-Utility services do not interact with the event store, the ring coordinator, or any StackSaga abstraction.
-They keep exposing their existing REST/gRPC/GraphQL endpoints and remain stateless with respect to the saga: the orchestrator's executor calls the endpoint, the service performs its business operation, and it returns a result.
+=== Correlation Binding: `idempotencyKey` as the `correlationKey`
 
-NOTE: Because the saga logic (forward call, navigation, and compensation) lives entirely in the orchestrator's executors, the same utility service can participate in sagas owned by different orchestrators without any awareness of StackSaga.
+To prevent mismatched resumptions and duplicate callback processing:
+1. In `doProcess(...)`, the framework generates a deterministic, stable `idempotencyKey` for the span.
+2. The orchestrator sends this `idempotencyKey` to the downstream service or message broker.
+3. The downstream service returns this exact key in its callback payload.
+4. StackSaga validates that the supplied `correlationKey` matches the active `current_resume_key` in the Event Store before resuming execution.
 
-== Next Steps
+=== Pristine State Restoration on Re-Execution
 
-* xref:stacksaga-sync/architecture.adoc[Architecture] -- the staged deployment model (basic, retry-ready, and monitoring) and how the orchestrator and utility services fit together.
-* xref:stacksaga-sync/orchestrator/Saga-CHES-architecture.adoc[CHES & D Layered Architecture] -- the design pattern StackSaga introduces on top of Spring's layered architecture.
-* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Saga Executors] -- learn how to implement `CommandExecutor` and `QueryExecutor`, navigate forward with staged builders, and pause for callbacks with `.pause(duration)`.
-* xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[SagaTemplate & Event Listeners] -- learn how to initiate sagas, stream real-time events, and resume paused sagas via `sagaTemplate.resume(...)`.
-* xref:stacksaga-sync/overview.adoc[Components & Custom Configuration] -- the StackSaga ecosystem components and advanced configuration options such as the saga scheduler.
+A fundamental architectural advantage of StackSaga's Event Sourcing engine is that when an executor is re-invoked following a timeout, the `DomainEntity` is restored to its **exact pristine state prior to entering that executor**:
+
+* If an executor mutates domain entity fields in memory and then times out while waiting for a callback, StackSaga's retry engine re-invokes the paused executor.
+* Upon re-execution, the framework **discards all uncommitted in-memory mutations** and reconstructs the domain entity cleanly from the Event Store up to the checkpoint preceding this executor.
+* This prevents dirty state leakage and guarantees deterministic, idempotent execution across all retries.
+
+---
+
+== Architectural Discipline: The CHES & D Layering
+
+To maintain separation of concerns in enterprise Spring Boot microservices, StackSaga introduces the **CHES & D layered architecture** (extending Spring's standard 3-layer architecture):
+
+* **C - Controller Layer**: Receives external REST/GraphQL/Webhook requests and invokes Handlers or `sagaTemplate.resume()`.
+* **H - Handler Layer**: Orchestrates business entry points, initializes the `DomainEntity`, and triggers `sagaTemplate.process()`.
+* **E - Executor Layer**: Encapsulates atomic saga spans (`CommandExecutor` and `QueryExecutor`), staged navigation, and compensating logic (`doRevert()`).
+* **S - Service Layer**: Standard Spring business domain services invoked by executors (zero StackSaga awareness).
+* **D - Data Access Layer**: Standard Spring Data repositories (JPA, JDBC, R2DBC) for local business persistence.
+
+This architecture ensures that saga orchestration logic remains strictly contained within the **Executor layer**, keeping business services and domain models cleanly decoupled.
+
+---
+
+== Next Steps & Implementation Roadmap
+
+Now that you understand the core architecture of the SEC engine, explore the implementation guides below to begin building sagas:
+
+* xref:stacksaga-sync/orchestrator/domain-entity.adoc[Domain Entity & Aggregate Root] -- Learn how to define `@SagaDomainEntity` classes, manage business state payloads, and configure serialization.
+* xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Executor Architecture & Navigation] -- Implement `CommandExecutor` and `QueryExecutor`, navigate forward with `ProcessStepManager`, and handle compensations via `doRevert()`.
+* xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[Unified Saga Orchestration Patterns (USIP & USNP)] -- Explore the comprehensive pattern catalog: 11 integration patterns, conditional dynamic branching, and reverse compensation pipelines.
+* xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[SagaTemplate & Event Resumption] -- Master the `SagaTemplate` API: initiating workflows, reactive streaming, and resuming paused sagas with `ResumeContext`.
+* xref:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties Reference] -- Tune SEC thread pools, execution timeouts, and retry policies in `application.yml`.

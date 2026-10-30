@@ -54,7 +54,7 @@ StackSaga provides that infrastructure.
 ====
 
 [[successful_transactions]]
-== 1. Successful Transactions
+== Successful Transactions
 
 Successful transactions represent the dominant outcome in any well-managed system.
 Every primary execution span completes without error, and the transaction reaches its intended final state.
@@ -63,7 +63,7 @@ No retry subsystem involvement is required.
 This is the normal path.
 
 [[primary_execution_failed_transactions]]
-== 2. Primary-Execution Failed Transactions
+== Primary-Execution Failed Transactions
 
 Some transactions encounter a non-retryable (business logic) error during the primary execution flow.
 This is not considered a system failure — it is an expected outcome of the Saga design pattern.
@@ -81,7 +81,7 @@ StackSaga is designed to address all of them.
 ====
 
 [[compensation_failed_transactions]]
-== 3. Compensation Failed Transactions
+== Compensation Failed Transactions
 
 If a compensation span fails with a permanent (non-retryable) error, the transaction is stuck in a partially compensated state.
 The system cannot automatically recover — the compensation logic itself has a bug or an unresolvable condition.
@@ -96,7 +96,7 @@ StackSaga exposes them through its event store API, allowing you to retrieve aff
 The transaction will then be re-executed from the exact span where it stopped.
 
 [[crashed_transactions]]
-== 4. Crashed Transactions
+== Crashed Transactions
 
 In a microservices environment, the JVM process itself can die unexpectedly — due to a hardware fault, an OOM kill, a power outage, or a forced pod eviction.
 When this happens in the middle of a transaction, the Saga Execution Coordinator (SEC) has no opportunity to record the failure.
@@ -115,10 +115,9 @@ This produces an ambiguous state where it is unclear whether the event-store wri
 StackSaga addresses this using the *Transaction Restore Retention Time* mechanism.
 Every time the SEC successfully updates the transaction state in the event store, it also refreshes a retention timestamp on that record.
 If a transaction's retention timestamp exceeds its configured threshold without any further updates, StackSaga treats the transaction as crashed and automatically re-exposes it for retrying at the next scheduled window.
-// TODO: fix link to replay-transaction.adoc#transaction_restore_retention_time in the future once the replay page is created
-See *Transaction Restore Retention Time* for configuration details.
+
 [[missing_transactions]]
-== 5. Missing Transactions
+== Missing Transactions
 
 During asynchronous retry processing, a transaction is dispatched for re-execution — via a queue, an HTTP callback, or another async channel.
 But before it can be processed, it disappears: the message is lost, the queue entry is dropped, or the receiving node dies between receiving the message and processing it.
@@ -132,8 +131,7 @@ The transaction simply vanishes from the active processing pipeline.
 The same *Transaction Restore Retention Time* logic that protects against crashes also covers this scenario.
 If a dispatched transaction produces no state update within the retention window, StackSaga automatically re-exposes it for retrying.
 The system self-heals without any manual intervention.
-// TODO: fix link to replay-transaction.adoc#transaction_restore_retention_time in the future once the replay page is created
-See *Transaction Restore Retention Time* for configuration details.
+
 == Why Retry Infrastructure Cannot Be Optional
 
 The failure modes in categories 3 through 5 share a common characteristic: *they cannot be predicted, scheduled, or prevented*.
@@ -144,3 +142,10 @@ The question in a distributed system is never *whether* a transient failure will
 
 A system that handles the happy path correctly but has no strategy for these edge cases is not a reliable system.
 It is a system that works until it doesn't, and then produces silent inconsistency.
+
+== Next Steps
+
+Now that you understand the fundamental challenges of distributed transactions and the statistical necessity of retries, explore how the StackSaga framework solves these problems:
+
+* xref:ROOT:introduction-to-stacksaga.adoc[Introduction to StackSaga &#8594;] -- Discover the architecture, 4 core pillars, and unified hybrid LRT model.
+* xref:ROOT:architecture.adoc[System Architecture & Deployment Stages &#8594;] -- Explore how the Orchestrator embeds directly into your microservices.

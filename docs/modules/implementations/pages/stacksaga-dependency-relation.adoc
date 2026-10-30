@@ -1,34 +1,23 @@
-= Stacksaga Dependencies and Relations
+= StackSaga Dependencies and Relations
 
 image::implementations:overview/stacksaga-dependencies-and-relations.svg[]
 
-The above diagram shows all the main dependencies that should be added to your project and their relations of the StackSaga umbrella project.
+The diagram above illustrates the primary dependencies and architectural relations within the StackSaga ecosystem.
 
-* As per the diagram, stacksaga has two main implementations called
-** xref:stacksaga-sync/index.adoc[stacksaga framework] (synchronous implementation)
-** xref:stacksaga-kafka-implementation/stacksaga-kafka-overview.adoc[stacksaga-kafka framework] (asynchronous implementation using Kafka as the message broker)
-* If you are using stacksaga framework(synchronous implementation), mainly you need to add the dependencies to the flowing services,
-*** orchestrator-service +
-In the orchestrator-service, you need to add three main dependencies as follows,
-**** xref:stacksaga-sync/index.adoc#stacksaga_components[stacksaga-spring-boot-starter]
-**** xref:stacksaga-database-support:overview/database-support-overview.adoc[stacksaga-database-support] (you can choose any one of the database support modules as per your primary database)
-**** `stacksaga-environment-support` (see xref:ROOT:saga-region-resolver.adoc[SagaRegionResolver])
-*** agent-service / retry-node (see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator]) +
-The dependency that should be added to the agent-service depends on which database support dependency is used in the orchestrator-service.
-For instance, if you are using stacksaga-mysql-support in the orchestrator-service, you need to add stacksaga-agent-mysql dependency to the agent-service.
-* If you are using stacksaga-kafka framework(asynchronous implementation), mainly you need to add the dependencies to the flowing services,
-** orchestrator-service +
-In the orchestrator-service, you need to add three main dependencies as follows,
-**** xref:stacksaga-kafka-implementation/orchestrator/orchestrator-usage.adoc[stacksaga-kafka-spring-boot-starter]
-**** xref:stacksaga-database-support:overview/database-support-overview.adoc[stacksaga-database-support] (you can choose any one of the database support modules as per your primary database)
-**** `stacksaga-environment-support` (see xref:ROOT:saga-region-resolver.adoc[SagaRegionResolver])
-** agent-service / retry-node (see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator]) +
-The dependency that should be added to the agent-service depends on which database support dependency is used in the orchestrator-service.
-For instance, if you are using stacksaga-mysql-support in the orchestrator-service, you need to add stacksaga-kafka-agent-mysql dependency to the agent-service.
-** client-service(target-service) +
-In the client-service(target-service), you need to add the xref:stacksaga-kafka-implementation/worker/worker-endpoints.adoc[stacksaga-kafka-client / worker] dependency to be able to consume the messages and send the response back to the orchestrator-service with stacksaga specifications.
+* **StackSaga Framework** (`stacksaga-spring-boot-starter`) provides unified saga orchestration, natively coordinating both synchronous request/response (REST, gRPC, local DB) and asynchronous event-driven messaging (Apache Kafka, RabbitMQ) within the exact same saga workflow.
 
+== Key Dependencies
 
-IMPORTANT: xref:stacksaga-database-support:overview/database-support-overview.adoc[stacksaga-database-support] and `stacksaga-environment-support` can be used for both stacksaga and stacksaga-kafka frameworks as a shared module.
-for instance, if you are using stacksaga-framework(synchronous implementation) and stacksaga-kafka-framework(asynchronous implementation) in your project together, you can use the same stacksaga-database-support and environment support configurations for both.
+=== 1. Orchestrator Service
+The domain service coordinating the saga adds the following core dependencies:
+* xref:implementations:stacksaga-sync/index.adoc#stacksaga-spring-boot-starter[`stacksaga-spring-boot-starter`]: Core saga engine, `SagaTemplate`, `CommandExecutor`, `QueryExecutor`, and step managers.
+* xref:stacksaga-database-support:overview/database-support-overview.adoc[`stacksaga-database-support`]: Database-specific event store adapter for persisting domain entity state and execution snapshots (e.g., `stacksaga-mysql-support`, `stacksaga-postgres-support`, `stacksaga-cassandra-support`).
+* `stacksaga-environment-support`: Cloud and container topology resolution (see xref:ROOT:saga-region-resolver.adoc[SagaRegionResolver]).
 
+=== 2. Retry Subsystem (Ring Coordinator)
+For automated distributed self-healing:
+* `stacksaga-ring-coordinator-connector`: Embedded in orchestrator instances to participate in token-ring retry partitioning.
+* `stacksaga-ring-coordinator`: Standalone coordinator managing Murmur3 token sub-ranges across orchestrator clusters (see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc[Retry Ring Coordinator]).
+
+=== 3. Downstream Services
+* Participating downstream utility services require **zero StackSaga dependencies**. They expose standard REST, gRPC, or messaging endpoints without any framework intrusion.
