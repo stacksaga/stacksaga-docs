@@ -32,7 +32,7 @@ The engine natively unifies **both synchronous execution (REST over HTTP, gRPC o
         │                                              [Event Callback]
         │                                                     │
         ▼                                                     ▼
-[Next Synchronous Step] ◄────────────────────── [sagaTemplate.resume(txId, key)]
+[Next Synchronous Step] ◄────────────────────── [sagaTemplate.resume(resumeKey, duration)]
 ```
 
 === The Domain-Centric Orchestration Principle
@@ -93,7 +93,7 @@ Consider a distributed E-Commerce checkout saga coordinating across `user-servic
 
 | **Callback Resumption**
 | Webhook or Kafka consumer receives reply.
-| Controller or message listener invokes `sagaTemplate.resume(txId, idempotencyKey)`, and the SEC restores the domain entity and resumes execution directly at the designated target executor.
+| Controller or message listener invokes `sagaTemplate.resume(resumeKey, retentionDuration)`, and the SEC restores the domain entity and resumes execution directly at the designated target executor.
 
 | **Symmetrical Rollback**
 | Permanent failure occurs.
@@ -230,7 +230,7 @@ When an external system fires a callback, the controller or event listener attac
 // Webhook Controller:
 @PostMapping("/callbacks/payment")
 public ResponseEntity<Void> handlePaymentCallback(@RequestBody PaymentCallbackDTO callback) {
-    this.sagaTemplate.resume(callback.getTransactionId(), callback.getCorrelationKey())
+    this.sagaTemplate.resume(callback.getResumeKey(), Duration.ofMinutes(15))
             .put("gatewayPaymentId", callback.getGatewayPaymentId())
             .put("settlementStatus", callback.getStatus())
             .execute();

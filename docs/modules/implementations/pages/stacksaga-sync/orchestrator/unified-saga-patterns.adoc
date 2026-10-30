@@ -446,11 +446,10 @@ public class PaymentWebhookController {
 
     @PostMapping("/webhook")
     public ResponseEntity<Void> handleWebhook(@RequestBody PaymentWebhookPayload payload) {
-        sagaTemplate.resume(
-                OrderDomainEntity.class,
-                payload.getOrderId(),
-                ResumeContext.of("authCode", payload.getAuthCode(), "status", payload.getStatus())
-        );
+        sagaTemplate.resume(payload.getResumeKey(), Duration.ofMinutes(15))
+                .put("authCode", payload.getAuthCode())
+                .put("status", payload.getStatus())
+                .execute();
         return ResponseEntity.ok().build();
     }
 }
@@ -470,11 +469,10 @@ public class PaymentKafkaResponseListener {
 
     @KafkaListener(topics = "payment-resolution-topic", groupId = "order-orchestrator-group")
     public void onPaymentCompleted(PaymentEventMessage message) {
-        sagaTemplate.resume(
-                OrderDomainEntity.class,
-                message.getOrderId(),
-                ResumeContext.of("authCode", message.getAuthCode(), "status", message.getStatus())
-        );
+        sagaTemplate.resume(message.getResumeKey(), Duration.ofMinutes(15))
+                .put("authCode", message.getAuthCode())
+                .put("status", message.getStatus())
+                .execute();
     }
 }
 ----
@@ -492,21 +490,21 @@ public class OrderApprovalController {
 
     private final SagaTemplate<OrderDomainEntity> sagaTemplate;
 
-    @PostMapping("/{orderId}/approve")
+    @PostMapping("/approve")
     public ResponseEntity<Void> approveOrder(
-            @PathVariable String orderId,
+            @RequestParam String resumeKey,
             @RequestParam String managerId
     ) {
-        sagaTemplate.resume(
-                OrderDomainEntity.class,
-                orderId,
-                ResumeContext.of("approvedBy", managerId, "approvalStatus", "APPROVED")
-        );
+        sagaTemplate.resume(resumeKey, Duration.ofHours(1))
+                .put("approvedBy", managerId)
+                .put("approvalStatus", "APPROVED")
+                .execute();
         return ResponseEntity.ok().build();
     }
 }
 ----
 
+[[the-critical-problem-fast-callback-outbox-race-condition]]
 [IMPORTANT]
 .The Critical Problem: Fast-Callback & Outbox Race Condition
 ====

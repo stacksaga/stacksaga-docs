@@ -1,5 +1,5 @@
-:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, fire-and-forget, fire-and-watch, resuming pausable transactions via correlation keys, blocking vs. reactive execution, and real-time event listeners.
-:keywords: StackSaga, SagaTemplate, resume, correlationKey, idempotencyKey, pausable LRT, callback webhook, fireAndForget, fireAndWatch, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
+:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, fire-and-forget, fire-and-watch, resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
+:keywords: StackSaga, SagaTemplate, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, fireAndWatch, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
 :page-priority: 0.7
 
 = SagaTemplate and Event Listeners
@@ -178,50 +178,61 @@ Similarly, when a compensation step must undo a transaction via an asynchronous 
 At the moment of pausing, the transaction enters an intentional business wait state:
 
 * The `DomainEntity` state is persisted to the event store.
-* `es_transaction` marks `is_paused = 1` and records `current_resume_key = <idempotencyKey>`.
-* CPU worker threads are freed immediately.
+* `es_transaction` marks `is_paused = 1` and records the active `resume_key` (generated and accessible during execution via `stepManager.getResumeKey()`).
+* CPU worker threads and database connections are freed immediately.
+
+[NOTE]
+====
+**Retrieving the Resume Key:**  
+During forward execution (`doProcess`) or compensation (`doRevert`), the executor invokes `stepManager.getResumeKey()` to obtain the unique correlation token. This token encapsulates the transaction ID and step idempotency metadata (e.g., `transactionId:idempotencyKey`). Pass this key to external webhooks, asynchronous payment providers, or message broker headers so that the callback can supply it back upon completion.
+====
 
 To wake up and continue the transaction once the external system completes its task, `SagaTemplate` provides the `resume(...)` operator.
 
 [[fluent-resume-spec]]
 ==== The Fluent `ResumeSpec` Builder API
 
-Calling `sagaTemplate.resume(...)` returns a `SagaTemplate.ResumeSpec<DE>` fluent builder that configures callback metadata and initiates transaction resumption:
+Calling `sagaTemplate.resume(resumeKey, retentionDuration)` returns a `SagaTemplate.ResumeSpec<DE>` fluent builder that configures callback metadata and initiates transaction resumption:
 
 [source,java]
 ----
-// Resuming with fluent key-value context entries:
+// Resuming synchronously with fluent key-value context entries:
 this.sagaTemplate
-        .resume(transactionId, correlationKey)
+        .resume(resumeKey, Duration.ofMinutes(15))
         .put("status", "SUCCESS")
         .put("gatewayReference", "REF-987654")
         .execute(); // Blocking (Spring MVC)
 
 // Reactive non-blocking resumption:
 Mono<Void> resumeMono = this.sagaTemplate
-        .resume(transactionId, correlationKey)
+        .resume(resumeKey, Duration.ofMinutes(15))
         .put("status", "SUCCESS")
         .put("gatewayReference", "REF-987654")
         .executeAsync(); // Reactive (Spring WebFlux)
 ----
+
+`sagaTemplate.resume(...)` requires two parameters:
+
+* **`resumeKey`** (`String`): The unique correlation key that was generated for the paused span (retrieved via `stepManager.getResumeKey()`). It uniquely identifies the paused transaction and tryout checkpoint in the event store.
+* **`retentionDuration`** (`Duration`): The duration to retain the transaction without being exposed for restoring by the Ring Coordinator's scheduled recovery workers (e.g., `Duration.ofMinutes(15)` or `Duration.ofHours(1)`). In case of an unexpected system termination during resumption, the transaction will be exposed for restoring only after this retention duration has elapsed.
 
 `ResumeSpec<DE>` exposes the following fluent methods:
 
 * **`.put(String key, String value)`**: Adds an individual key-value entry to the `ResumeContext`.
 * **`.putAll(Map<String, String> map)`**: Adds all entries from the specified map to the `ResumeContext`.
 * **`.withContext(ResumeContext resumeContext)`**: Supplies or replaces a pre-built `ResumeContext` (e.g., from `DefaultResumeContext.of(map)`).
-* **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments).
-* **`.executeAsync()`**: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments).
+* **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments). Throws `InvalidTransactionResumeKeyException` if the resume key is invalid or unrecognized.
+* **`.executeAsync()`**: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments). Signals `InvalidTransactionResumeKeyException` via `onError` if invalid.
 
-NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(transactionId, correlationKey, resumeContext).execute()`.
+NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(resumeKey, resumeContext, retentionDuration).execute()`.
 
 [[uniform-resumption]]
 ==== Uniform Resumption: Seamless Handling of Forward and Compensation Flows
 
 A major strength of StackSaga's architecture is that **resumption is completely uniform from the orchestrator's perspective**:
 
-* You invoke the exact same method -- `sagaTemplate.resume(transactionId, correlationKey)` -- whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
-* The StackSaga Execution Coordinator (SEC) queries the event store, determines the transaction status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, resets `is_paused = 0` and `current_resume_key = NULL`, and dispatches the execution:
+* You invoke the exact same method -- `sagaTemplate.resume(resumeKey, retentionDuration)` -- whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
+* The StackSaga Execution Coordinator (SEC) queries the event store, resolves the `resumeKey`, determines the transaction status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, resets `is_paused = 0` and `current_resume_key = NULL`, and dispatches the execution:
 ** **If paused in forward flow**: Advances to the target `NextExecutor` designated by xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).asSync().pauseUntilResume(duration).resumeToNextExecutor(NextExecutor.class)`] (or `asAsync()`), invoking its `doProcess(...)` with the supplied `ResumeContext`.
 ** **If paused in compensation flow**: Re-invokes the paused `CommandExecutor`'s `doRevert(...)` with the supplied `ResumeContext`, allowing it to finalize reversal actions. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[Implementing Pausable Compensation].
 
@@ -234,7 +245,7 @@ The following example demonstrates how Spring REST controllers handle external c
 
 [source,java]
 ----
-@Slf4log
+@Slf4j
 @RestController
 @RequestMapping("/orders/callbacks")
 @RequiredArgsConstructor
@@ -247,11 +258,10 @@ public class OrderCallbackController {
      */
     @PostMapping("/order-ready")
     public ResponseEntity<Void> onOrderReadyCallback(@RequestBody OrderReadyCallbackDto callbackDto) {
-        log.info("Received order-ready callback for transaction: {} with correlationKey: {}",
-                callbackDto.getTransactionId(), callbackDto.getCorrelationKey());
+        log.info("Received order-ready callback for resumeKey: {}", callbackDto.getResumeKey());
 
         this.sagaTemplate
-                .resume(callbackDto.getTransactionId(), callbackDto.getCorrelationKey())
+                .resume(callbackDto.getResumeKey(), Duration.ofMinutes(15))
                 .put("kitchenStatus", callbackDto.getKitchenStatus())
                 .put("readyTimestamp", callbackDto.getReadyTimestamp().toString())
                 .execute();
@@ -264,11 +274,10 @@ public class OrderCallbackController {
      */
     @PostMapping("/refund-confirmed")
     public ResponseEntity<Void> onRefundConfirmed(@RequestBody RefundWebhookDto refundDto) {
-        log.info("Received refund webhook for transaction: {} with correlationKey: {}",
-                refundDto.getTransactionId(), refundDto.getCorrelationKey());
+        log.info("Received refund webhook for resumeKey: {}", refundDto.getResumeKey());
 
         this.sagaTemplate
-                .resume(refundDto.getTransactionId(), refundDto.getCorrelationKey())
+                .resume(refundDto.getResumeKey(), Duration.ofHours(1))
                 .put("refundStatus", refundDto.getRefundStatus())
                 .put("gatewayRefundRef", refundDto.getGatewayRefundReference())
                 .execute();
@@ -282,7 +291,7 @@ public class OrderCallbackController {
 
 [source,java]
 ----
-@Slf4log
+@Slf4j
 @RestController
 @RequestMapping("/orders/callbacks")
 @RequiredArgsConstructor
@@ -294,11 +303,10 @@ public class ReactiveOrderCallbackController {
     public Mono<ResponseEntity<Void>> onRefundConfirmed(@RequestBody Mono<RefundWebhookDto> refundDtoMono) {
         return refundDtoMono
                 .flatMap(dto -> {
-                    log.info("Received reactive refund webhook for tx: {} key: {}",
-                            dto.getTransactionId(), dto.getCorrelationKey());
+                    log.info("Received reactive refund webhook for resumeKey: {}", dto.getResumeKey());
 
                     return this.sagaTemplate
-                            .resume(dto.getTransactionId(), dto.getCorrelationKey())
+                            .resume(dto.getResumeKey(), Duration.ofHours(1))
                             .put("refundStatus", dto.getRefundStatus())
                             .put("gatewayRefundRef", dto.getGatewayRefundReference())
                             .executeAsync()
@@ -310,7 +318,7 @@ public class ReactiveOrderCallbackController {
 
 When `resume(...)` is called:
 
-. StackSaga validates that the supplied `correlationKey` matches the `current_resume_key` registered on `es_transaction`.
+. StackSaga parses and resolves the `resumeKey` via `ResumeKeyResolver`, locating the exact transaction ID and execution tryout registered in the event store.
 . It stores the serialized `ResumeContext` JSON into `es_transaction_execution_tryout.resume_context`.
 . It resets `is_paused = 0` and clears `current_resume_key = NULL`.
 . It restores the `OrderDomainEntity` with its pristine checkpoint state.
@@ -401,7 +409,7 @@ Because listener callbacks follow at-least-once semantics and can be re-triggere
 
 * **Recommended Pattern -- Use a `QueryExecutor`:**
 If your workflow requires an operation to execute immediately following an executor (such as generating an internal receipt, updating a read model, or creating an audit log) that does not require compensation, **do not place it in `TransactionEventListener`**.
-Instead, model it as a formal **`QueryExecutor`** within the saga flow (e.g., chaining it via `stepManager.next(RecordAuditQueryExecutor.class, ...)`).
+Instead, model it as a formal **`QueryExecutor`** within the saga flow (e.g., chaining it via `stepManager.success("AUDIT_RECORDED").asSync().noPause().toNextExecutor(RecordAuditQueryExecutor.class)`).
 As a first-class saga participant, a `QueryExecutor` guarantees:
 +
 ** Durable recording and tracking in the Event Store.
@@ -415,7 +423,7 @@ Implement `TransactionEventListener` to listen to transaction events in an imper
 
 [source,java]
 ----
-@Slf4log
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
@@ -442,7 +450,7 @@ Implement `ReactiveTransactionEventListener` to listen to transaction events in 
 
 [source,java]
 ----
-@Slf4log
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {
@@ -526,7 +534,7 @@ The StackSaga team recommends organizing saga transaction logic inside a dedicat
 
 [source,java]
 ----
-@Slf4log
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
@@ -571,7 +579,7 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 
 [source,java]
 ----
-@Slf4log
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListener<OrderDomainEntity> {

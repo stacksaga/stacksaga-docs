@@ -1,0 +1,1205 @@
+:description: A step-by-step quick example that builds a complete order-placement mixed-style saga (continuous STP and pausable wait-state with webhook callback) on StackSaga with MySQL as the event store — progressing from minimal implementation to retry and observability.
+:keywords: StackSaga, quick example, saga orchestration, mixed-style saga, continuous LRT, pausable LRT, straight-through processing, STP, human-in-the-loop, HITL, webhook callback, resumeKey, retentionDuration, MySQL event store, orchestrator, executor, compensation, retry, trace window
+
+= Quick Example: StackSaga with MySQL (Mixed-Style Saga: Continuous & Pausable)
+
+This quick example walks you through building a complete *order-placement* saga on StackSaga's unified orchestration engine, using *MySQL* (via reactive R2DBC) as the persistent event store.
+
+Unlike traditional orchestration frameworks that force an artificial choice between purely synchronous pipelines or purely asynchronous message queues, StackSaga natively harmonizes both within the **exact same saga workflow**.
+We start with a minimal implementation featuring automated continuous execution, a pausable payment wait-state, and external webhook callback resumption, and then incrementally layer on retry resilience and observability.
+
+[[mental-model]]
+== The Unified Mental Model: Continuous (STP), Pausable (HITL), or Mixed
+
+[IMPORTANT]
+.One Single Engine: Zero Configuration Switches
+====
+Before implementing code, it is important to recognize that **StackSaga has only ONE unified orchestration coordinator**: the **StackSaga Execution Coordinator (SEC)** provided by `stacksaga-spring-boot-starter`.
+
+There are no separate "Continuous engines" or "Pausable engines", and no application-level mode switches.
+The framework treats **Continuous (STP)**, **Pausable (Wait-State / HITL)**, and **Mixed-Style** execution as standard architectural patterns governed by the xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[Unified Saga Model (USM)].
+====
+
+Depending on your business requirements, you can structure any saga in three ways (see xref:ROOT:lrt-transaction-models.adoc[Long-Running Transaction Models: Continuous vs Pausable]):
+
+1. **Purely Continuous Long-Running Transactions (Continuous LRT / STP)**:
+* Every step in the workflow executes straight-through without intentional pauses by returning `.asSync().noPause().toNextExecutor(...)` (following xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-1-direct-synchronous[USIP Pattern 1: Direct Synchronous Integration]).
+* Best for fast, fully-automated microservice operations (e.g. internal API calls, database writes, validation checks) completing end-to-end in milliseconds.
+
+2. **Purely Pausable Long-Running Transactions (Pausable LRT / HITL)**:
+* Business steps intentionally pause execution by returning `.asSync().pauseUntilResume(duration)` (following xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP Pattern 2: Correlated Park-and-Resume]).
+* The SEC safely commits state to the Event Store and **releases 100% of CPU worker threads and database connections** while the transaction sleeps ("Park and Wait").
+* Resumed only when an external trigger (such as a customer webhook, KYC verification, or manager sign-off) invokes xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(resumeKey, retentionDuration)`].
+
+3. **Mixed-Style Long-Running Transactions (The Real-World Standard)**:
+* Real-world enterprise workflows routinely interleave automated, sub-second steps with real-world delays (such as payment gateway redirects or order readiness webhooks).
+* A single saga can run its first few steps continuously, enter a pausable wait-state for an external callback, and resume straight-through to completion.
+
+TIP: **Why this Quick Example uses Mixed-Style:** By building a mixed saga in this tutorial, you master the **complete spectrum of StackSaga** in a single guide—learning continuous execution, thread-safe wait-states, webhook resumption, and automatic reverse rollback. If your production application only requires continuous straight-through processing, you simply use `.noPause()` on all steps.
+
+---
+
+== Scenario & Step Topology Overview
+
+We orchestrate an e-commerce *place-order* transaction across four atomic steps (*executors*), demonstrating how the `OrderDomainEntity` aggregate accumulates state across steps:
+
+[cols="1,2,2,2,3",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| # | Step (Executor) | Type | Execution Style | Compensation (`doRevert`)
+
+| 1
+| *Validate User* (`ValidateUserExecutor`)
+| Query (read-only)
+| Continuous (`.asSync().noPause()`)
+| — _(queries are never compensated; automatically bypassed during rollback)_
+
+| 2
+| *Reserve Order* (`ReserveOrderExecutor`)
+| Command (state-changing)
+| Continuous (`.asSync().noPause()`)
+| Releases the reserved order inventory in the warehouse service
+
+| 3
+| *Initiate Payment* (`InitiatePaymentExecutor`)
+| Command (state-changing)
+| Pausable Wait-State (`.asSync().pauseUntilResume(...)`)
+| Voids the initiated checkout session with the payment provider
+
+| —
+| *Payment Gateway Webhook*
+| External REST Callback
+| Awakens the paused saga via `sagaTemplate.resume(resumeKey, duration)`
+| —
+
+| 4
+| *Finalize Order* (`FinalizeOrderExecutor`)
+| Command (state-changing)
+| Resumed Continuous (`.asSync().noPause()`)
+| Marks order status as failed / canceled
+|===
+
+If any step fails (or if the payment provider sends a declined callback), StackSaga automatically **compensates** previously completed command steps in reverse order—voiding the payment session and releasing the reserved order—leaving the system in a consistent state without any manual reverse routing.
+
+[[step-architecture-rationale]]
+=== Architectural Rationale: Why Each Step Uses Its Respective Model
+
+Selecting between `QueryExecutor` vs `CommandExecutor` and Continuous Straight-Through (`.noPause()`) vs Pausable Wait-State (`.pauseUntilResume(...)`) is a deliberate architectural choice defined by the xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[Unified Saga Model (USM)]. Understanding the rationale behind each choice ensures you make optimal design decisions in your production microservices:
+
+* **Step 1 (`ValidateUserExecutor`): `QueryExecutor` with Continuous STP**
+** *Why Query?* Validating customer purchasing standing against the User Service is purely read-only—it produces zero state mutations or side effects in downstream systems. By implementing xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor`] rather than `CommandExecutor`, StackSaga's reverse autopilot automatically skips and prunes this step during rollback. No compensation method is required, eliminating unnecessary reverse network calls.
+** *Why Continuous STP (`.noPause()`)?* Internal user validation completes in milliseconds. There is no human wait or asynchronous redirect; therefore, it adheres to xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-1-direct-synchronous[USIP Pattern 1: Direct Synchronous Integration] to advance immediately to the next step.
+
+* **Step 2 (`ReserveOrderExecutor`): `CommandExecutor` with Continuous STP**
+** *Why Command?* Reserving product inventory in the Warehouse Service mutates distributed state by locking physical or virtual stock. Because it creates real-world business side effects, it must implement xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[`CommandExecutor`] with a matching `doRevert()` method. If a downstream step (such as payment) fails, the SEC invokes `doRevert()` to release the reserved stock back to the warehouse.
+** *Why Continuous STP (`.noPause()`)?* Automated inventory reservation against an internal microservice completes in milliseconds, making continuous straight-through execution the natural fit.
+
+* **Step 3 (`InitiatePaymentExecutor`): `CommandExecutor` with Pausable LRT Wait-State**
+** *Why Command?* Creating a checkout session with an external payment gateway establishes an active payment intent. If later steps fail, `doRevert()` voids or cancels that session with the payment provider.
+** *Why Pausable Wait-State (`.pauseUntilResume(...)`)?* The customer must be redirected to a third-party payment portal (or complete 3D-Secure SMS/banking authentication). Because human interaction takes an unpredictable amount of time (seconds to minutes), keeping an HTTP connection open or blocking an operating system worker thread would quickly starve the server thread pool and crash the application under load. By returning `.pauseUntilResume(Duration.ofMinutes(15))`, the SEC persists the transaction state into MySQL, generates a unique correlation key via `stepManager.getResumeKey()`, and **completely terminates in-memory execution—freeing 100% of CPU threads and database connections** ("Park and Wait" under xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP Pattern 2: Correlated Park-and-Resume]).
+** *The Critical Risk of Pattern 2 & When to Avoid It*:
++
+[IMPORTANT]
+.The Fast-Callback & Outbox Race Condition Risk
+====
+Notice the physical execution order of USIP Pattern 2:  
+*Step 1: Network Call Out to External Service* ➔ *Step 2: SEC Commits PAUSED State to Event Store*
+
+This order introduces a dangerous race condition in high-throughput or asynchronous messaging scenarios:
+* If the downstream system responds in sub-milliseconds (e.g. an automated Kafka consumer or a fast fire-and-forget HTTP endpoint), the external callback could arrive at the orchestrator **BEFORE the SEC has finished committing the `PAUSED` record to MySQL**.
+* When the webhook arrives, `sagaTemplate.resume(resumeKey, ...)` queries the Event Store, finds no active paused transaction, and rejects the callback—leaving the transaction permanently stranded!
+
+**Why it is completely safe here:** For customer payment redirects, 3D-Secure authentication, and human-in-the-loop (HITL) approvals, human physical actions inherently take seconds or minutes, vastly outpacing the 2–5ms MySQL commit.
+
+**When you must NOT use Pattern 2:** If you are dispatching messages over Apache Kafka, RabbitMQ, or invoking sub-millisecond fire-and-forget APIs where callbacks can return immediately, you must instead use **xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[USIP Pattern 3: Two-Stage Lazy Broker Dispatch with Commit Barrier]** (`.asAsync().invoker(...)`). Pattern 3 commits the `PAUSED` state to the Event Store *first* before releasing the network message, eliminating the race condition entirely. Read the complete risk analysis in xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#the-critical-problem-fast-callback-outbox-race-condition[The Critical Problem: Fast-Callback & Outbox Race Condition].
+====
+
+* **Step 4 (`FinalizeOrderExecutor`): `CommandExecutor` with Resumed Continuous STP**
+** *Why Command?* Fulfilling an order and updating local order tables changes state. If fulfillment fails, or if the payment gateway returned a declined status in `ResumeContext`, `FinalizeOrderExecutor` throws a xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`], initiating reverse compensation across `InitiatePaymentExecutor` and `ReserveOrderExecutor`.
+** *Why Resumed Continuous STP (`.noPause().complete()`)?* Once awakened by the webhook, final order confirmation is a fully automated internal operation that runs straight-through to terminal completion (`.complete()`), fulfilling xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-1-2-terminal-completion[USNP Pattern 1.2: Terminal Saga Completion].
+
+We build this up across three progressive stages:
+
+. xref:#stage-1[Stage-1 — Minimal Mixed-Style Implementation]: create the domain entity, four executors (with compensation and wait-state), event handler, and REST endpoints to trigger and resume the transaction.
+. xref:#stage-2[Stage-2 — Adding Retry Capability]: make the flow resilient to transient infrastructure failures using the Ring Coordinator and retry subsystem.
+. xref:#stage-3[Stage-3 — Observability]: connect the StackSaga Trace Window to visualize the transaction graph in real time.
+
+---
+
+[[stage-1]]
+== Stage-1 [Minimal Mixed-Style Implementation]
+
+Stage-1 builds a complete mixed-style saga backed by MySQL as the event store. We will build it in the following order:
+
+. xref:#prerequisites[]
+. xref:#getting-started[]
+. xref:#creating-domain-entity[]
+. xref:#creating-executors[]
+. xref:#create-handler[]
+. xref:#creating-controller[]
+. xref:#tuning-configuration[]
+. xref:#running-application[]
+
+[[prerequisites]]
+=== Prerequisites
+
+Make sure you have the following installed and running:
+
+. Java 21+
+. Spring Boot 3.x / 4.x
+. MySQL 8+ — used by the orchestrator as the persistent event store.
+. Maven 3.8+
+
+TIP: The quickest way to run MySQL locally is Docker: `docker run -d --name stacksaga-mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=order_service_event_store mysql:8`.
+
+[[getting-started]]
+=== Getting Started - Project Setup
+
+Create a new Spring Boot application with Spring MVC and include the following dependencies in your `pom.xml`:
+
+IMPORTANT: You can also use the http://init.stacksaga.org/[StackSaga Initializer] to generate dependency snippets tailored to your build setup.
+
+[source,xml,subs="attributes+"]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>{stacksaga-version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <!-- Spring Boot Starter Web (MVC) -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <optional>true</optional>
+    </dependency>
+
+    <!-- StackSaga Core Engine (SEC) -->
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- StackSaga MySQL Reactive Support (Event Store via R2DBC) -->
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-mysql-reactive-support</artifactId>
+    </dependency>
+</dependencies>
+
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <executions>
+                <execution>
+                    <goals>
+                        <goal>build-info</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+----
+
+* `stacksaga-spring-boot-starter`: The core StackSaga Execution Coordinator (SEC) runtime managing execution graphs, commit barriers, and compensations.
+* `stacksaga-mysql-reactive-support`: High-performance, non-blocking R2DBC driver integration for storing saga snapshots into MySQL.
+* `build-info`: Captures application version metadata so the framework tags every transaction with its exact deploy version.
+
+[[creating-domain-entity]]
+=== Creating the Domain-Entity (The Saga Aggregator)
+
+The `DomainEntity` serves as the aggregate root and state carrier throughout the transaction lifecycle.
+Every executor consumes existing transactional data produced by previous steps and contributes newly produced state as the business process moves forward.
+Upon completion of each span, the SEC serializes the updated aggregate and commits an immutable snapshot to MySQL. xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc[Read more about Domain Entity Architecture].
+
+[source,java]
+----
+@Getter
+@Setter
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity"
+)
+public class OrderDomainEntity extends DomainEntity {
+
+    // 1. Initial request payload (populated at saga initiation)
+    @JsonProperty("username")
+    private String username;
+
+    @JsonProperty("total_amount")
+    private double totalAmount;
+
+    @JsonProperty("product_items")
+    private List<String> productItems;
+
+    // 2. State enriched by Step 1 (ValidateUserExecutor)
+    @JsonProperty("user_id")
+    private String userId;
+
+    @JsonProperty("user_email")
+    private String userEmail;
+
+    @JsonProperty("user_validated")
+    private boolean userValidated;
+
+    // 3. State enriched by Step 2 (ReserveOrderExecutor)
+    @JsonProperty("reservation_id")
+    private String reservationId;
+
+    @JsonProperty("warehouse_code")
+    private String warehouseCode;
+
+    // 4. State enriched by Step 3 (InitiatePaymentExecutor)
+    @JsonProperty("payment_session_id")
+    private String paymentSessionId;
+
+    @JsonProperty("payment_redirect_url")
+    private String paymentRedirectUrl;
+
+    // 5. State enriched by Step 4 (FinalizeOrderExecutor) from Webhook callback
+    @JsonProperty("payment_reference_id")
+    private String paymentReferenceId;
+
+    @JsonProperty("order_status")
+    private String orderStatus;
+
+    public OrderDomainEntity() {
+        super(OrderDomainEntity.class);
+    }
+}
+----
+
+* `@SagaDomainEntity`: Binds this class as the generic type anchor for the saga workflow and specifies semantic versioning.
+* `super(OrderDomainEntity.class)`: Required by the framework for Jackson polymorphic serialization.
+
+[[creating-executors]]
+=== Creating the Executors
+
+Now, we implement the four atomic executors. Each executor encapsulates **exactly one atomic operation** (such as calling a downstream microservice or database), demonstrates reading from and updating the `DomainEntity` aggregator, and navigates using the staged 4-stage builder:
+`Event` ➔ `Mode (.asSync() / .asAsync())` ➔ `Lifecycle (.noPause() / .pauseUntilResume())` ➔ `Destination (.toNextExecutor() / .complete())`. (See xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#step-manager-navigation-reference[Step Manager Navigation Reference]).
+
+==== 1. ValidateUserExecutor (QueryExecutor — Continuous STP)
+
+Validates user purchasing standing against an external user microservice.
+Because read-only queries make no state mutations that require rollback, it implements `QueryExecutor` (no `doRevert()` required).
+Notice how it reads `currentDomainEntity.getUsername()` and enriches the aggregator with `userId`, `userEmail`, and `userValidated`.
+
+[NOTE]
+.Pattern Rationale: QueryExecutor + Continuous STP (USIP Pattern 1)
+====
+* **Executor Type**: Implements xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor<OrderDomainEntity>`] because querying user status produces no durable side-effects. If a downstream step fails, the SEC's reverse autopilot automatically bypasses this query, eliminating redundant rollback calls.
+* **Navigation**: Uses `.asSync().noPause().toNextExecutor(...)` (xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-1-direct-synchronous[USIP Pattern 1]) because user validation completes in milliseconds without external delays.
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "user-service", value = "ValidateUserExecutor")
+public class ValidateUserExecutor implements QueryExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. Read input data from the DomainEntity aggregator (set during saga initiation)
+        String username = currentDomainEntity.getUsername();
+        log.info("Step 1: Validating user '{}' [idempotencyKey: {}]", username, idempotencyKey);
+
+        // 2. Simulated external microservice client call (e.g. FeignClient, WebClient, or RestTemplate)
+        // In production: UserValidationResponse response = this.userServiceClient.validateUser(username, idempotencyKey);
+        log.info(">> [SIMULATION] External UserService call: GET /users/{}?idempotencyKey={}", username, idempotencyKey);
+        String simulatedUserId = "usr_" + Math.abs(username.hashCode() % 10000);
+        String simulatedEmail = username + "@example.com";
+        boolean isUserActive = true;
+
+        // 3. Mutate DomainEntity aggregator with response data returned from external service
+        currentDomainEntity.setUserId(simulatedUserId);
+        currentDomainEntity.setUserEmail(simulatedEmail);
+        currentDomainEntity.setUserValidated(isUserActive);
+        currentDomainEntity.setOrderStatus("USER_VALIDATED");
+        log.info(">> [AGGREGATOR] Updated OrderDomainEntity: userId={}, email={}, status={}", 
+                simulatedUserId, simulatedEmail, currentDomainEntity.getOrderStatus());
+
+        // 4. Continuous STP Advance (USIP Pattern 1) to ReserveOrderExecutor
+        return stepManager
+                .success("VALIDATED_USER")
+                .asSync()
+                .noPause()
+                .toNextExecutor(ReserveOrderExecutor.class);
+    }
+}
+----
+
+==== 2. ReserveOrderExecutor (CommandExecutor — Continuous STP)
+
+Reserves product inventory in the warehouse service. It implements `CommandExecutor`:
+* `doProcess`: Reads `userId` and `productItems` from the aggregator (populated in Step 1 and the initial request), invokes the warehouse service with `idempotencyKey`, and updates the aggregator with `reservationId` and `warehouseCode`.
+* `doRevert`: If a subsequent step fails, reads `finalDomainEntityState.getReservationId()` from the restored historical snapshot to release the reserved stock.
+
+[NOTE]
+.Pattern Rationale: CommandExecutor + Continuous STP (USIP Pattern 1 & USNP Pattern 2.1)
+====
+* **Executor Type**: Implements xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[`CommandExecutor<OrderDomainEntity>`] because reserving stock modifies warehouse inventory state. The corresponding `doRevert()` undoes this operation by reading the historical `reservationId` from `finalDomainEntityState`.
+* **Reverse Routing**: In `doRevert()`, calling `.resumeToNextDefaultExecutor()` activates xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-2-1-revert-to-core[USNP Pattern 2.1: Reverse Autopilot], which automatically unwinds backward to the preceding command step without hardcoded reverse paths.
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "order-service", value = "ReserveOrderExecutor")
+public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. Read data contributed by previous steps from the DomainEntity aggregator
+        String userId = currentDomainEntity.getUserId(); // Populated by Step 1 (ValidateUserExecutor)
+        List<String> items = currentDomainEntity.getProductItems(); // Populated during saga initiation
+        double totalAmount = currentDomainEntity.getTotalAmount(); // Populated during saga initiation
+        log.info("Step 2: Reserving inventory for userId '{}', items: {}, amount: {} [idempotencyKey: {}]", 
+                userId, items, totalAmount, idempotencyKey);
+
+        // 2. Simulated external microservice client call (e.g., Inventory / Warehouse Service)
+        // In production: ReservationResponse response = this.inventoryServiceClient.reserveStock(userId, items, idempotencyKey);
+        log.info(">> [SIMULATION] External InventoryService call: POST /inventory/reservations [userId: {}, items: {}, idempotencyKey: {}]",
+                userId, items, idempotencyKey);
+        String simulatedReservationId = "resv_" + idempotencyKey.substring(0, 8);
+        String simulatedWarehouseCode = "WH-NORTH-01";
+
+        // 3. Mutate aggregator with reservation details received from response
+        currentDomainEntity.setReservationId(simulatedReservationId);
+        currentDomainEntity.setWarehouseCode(simulatedWarehouseCode);
+        currentDomainEntity.setOrderStatus("INVENTORY_RESERVED");
+        log.info(">> [AGGREGATOR] Updated OrderDomainEntity: reservationId={}, warehouseCode={}, status={}", 
+                simulatedReservationId, simulatedWarehouseCode, currentDomainEntity.getOrderStatus());
+
+        // 4. Continuous STP Advance to Pausable Payment Step
+        return stepManager
+                .success("RESERVED_ORDER")
+                .asSync()
+                .noPause()
+                .toNextExecutor(InitiatePaymentExecutor.class);
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        // 1. Read reservationId from the pristine historical state snapshot
+        String reservationId = finalDomainEntityState.getReservationId();
+        String userId = finalDomainEntityState.getUserId();
+        log.warn("Reverting Step 2: Compensating inventory reservation '{}' for userId '{}' [idempotencyKey: {}]", 
+                reservationId, userId, idempotencyKey);
+
+        // 2. Simulated external compensation call to release stock
+        // In production: this.inventoryServiceClient.releaseStock(reservationId, idempotencyKey);
+        log.info(">> [SIMULATION] External InventoryService Compensation: POST /inventory/reservations/{}/release [idempotencyKey: {}]",
+                reservationId, idempotencyKey);
+
+        // 3. Reverse Autopilot: unrolls to preceding command in history
+        return stepManager
+                .success("REVERTED_ORDER")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+==== 3. InitiatePaymentExecutor (CommandExecutor — Pausable LRT Wait-State)
+
+Initiates an asynchronous payment session with an external payment gateway (e.g., Stripe, PayPal, or 3D-Secure bank redirect):
+* Reads `totalAmount`, `userId`, and `reservationId` from the aggregator.
+* Obtains the unique correlation token using `stepManager.getResumeKey()`.
+* Calls the payment provider, forwarding `resumeKey` so that the gateway knows where to send the webhook.
+* Mutates the aggregator with `paymentSessionId` and `paymentRedirectUrl`.
+* **Parks execution for up to 15 minutes** via `.pauseUntilResume(Duration.ofMinutes(15))`, releasing worker threads and database connections while waiting.
+* `doRevert`: Voids the payment session if downstream steps fail.
+
+[IMPORTANT]
+.Pattern Rationale: Pausable LRT Wait-State (USIP Pattern 2) & The Fast-Callback Risk
+====
+* **Executor Type**: Implements `CommandExecutor<OrderDomainEntity>` with `.pauseUntilResume(Duration.ofMinutes(15))` to release 100% of CPU worker threads and database connections while the customer is redirected to complete payment.
+* **Correlation Key**: `stepManager.getResumeKey()` generates the unique correlation token passed to the payment gateway. The gateway must echo this token in its webhook callback.
+* **The Fast-Callback Race Condition Risk**: USIP Pattern 2 performs the network call *before* committing the `PAUSED` state to MySQL. If downstream replies could arrive in sub-milliseconds (such as in Kafka event-driven architectures), the callback might arrive before the database write finishes, causing the callback to be rejected. For human redirects and payment gateways, this is safe because user actions take seconds to minutes. For high-speed messaging, always use xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[USIP Pattern 3: Two-Stage Lazy Broker Dispatch with Commit Barrier].
+* **Deep Dive**: Read the complete risk analysis in xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#the-critical-problem-fast-callback-outbox-race-condition[The Critical Problem: Fast-Callback & Outbox Race Condition].
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "payment-service", value = "InitiatePaymentExecutor")
+public class InitiatePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. Read accumulated order and reservation data from aggregator
+        String userId = currentDomainEntity.getUserId(); // from Step 1
+        String userEmail = currentDomainEntity.getUserEmail(); // from Step 1
+        double amount = currentDomainEntity.getTotalAmount(); // from saga initiation
+        String reservationId = currentDomainEntity.getReservationId(); // from Step 2
+
+        // 2. Retrieve unique resumeKey to supply as the webhook callback correlation token
+        String resumeKey = stepManager.getResumeKey();
+        log.info("Step 3: Creating payment checkout session for user '{}' ({}), amount: {}, reservation: {} [resumeKey: {}]", 
+                userId, userEmail, amount, reservationId, resumeKey);
+
+        // 3. Simulated external call to payment provider (Stripe / PayPal / 3D-Secure gateway)
+        // In production: PaymentSessionResponse session = this.paymentGatewayClient.createCheckoutSession(userId, amount, reservationId, resumeKey);
+        log.info(">> [SIMULATION] External Payment Gateway call: POST /checkout/sessions [amount: {}, ref: {}, callbackToken: {}]",
+                amount, reservationId, resumeKey);
+        String simulatedSessionId = "sess_" + idempotencyKey.substring(0, 8);
+        String simulatedRedirectUrl = "https://pay.gateway.com/checkout/" + simulatedSessionId;
+
+        // 4. Mutate aggregator with payment session data received from payment gateway
+        currentDomainEntity.setPaymentSessionId(simulatedSessionId);
+        currentDomainEntity.setPaymentRedirectUrl(simulatedRedirectUrl);
+        currentDomainEntity.setOrderStatus("AWAITING_PAYMENT_CALLBACK");
+        log.info(">> [AGGREGATOR] Updated OrderDomainEntity: paymentSessionId={}, redirectUrl={}, status={}", 
+                simulatedSessionId, simulatedRedirectUrl, currentDomainEntity.getOrderStatus());
+
+        // 5. Pausable Wait-State (USIP Pattern 2): Parks in Event Store for up to 15 minutes
+        return stepManager
+                .success("PAYMENT_SESSION_INITIATED")
+                .asSync()
+                .pauseUntilResume(Duration.ofMinutes(15))
+                .resumeToNextExecutor(FinalizeOrderExecutor.class);
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        // 1. Read payment session ID from the restored pristine historical state snapshot
+        String sessionId = finalDomainEntityState.getPaymentSessionId();
+        log.warn("Reverting Step 3: Canceling payment checkout session '{}' [idempotencyKey: {}]",
+                sessionId, idempotencyKey);
+
+        // 2. Simulated external compensation call to void payment session
+        // In production: this.paymentGatewayClient.cancelSession(sessionId, idempotencyKey);
+        log.info(">> [SIMULATION] External Payment Gateway Compensation: POST /checkout/sessions/{}/void [idempotencyKey: {}]",
+                sessionId, idempotencyKey);
+
+        return stepManager
+                .success("PAYMENT_SESSION_VOIDED")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+==== 4. FinalizeOrderExecutor (CommandExecutor — Resumed Step & Completion)
+
+When the external payment gateway fires a callback webhook, `sagaTemplate.resume(resumeKey, retentionDuration)` wakes up the transaction.
+The SEC restores the `OrderDomainEntity` snapshot, injects callback payload data into `ResumeContext`, and executes `FinalizeOrderExecutor`:
+* Reads callback metadata (`paymentStatus`, `referenceId`) from `ResumeContext`.
+* Reads accumulated aggregator data (`reservationId`, `userEmail`, `paymentSessionId`).
+* **Happy path (`SUCCESS`)**: Enriches aggregator with `paymentReferenceId`, calls external fulfillment and notification services, and concludes the saga via `.complete()`.
+* **Failure path (`DECLINED`)**: Throws `NonRetryableExecutorException`, which automatically halts forward progression and triggers reverse compensation!
+
+[NOTE]
+.Pattern Rationale: Resumed Step, ResumeContext Decoupling & Terminal Completion
+====
+* **Decoupled Payloads**: Callback parameters are injected into `ResumeContext` rather than directly mutating the domain aggregate in the REST controller. This preserves domain encapsulation and prevents race conditions (see xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resume-context-contract[ResumeContext Contract]).
+* **Failure Pivot**: If payment failed, throwing xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`] immediately halts forward progression and triggers reverse compensation.
+* **Completion**: If successful, calling `.complete()` concludes the saga with status `PROCESS_COMPLETED` (xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-1-2-terminal-completion[USNP Pattern 1.2: Terminal Saga Completion]).
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "order-service", value = "FinalizeOrderExecutor")
+public class FinalizeOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. Extract callback metadata safely from ResumeContext (injected by controller during resume())
+        String paymentStatus = resumeContext.get("paymentStatus").orElse("DECLINED");
+        String referenceId = resumeContext.get("referenceId").orElse("UNKNOWN");
+
+        // 2. Read accumulated data from earlier steps in the aggregator
+        String reservationId = currentDomainEntity.getReservationId(); // from Step 2
+        String userEmail = currentDomainEntity.getUserEmail(); // from Step 1
+        String paymentSessionId = currentDomainEntity.getPaymentSessionId(); // from Step 3
+
+        log.info("Step 4: Awakened with payment callback. Status: {}, Ref: {}, Session: {}, Reservation: {}", 
+                paymentStatus, referenceId, paymentSessionId, reservationId);
+
+        if ("SUCCESS".equalsIgnoreCase(paymentStatus)) {
+            // Happy path: payment succeeded
+            // 3. Mutate aggregator with payment confirmation details
+            currentDomainEntity.setPaymentReferenceId(referenceId);
+            currentDomainEntity.setOrderStatus("CONFIRMED");
+            log.info(">> [AGGREGATOR] Updated OrderDomainEntity: paymentReferenceId={}, status=CONFIRMED", referenceId);
+
+            // 4. Simulated external calls: confirm warehouse fulfillment & dispatch customer receipt email
+            // In production:
+            //   this.orderFulfillmentClient.confirmOrder(reservationId, referenceId, idempotencyKey);
+            //   this.notificationClient.sendOrderConfirmation(userEmail, referenceId);
+            log.info(">> [SIMULATION] External Order Fulfillment: POST /orders/{}/confirm [ref: {}, idempotencyKey: {}]",
+                    reservationId, referenceId, idempotencyKey);
+            log.info(">> [SIMULATION] External Notification Service: POST /notifications/email [recipient: {}, ref: {}]",
+                    userEmail, referenceId);
+
+            // Conclude Saga
+            return stepManager
+                    .success("ORDER_CONFIRMED")
+                    .asSync()
+                    .noPause()
+                    .complete();
+        } else {
+            // Failure path: payment was declined -> mutate aggregator and trigger reverse compensation
+            currentDomainEntity.setOrderStatus("PAYMENT_DECLINED");
+            log.warn("Step 4: Payment declined for tx: {}. Mutating aggregator and triggering reverse compensation.", 
+                    currentDomainEntity.getTransactionId());
+
+            throw NonRetryableExecutorException
+                    .buildWith(new RuntimeException("Payment was declined by payment gateway (ref: " + referenceId + ")"))
+                    .put("reason", "PAYMENT_DECLINED")
+                    .put("referenceId", referenceId)
+                    .build();
+        }
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        String txId = finalDomainEntityState.getTransactionId();
+        log.warn("Reverting Step 4: Canceling order finalization for tx: {}", txId);
+
+        // Simulated local compensation call
+        // In production: this.orderRepository.updateStatus(txId, "ORDER_CANCELED");
+        log.info(">> [SIMULATION] Marking order status as CANCELED in local database for tx: {}", txId);
+
+        return stepManager
+                .success("ORDER_FINALIZATION_REVERTED")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+[[create-handler]]
+=== Creating the Event Handler
+
+Create an event listener implementing `TransactionEventListener<OrderDomainEntity>` to observe transaction lifecycle state changes in real time. (See xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#state-change-listeners[State Change Listeners Reference]).
+
+[source,java]
+----
+@Slf4j
+@Component
+public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
+
+    @Override
+    public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) {
+        log.info(">>> Saga State Transition: status={}, txId={}, hasException={}",
+                transactionState.getCurrentStatus(),
+                transactionState.getTransactionId(),
+                transactionState.getExecutionException() != null);
+    }
+}
+----
+
+[[creating-controller]]
+=== Creating the Controller (Trigger, Callback Webhook & Status)
+
+We expose three REST endpoints demonstrating `SagaTemplate` operations:
+1. `POST /api/v1/order`: Initiates the saga via `sagaTemplate.init(...)` using xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#stackSagaTemplate_usage_in_non_reactive_environment[fireAndForget].
+2. `POST /api/v1/order/callback/payment`: Receives external webhooks and resumes the saga via xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[sagaTemplate.resume(resumeKey, retentionDuration)].
+3. `GET /api/v1/order/status?order-id={id}`: Pulls the transaction snapshot on demand via xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#getcurrentstate-on-demand[sagaTemplate.getCurrentState(orderId).fetch()].
+
+[source,java]
+----
+@Slf4j
+@RestController
+@RequestMapping("/api/v1/order")
+@RequiredArgsConstructor
+public class PlaceOrderController {
+
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
+
+    @PostMapping
+    public ResponseEntity<PlaceOrderResponse> placeOrder(@RequestBody PlaceOrderRequest request) {
+        final String transactionId = this.sagaTemplate
+                .init(() -> {
+                    OrderDomainEntity entity = new OrderDomainEntity();
+                    entity.setUsername(request.getUsername());
+                    entity.setTotalAmount(request.getTotalAmount());
+                    entity.setProductItems(request.getItems() != null ? Arrays.asList(request.getItems()) : List.of());
+                    entity.setOrderStatus("INITIALIZED");
+                    return entity;
+                })
+                .peek(entity -> log.info("Starting order transaction: {}", entity.getTransactionId()))
+                .startWith(ValidateUserExecutor.class)
+                .fireAndForget()
+                .execute();
+
+        return ResponseEntity.ok(new PlaceOrderResponse(
+                transactionId,
+                "Order initiated successfully. Awaiting payment callback."
+        ));
+    }
+
+    @PostMapping("/callback/payment")
+    public ResponseEntity<String> paymentCallback(@RequestBody PaymentCallbackRequest callback) {
+        log.info("Received payment webhook callback for resumeKey: {}", callback.getResumeKey());
+
+        // Resumes the paused transaction delivering callback payload data into ResumeContext
+        this.sagaTemplate
+                .resume(callback.getResumeKey(), Duration.ofMinutes(15))
+                .put("paymentStatus", callback.getPaymentStatus())
+                .put("referenceId", callback.getReferenceId())
+                .execute();
+
+        return ResponseEntity.ok("Payment callback accepted and resumption dispatched.");
+    }
+
+    @GetMapping("/status")
+    public ResponseEntity<TransactionState<?, ?>> orderStatus(@RequestParam("order-id") String orderId) {
+        TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state = 
+                this.sagaTemplate.getCurrentState(orderId).fetch();
+        return ResponseEntity.ok(state);
+    }
+
+    // --- DTOs ---
+    @Data
+    public static class PlaceOrderRequest {
+        private String username;
+        private double totalAmount;
+        private String[] items;
+    }
+
+    @Data
+    @AllArgsConstructor
+    public static class PlaceOrderResponse {
+        private String transactionId;
+        private String message;
+    }
+
+    @Data
+    public static class PaymentCallbackRequest {
+        private String resumeKey;
+        private String paymentStatus; // "SUCCESS" or "DECLINED"
+        private String referenceId;
+    }
+}
+----
+
+[[tuning-configuration]]
+=== Tune Configuration
+
+Configure your `application.properties` (or `application.yml`). For complete parameter options, see xref:implementations:stacksaga-sync/orchestrator/properties.adoc[StackSaga Configuration Properties Reference].
+
+[source,properties]
+----
+spring.application.name=order-service
+
+# StackSaga instance topology
+stacksaga.instance.cluster=local-cluster
+stacksaga.instance.region=local-region
+stacksaga.instance.zone=local-zone
+
+# Package scan for @SagaDomainEntity classes
+stacksaga.domain-entity-scan=org.example.orderservice.domain
+
+# Dedicated MySQL Event-Store DataSource via R2DBC
+stacksaga.datasource.r2dbc.url=r2dbc:mysql://localhost:3306
+stacksaga.datasource.r2dbc.database=order_service_event_store
+stacksaga.datasource.r2dbc.username=${MYSQL_USER:root}
+stacksaga.datasource.r2dbc.password=${MYSQL_PASSWORD:password}
+----
+
+* `stacksaga.instance.*`: Identifies the cluster node for partitioned retry management.
+* `stacksaga.datasource.r2dbc.*`: Configures the non-blocking connection to the MySQL event store. On first startup, Liquibase automatically initializes the event store schema.
+
+---
+
+[[running-application]]
+=== Running the Application and Testing the Transaction Flow
+
+Start your MySQL database and run the `order-service` Spring Boot application.
+
+==== Step 1: Initiate Order Transaction
+
+Trigger the saga with a `POST` request to `/api/v1/order`:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/v1/order \
+  -H "Content-Type: application/json" \
+  -d '{
+        "username": "john.doe",
+        "totalAmount": 149.99,
+        "items": ["item-1", "item-2"]
+      }'
+----
+
+Response:
+[source,json]
+----
+{
+  "transactionId": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2",
+  "message": "Order initiated successfully. Awaiting payment callback."
+}
+----
+
+In the application console, you will observe Step 1 and Step 2 executing straight-through, with each step reading aggregator state, invoking simulated services, updating the aggregator, and Step 3 entering the **`PAUSED`** state:
+
+[source,text]
+----
+INFO ... c.e.o.s.ValidateUserExecutor : Step 1: Validating user 'john.doe' [idempotencyKey: idk-val-01]
+INFO ... c.e.o.s.ValidateUserExecutor : >> [SIMULATION] External UserService call: GET /users/john.doe?idempotencyKey=idk-val-01
+INFO ... c.e.o.s.ValidateUserExecutor : >> [AGGREGATOR] Updated OrderDomainEntity: userId=usr_4821, email=john.doe@example.com, status=USER_VALIDATED
+INFO ... c.e.o.s.ReserveOrderExecutor : Step 2: Reserving inventory for userId 'usr_4821', items: [item-1, item-2], amount: 149.99 [idempotencyKey: idk-res-02]
+INFO ... c.e.o.s.ReserveOrderExecutor : >> [SIMULATION] External InventoryService call: POST /inventory/reservations [userId: usr_4821, items: [item-1, item-2], idempotencyKey: idk-res-02]
+INFO ... c.e.o.s.ReserveOrderExecutor : >> [AGGREGATOR] Updated OrderDomainEntity: reservationId=resv_c0af5df2, warehouseCode=WH-NORTH-01, status=INVENTORY_RESERVED
+INFO ... c.e.o.s.InitiatePaymentExecutor : Step 3: Creating payment checkout session for user 'usr_4821' (john.doe@example.com), amount: 149.99, reservation: resv_c0af5df2 [resumeKey: orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2:c0af5df2-pay]
+INFO ... c.e.o.s.InitiatePaymentExecutor : >> [SIMULATION] External Payment Gateway call: POST /checkout/sessions [amount: 149.99, ref: resv_c0af5df2, callbackToken: orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2:c0af5df2-pay]
+INFO ... c.e.o.s.InitiatePaymentExecutor : >> [AGGREGATOR] Updated OrderDomainEntity: paymentSessionId=sess_c0af5df2, redirectUrl=https://pay.gateway.com/checkout/sess_c0af5df2, status=AWAITING_PAYMENT_CALLBACK
+INFO ... c.e.o.s.PlaceOrderHandler : >>> Saga State Transition: status=PROCESSING, txId=orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2, hasException=false
+----
+
+==== Step 2: Query Intermediate State (Paused Wait-State)
+
+Query the transaction snapshot while it is parked:
+
+[source,bash]
+----
+curl -X GET "http://localhost:8080/api/v1/order/status?order-id=orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2"
+----
+
+Response:
+[source,json]
+----
+{
+  "transaction_id": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2",
+  "current_status": "PROCESSING",
+  "current_domain_entity_state": {
+    "username": "john.doe",
+    "total_amount": 149.99,
+    "product_items": ["item-1", "item-2"],
+    "user_id": "usr_4821",
+    "user_email": "john.doe@example.com",
+    "user_validated": true,
+    "reservation_id": "resv_c0af5df2",
+    "warehouse_code": "WH-NORTH-01",
+    "payment_session_id": "sess_c0af5df2",
+    "payment_redirect_url": "https://pay.gateway.com/checkout/sess_c0af5df2",
+    "payment_reference_id": null,
+    "order_status": "AWAITING_PAYMENT_CALLBACK"
+  },
+  "execution_history": {
+    "0": {
+      "executor": "ValidateUserExecutor",
+      "executor_type": "QUERY_EXECUTOR",
+      "event_name": "VALIDATED_USER",
+      "current_status": "SUCCESS"
+    },
+    "1": {
+      "executor": "ReserveOrderExecutor",
+      "executor_type": "COMMAND_EXECUTOR",
+      "event_name": "RESERVED_ORDER",
+      "current_status": "SUCCESS"
+    },
+    "2": {
+      "executor": "InitiatePaymentExecutor",
+      "executor_type": "COMMAND_EXECUTOR",
+      "event_name": "PAYMENT_SESSION_INITIATED",
+      "current_status": "SUCCESS"
+    }
+  }
+}
+----
+
+Notice how the `current_domain_entity_state` aggregator has accumulated data across each step: `user_id`, `reservation_id`, and `payment_session_id` are durably recorded in MySQL, and the compute threads are completely free while waiting for the webhook!
+
+==== Step 3.A: Happy Path — Successful Webhook Resumption
+
+Simulate the payment gateway posting a `"SUCCESS"` callback providing the `resumeKey`:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/v1/order/callback/payment \
+  -H "Content-Type: application/json" \
+  -d '{
+        "resumeKey": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2:c0af5df2-pay",
+        "paymentStatus": "SUCCESS",
+        "referenceId": "PAY-GATEWAY-998811"
+      }'
+----
+
+The saga awakens, dispatches to `FinalizeOrderExecutor`, confirms fulfillment, and marks the transaction `PROCESS_COMPLETED`:
+
+[source,text]
+----
+INFO ... c.e.o.s.FinalizeOrderExecutor : Step 4: Awakened with payment callback. Status: SUCCESS, Ref: PAY-GATEWAY-998811, Session: sess_c0af5df2, Reservation: resv_c0af5df2
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [AGGREGATOR] Updated OrderDomainEntity: paymentReferenceId=PAY-GATEWAY-998811, status=CONFIRMED
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [SIMULATION] External Order Fulfillment: POST /orders/resv_c0af5df2/confirm [ref: PAY-GATEWAY-998811, idempotencyKey: idk-fin-04]
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [SIMULATION] External Notification Service: POST /notifications/email [recipient: john.doe@example.com, ref: PAY-GATEWAY-998811]
+INFO ... c.e.o.s.PlaceOrderHandler : >>> Saga State Transition: status=PROCESS_COMPLETED, txId=orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2, hasException=false
+----
+
+Now query `/api/v1/order/status`:
+
+[source,json]
+----
+{
+  "transaction_id": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2",
+  "current_status": "PROCESS_COMPLETED",
+  "current_domain_entity_state": {
+    "username": "john.doe",
+    "total_amount": 149.99,
+    "product_items": ["item-1", "item-2"],
+    "user_id": "usr_4821",
+    "user_email": "john.doe@example.com",
+    "user_validated": true,
+    "reservation_id": "resv_c0af5df2",
+    "warehouse_code": "WH-NORTH-01",
+    "payment_session_id": "sess_c0af5df2",
+    "payment_reference_id": "PAY-GATEWAY-998811",
+    "order_status": "CONFIRMED"
+  }
+}
+----
+
+==== Step 3.B: Failure Path — Automatic Reverse Compensation
+
+Start a new order, and then simulate a `"DECLINED"` webhook callback:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/v1/order/callback/payment \
+  -H "Content-Type: application/json" \
+  -d '{
+        "resumeKey": "orde-01a0b098-new-id:idemp-key",
+        "paymentStatus": "DECLINED",
+        "referenceId": "ERR-CARD-EXPIRED"
+      }'
+----
+
+`FinalizeOrderExecutor` throws xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`].
+The SEC halts forward progress and activates **Deterministic Reverse Autopilot** (xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-2-1-revert-to-core[USNP Pattern 2.1]):
+
+1. `FinalizeOrderExecutor.doRevert()` marks the order canceled (`ORDER_FINALIZATION_REVERTED`).
+2. `InitiatePaymentExecutor.doRevert()` reads `payment_session_id` from historical snapshot and voids it (`PAYMENT_SESSION_VOIDED`).
+3. `ReserveOrderExecutor.doRevert()` reads `reservation_id` and releases reserved stock in the warehouse (`REVERTED_ORDER`).
+4. `ValidateUserExecutor` (`QueryExecutor`) is **automatically bypassed and pruned** by the SEC during compensation.
+5. The saga cleanly terminates with status **`REVERT_COMPLETED`**.
+
+Console output:
+[source,text]
+----
+WARN ... c.e.o.s.FinalizeOrderExecutor : Reverting Step 4: Canceling order finalization for tx: orde-01a0b098-new-id
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [SIMULATION] Marking order status as CANCELED in local database for tx: orde-01a0b098-new-id
+WARN ... c.e.o.s.InitiatePaymentExecutor : Reverting Step 3: Canceling payment checkout session 'sess_new' [idempotencyKey: idk-rev-3]
+INFO ... c.e.o.s.InitiatePaymentExecutor : >> [SIMULATION] External Payment Gateway Compensation: POST /checkout/sessions/sess_new/void [idempotencyKey: idk-rev-3]
+WARN ... c.e.o.s.ReserveOrderExecutor : Reverting Step 2: Compensating inventory reservation 'resv_new' for userId 'usr_4821' [idempotencyKey: idk-rev-2]
+INFO ... c.e.o.s.ReserveOrderExecutor : >> [SIMULATION] External InventoryService Compensation: POST /inventory/reservations/resv_new/release [idempotencyKey: idk-rev-2]
+INFO ... c.e.o.s.PlaceOrderHandler : >>> Saga State Transition: status=REVERT_COMPLETED, txId=orde-01a0b098-new-id, hasException=true
+----
+
+---
+
+[[stage-2]]
+== Stage-2 [Adding Retry Capability]
+
+Stage-1 covered continuous progression, wait-state pauses, and compensation.
+In production environments, you will also encounter **transient infrastructure faults** (e.g., temporary network disconnects, downstream 503s, or database lock deadlocks) that should be retried automatically rather than triggering immediate rollback.
+
+StackSaga provides distributed self-healing through the **Retry Subsystem**:
+1. Create a dedicated **Ring Coordinator Application** using `stacksaga-ring-coordinator-spring-boot-starter`.
+2. Add `stacksaga-ring-coordinator-connector` to your `order-service` orchestrator application.
+
+=== 1. Creating the Ring Coordinator Application
+
+Create a standalone Spring Boot application and add the following dependency:
+
+[source,xml,subs="attributes+"]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>{stacksaga-version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-ring-coordinator-spring-boot-starter</artifactId>
+</dependency>
+----
+
+Configure `application.properties`:
+
+[source,properties]
+----
+spring.application.name=order-service-ring-coordinator
+
+# RSocket Server on Master
+spring.rsocket.server.address=localhost
+spring.rsocket.server.port=4455
+
+# Master and Slave configuration
+stacksaga.coordinator.target-services=order-service
+stacksaga.coordinator.instance-type=master,slave
+
+# Must match orchestrator cluster and region
+stacksaga.instance.cluster=local-cluster
+stacksaga.instance.region=local-region
+stacksaga.instance.zone=local-zone
+
+stacksaga.coordinator.slave.target-master.port=4455
+stacksaga.coordinator.slave.target-master.host=localhost
+----
+
+=== 2. Connecting the Orchestrator Service
+
+In your `order-service` `pom.xml`, add the coordinator connector:
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-ring-coordinator-connector</artifactId>
+</dependency>
+----
+
+Add the connection properties to `order-service` `application.properties`:
+
+[source,properties]
+----
+# Duration a stalled transaction is kept waiting before being exposed for retry
+stacksaga.sql.transaction.recovery.default.retry.delay=1m
+
+# Enable connector and connect to Ring Coordinator RSocket master
+stacksaga.coordinator.connector.enabled=true
+stacksaga.coordinator.connector.master.requester.host=localhost
+stacksaga.coordinator.connector.master.requester.port=4455
+----
+
+=== 3. Simulating Retryable Fault Recovery
+
+Update `ReserveOrderExecutor` to simulate a transient network fault on the first attempt using xref:ROOT:retryable_executor_exception.adoc[`RetryableExecutorException`]. The Ring Coordinator will automatically claim the stalled transaction and retry it:
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "order-service", value = "ReserveOrderExecutor")
+public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final AtomicReference<Map<String, Integer>> attemptCounter = new AtomicReference<>(new HashMap<>());
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        String txId = currentDomainEntity.getTransactionId();
+        int attempts = attemptCounter.get().compute(txId, (k, v) -> v == null ? 1 : v + 1);
+
+        // 1. First attempt fails due to transient network timeout
+        if (attempts == 1) {
+            log.warn("Attempt 1: Simulating transient network timeout connecting to InventoryService for tx: {}", txId);
+            // Throws RetryableExecutorException -> SEC marks transaction for scheduled retry
+            throw RetryableExecutorException.of("Transient inventory service connection timeout for tx: " + txId);
+        }
+
+        // 2. Second attempt (retry claimed and executed by Ring Coordinator) succeeds
+        String userId = currentDomainEntity.getUserId();
+        List<String> items = currentDomainEntity.getProductItems();
+        log.info("Attempt {} succeeded: Reserving inventory for userId '{}', items: {}", attempts, userId, items);
+
+        log.info(">> [SIMULATION] External InventoryService call on retry: POST /inventory/reservations [userId: {}, items: {}]",
+                userId, items);
+        String simulatedReservationId = "resv_" + idempotencyKey.substring(0, 8);
+        currentDomainEntity.setReservationId(simulatedReservationId);
+        currentDomainEntity.setWarehouseCode("WH-NORTH-01");
+        currentDomainEntity.setOrderStatus("INVENTORY_RESERVED");
+        log.info(">> [AGGREGATOR] Updated OrderDomainEntity on retry: reservationId={}", simulatedReservationId);
+
+        return stepManager
+                .success("RESERVED_ORDER")
+                .asSync()
+                .noPause()
+                .toNextExecutor(InitiatePaymentExecutor.class);
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        String reservationId = finalDomainEntityState.getReservationId();
+        log.warn("Reverting Step 2: Calling InventoryService to release reservation '{}'", reservationId);
+
+        log.info(">> [SIMULATION] External InventoryService Compensation: POST /inventory/reservations/{}/release",
+                reservationId);
+
+        return stepManager
+                .success("REVERTED_ORDER")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+---
+
+[[stage-3]]
+== Stage-3 [Observability via Trace Window]
+
+The xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] is an interactive web portal that visualizes your transaction graphs in real time—rendering execution timelines, state transitions, step latencies, domain entity snapshots, and compensation trees.
+
+=== 1. Adding Trace Window Connector
+
+In your `order-service` `pom.xml`, add the trace connector (see xref:trace-window:stacksaga-trace-window-connector-overview.adoc[Trace Window Connector Overview]):
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-trace-window-connector-servlet</artifactId>
+</dependency>
+----
+
+Enable the API in `order-service` `application.properties`:
+
+[source,properties]
+----
+stacksaga.trace-window.enable-api=true
+stacksaga.trace-window.secure-api=false
+----
+
+=== 2. Visualizing Transactions
+
+1. Restart your `order-service`.
+2. Navigate to https://trace.stacksaga.org/[Trace-Window].
+3. Connect your local server by specifying `http://localhost:8080`.
+4. Enter your `transactionId` to inspect:
+   * Continuous forward steps (`ValidateUserExecutor`, `ReserveOrderExecutor`) with progressive aggregator mutations.
+   * The intentional pause point at `InitiatePaymentExecutor` displaying the active `resumeKey`.
+   * The webhook callback resumption restoring state into `FinalizeOrderExecutor`.
+   * If failed, the exact reverse compensation path and pruned query steps.
+
+---
+
+[[next-steps-and-references]]
+== Next Steps & Advanced Reference Documentation
+
+This quick example covered the essential mechanics of building a mixed-style saga. In real-world enterprise architectures, you will encounter more specialized integration needs, complex routing requirements, and advanced operational setups. Explore the following in-depth reference guides to enhance your implementation:
+
+[cols="1,2,2",options="header"]
+|===
+| Topic | Architectural Focus | Documentation Link
+
+| *Integration Patterns (USIP)*
+| Master the three core integration modes: Direct Synchronous (Pattern 1), Correlated Park-and-Resume (Pattern 2), and Two-Stage Broker Dispatch with Commit Barrier (Pattern 3).
+| xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-overview[Unified Saga Integration Patterns (USIP)]
+
+| *Navigation Patterns (USNP)*
+| Dynamic runtime branching, failure pivots, Pre/Post-Executors, and 3-Phase Compensation unrolling.
+| xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-overview[Unified Saga Navigation Patterns (USNP)]
+
+| *Executor Architecture*
+| Detailed specifications for `CommandExecutor`, `QueryExecutor`, `ReactiveCommandExecutor`, and method parameter contracts.
+| xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[Executor Architecture & Component Reference]
+
+| *SagaTemplate Operations*
+| Programmatic initiation (`fireAndForget`, `fireAndWatch`), fluent resumption (`ResumeSpec`), and on-demand queries (`getCurrentState`).
+| xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc[SagaTemplate Reference Guide]
+
+| *State Aggregation (Domain Entity)*
+| Jackson polymorphic serialization, schema versioning, and snapshot storage in R2DBC event stores.
+| xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc[Domain Entity (DE) Architecture]
+
+| *Exception & Failure Taxonomy*
+| Distinguishing transient infrastructure failures (`RetryableExecutorException`) from definitive business errors (`NonRetryableExecutorException`).
+| xref:ROOT:retryable_executor_exception.adoc[Retryable] & xref:ROOT:non_retryable_executor_exception.adoc[Non-Retryable Exceptions]
+
+| *Configuration & Tuning*
+| Scheduler parallelism, pool capacities, event store retries, and cluster topology tuning.
+| xref:implementations:stacksaga-sync/orchestrator/properties.adoc[Configuration Properties Reference]
+
+| *Trace Window Observability*
+| Connecting your microservices to the web portal for real-time transaction graph inspection, step latency tracking, and compensation visualization.
+| xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window Guide]
+|===

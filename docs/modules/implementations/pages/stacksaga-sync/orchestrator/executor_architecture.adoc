@@ -190,7 +190,7 @@ RevertStepManager doRevert(
    * **Mandatory Best Practice**: Always forward `idempotencyKey` to downstream REST APIs (as an HTTP header like `Idempotency-Key` or request body attribute), message queues, or database operations to guarantee safe retries without side-effects.
 
 3. **`resumeContext`**:
-   * An immutable key-value metadata store (`ResumeContext`) delivered when a paused transaction is awakened via `sagaTemplate.resume(txId, resumeKey, resumeContext)`.
+   * An immutable key-value metadata store (`ResumeContext`) delivered when a paused transaction is awakened via `sagaTemplate.resume(resumeKey, retentionDuration)`.
    * Extract callback parameters safely using `resumeContext.get("key")` (returns `Optional<String>`).
    * When a step runs continuously without pausing, `resumeContext` is empty.
 
@@ -329,7 +329,7 @@ return stepManager
 
 * The SEC marks the transaction as `PAUSED`, commits the `resumeKey`, and **immediately frees the worker thread and DB connection**.
 * The saga consumes zero CPU, threads, or memory while parked.
-* When the webhook arrives, call `sagaTemplate.resume(OrderDomainEntity.class, orderId, resumeContext)` to wake the saga and invoke `CapturePaymentExecutor`.
+* When the webhook arrives, call `sagaTemplate.resume(resumeKey, retentionDuration)` (fluent `.put(...)` or `.withContext(resumeContext)`) to wake the saga and invoke `CapturePaymentExecutor`.
 * See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP Pattern 2: Correlated Park-and-Resume] for complete thread lifecycle details.
 
 === Supporting Two-Stage Broker Dispatch with Commit Barrier (USIP Pattern 3)

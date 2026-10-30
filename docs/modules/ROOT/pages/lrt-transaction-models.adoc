@@ -99,14 +99,14 @@ An executor dispatches a command to a Kafka topic via the Two-Stage model:
 `stepManager.success("PAYMENT_DISPATCHED").asAsync().invoker(...).pauseUntilResume(Duration.ofHours(2)).resumeToNextExecutor(ReserveInventoryExecutor.class);`
 
 The orchestrator commits state to the Event Store *first*, lazily fires the broker message, and frees 100% of its worker threads.
-When the downstream consumer completes processing, it produces a reply event consumed by a `@KafkaListener` on the orchestrator, which invokes `sagaTemplate.resume(txId, idempotencyKey)` to advance the saga.
+When the downstream consumer completes processing, it produces a reply event consumed by a `@KafkaListener` on the orchestrator, which invokes `sagaTemplate.resume(resumeKey, Duration.ofMinutes(15)).execute()` to advance the saga.
 
 ==== On-Demand Logistics & Food Delivery (Physical Operation Delays)
 In on-demand delivery platforms (such as Uber Eats, Deliveroo, or DoorDash):
 . A customer places an order; item checks and payment authorization succeed immediately.
 . The orchestrator notifies the restaurant (`restaurant-service`).
 . *Intentional Business Pause*: The saga cannot dispatch a courier immediately because physical food preparation takes 20–40 minutes. The executor enters a wait state (`.pauseUntilResume(Duration.ofHours(2))`). The orchestrator persists the transaction and releases all worker threads.
-. *Resumption via Webhook*: When kitchen staff mark the food "Ready", the restaurant POS fires a callback webhook. The orchestrator calls `sagaTemplate.resume(txId, correlationKey).execute()`.
+. *Resumption via Webhook*: When kitchen staff mark the food "Ready", the restaurant POS fires a callback webhook. The orchestrator calls `sagaTemplate.resume(resumeKey, Duration.ofMinutes(15)).execute()`.
 . The saga wakes up, restores domain entity state from the Event Store, and advances to `DeliveryDispatchExecutor` to assign a nearby courier.
 
 ==== Asynchronous Payment Gateways & 3D-Secure Redirects
@@ -126,7 +126,7 @@ When a downstream step fails, StackSaga rolls back the saga in reverse order.
 However, undoing financial or logistical operations frequently requires asynchronous processing:
 . The orchestrator triggers `doRevert()` on the payment executor.
 . Because banking gateways process reversals asynchronously via webhooks, `doRevert()` dispatches the refund request and pauses compensation via `.asSync().pauseUntilResume(Duration.ofHours(24)).resumeToNextDefaultExecutor()`.
-. When the payment provider confirms the refund via webhook, the orchestrator calls `sagaTemplate.resume(txId, correlationKey).execute()`.
+. When the payment provider confirms the refund via webhook, the orchestrator calls `sagaTemplate.resume(resumeKey, Duration.ofHours(1)).execute()`.
 . The resumed `doRevert()` verifies the refund status and completes, allowing the saga to proceed with compensating earlier steps.
 
 ---
@@ -153,8 +153,8 @@ Unlike traditional orchestration engines that only support pausing during forwar
 | `stepManager.success(event).asSync().pauseUntilResume(duration).resumeToNextDefaultExecutor()` (or `asAsync()`)
 
 | *Resumption Trigger*
-| Callback webhook or Kafka consumer calls `sagaTemplate.resume(txId, correlationKey).execute()`
-| Callback webhook or Kafka consumer calls `sagaTemplate.resume(txId, correlationKey).execute()`
+| Callback webhook or Kafka consumer calls `sagaTemplate.resume(resumeKey, retentionDuration).execute()`
+| Callback webhook or Kafka consumer calls `sagaTemplate.resume(resumeKey, retentionDuration).execute()`
 
 | *Resumption Routing*
 | Resumes target `NextExecutor.doProcess(...)` with `ResumeContext`.
@@ -200,7 +200,7 @@ In Pausable LRTs, two critical architectural mechanisms guarantee stability acro
 === Decoupling Callback Payloads via `ResumeContext`
 Allowing external webhook controllers or Kafka listeners to directly mutate fields on the `DomainEntity` breaks domain encapsulation and invites race conditions.
 StackSaga solves this by routing all callback payloads through a separate metadata map called `ResumeContext`.
-External controllers supply callback data via `sagaTemplate.resume(txId, key).put("gatewayRef", ref).execute()`.
+External controllers supply callback data via `sagaTemplate.resume(resumeKey, retentionDuration).put("gatewayRef", ref).execute()`.
 The SEC passes this `ResumeContext` directly into the resumed executor, ensuring that **only the executor contains the domain logic to interpret and validate external callback data**.
 
 === Pristine State Restoration on Re-Execution
