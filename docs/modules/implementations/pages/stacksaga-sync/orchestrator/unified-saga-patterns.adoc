@@ -264,7 +264,7 @@ public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
 
     @Override
     public @NonNull RevertStepManager doRevert(...) {
-        return stepManager.success("ORDER_CANCELED").asSync().noPause().resumeToNextDefaultExecutor();
+        return stepManager.success("ORDER_CANCELED").asSync().noPause().toNextDefaultExecutor();
     }
 }
 ----
@@ -306,7 +306,7 @@ public class CreateOrderReactiveExecutor implements ReactiveCommandExecutor<Orde
 
     @Override
     public Mono<RevertStepManager> doRevert(...) {
-        return Mono.just(stepManager.success("ORDER_CANCELED").asSync().noPause().resumeToNextDefaultExecutor());
+        return Mono.just(stepManager.success("ORDER_CANCELED").asSync().noPause().toNextDefaultExecutor());
     }
 }
 ----
@@ -374,7 +374,10 @@ No resources remain tied to this transaction during the waiting period.
 
 * **Zero Held Threads**: No server threads remain blocked while waiting.
 * **Persistent Correlation**: The transaction state and correlation key are safely persisted in the Event Store.
-* **Handles Duplicate Resume Triggers**: If a gateway, message broker, or user action sends multiple duplicate resume requests at the same time, only the first one resumes the saga; subsequent duplicate calls are safely ignored.
+* **Enforces Replay Protection (Double Execution Guard)**: If a gateway, message broker, or user action sends multiple duplicate resume requests with the same `resumeKey`, only the first invocation succeeds in acquiring the active transaction lease and resuming the saga.
+Subsequent duplicate requests are rejected with `InvalidTransactionResumeKeyException` (because the correlation key is atomically consumed and invalidated in the Event Store upon the first resumption).
+This strictly prevents double execution of downstream executors (idempotent single execution).
+Controllers receiving external callbacks can catch `InvalidTransactionResumeKeyException` to return an idempotent HTTP `200 OK` acknowledgment, signaling external gateways to cease further retries.
 
 ==== Advantages of Pattern 2
 
@@ -518,14 +521,41 @@ In high-throughput systems, this execution order causes a serious race condition
 A consumer service on another server receives it in 2 milliseconds, finishes the work, and immediately sends a completion event back to the orchestrator.
 * **Scenario B: HTTP Fire-and-Forget Endpoints**: An executor calls a fire-and-forget HTTP endpoint on `Service-A`. `Service-A` immediately returns HTTP `202 Accepted` and triggers a fast background webhook back to the orchestrator.
 
-**What Happens When the Persistence Layer Experiences Latency?**
+**What Happens When the Persistence Layer Experiences Latency? (The Stuck Wait-State Vulnerability)**
 
-1. The executor sends the HTTP request or Kafka message (*Step 1*).
-2. The external service receives it and **immediately sends the resume callback back to the orchestrator**.
-3. Meanwhile, on the orchestrator side, the persistence layer experiences momentary latency while persisting the `PAUSED` state to the Event Store (*Step 2*).
-4. The incoming resume callback arrives at the orchestrator **BEFORE the Event Store finishes persisting the `PAUSED` state record!**
-5. The resume endpoint (whether HTTP webhook or message listener) queries the Event Store for the correlation key, finds no active `PAUSED` transaction record yet, and rejects the callback.
-The transaction gets stuck permanently!
+Consider what happens when an outbound network call is dispatched eagerly inside `doProcess()` before the orchestrator commits the step state to the Event Store:
+
+[source,text]
+----
+EXECUTOR (doProcess)               EVENT STORE                      EXTERNAL SERVICE
+       │                                │                                  │
+  (1)  ├────── Send Outbound Request ───┼─────────────────────────────────►│
+       │                                │                                  │
+  (2)  │                                │◄─── Immediate Resume Callback ───┤
+       │                                │     (sagaTemplate.resume)        │
+       │                                │                                  │
+       │   [ Event Store Query ]        │                                  │
+       │   No active PAUSED state found!│                                  │
+       │   (Step 1 not yet committed)   │                                  │
+       │                                │                                  │
+  (3)  │                                ├───► Rejected! (Correlation Key Mismatch)
+       │                                │                                  │
+  (4)  ├─── Commit PAUSED State ───────►│                                  │
+       │    (Saga parked & waiting)     │                                  │
+       │                                │                                  │
+  (5)  ▼   [ DEADLOCK / STUCK ]         ▼                                  ▼
+       Saga waits forever for a callback that was already consumed and rejected!
+----
+
+1. The executor dispatches the network request eagerly inside `doProcess()` (*Step 1*).
+2. The external service receives it and **immediately sends the resume callback back to the orchestrator** (*Step 2*).
+3. Meanwhile, the orchestrator's local thread is still finalizing execution and has not yet committed the step's `PAUSED` state or registered the correlation key in the Event Store.
+4. The incoming resume callback arrives at the orchestrator **BEFORE the Event Store commits the `PAUSED` state!**
+5. When the orchestrator queries the Event Store, it finds no active paused transaction matching the correlation key.
+The engine rejects the premature callback with `InvalidTransactionResumeKeyException` (correlation key mismatch / uncommitted transaction).
+6. Moments later, the local executor thread completes and the orchestrator commits the `PAUSED` state to the Event Store, holding an active transaction lease.
+7. **The Fatal Result**: Because the single callback was already delivered, rejected, and discarded by the external system, **no further resume triggers will arrive**.
+The transaction remains **permanently stuck in a waiting state**, and downstream steps are **never invoked**.
 
 **The Universal Need for Pattern 3 (The Commit Barrier)**:
 
@@ -622,16 +652,20 @@ public class DispatchShippingExecutor implements CommandExecutor<OrderDomainEnti
         return stepManager
                 .success("SHIPPING_DISPATCH_SUBMITTED")
                 .asAsync()
-                .invoker((de, ctx) -> {
-                    // Stage 2: Lazy Invocation (Executed strictly AFTER the event store commit)
-                    ShippingCommandMessage message = new ShippingCommandMessage(
-                            de.getOrderId(),
-                            de.getShippingTrackingId(),
-                            de.getShippingAddress(),
-                            idempotencyKey
-                    );
-                    kafkaTemplate.send("shipping-commands-topic", de.getOrderId(), message);
-                })
+                .invoker(
+                        resumeKey -> {
+                            // Stage 2: Lazy Invocation (Executed strictly AFTER the event store commit)
+                            ShippingCommandMessage message = new ShippingCommandMessage(
+                                    currentDomainEntity.getOrderId(),
+                                    currentDomainEntity.getShippingTrackingId(),
+                                    currentDomainEntity.getShippingAddress(),
+                                    resumeKey // Resume key included for asynchronous callback!
+                            );
+                            kafkaTemplate.send("shipping-commands-topic", currentDomainEntity.getOrderId(), message);
+                        },
+                        Duration.ofMinutes(15),     // Tier 2 scheduled retry window on transient network failure
+                        KafkaException.class        // Exception type triggering framework scheduled retry
+                )
                 .pauseUntilResume(Duration.ofHours(2))
                 .resumeToNextExecutor(ConfirmDeliveryExecutor.class);
     }
@@ -662,14 +696,18 @@ public class DispatchSmsFireAndForgetExecutor implements CommandExecutor<OrderDo
         return stepManager
                 .success("SMS_DISPATCH_COMMITTED")
                 .asAsync()
-                .invoker((de, ctx) -> {
-                    // Stage 2: Fire-and-forget HTTP call (No payload returned)
-                    fastSmsGatewayClient.sendFireAndForget(
-                            de.getCustomerPhone(),
-                            "Your order " + de.getOrderId() + " is confirmed!",
-                            idempotencyKey
-                    );
-                })
+                .invoker(
+                        resumeKey -> {
+                            // Stage 2: Fire-and-forget HTTP call (No payload returned)
+                            fastSmsGatewayClient.sendFireAndForget(
+                                    currentDomainEntity.getCustomerPhone(),
+                                    "Your order " + currentDomainEntity.getOrderId() + " is confirmed! Callback token: " + resumeKey,
+                                    idempotencyKey
+                            );
+                        },
+                        Duration.ofMinutes(5),           // Retry window for transient network failure
+                        WebClientResponseException.class // Exception triggering framework scheduled retry
+                )
                 .pauseUntilResume(Duration.ofMinutes(10))
                 .resumeToNextExecutor(PostNotificationConfirmationExecutor.class);
     }
@@ -714,7 +752,7 @@ public class DispatchShippingReactiveExecutor implements ReactiveCommandExecutor
 
     @Override
     public Mono<RevertStepManager> doRevert(...) {
-        return Mono.just(stepManager.success("SHIPPING_REVERTED").asSync().noPause().resumeToNextDefaultExecutor());
+        return Mono.just(stepManager.success("SHIPPING_REVERTED").asSync().noPause().toNextDefaultExecutor());
     }
 }
 ----
@@ -1136,7 +1174,17 @@ Instead, StackSaga handles rollback automatically via **Deterministic Reverse Au
 1. When compensation activates, the coordinator inspects the executed event store history.
 2. It identifies all completed command steps in the exact order they ran.
 3. It reverses the steps in backward order (Last-In, First-Out: LIFO).
-4. Calling `.resumeToNextDefaultExecutor()` signals the engine to automatically route to the appropriate predecessor step in history.
+4. Calling `.toNextDefaultExecutor()` (or `.resumeToNextDefaultExecutor()` when entering a pausable wait-state) signals the engine to automatically route to the appropriate predecessor step in history.
+====
+
+[IMPORTANT]
+.Domain Entity Immutability & RevertHintStore During Rollback
+====
+During rollback execution, `finalDomainEntityState` represents the immutable domain entity snapshot frozen at the exact point of forward failure.
+
+* **No Domain Entity Persistence in Revert**: StackSaga intentionally does NOT persist any modifications made to `finalDomainEntityState` during rollback. The Event Store preserves the aggregate's forward state at the failure point for post-mortem forensics, auditing, and debugging.
+* **Passing Data Backward Across Compensations**: To transfer data backward between compensating steps (such as refund references, cancellation codes, or restock batch IDs), developers must use `RevertHintStore` (`revertHintStore.put(key, value)`).
+* The `RevertHintStore` is automatically propagated backward across the entire reverse cascade (`doRevert`, Pre-Executors, Post-Executors) and persisted immutably with each compensation execution in the Event Store for full auditability and trace parity.
 ====
 
 ==== Overview & Rollback Destination Roadmap
@@ -1182,7 +1230,7 @@ public @NonNull RevertStepManager doRevert(
             .success("INVENTORY_UNRESERVED")
             .asSync()
             .noPause()
-            .resumeToNextDefaultExecutor();
+            .toNextDefaultExecutor();
 }
 ----
 
@@ -1207,7 +1255,7 @@ public @NonNull RevertStepManager doRevert(...) throws RetryableExecutorExceptio
     }
 
     // Resumed attempt: Settlement trigger arrived
-    return stepManager.success("REFUND_SETTLED").asSync().noPause().resumeToNextDefaultExecutor();
+    return stepManager.success("REFUND_SETTLED").asSync().noPause().toNextDefaultExecutor();
 }
 ----
 
@@ -1221,9 +1269,13 @@ public @NonNull RevertStepManager doRevert(...) {
     return stepManager
             .success("ROLLBACK_COMMAND_EMITTED")
             .asAsync()
-            .invoker((de, ctx) -> {
-                kafkaTemplate.send("logistics-cancel-topic", de.getOrderId(), "CANCEL");
-            })
+            .invoker(
+                    resumeKey -> {
+                        kafkaTemplate.send("logistics-cancel-topic", finalDomainEntityState.getOrderId(), resumeKey);
+                    },
+                    Duration.ofHours(1),
+                    KafkaException.class
+            )
             .pauseUntilResume(Duration.ofHours(2))
             .resumeToNextDefaultExecutor();
 }
@@ -1593,7 +1645,7 @@ This guarantees that read-only queries and non-compensable audit operations neve
 | Sync-Continuous
 | `CommandExecutor`
 | Preceding Command
-| `.asSync().noPause().resumeToNextDefaultExecutor()`
+| `.asSync().noPause().toNextDefaultExecutor()`
 | Immediate Stock Unreservation -> Rolls back to previous step
 
 | `RevertStepManager`
