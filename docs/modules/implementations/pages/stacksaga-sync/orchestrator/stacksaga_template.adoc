@@ -1,5 +1,5 @@
-:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, fire-and-forget, fire-and-watch, resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
-:keywords: StackSaga, SagaTemplate, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, fireAndWatch, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
+:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, fire-and-forget, resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
+:keywords: StackSaga, SagaTemplate, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
 :page-priority: 0.7
 
 = SagaTemplate and Event Listeners
@@ -9,7 +9,7 @@
 == SagaTemplate
 
 `SagaTemplate` is the main entry point for interacting with the StackSaga engine (SEC) in an orchestrator service.
-It provides a fluent builder API to initialize transactions, configure execution modes (fire-and-forget or fire-and-watch), and query the current state and execution history of any transaction.
+It provides a fluent builder API to initialize transactions, trigger execution (`fireAndForget`), and query the current state and execution history of any transaction.
 
 `SagaTemplate` seamlessly supports both imperative (blocking) and reactive (non-blocking) application architectures.
 
@@ -92,14 +92,7 @@ NOTE: For real-time updates without polling, implement a xref:#event_listener_fo
 
 In a reactive environment (e.g., Spring WebFlux), `SagaTemplate` provides non-blocking operators across all lifecycle phases.
 
-There are two primary modes to execute a saga transaction reactively:
-
-. *Fire-and-Forget* -- Start the transaction and immediately receive a `Mono<String>` emitting the transaction ID once the saga is accepted. The saga executes in the background. Use this when you only need the transaction ID and will rely on `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track progress.
-. *Fire-and-Watch* -- Start the transaction and observe real-time state transitions as a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`. Ideal for streaming live execution events to clients (e.g., via Server-Sent Events or WebSockets).
-
-==== Fire-and-Forget
-
-Calling `.fireAndForget().executeAsync()` hands the transaction off to the StackSaga engine and returns a `Mono<String>` emitting the generated transaction ID:
+Calling `.fireAndForget().executeAsync()` hands the transaction off to the StackSaga engine in a non-blocking manner and returns a `Mono<String>` emitting the generated transaction ID once initialized:
 
 [source,java]
 ----
@@ -134,40 +127,6 @@ public class PlaceOrderHandler {
 ----
 
 <1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress.
-
-==== Fire-and-Watch
-
-Calling `.fireAndWatch(Duration waitTimeout).toFlux()` initiates the transaction and returns a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>` that emits an updated `TransactionState` snapshot after each executor span completes:
-
-[source,java]
-----
-@GetMapping(value = "/order/watch", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-public Flux<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>>> createOrderAndWatch() {
-    return sagaTemplate
-            .init(OrderDomainEntity::new)
-            .peek(orderDomainEntity -> {
-                log.info("Started Transaction ID: {}", orderDomainEntity.getTransactionId());
-            })
-            .startWith(ValidateUserExecutor.class)
-            .fireAndWatch(Duration.ofSeconds(40)) //<1>
-            .toFlux()
-            .doOnNext(state -> {
-                log.info("Received state change: {}", state);
-            });
-}
-----
-
-<1> `waitTimeout` defines the maximum duration the subscriber will wait for execution results before the pipeline signals a `WaitTimeExceededException`.
-
-===== Key Behaviors and Error Handling
-
-* *Timeout (`WaitTimeExceededException`)*: If execution exceeds the specified `Duration waitTimeout`, the pipeline terminates with a `WaitTimeExceededException` via `onError`. This **only ends the subscription** -- the saga execution continues asynchronously in the background. After the subscription ends, you can still observe progress in two ways:
-+
-** If you have registered a xref:#event_listener_for_stage_change_events[State Change Listener] (`TransactionEventListener` or `ReactiveTransactionEventListener`), it continues to receive event callbacks.
-** Alternatively, query the state at any time using `getCurrentState(transactionId).fetchAsync()`.
-
-* *Execution Pause (`TransactionPausedException`)*: If a step encounters a retryable exception (such as a transient database failure or custom `RetryableExecutorException`), execution is paused and rescheduled. Because `TransactionState` only represents completed saga states, the live subscription halts and emits a `TransactionPausedException` via `onError`. This indicates a temporary retry pause, not a fatal failure.
-Once rescheduled and retried, state notifications continue via listeners, or you can query state using `getCurrentState(transactionId).fetchAsync()`.
 
 [[resuming-paused-transactions]]
 === Resuming Paused Transactions (Pausable LRT)
