@@ -136,8 +136,8 @@ Similarly, when a compensation step must undo a transaction via an asynchronous 
 
 At the moment of pausing, the transaction enters an intentional business wait state:
 
-* The `DomainEntity` state is persisted to the event store.
-* `es_transaction` marks `is_paused = 1` and records the active `resume_key` (generated and accessible during execution via `stepManager.getResumeKey()`).
+* The `DomainEntity` state is persisted to the Event Store.
+* The orchestrator marks the transaction as paused and registers the active correlation token (generated and accessible during execution via `stepManager.getResumeKey()`).
 * CPU worker threads and database connections are freed immediately.
 
 [NOTE]
@@ -180,7 +180,7 @@ Mono<Void> resumeMono = this.sagaTemplate
 * **`.put(String key, String value)`**: Adds an individual key-value entry to the `ResumeContext`.
 * **`.putAll(Map<String, String> map)`**: Adds all entries from the specified map to the `ResumeContext`.
 * **`.withContext(ResumeContext resumeContext)`**: Supplies or replaces a pre-built `ResumeContext` (e.g., from `DefaultResumeContext.of(map)`).
-* **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments). Throws `InvalidTransactionResumeKeyException` if the resume key is invalid or unrecognized.
+* **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments). Throws `InvalidTransactionResumeKeyException` if the resume key is invalid or unrecognized. Throws `IllegalStateException` if invoked from a non-blocking Reactor/Netty event-loop thread.
 * **`.executeAsync()`**: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments). Signals `InvalidTransactionResumeKeyException` via `onError` if invalid.
 
 NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(resumeKey, resumeContext, retentionDuration).execute()`.
@@ -191,7 +191,7 @@ NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(r
 A major strength of StackSaga's architecture is that **resumption is completely uniform from the orchestrator's perspective**:
 
 * You invoke the exact same method -- `sagaTemplate.resume(resumeKey, retentionDuration)` -- whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
-* The StackSaga Execution Coordinator (SEC) queries the event store, resolves the `resumeKey`, determines the transaction status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, resets `is_paused = 0` and `current_resume_key = NULL`, and dispatches the execution:
+* The StackSaga Execution Coordinator (SEC) queries the Event Store, resolves the `resumeKey`, determines the transaction lifecycle status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, clears the wait-state markers, and dispatches execution:
 ** **If paused in forward flow**: Advances to the target `NextExecutor` designated by xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).asSync().pauseUntilResume(duration).resumeToNextExecutor(NextExecutor.class)`] (or `asAsync()`), invoking its `doProcess(...)` with the supplied `ResumeContext`.
 ** **If paused in compensation flow**: Re-invokes the paused `CommandExecutor`'s `doRevert(...)` with the supplied `ResumeContext`, allowing it to finalize reversal actions. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[Implementing Pausable Compensation].
 
@@ -277,9 +277,9 @@ public class ReactiveOrderCallbackController {
 
 When `resume(...)` is called:
 
-. StackSaga parses and resolves the `resumeKey` via `ResumeKeyResolver`, locating the exact transaction ID and execution tryout registered in the event store.
-. It stores the serialized `ResumeContext` JSON into `es_transaction_execution_tryout.resume_context`.
-. It resets `is_paused = 0` and clears `current_resume_key = NULL`.
+. StackSaga resolves the `resumeKey`, validating and correlating the callback to the exact transaction ID and execution checkpoint registered in the Event Store.
+. It durably records the serialized `ResumeContext` payload in the Event Store for complete auditing and tracing.
+. It clears the transaction wait-state, ensuring subsequent duplicate callbacks with the same resume key are rejected.
 . It restores the `OrderDomainEntity` with its pristine checkpoint state.
 . It invokes the target executor's `doProcess(...)` or `doRevert(...)`, injecting the populated `ResumeContext`. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[Pausable Long-Running Transactions in Executor Architecture] for how executors consume this data.
 
@@ -299,7 +299,7 @@ String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
 * **Immutability Guarantee**: Once passed into an executor (`doProcess` or `doRevert`), the `ResumeContext` is marked read-only. Calling modifying operations (`put`, `remove`, `clear`) throws `UnsupportedOperationException`. This prevents executors from accidentally mutating callback audit records.
 * **Serialization & Event Sourcing**: Provides `prettyPrintAsString(ApplicationContext)` and `printAsString(ApplicationContext)` using the framework's configured JSON mapper bean.
 * **Deep Comparison**: Provides `deepEquals(ResumeContext obj, ApplicationContext applicationContext)` for structural JSON equality checks.
-* **Event Store Durability**: Serialized into the `resume_context` JSON column of `es_transaction_execution_tryout`, providing complete auditability for every callback payload received by the system. See xref:stacksaga-sync/index.adoc#resume-context-concept[Decoupling External Callback Payloads].
+* **Event Store Durability**: Durably serialized and recorded in the underlying Event Store, providing an immutable audit trail for every callback payload received by the system. See xref:stacksaga-sync/index.adoc#resume-context-concept[Decoupling External Callback Payloads].
 
 [[pausable-lrt-timeout-reexecution]]
 === Timeout Re-Execution Mechanics (When No Callback Arrives)
@@ -672,7 +672,7 @@ When configuring a wait-state via `stepManager.pauseUntilResume(Duration duratio
 If the timeout duration expires before the callback arrives:
 . The Retry Subsystem re-invokes the paused executor.
 . When re-invoked, the executor may re-query or re-call the target service using the **exact same deterministic `resumeKey` / `idempotencyKey`** generated for that span, allowing the downstream system to match the operation idempotently.
-. If a late callback arrives while re-invocation is underway or after compensation has commenced, `sagaTemplate.resume(resumeKey)` may detect that the active resume token has expired or transitioned.
+. If a late callback arrives while re-invocation is underway or after compensation has commenced, `sagaTemplate.resume(resumeKey, retentionDuration)` may detect that the active resume token has expired or transitioned.
 
 *Best Practice Recommendation:* Webhook controllers should handle late callbacks flexibly according to partner integration policies. Rather than throwing unhandled exceptions that cause third-party gateways to retry endlessly, controllers can inspect the current transaction state via `sagaTemplate.getCurrentState(orderId).fetch()` and acknowledge the callback (e.g. returning HTTP 200/202 with an informational audit log).
 
