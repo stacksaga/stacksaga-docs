@@ -395,26 +395,94 @@ Keep `onStateChanged` lightweight (e.g., publishing a quick notification or logg
 
 [[at-least-once-listener-semantics]]
 [WARNING]
-.At-Least-Once Notification in Pausable LRT (Duplicate Listener Invocations)
+.Crucial: Atomicity, the Crash Window, and the Two Failure Hazards of Placing Business Logic in Listeners
 ====
-In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses awaiting an external callback with a timeout `Duration` (e.g., 5 hours), the listener callback (`onStateChanged`) can be invoked **multiple times** for that same executor:
+While `TransactionEventListener` and `ReactiveTransactionEventListener` logically receive at-least-once notifications during normal workflow progression, developers must understand the technical lifecycle boundaries, the Event Store commit barrier, and failure semantics to avoid critical architectural bugs:
 
-. **First Invocation (Initial Success):** When the executor successfully completes its initial forward logic (such as dispatching an asynchronous request to an external payment provider) and pauses via `stepManager.pauseUntilResume(...)`, the engine invokes `onStateChanged`.
-. **Second Invocation (Timeout Re-Execution):** If no external callback arrives to resume the saga before the configured duration expires, the framework re-executes the paused executor. Upon successful re-execution, the engine invokes `onStateChanged` **again** for that same executor.
+*1. The Atomicity Mandate: Why the Engine Persists State BEFORE Invoking Listeners*
 
-*Crucial Design Rules:*
+A fundamental design invariant of the StackSaga Execution Coordinator (SEC) is: **The SEC immutably persists the executor's state transition and domain snapshot to the Event Store BEFORE invoking the `onStateChanged` listener callback.**
 
-* **Never place critical business logic or state mutations in a listener:**
-Because listener callbacks follow at-least-once semantics and can be re-triggered during retries and timeout recoveries, placing non-idempotent business logic, state mutations, or external charges inside `onStateChanged` will cause duplicate side-effects. Listeners should be strictly reserved for observational tasks (logging, metrics, or pushing user notifications).
+To understand why this sequence is mandatory, consider what would happen if the engine violated this rule and invoked the listener *before* persisting to the Event Store:
 
-* **Recommended Pattern -- Use a `QueryExecutor`:**
-If your workflow requires an operation to execute immediately following an executor (such as generating an internal receipt, updating a read model, or creating an audit log) that does not require compensation, **do not place it in `TransactionEventListener`**.
-Instead, model it as a formal **`QueryExecutor`** within the saga flow (e.g., chaining it via `stepManager.success("AUDIT_RECORDED").asSync().noPause().toNextExecutor(RecordAuditQueryExecutor.class)`).
-As a first-class saga participant, a `QueryExecutor` guarantees:
-+
-** Durable recording and tracking in the Event Store.
-** Deterministic execution aligned with the saga's forward progression.
-** Full idempotency protection and visibility in the transaction execution history.
+* Suppose the listener runs first and executes external side-effects (e.g. sending a customer SMS, email, or webhook confirmation: *"Your payment of $100 succeeded! Order #123 is confirmed"*).
+* The user's phone receives the notification.
+* A millisecond later, before the database write commits (or while the write is in progress), the JVM process suffers an Out-Of-Memory (OOM) kill, a node eviction, or a database connection timeout.
+* **The Catastrophic Inconsistency (Phantom Notification):** When the cluster recovers, the Event Store contains **no record** of that payment or order confirmation. From the system's perspective, the step never happened (or will be rolled back). Yet the customer has already received an authoritative confirmation of success! This represents a total breach of atomicity and consistency.
+
+Therefore, StackSaga enforces that **no step is considered complete until it is durably committed to disk in the Event Store**. The Event Store Commit Barrier must always precede listener notification.
+
+*2. The Resulting Crash Window & The Silent Omission Hazard*
+
+Because the Event Store commit barrier *must* precede listener execution to guarantee atomicity, there is an unavoidable physical window in distributed computing:
+
+[source,text]
+----
+[1. Executor doProcess()] ──► [2. Event Store Commit Barrier] ──► [3. onStateChanged()] ──► [4. Next Executor]
+                                                                     ▲
+                                                        CRASH WINDOW: If JVM dies here,
+                                                        Executor A is COMMITTED in Event Store.
+                                                        On restore, saga resumes directly at [4]!
+----
+
+If the JVM process crashes (e.g. OOM kill, hardware fault, pod eviction, host power cut) immediately after step 2 or while step 3 is executing:
+
+* The Event Store has already durably recorded that Executor A succeeded and committed its milestone snapshot.
+* When the Retry-Node or dead-man's switch restore worker detects the stalled transaction and restores it, it inspects the Event Store and determines that Executor A is already `COMMITTED`.
+* Consequently, the engine resumes transaction execution directly from **Executor B (the Next Executor)**.
+* The framework **does NOT re-invoke the listener** for the already-committed Executor A!
+* If a developer placed critical business logic inside `onStateChanged` (such as generating an invoice, decrementing another resource, or notifying a downstream ledger), **that critical invocation is permanently lost and will never execute**, without triggering any retry or compensation.
+
+*3. Summary: The Two Failure Hazards of Listeners*
+
+Placing business logic, financial operations, or state mutations in an event listener exposes the system to two complementary hazards:
+
+[arabic]
+. *Hazard 1: At-Least-Once Duplication (Timeout Re-Executions)* +
+In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses awaiting an external callback with a timeout `Duration` (e.g. 5 hours), the listener callback (`onStateChanged`) can be invoked **multiple times** for that same executor (once when entering the pause, and again upon timeout re-execution if no callback arrives). Non-idempotent logic will execute redundantly.
+. *Hazard 2: Zero-Invocation Omission (The JVM Crash Window)* +
+If the application crashes after the executor commits but before the listener completes, the listener will be invoked **zero times** for that attempt upon cluster restoration. Non-skippable logic will be dropped permanently.
+
+*4. The Architectural Solution: The Re-Invokable Executor Pattern (`QueryExecutor` / `CommandExecutor`)*
+
+If an invocation must run definitely as part of the Long-Running Transaction and must **never be skipped under any circumstance (including application crashes)**:
+
+* **Rule 1: Never execute transactional or critical business logic inside `TransactionEventListener`.** Listeners are strictly reserved for ephemeral, non-transactional observations (pushing Prometheus metrics, emitting debug logs, or sending best-effort UI WebSocket updates).
+* **Rule 2: Model and chain the invocation as a formal Executor as the immediate next step in your saga flow.**
+** *If the operation is non-compensable* (e.g. creating an internal invoice, recording an immutable audit ledger, reading verification data, or dispatching a non-rollbackable receipt): implement it as a formal **`QueryExecutor`** (e.g. `stepManager.success("ORDER_PROCESSED").asSync().noPause().toNextExecutor(CreateInvoiceQueryExecutor.class)`).
+** *If the operation is state-changing and requires rollback on failure*: implement it as a formal **`CommandExecutor`** with an appropriate `doRevert()` compensation method.
+
+*Why Executors Guarantee Non-Skippability & Durability:*
+
+. **Re-Invokable by Default:** Executors are first-class saga participants. If the JVM crashes before, during, or after an executor, StackSaga's Event Store and xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem] detect the uncommitted state, restore the pristine `DomainEntity` snapshot, and re-invoke the executor deterministically until completion.
+. **Automatic Rollback Pruning for `QueryExecutor`:** Because `QueryExecutor` does not implement `doRevert()`, StackSaga's Reverse Autopilot automatically skips and prunes it during rollback (see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[USNP Query Pruning Pattern]). It provides durability without complicating the compensation path.
+. **Trace Window Observability:** Unlike logic hidden inside listeners, every Executor span is fully visible in the xref:trace-window:stacksaga-trace-window.adoc[Trace Window] dashboard—including execution latency, domain entity snapshots before and after execution, and transient retry attempts.
+
+.Developer Decision Matrix: Where Should Your Logic Live?
+[cols="2,2,1,2,1",options="header"]
+|===
+| Task / Goal | Recommended Component | Crash-Safe? | Rollback Behavior | Trace Window Visibility
+
+| Real-time UI progress bars, Prometheus metrics, debug logging
+| xref:#state-change-listeners[`TransactionEventListener`]
+| ❌ Ephemeral (Skipped on crash)
+| Ignored (Does not participate in rollback)
+| ❌ Not tracked as a span
+
+| Invoices, email receipts, audit logs, read-model sync, non-compensable queries
+| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor`]
+| ✔ Yes (Durable & Re-invokable)
+| **Automatically pruned & skipped** (xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[Zero rollback impact])
+| ✔ First-class span with latency & status (xref:trace-window:stacksaga-trace-window.adoc[Trace Window])
+
+| Charging cards, inventory reservations, state-modifying business commands
+| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[`CommandExecutor`]
+| ✔ Yes (Durable & Re-invokable)
+| Executes `doRevert()` in reverse LIFO order
+| ✔ First-class span with latency & snapshots (xref:trace-window:stacksaga-trace-window.adoc[Trace Window])
+|===
+
+TIP: For a hands-on walkthrough demonstrating `TransactionEventListener` implementation alongside saga controllers, see the xref:demo:page$mysql/stacksaga-mysql-quick-example.adoc#create-handler[MySQL Quick Example: Order Handler Guide].
 ====
 
 ==== TransactionEventListener
@@ -620,3 +688,71 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
 <1> Non-blocking transaction initiation returning `Mono<String>` with the transaction ID.
 <2> Non-blocking state query using `.getCurrentState(orderId).fetchAsync()`.
 <3> Implement `onStateChanged` from `ReactiveTransactionEventListener` returning `Mono<Void>` for non-blocking event handling.
+
+[[advanced-architectural-faq]]
+== Advanced Architectural FAQ & Production Edge Cases
+
+In distributed systems, workflow implementations often rely on intuitive assumptions that break down under real-world production conditions (such as network latency, late callbacks, pod evictions, and infrastructure timeouts).
+The following Q&A addresses six critical, real-world edge cases to help architects and developers design resilient, bug-free sagas before encountering these scenarios in production.
+
+=== Q1: Can an executor action (`doProcess()` or `doRevert()`) be re-invoked even after being marked as success?
+
+*Yes.* In a xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transaction] where an executor enters a wait-state via `stepManager.pauseUntilResume(duration)`, the executor's initial execution is marked as `SUCCESS` and the transaction enters `PAUSED` status.
+
+However, if the external callback (e.g. payment gateway webhook or courier confirmation) fails to arrive before the configured `duration` expires:
+* The framework **cannot advance** to the next executor because the business operation remains unconfirmed.
+* Furthermore, the domain logic to query the external system's status or re-trigger the call resides **inside that paused executor**.
+* Therefore, the StackSaga xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem] re-executes the transaction directly from the executor where it was paused, **even though its initial execution previously succeeded before entering the pause**. See xref:#pausable-lrt-timeout-reexecution[Timeout Re-Execution Mechanics].
+
+*Architectural Takeaway:* Any executor that returns `.pauseUntilResume(...)` must implement its `doProcess()` (or `doRevert()`) idempotently, so that a timeout re-execution does not generate duplicate business side-effects.
+
+=== Q2: What happens if an external callback arrives after the wait-state timeout has expired, and how should duration be tuned?
+
+When configuring a wait-state via `stepManager.pauseUntilResume(Duration duration)`, developers should tune the validity period based on the expected turnaround SLA and real-world response behavior of the target external system (e.g. 15 minutes for customer 3D-Secure redirects, 2 hours for restaurant kitchen preparation, or 24 hours for asynchronous bank clearing).
+
+If the timeout duration expires before the callback arrives:
+. The Retry Subsystem re-invokes the paused executor.
+. When re-invoked, the executor may re-query or re-call the target service using the **exact same deterministic `resumeKey` / `idempotencyKey`** generated for that span, allowing the downstream system to match the operation idempotently.
+. If a late callback arrives while re-invocation is underway or after compensation has commenced, `sagaTemplate.resume(resumeKey)` may detect that the active resume token has expired or transitioned.
+
+*Best Practice Recommendation:* Webhook controllers should handle late callbacks flexibly according to partner integration policies. Rather than throwing unhandled exceptions that cause third-party gateways to retry endlessly, controllers can inspect the current transaction state via `sagaTemplate.getCurrentState(orderId).fetch()` and acknowledge the callback (e.g. returning HTTP 200/202 with an informational audit log).
+
+=== Q3: Why do in-memory field mutations on `DomainEntity` disappear upon timeout re-execution?
+
+StackSaga enforces the **Event Sourcing** paradigm. State transitions are committed immutably to the Event Store only at completed execution milestones.
+
+If an executor mutates in-memory fields on `currentDomainEntity` inside `doProcess()` and pauses, but the wait-state times out without a callback:
+* The engine **discards all uncommitted in-memory mutations** from that paused tryout.
+* Upon re-invocation, the engine reconstructs the `DomainEntity` cleanly from the Event Store up to the exact checkpoint preceding this executor (see xref:stacksaga-sync/index.adoc#pristine-state-restoration[Pristine State Restoration]).
+
+*Architectural Takeaway:* Never rely on ephemeral in-memory object state across retries or pauses. Only domain state committed to the Event Store through successful tryout barriers is preserved.
+
+=== Q4: Can `doRevert()` throw `NonRetryableExecutorException`? What happens if compensation encounters an error?
+
+*No.* In StackSaga, `NonRetryableExecutorException` is **strictly forbidden in `doRevert()`** (see xref:ROOT:non_retryable_executor_exception.adoc[NonRetryableExecutorException]). Compensating transactions are allowed to throw `RetryableExecutorException` only.
+
+*The Architectural Rationale:* In the Saga pattern, there is no compensation for a compensation. If a forward step fails, backward rollback must run until completion to guarantee eventual consistency.
+* **Transient Rollback Errors:** If a downstream service is temporarily unavailable during compensation, throwing `RetryableExecutorException` pauses the rollback, and the Retry Subsystem will automatically re-attempt `doRevert()`.
+* **Permanent Rollback Errors (The Risk):** If an unhandled `RuntimeException` occurs in `doRevert()`, the saga becomes a xref:retry-ring-coordinator:disabled-and-terminated-transaction.adoc#terminated-transactions[Terminated Transaction] (permanently frozen in partial compensation). The issue must be investigated and resolved via the xref:trace-window:stacksaga-trace-window.adoc[Trace Window] dashboard before restoring the transaction.
+
+*Architectural Takeaway:* Write `doRevert()` methods defensively and idempotently. For example, if a downstream resource was never created in the forward step, `doRevert()` should treat cancellation as successful rather than throwing an error.
+
+=== Q5: Why can `onStateChanged` be called multiple times, but also ZERO times during crashes?
+
+State Change Listeners follow **At-Least-Once notification semantics** during normal operations, but have a physical **Crash Window**:
+* **Multiple Invocations:** In a Pausable LRT, `onStateChanged` is invoked on the initial pause and **again** upon timeout re-execution.
+* **Zero Invocations:** To guarantee atomicity and prevent phantom notifications (such as sending an SMS confirmation before data is committed to the database), the SEC persists state to the Event Store *before* calling listeners. If the JVM crashes after commit but before the listener finishes, cluster restoration resumes directly from the *next* executor, meaning the listener is never re-invoked for the completed step.
+
+*Architectural Takeaway:* As summarized in the xref:#at-least-once-listener-semantics[Developer Decision Matrix], never place non-skippable transactional operations in `TransactionEventListener`. Always model critical post-step actions as formal xref:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor`] steps.
+
+=== Q6: Do we need a distributed lock (e.g. Redis / Redlock) to prevent multiple pods from retrying the same transaction?
+
+*No.* Developers must **never** implement external distributed locks (such as Redis locks, Hazelcast mutexes, or database row locks) around StackSaga sagas or retry schedulers.
+
+StackSaga eliminates distributed locking entirely through **Murmur3 64-bit Consistent Hashing Token Ring Partitioning** and **30-Second Forward Time-Window Publishing**:
+* Every transaction ID is deterministically hashed into a 64-bit token (`-2^63` to `2^63 - 1`).
+* The Retry-Coordinator Master and Slaves partition this token space into strictly non-overlapping sub-ranges assigned to active Retry-Nodes.
+* Each Retry-Node holds exclusive ownership of its assigned sub-range for a defined one-minute time window.
+
+Because no two nodes ever share ownership of the same token sub-range, **multi-node race conditions are mathematically impossible without distributed locks**. See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#token-ring-partitioning[Token Ring Partitioning Architecture].
+

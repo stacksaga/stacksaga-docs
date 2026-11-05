@@ -663,6 +663,14 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
 }
 ----
 
+[NOTE]
+====
+`TransactionEventListener` is designed strictly for **observability** (logging, metrics, updating caches, or pushing real-time WebSocket notifications to the UI).
+Never place transactional business logic or non-skippable downstream actions inside `onStateChanged`.
+As detailed in xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#at-least-once-listener-semantics[The Atomicity Mandate and the Crash Window], the SEC commits state to the Event Store *before* calling listeners to preserve atomicity; if the process crashes immediately after commit, cluster restoration resumes from the next executor and will **not** re-invoke this listener.
+If an operation must reliably run as part of the saga, model it as a formal xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor`] instead. For a comparison of component responsibilities, consult the xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#at-least-once-listener-semantics[Developer Decision Matrix].
+====
+
 [[creating-controller]]
 === Creating the Controller (Trigger, Callback Webhook & Status)
 

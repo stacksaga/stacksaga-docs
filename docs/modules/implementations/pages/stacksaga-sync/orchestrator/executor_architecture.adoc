@@ -313,6 +313,11 @@ public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
 }
 ----
 
+[NOTE]
+====
+In `doRevert()`, **only `RetryableExecutorException` is allowed**. `NonRetryableExecutorException` is strictly forbidden because in the Saga pattern there is no compensation for a compensation. If compensation fails permanently due to an unhandled exception, the saga becomes a Terminated Transaction requiring manual operator intervention. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#advanced-architectural-faq[FAQ Q4: Compensation Error Handling & Terminated Transactions].
+====
+
 === Supporting Pausable Wait-States (USIP Pattern 2)
 
 When an operation requires an external callback, user redirect (3D-Secure, PayPal), or manual manager approval, configure a pausable wait-state using `.pauseUntilResume(duration)`:
@@ -330,6 +335,7 @@ return stepManager
 * The SEC marks the transaction as `PAUSED`, commits the `resumeKey`, and **immediately frees the worker thread and DB connection**.
 * The saga consumes zero CPU, threads, or memory while parked.
 * When the webhook arrives, call `sagaTemplate.resume(resumeKey, retentionDuration)` (fluent `.put(...)` or `.withContext(resumeContext)`) to wake the saga and invoke `CapturePaymentExecutor`.
+* **Timeout Re-Execution:** If the callback fails to arrive within the configured duration, the Retry Coordinator re-invokes this executor's `doProcess(...)`. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#advanced-architectural-faq[FAQ Q1 & Q2: Re-Invocation of Succeeded Steps and Tuning Wait-State Duration].
 * See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP Pattern 2: Correlated Park-and-Resume] for complete thread lifecycle details.
 
 === Supporting Two-Stage Broker Dispatch with Commit Barrier (USIP Pattern 3)
@@ -435,6 +441,16 @@ Because read-only queries make no external state mutations that need to be rever
 ====
 **Automatic Rollback Pruning**: During compensation, the SEC automatically skips historical `QueryExecutor` events. A query step will never break or complicate transaction rollback.
 See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[Query State Pruning & Bypass Pattern].
+====
+
+[IMPORTANT]
+.Architectural Best Practice: QueryExecutor vs. TransactionEventListener for Post-Step Invocations
+====
+If an operation must execute immediately following another executor (such as generating an internal receipt, recording an immutable audit ledger entry, or invoking a non-compensable verification) and must **never be skipped under any failure condition (including application crashes)**, model it as a formal **`QueryExecutor`** chained as the next step, rather than placing it inside a `TransactionEventListener`.
+
+* *Why not an Event Listener?* As explained in xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#at-least-once-listener-semantics[The Atomicity Mandate and the Crash Window], the SEC must durably persist executor state to the Event Store *before* notifying listeners to prevent phantom notifications. If the JVM process crashes immediately after state persistence, cluster restoration resumes execution directly from the *next* executor in the workflow, meaning any critical logic inside `onStateChanged` is permanently skipped and will never execute.
+* *Why QueryExecutor?* `QueryExecutor` instances are first-class saga participants: they are **re-invokable by default**, tracked in the Event Store, self-healed by the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem], and fully observable in the xref:trace-window:stacksaga-trace-window.adoc[Trace Window dashboard]. Because they do not implement `doRevert()`, the SEC's Reverse Autopilot prunes them automatically during backward compensation (see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[USNP Query Pruning Pattern]), delivering durability without rollback overhead.
+* *Developer Decision Matrix:* To determine whether your logic should be a `QueryExecutor`, `CommandExecutor`, or `TransactionEventListener`, consult the xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#at-least-once-listener-semantics[Developer Decision Matrix in the SagaTemplate Guide].
 ====
 
 === Blocking Query Executor
