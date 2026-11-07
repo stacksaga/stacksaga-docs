@@ -115,7 +115,7 @@ The unified schema script creates 9 static tables divided into two coordinated g
 | `es_transaction` | Primary transaction state and metadata store (Single-Row Partition).
 | `es_transaction_tryout` | Transaction step execution history, physically co-located by transaction ID.
 | `es_frozen_transaction` | Quarantined transactions where compensation (rollback) failed unrecoverably.
-| `es_execution_markers` | Step execution markers and idempotency leases guarding against duplicate step execution.
+| `es_execution_markers` | Step execution markers and idempotency leases for event streaming deduplication.
 
 .5+| *5-Tier Recovery Engine* (5 tables)
 | `es_days_by_year` | Tier 1: Directory of active calendar dates with pending retries or restores.
@@ -233,7 +233,7 @@ They require developer diagnosis and manual re-triggering via the administrative
 
 === `es_execution_markers` — The Idempotency Lease Table
 
-`es_execution_markers` stores step execution markers and idempotency leases to prevent duplicate saga step execution, whether the repeat originates in a retry, a resume-window expiry, crash recovery, or a broker re-delivery.
+`es_execution_markers` stores step execution markers and idempotency leases to prevent duplicate saga step execution during Kafka consumer group rebalances or network re-deliveries.
 
 *Partition lifecycle and storage cleanup:*
 
@@ -254,42 +254,20 @@ This guarantees that `es_execution_markers` storage is **self-bounded**: rows ar
 
 '''
 
-== Part 3: Write Protection (Duplicate Execution Guard)
+== Part 3: Write Protection (Kafka Event Sourcing)
 
-A saga step can be invoked more than once for several independent reasons.
-Write protection guards every step against all of them, so that a repeated *invocation* does not become a repeated *side effect*.
+When using Kafka or similar streaming brokers for event-driven saga orchestration, guarding against duplicate step execution and race conditions is essential.
 
-=== Why Duplicate Executions Occur
+=== Why Duplicate Events Occur
 
-StackSaga re-invokes a step whenever it cannot prove the previous attempt completed.
-That is deliberate — it is what makes the framework self-healing — which means duplicate invocation is a normal operating condition rather than an exceptional one:
+StackSaga's Kafka messaging layer uses *at-least-once delivery semantics*.
+Duplicate event deliveries naturally occur in distributed environments due to:
 
-* **Retry subsystem re-invocation** — a span that failed with a retryable error is re-invoked by whichever Retry-Node currently owns its token range.
-* **Resume-window expiry** — a span that returned `.pauseUntilResume(...)` is re-executed when the window elapses without a callback arriving.
-* **Crash recovery** — a pod that dies mid-execution leaves a span whose outcome is unknown, so recovery must re-invoke it.
-* **Ownership-window transition** — during a token-range handover, two instances may briefly consider the same transaction theirs.
-
-[NOTE]
-====
-If the pipeline includes a messaging system such as Kafka or RabbitMQ, the probability is **materially higher**: at-least-once broker delivery, consumer group rebalances, and restarts before offset commits are acknowledged each add their own duplicate deliveries on top of the causes above.
-That is why the stricter mode is usually selected for broker-driven domains — but the protection itself is not specific to any transport.
-====
+* Consumer group rebalances when pods scale up or down.
+* Consumer node restarts before offset commits are acknowledged.
+* Network timeouts and automated message retries.
 
 Without protection, the same saga step could execute twice — charging a credit card twice, reserving duplicate inventory, or sending multiple customer confirmations.
-
-=== Why Two Modes Exist — Cassandra Has No Native Duplicate Signal
-
-On a relational event store an `INSERT` is genuinely an insert: a primary-key or unique constraint rejects the second write, so *at most one execution per idempotency key* is supplied natively by the storage engine.
-
-**Cassandra has no such signal — every `INSERT` is an upsert.**
-A duplicate write succeeds silently, overwriting rather than failing, so nothing in the storage engine will tell the pod that this step already ran.
-
-The duplicate-execution guard therefore has to be *constructed* rather than inherited, and the two modes are the two ways of constructing it:
-
-* `STRICT` buys a real conditional insert with Paxos (`IF NOT EXISTS`), at the cost of a consensus round-trip.
-* `RELAXED_WITH_DEDUP` trades that round-trip for a fast read check.
-
-Choosing between them is therefore a question about how much a given step tolerates duplicate execution — not about which transport delivered the attempt.
 
 === STRICT Mode — Mutual Exclusion with Cassandra LWT
 
@@ -314,7 +292,7 @@ If a pod crashes between Step 1 and Step 3, the temporary lease expires when its
 .STRICT Mode Write Protection Flow
 image::stacksaga-database-support:cassandra/stacksaga-write-protection-strict.svg[alt="STRICT Mode Write Protection Flow"]
 
-. **Execution Attempt Inflow:** A step execution attempt arrives — a first invocation, a retry, a resume, or a broker re-delivery — with no guarantee that it is the only one.
+. **Kafka Event Inflow:** A saga step execution event arrives from Kafka with potential at-least-once duplicate delivery.
 . **Paxos LWT Lease Acquisition:** The pod executes an atomic `INSERT ... IF NOT EXISTS USING TTL 5s` into `es_execution_markers`.
 If a lease exists with `TTL > 0`, the pod backs off; if `TTL = 0`, it skips.
 . **Mutual Exclusive Execution:** The single pod holding the active lease executes the saga business logic.
@@ -330,7 +308,7 @@ This mode avoids Cassandra LWT round-trips, maximizing throughput.
 .RELAXED_WITH_DEDUP Mode Execution Flow
 image::stacksaga-database-support:cassandra/stacksaga-write-protection-relaxed.svg[alt="RELAXED_WITH_DEDUP Mode Execution Flow"]
 
-. **Execution Attempt Inflow:** An attempt arrives on a high-throughput path where the operation is inherently idempotent.
+. **Kafka Event Inflow:** Event received on high-throughput streaming pipelines where operations are inherently idempotent.
 . **Non-Blocking Read Check:** Executes a fast read against `es_execution_markers` without Paxos consensus overhead.
 If a marker exists, execution terminates immediately.
 . **Atomic Batch Write:** Step results and execution markers are committed together in a single logged batch write.

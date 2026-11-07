@@ -80,7 +80,7 @@ Consider a distributed E-Commerce checkout saga coordinating across `user-servic
 | **Programmatic Navigation**
 | Executor queries customer credit limits.
 | The executor executes business logic and returns staged navigation instructions via `ProcessStepManager`: +
-`return stepManager.success("ELIGIBILITY_CONFIRMED").asSync().noPause().toNextExecutor(ReserveInventoryExecutor.class);`
+`return stepManager.success("ELIGIBILITY_CONFIRMED").asSync().noPause().nextExecutor(ReserveInventoryExecutor.class);`
 
 | **Hybrid Execution**
 | Direct RPC vs Message Broker.
@@ -147,10 +147,10 @@ Annotated with `@SagaDomainEntity`, it carries all accumulated business data. Ev
 
 | [[glossary-step-manager]]*Step Manager*
 | The staged fluent builder passed into each executor to drive execution and routing: +
-• **Forward Navigation (`ProcessStepManager<DE>`)**: `.noPause().toNextExecutor(...)`, or `.pauseUntilResume(duration).resumeToNextExecutor(...)`, or `.complete()`. +
-• **Compensation Navigation (`RevertStepManager`)**: `.noPause().toNextDefaultExecutor()`, or `.pauseUntilResume(duration).resumeToNextDefaultExecutor()`. The destination is not developer-selectable: the engine routes to the preceding command in history. +
-• **Pre-Compensation Navigation (`PreStepManager<DE, E>`)**: `.noPause().toNextDefaultExecutor()` (hands off to the parent `doRevert`) or `.toNextPreExecutor(...)`. +
-• **Post-Compensation Navigation (`PostStepManager<DE, E>`)**: `.noPause().toNextDefaultExecutor()` (concludes the step rollback) or `.toNextPostExecutor(...)`.
+• **Forward Navigation (`ProcessStepManager<DE>`)**: `.success(event).asSync().noPause().nextExecutor(...)` or `.pauseUntilResume(duration)` or `.complete()`. +
+• **Compensation Navigation (`RevertStepManager`)**: `.success(event).asSync().noPause().resumeToNextDefaultExecutor()` or `.pauseUntilResume(duration)`. +
+• **Pre-Compensation Navigation (`PreStepManager<DE, E>`)**: `.success(event).asSync().noPause().toNextDefaultExecutor()` or `.toNextPreExecutor(...)`. +
+• **Post-Compensation Navigation (`PostStepManager<DE, E>`)**: `.success(event).asSync().noPause().toNextDefaultExecutor()` or `.toNextPostExecutor(...)`.
 
 | *Idempotency Key & Correlation Key*
 | A deterministic, stable unique key generated per span.
@@ -207,8 +207,8 @@ TIP: For the comprehensive architectural deep dive, full flow diagrams, and 5 en
 | 100% of CPU worker threads released during wait states; zero thread starvation.
 
 | *Executor Navigation*
-| Forward: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.success(...).asSync().noPause().toNextExecutor(...)`] +
-Revert: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[`stepManager.success(...).asSync().noPause().toNextDefaultExecutor()`]
+| Forward: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_navigation[`stepManager.success(...).asSync().noPause().nextExecutor(...)`] +
+Revert: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#revert-step-manager-util[`stepManager.success(...).asSync().noPause().resumeToNextDefaultExecutor()`]
 | Forward: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.success(...).pauseUntilResume(duration)`] +
 Revert: xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.success(...).pauseUntilResume(duration)`]
 |===
@@ -256,7 +256,7 @@ public ProcessStepManager<OrderDomainEntity> doProcess(
     return stepManager.success("PAYMENT_CONFIRMED")
             .asSync()
             .noPause()
-            .toNextExecutor(DispatchOrderExecutor.class);
+            .nextExecutor(DispatchOrderExecutor.class);
 }
 ----
 
