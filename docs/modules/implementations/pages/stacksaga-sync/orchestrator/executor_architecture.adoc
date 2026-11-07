@@ -295,7 +295,7 @@ public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
                     .success("ORDER_CANCELED")
                     .asSync()
                     .noPause()
-                    .resumeToNextDefaultExecutor();
+                    .toNextDefaultExecutor();
 
         } catch (OperationAlreadyExecutedException ex) {
             // Already cancelled: treat as successfully compensated
@@ -303,7 +303,7 @@ public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
                     .success("ORDER_CANCELED")
                     .asSync()
                     .noPause()
-                    .resumeToNextDefaultExecutor();
+                    .toNextDefaultExecutor();
 
         } catch (FeignException.ServiceUnavailable ex) {
             // Retry transient rollback failure
@@ -424,7 +424,7 @@ public class ReactiveCreateOrderExecutor implements ReactiveCommandExecutor<Orde
                         .success("ORDER_CANCELED")
                         .asSync()
                         .noPause()
-                        .resumeToNextDefaultExecutor());
+                        .toNextDefaultExecutor());
     }
 }
 ----
@@ -548,7 +548,7 @@ public @NonNull RevertStepManager doRevert(
 ) throws RetryableExecutorException {
     // Core payment refund compensation
     paymentClient.refund(finalDomainEntityState.getPaymentId(), idempotencyKey);
-    return stepManager.success("PAYMENT_REFUNDED").asSync().noPause().resumeToNextDefaultExecutor();
+    return stepManager.success("PAYMENT_REFUNDED").asSync().noPause().toNextDefaultExecutor();
 }
 ----
 
@@ -658,7 +658,7 @@ StackSaga classifies faults strictly into transient infrastructure issues and pe
 During compensation (`doRevert()`, `PreExecutor`, or `PostExecutor`), throwing unhandled non-retryable exceptions is prohibited because it would stall the rollback pipeline.
 If an unrecoverable compensation error occurs that can be safely tolerated (e.g., account already closed):
 1. Catch the exception and record diagnostic metadata in `revertHintStore.put("key", errorMsg)`.
-2. Return `.success("REVERT_TOLERATED").asSync().noPause().resumeToNextDefaultExecutor()` to permit rollback to proceed.
+2. Return `.success("REVERT_TOLERATED").asSync().noPause().toNextDefaultExecutor()` to permit rollback to proceed.
 ====
 
 '''
@@ -693,8 +693,9 @@ _or_ `.asAsync()`
 | `.noPause()` +
 _or_ `.pauseUntilResume(duration)` +
 _or_ `.invoker(...)`
-| `.resumeToNextDefaultExecutor()` +
-_(Engine routes to preceding command in history)_
+| `.toNextDefaultExecutor()` _(with `.noPause()`)_ +
+_or_ `.resumeToNextDefaultExecutor()` _(after `.pauseUntilResume(...)`)_ +
+_(Engine routes to the preceding command in history; not developer-selectable)_
 
 | **`PreStepManager<DE, E>`** +
 _(Pre-Compensation Hook)_

@@ -48,15 +48,16 @@ public class CheckUserExecutor implements QueryExecutor<OrderDomainEntity> {
 
     private final UserService userService;
     @Override
-    public ProcessStepManager<OrderDomainEntity> doProcess(
-            ProcessStack processStack,
-            OrderDomainEntity domainEntity,
-            ProcessStepManagerUtil<OrderDomainEntity> stepManagerUtil
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
 
         try {
 
-            ResponseEntity<UserDetailDto> userDetail = this.userService.getUserDetail(domainEntity.getUsername());
+            ResponseEntity<UserDetailDto> userDetail = this.userService.getUserDetail(currentDomainEntity.getUsername());
             ...
         } catch (FeignException.ServiceUnavailable unavailableException) {
             throw RetryableExecutorException.of(unavailableException);
