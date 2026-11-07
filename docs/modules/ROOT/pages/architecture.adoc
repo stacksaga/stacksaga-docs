@@ -86,7 +86,7 @@ image::implementations:stacksaga-sync/stacksaga-diagram-stage-2-retry-ready-arch
 
 | Ring Coordinator Service
 | `stacksaga-ring-coordinator`
-| Standalone service that manages the token ring. It tracks available orchestrator instances, distributes Murmur3 token sub-ranges among them, and dynamically rebalances token ranges when instances scale up or down.
+| Standalone service that manages the token ring. It tracks available orchestrator instances and divides the Murmur3 token space among them once per publish cycle. Scaling up or down changes nothing in the window already in progress — the next division simply recomputes the split from whichever instances are registered at that moment.
 
 | Orchestrator
 | `stacksaga-ring-coordinator-connector`
@@ -99,7 +99,10 @@ By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, th
 The ring coordinator assigns each orchestrator instance a deterministic sub-range of the Murmur3 token ring.
 The local scheduler scans the event store for non-terminal transactions (`IN_PROGRESS`, `COMPENSATING`) whose transaction ID hashes into the locally owned token range, safely re-submitting them to the SEC for re-execution.
 
-This partitioning guarantees that **each stuck transaction is retried by exactly one instance without distributed locking or multi-node race conditions**.
+This guarantees that **each stuck transaction is retried by exactly one instance without distributed locking or multi-node race conditions**.
+The guarantee does not rest on the sub-ranges being disjoint alone — it rests on the fact that a range grant is *never reclaimed* from its holder.
+If a Retry Node is lost mid-window its range is left uncovered until the next division, rather than being handed to a survivor, so a second claimant for the same range is never created.
+See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#conflict-avoidance[Conflict Avoidance] for the full argument, including why no fencing token is required.
 
 [[stacksaga-architecture-3rd-stage]]
 == Stage 3 — Monitoring and Observability Setup

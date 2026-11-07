@@ -96,6 +96,7 @@ See xref:foundations:proportional-analysis-of-long-running-transactions-in-saga.
 The next challenge is how retry responsibility is safely distributed across the cluster of Retry-Nodes without any two nodes conflicting over the same transaction.
 This is where *Token Ring Partitioning* comes in.
 
+[[token-ring-partitioning]]
 == Token Ring Partitioning
 
 === Overview
@@ -338,10 +339,11 @@ When a Retry-Coordinator-Slave crashes or becomes unreachable:
 
 . All Orchestrators connected to that Retry-Coordinator-Slave lose their stream.
 Their sub-ranges become stale; retry polling pauses for those instances.
-. The Master detects the lost connection and applies a *lazy rebalance strategy*:
-** If the lost Retry-Coordinator-Slave is *not the last index* in the registry, the Master assumes it will recover shortly (especially true in Kubernetes) and does *not* immediately rebalance.
-** The Master continues sending cached token ranges to the remaining Retry-Coordinator-Slaves.
+. The Master detects the lost connection and applies a *lazy rebalance strategy*.
+In no case is the lost range redistributed inside a window that is already in progress: redistribution happens only when a new division is computed at a publish cycle.
 ** The crashed Retry-Coordinator-Slave's token range is *frozen* — no Orchestrator covers it during the outage.
+** If the lost Retry-Coordinator-Slave is *not the last index* in the registry, the Master assumes it will recover shortly (especially true in Kubernetes) and does not recompute the division around its absence.
+** The Master continues sending the existing cached token ranges to the remaining Retry-Coordinator-Slaves.
 . When the Retry-Coordinator-Slave restarts it reconnects to the Master and is treated as a *new registration*.
 . At the next 30-second publish cycle the Master recalculates and redistributes ranges across all currently registered Retry-Coordinator-Slaves, including the restarted one.
 
@@ -397,7 +399,8 @@ When an Orchestrator instance fails and restarts:
 . It opens a new persistent stream to the newly assigned Retry-Coordinator-Slave.
 . It receives the current sub-range at the next 30-second cycle and resumes retrying.
 
-Any transactions being actively retried at the moment of failure will be re-attempted in the next window by whichever Orchestrator instance acquires that token range.
+Any transactions being actively retried at the moment of failure are *not* taken over by another instance during the current window — the failed instance's sub-range simply stays uncovered until that window ends.
+They are re-attempted once a later division assigns that part of the ring to a live Orchestrator.
 
 == Registration & Token Distribution Flow
 
@@ -461,14 +464,16 @@ end note
 
 == Token Range Distribution (30th second of every minute) ==
 master -> master : timer triggers at 30th second\nrecalculate ring partitions
-master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
+master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd,\nvalidFrom=T+1, validUntil=T+2)
 slave -> slave : sub-divide received range\namong registered orchestrators
-slave -> orc : push SubTokenRangeUpdate\n(subRangeStart, subRangeEnd, validForMinute=T+1)
+slave -> orc : push SubTokenRangeUpdate\n(subRangeStart, subRangeEnd,\nvalidFrom=T+1, validUntil=T+2)
 
 note over orc
   Orchestrator stores the
-  sub-range. Range becomes
-  active at minute T+1.
+  sub-range and polls with it
+  only while its own UTC clock
+  is inside T+1 .. T+2.
+  Then it stops.
 end note
 
 == Retry Execution Loop (Minute T+1) ==
@@ -501,9 +506,9 @@ This ensures balanced Orchestrator distribution across Retry-Coordinator-Slaves 
 ==== Phase 3 — Token Range Distribution
 
 . At the 30th second of every minute the Master fires its publish timer.
-. The Master partitions the full token ring equally among all registered Retry-Coordinator-Slaves and sends each Retry-Coordinator-Slave its range, tagged with `validForMinute = T+1`.
+. The Master partitions the full token ring equally among all registered Retry-Coordinator-Slaves and sends each Retry-Coordinator-Slave its range, granted for the absolute interval from minute `T+1` until minute `T+2`.
 . Each Retry-Coordinator-Slave divides its range equally among its registered Orchestrators and pushes sub-range updates downstream.
-. Each Orchestrator stores the received sub-range and activates it at the start of minute `T+1`.
+. Each Orchestrator stores the received sub-range, activates it at the start of minute `T+1`, and stops polling with it at the end of minute `T+1` — the grant carries its own expiry, so nothing has to revoke it.
 
 ==== Phase 4 — Retry Execution Loop
 
@@ -550,7 +555,12 @@ At each trigger the Master:
 . Publishes the new token range to each Retry-Coordinator-Slave.
 . Each Retry-Coordinator-Slave recalculates its sub-ranges and pushes updates to its registered Orchestrators.
 
-The published range is labelled as valid for the *next full minute* (`T+1`), not the current minute.
+A published range is not merely *labelled* — it is granted together with the absolute UTC interval over which it belongs to that node: *this sub-range, from minute `T+1` until minute `T+2`*.
+The grant carries its own expiry, and the holder stops polling when the interval ends.
+
+The division is also *closed* for the window it covers.
+An Orchestrator or Retry-Coordinator-Slave that registers **after** a division has been computed receives no range from it, and stays idle until a later division includes it.
+Membership for a window is fixed at the instant that window's division is computed.
 
 === Why the 30-Second Offset?
 
@@ -569,10 +579,52 @@ Timeline example:
   ...
 ----
 
+[[conflict-avoidance]]
 === Conflict Avoidance
 
-Because each Orchestrator holds a *non-overlapping sub-range* for a *defined time window*, two Orchestrator instances can never claim responsibility for the same transaction simultaneously.
-This eliminates the need for distributed locking when retrying transactions.
+Two Orchestrator instances can never claim responsibility for the same transaction, and no distributed locking is required to achieve it.
+
+The guarantee does not follow from the sub-ranges being disjoint *alone*.
+It follows from four separate properties of the protocol, which together leave no interval in which one range has two holders:
+
+[cols="1,2",options="header"]
+|===
+| Route to a conflict | Why it cannot occur
+
+| *Reassignment during a window*
+| A range grant is never revoked.
+If its holder is lost mid-window, the range is left uncovered until that window ends — the Master does not redistribute it among the survivors.
+
+| *Admission during a window*
+| An Orchestrator that registers after a division has been computed receives no range from it.
+It stays idle until a later division includes it.
+
+| *A range outliving its window*
+| Expiry is part of the grant.
+An Orchestrator polls its range only while its own UTC clock places it inside the granted interval, and stops when that interval ends.
+
+| *Two sub-ranges of one division intersecting*
+| Each division is a partition of the 64-bit ring — the sub-ranges are disjoint by construction.
+|===
+
+[IMPORTANT]
+.Why no fencing token is needed
+====
+Systems that **reclaim** a work assignment when a lease expires must also *fence* the previous holder, because reclamation is what can produce two nodes that each believe they own the same work.
+A fencing token — such as the `rangeID` used by Cadence and Temporal — exists to make the displaced holder's writes fail.
+
+StackSaga never reclaims.
+Declining to reassign a vacated range is precisely what guarantees that a second holder is never created, which is why no fencing token, row lock or distributed lock appears anywhere in this design.
+
+The cost is paid in *liveness* instead: transactions inside an uncovered range are not retried until the next division covers it again.
+They are never lost — they remain in the database at `FAILED_WITH_RETRYABLE_ERROR`.
+====
+
+[NOTE]
+====
+This guarantee assumes every component keeps synchronised UTC time, because each Orchestrator decides whether it is inside its granted interval by reading its own clock.
+Ordinary NTP discipline is sufficient — the skew simply has to stay small relative to the one-minute window.
+====
 
 [[multi-region-deployment]]
 == Multi-Region Deployment
