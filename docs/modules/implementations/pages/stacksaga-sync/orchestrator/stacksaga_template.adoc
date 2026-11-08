@@ -711,7 +711,10 @@ State Change Listeners follow **At-Least-Once notification semantics** during no
 StackSaga eliminates distributed locking entirely through **Murmur3 64-bit Consistent Hashing Token Ring Partitioning** and **30-Second Forward Time-Window Publishing**:
 * Every transaction ID is deterministically hashed into a 64-bit token (`-2^63` to `2^63 - 1`).
 * The Retry-Coordinator Master and Slaves partition this token space into strictly non-overlapping sub-ranges assigned to active Retry-Nodes.
-* Each Retry-Node holds exclusive ownership of its assigned sub-range for a defined one-minute time window.
+* Each Retry-Node holds exclusive ownership of its assigned sub-range for a defined one-minute time window, granted with the absolute UTC interval it covers.
 
-Because no two nodes ever share ownership of the same token sub-range, **multi-node race conditions are mathematically impossible without distributed locks**. See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#token-ring-partitioning[Token Ring Partitioning Architecture].
+Disjoint sub-ranges alone would not settle the question, because a system that reclaims an expired assignment must additionally *fence* the displaced holder to stop it writing.
+StackSaga never reclaims: if a Retry-Node is lost mid-window its range is left uncovered until the next division rather than handed to a survivor, so a second claimant for the same range is never created — and no fencing token, row lock or distributed lock is needed anywhere.
+
+See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#token-ring-partitioning[Token Ring Partitioning Architecture] and xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#conflict-avoidance[Conflict Avoidance] for the full argument.
 

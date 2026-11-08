@@ -96,8 +96,9 @@ image::implementations:stacksaga-sync/stacksaga-diagram-stage-2-retry-ready-arch
 === Retry Mechanism
 
 By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, the instance is promoted to a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry Node].
-The ring coordinator assigns each orchestrator instance a deterministic sub-range of the Murmur3 token ring.
-The local scheduler scans the event store for non-terminal transactions (`IN_PROGRESS`, `COMPENSATING`) whose transaction ID hashes into the locally owned token range, safely re-submitting them to the SEC for re-execution.
+The ring coordinator grants each orchestrator instance a deterministic sub-range of the Murmur3 token ring, together with the UTC window over which that range belongs to it.
+While that grant is valid, the instance recovers the transactions falling inside its range — those registered after a `RetryableExecutorException`, those whose `pauseUntilResume(...)` wait-state expired without a callback, and those orphaned by a pod that died silently — and re-submits each to the SEC for re-execution.
+How a token range is resolved to concrete transactions depends on the event-store implementation; see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#resolving-a-token-range-to-transactions[Resolving a Token Range to Transactions].
 
 This guarantees that **each stuck transaction is retried by exactly one instance without distributed locking or multi-node race conditions**.
 The guarantee does not rest on the sub-ranges being disjoint alone — it rests on the fact that a range grant is *never reclaimed* from its holder.
