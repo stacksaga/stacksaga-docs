@@ -683,6 +683,7 @@ However, if the external callback (e.g. payment gateway webhook or courier confi
 * Therefore, the StackSaga xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem] re-executes the transaction directly from the executor where it was paused, **even though its initial execution previously succeeded before entering the pause**. See xref:#pausable-lrt-timeout-reexecution[Timeout Re-Execution Mechanics].
 
 *Architectural Takeaway:* Any executor that returns `.pauseUntilResume(...)` must implement its `doProcess()` (or `doRevert()`) idempotently, so that a timeout re-execution does not generate duplicate business side-effects.
+If the re-execution then fails non-retryably, the executor's own `doRevert()` runs first during compensation (see xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
 
 === Q2: What happens if an external callback arrives after the wait-state timeout has expired, and how should duration be tuned?
 
@@ -714,6 +715,7 @@ If an executor mutates in-memory fields on `currentDomainEntity` inside `doProce
 * **Permanent Rollback Errors (The Risk):** If an unhandled `RuntimeException` occurs in `doRevert()`, the saga becomes a xref:retry-ring-coordinator:disabled-and-terminated-transaction.adoc#terminated-transactions[Terminated Transaction] (permanently frozen in partial compensation). The issue must be investigated and resolved via the xref:trace-window:stacksaga-trace-window.adoc[Trace Window] dashboard before restoring the transaction.
 
 *Architectural Takeaway:* Write `doRevert()` methods defensively and idempotently. For example, if a downstream resource was never created in the forward step, `doRevert()` should treat cancellation as successful rather than throwing an error.
+This also matters for a forward step that was retried and then failed non-retryably: its own `doRevert()` runs first and may target an operation that an earlier attempt only possibly applied (see xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
 
 === Q5: Why can `onStateChanged` be called multiple times, but also ZERO times during crashes?
 

@@ -14,7 +14,8 @@ In a distributed microservices architecture, transactions often span multiple se
 The StackSaga framework addresses this challenge with a robust *transaction retry subsystem* that ensures reliability and consistency without risking duplicate processing or conflicts.
 
 This subsystem detects paused transactions and re-invokes them safely across a cluster of microservice instances, using a combination of token ring partitioning, RSocket communication, and time-windowed publishing.
-The result is high availability and resilience even in the face of transient failures, while guaranteeing that transactions are processed exactly once.
+The result is high availability and resilience even in the face of transient failures, while guaranteeing that a stalled transaction is owned by exactly one node at a time.
+Delivery semantics are *at-least-once*: a step may be re-invoked, so executors forward the engine-provided `idempotencyKey` downstream, which makes the result *effectively-once*.
 
 === Scope of This Document
 
@@ -47,6 +48,7 @@ Examples include validation failures, authorization errors, or any condition tha
 These errors can occur in both the primary flow and the compensation flow.
 In the primary flow, a non-retryable error triggers compensation; if it occurs during compensation, the transaction is marked as permanently failed.
 In either case, the transaction *will not be retried*.
+A step that was retried after a transient failure can still end with a non-retryable error. In that case, an earlier attempt may already have been applied, so the failing step's own compensation runs first (see xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
 
 *Retryable error* — a transient condition, such as a downstream service being unavailable, a database connection timeout, or a network partition.
 The transaction is paused and will be replayed automatically.
@@ -242,7 +244,7 @@ Polls the database for paused transactions whose token falls in that sub-range a
 
 Each component does one small job cleanly.
 No component reaches into another's responsibility.
-The result is a retry system that scales horizontally, tolerates partial failures, and guarantees that every paused transaction is eventually retried — exactly once at a time.
+The result is a retry system that scales horizontally, tolerates partial failures, and guarantees that every paused transaction is eventually retried — by exactly one owner at a time.
 
 [[ring-coordinator-master]]
 === Retry-Coordinator-Master

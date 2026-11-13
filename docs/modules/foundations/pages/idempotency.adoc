@@ -93,6 +93,10 @@ To recover from transient network drops, socket timeouts, or momentary service r
 * *Forward Recovery*: If a transient network glitch occurs while invoking `reserve-inventory`, the coordinator retries the step until confirmation is received.
 * *Backward Recovery*: If a step fails permanently and compensation begins, compensating transactions (e.g., `release-inventory`) must also be retried if they encounter network blips.
 
+NOTE: The ambiguity also reaches the compensation. If a step timed out, was retried, and then failed permanently, the earlier timed-out attempt may have been applied.
+StackSaga therefore runs that step's own compensating transaction first, and it must tolerate a target that was never created.
+See xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
+
 === The Hazard: Duplicate Execution
 
 Retrying an operation across an unreliable network solves the problem of dropped connections, but it introduces a far more dangerous hazard: *duplicate execution*.

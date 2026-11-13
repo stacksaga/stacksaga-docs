@@ -218,6 +218,20 @@ The saga does not park its state in the Event Store.
 * **No Correlation Keys**: Does not generate correlation keys or wait timers.
 * **Retries on Failure**: If a temporary network failure occurs, throw a `RetryableExecutorException` (or return it via `Mono.error`).
 The engine automatically retries with exponential backoff.
+Immediate retries are the developer's choice and happen in memory inside `doProcess()`; the framework takes over only the asynchronous retry after the developer throws.
+* **Non-Transactional by Design**: The engine never wraps `doProcess()` in a database transaction, because that would hold a connection for the whole external call.
+The step result is persisted to the Event Store only after the method returns.
+A crash between the external call and that commit re-executes the step, so protection comes from the forwarded `idempotencyKey`, not from atomicity.
+
+[[publish-without-waiting]]
+.Publishing an Event Without Waiting for a Reply
+[NOTE]
+====
+When a step only needs to emit a message and expects no callback, do not park the saga.
+Use Pattern 1: send the message inside `doProcess()`, wait for the broker acknowledgement (`.get()`, or return the `Mono` of a reactive producer), retry in memory as needed, and throw `RetryableExecutorException` once retries are exhausted.
+Return `.asSync().noPause().toNextExecutor(...)` afterwards.
+A crash before the commit re-publishes the message, so put the `idempotencyKey` in the message and deduplicate in the consumer (at-least-once, effectively-once).
+====
 
 ==== Advantages of Pattern 1
 
@@ -626,6 +640,16 @@ At this point, the network request has not been sent yet.
 An external service will never see a message unless that step is already durably persisted in the Event Store.
 * **Entity Immutability**: The domain entity snapshot is sealed before Stage 2. Code inside the `invoker(...)` lambda must not modify the entity.
 * **Safe Crash Recovery**: If the orchestrator server crashes after state persistence but before the message is sent, the background recovery process safely retries sending the message.
+The recovery latency is bounded by the *crash retention* (`defaultRestoreOnCrashDuration`) that the engine applies by default as soon as an executor starts, so a crashed step is re-exposed for re-execution after that configurable delay.
+* **Invoker Failure Contract**: The framework runs the `invoker(...)` lambda once; it does not re-run it.
+Immediate retries are the developer's responsibility and happen in memory *inside* the lambda.
+Once those retries are exhausted, throw the exception type declared in `.invoker(lambda, duration, ExceptionType.class)`: the engine then records the attempt as a transient failure and the Retry Subsystem re-invokes the step asynchronously after the given duration.
+Any exception that is *not* of the declared type is treated as a `NonRetryableExecutorException` and starts compensation.
+If that happens on a re-invocation, the step's own `doRevert()` runs first, because the earlier dispatch may already have been applied (see xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
+* **Await the Broker Acknowledgement**: In the imperative `invoker(...)`, `kafkaTemplate.send(...)` returns a future.
+Wait for it (for example `.get()` or `.join()`) and rethrow a failure as the declared exception type; otherwise a failed send never reaches the lambda and the step stays parked until the wait-state expires.
+* **Duplicates Are Possible, So Forward the `idempotencyKey`**: A re-executed step gets a new Tryout UID and therefore a new `resumeKey`.
+The `resumeKey` alone cannot identify a duplicate message, so always put the engine-provided `idempotencyKey` in the message (key or header) and deduplicate on it in the consumer.
 
 ==== Reference Implementation
 
@@ -661,7 +685,8 @@ public class DispatchShippingExecutor implements CommandExecutor<OrderDomainEnti
                                     currentDomainEntity.getOrderId(),
                                     currentDomainEntity.getShippingTrackingId(),
                                     currentDomainEntity.getShippingAddress(),
-                                    resumeKey // Resume key included for asynchronous callback!
+                                    resumeKey,      // Resume key included for the asynchronous callback
+                                    idempotencyKey  // Stable across re-executions: lets the consumer deduplicate
                             );
                             kafkaTemplate.send("shipping-commands-topic", currentDomainEntity.getOrderId(), message);
                         },
@@ -1156,6 +1181,10 @@ if (availableStock < requestedQuantity) {
 }
 ----
 
+NOTE: If the failing executor had already been re-executed after a transient failure, an earlier attempt may have been applied by the remote service.
+In that case the failing executor's own `doRevert()` runs first, before the reverse unwinding continues.
+See xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
+
 '''
 
 [[usnp-revert-step-manager]]
@@ -1177,6 +1206,10 @@ Instead, StackSaga handles rollback automatically via **Deterministic Reverse Au
 2. It identifies all completed command steps in the exact order they ran.
 3. It reverses the steps in backward order (Last-In, First-Out: LIFO).
 4. Calling `.toNextDefaultExecutor()` (or `.resumeToNextDefaultExecutor()` when entering a pausable wait-state) signals the engine to automatically route to the appropriate predecessor step in history.
+
+The step that failed is normally not part of this chain.
+The exception is a step that failed non-retryably *after being re-executed*: its own `doRevert()` is the first compensation, because an earlier attempt may have been applied.
+See xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
 ====
 
 [IMPORTANT]

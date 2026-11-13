@@ -98,3 +98,48 @@ IMPORTANT: There is nothing like you can throw an exception when some exception 
 If you don't want to continue the execution of the transaction to forward, and if you decide that the transaction should be stopped at some point, due to a condition is not met, you can throw a *NonRetryableExecutorException* exception as well.
 <<usage_of_exceptions,See the full implementation>>
 
+== Non-Retryable Failure After a Retry [[non_retryable_after_retry]]
+
+When a `NonRetryableExecutorException` is thrown, the engine reverts the executors that completed *before* the failing one.
+By default the failing executor's own `doRevert()` is not part of that chain, because a step that failed on its first attempt never completed, so there is nothing to undo.
+
+=== The Scenario
+
+A step can be executed more than once.
+A transient failure (`RetryableExecutorException`) makes the engine try the same step again later, and an attempt that failed that way may have *already had an effect* on the remote service.
+A typical example is a timeout where the request was applied by the remote service, but the response was lost.
+
+. Attempt 1 calls the remote service and fails with a transient error. The engine schedules a retry.
+. Attempt 2 of the same step fails with a *non-retryable* error (for example, the service now answers `400 Bad Request`).
+. The transaction must now be compensated, but attempt 1 may have left an effect behind. Skipping the failing step's `doRevert()` would leave that effect in place.
+
+A transient failure never starts a revert on its own.
+The situation arises only for the sequence "one or more transient failures, then a non-retryable failure on the same step".
+
+=== How StackSaga Handles It
+
+The engine remembers whether a step was executed before the current attempt.
+
+* If the step fails non-retryably on its *first* attempt, nothing was executed before, so its `doRevert()` is *not* run. The revert chain starts from the previous step.
+* If the step fails non-retryably on a *re-execution*, an earlier attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, and then continues the normal reverse order.
+
+This is the default behavior, and it needs no extra code in the executor.
+
+To opt out for a step whose `doRevert()` must never run on a failed step, override it on the exception:
+
+[source,java]
+----
+throw NonRetryableExecutorException
+        .buildWith(badRequestException)
+        .compensateThisStep(false)
+        .build();
+----
+
+=== Writing a Safe `doRevert()`
+
+The `doRevert()` of a step may now be called for an attempt that was only *possibly* applied.
+Write it so that it is safe in both cases:
+
+* It must be *idempotent*.
+* It must tolerate a target that was never created (for example, treat "not found" as success).
+* Use the `idempotencyKey` of the executor to address the same remote operation that the earlier attempt may have created.
