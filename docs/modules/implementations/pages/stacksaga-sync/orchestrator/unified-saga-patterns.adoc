@@ -359,8 +359,8 @@ image::implementations:executor/Executor-Execution-SYNC-PAUSED.svg[alt="Correlat
 
 1. **Synchronous Initiation**: The orchestrator invokes the `Executor`, which calls `Service-A` (for example, creating a checkout session or submitting an approval request).
 2. **Pending Acknowledgment**: `Service-A` returns an initial response containing a session token (`Request Ack / Pending`).
-3. **State Persistence & Parking**: The Saga Execution Coordinator (`SEC`) marks the transaction as `PAUSED` in the `event-store`.
-It persists the updated domain entity state, registers a correlation key (`resumeKey`), and sets a retention timeout.
+3. **State Persistence & Parking**: The Saga Execution Coordinator (`SEC`) marks the transaction as `PAUSED` (`is_paused = 1`) in the `event-store`.
+It persists the updated domain entity state, registers a unique attempt correlation key (`resumeKey` formatted as `transactionId:tryoutId`), records the active step with **`ExecutionStatus.NOT_YET`**, and sets a retention timeout.
 4. **Freeing Threads ("Park and Wait")**: The server thread is returned immediately to the application pool.
 No resources remain tied to this transaction during the waiting period.
 5. **External Resume Trigger (Transport-Agnostic)**: Later, external input arrives to wake up the transaction. **Resumption is never limited to HTTP webhooks**; it can arrive through any communication channel:
@@ -368,12 +368,14 @@ No resources remain tied to this transaction during the waiting period.
 * A Message Broker Subscriber (`@KafkaListener`, `@RabbitListener`, SQS)
 * A User / Operator UI Action (e.g. a manager clicking an approval button in an internal admin dashboard)
 * A gRPC service or scheduled batch process
-6. **Reloading Saga & Destination Handoff**: When the trigger invokes `sagaTemplate.resume(...)`, the coordinator (`SEC`) looks up the saga in the `event-store` using the correlation key, verifies that the timeout has not expired, injects the trigger data into `ResumeContext`, and moves execution to the configured **`Destination`** (defined by USNP).
+6. **Reloading Saga & Destination Handoff**: When the trigger invokes `sagaTemplate.resume(...)`, the coordinator (`SEC`) looks up the saga in the `event-store` using the correlation key, verifies that the timeout has not expired and that the Tryout UID matches the active attempt, transitions the parked step to **`ExecutionStatus.SUCCESS`**, injects the trigger data into `ResumeContext`, and moves execution to the configured **`Destination`** (defined by USNP).
 
 ==== Key Rules of Pattern 2
 
 * **Zero Held Threads**: No server threads remain blocked while waiting.
-* **Persistent Correlation**: The transaction state and correlation key are safely persisted in the Event Store.
+* **Persistent Correlation & Tryout UID Precision**: The transaction state and correlation key are safely persisted in the Event Store. The resume key (`transactionId:tryoutId`) encapsulates the attempt's specific Tryout UID.
+* **Parked Execution Status (`ExecutionStatus.NOT_YET`)**: While parked waiting for external resumption, the step event's status is strictly `ExecutionStatus.NOT_YET`. It transitions to `ExecutionStatus.SUCCESS` only upon successful callback resumption.
+* **Stale Callback Protection**: If a wait-state times out and the Retry Coordinator re-invokes the step, a new Tryout UID is allocated. If the external gateway belatedly returns a callback for the earlier timed-out attempt, StackSaga recognizes that the callback's tryout UID does not match the active tryout and safely rejects the stale callback.
 * **Enforces Replay Protection (Double Execution Guard)**: If a gateway, message broker, or user action sends multiple duplicate resume requests with the same `resumeKey`, only the first invocation succeeds in acquiring the active transaction lease and resuming the saga.
 Subsequent duplicate requests are rejected with `InvalidTransactionResumeKeyException` (because the correlation key is atomically consumed and invalidated in the Event Store upon the first resumption).
 This strictly prevents double execution of downstream executors (idempotent single execution).

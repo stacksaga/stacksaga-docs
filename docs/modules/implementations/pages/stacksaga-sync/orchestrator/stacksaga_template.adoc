@@ -142,8 +142,17 @@ At the moment of pausing, the transaction enters an intentional business wait st
 
 [NOTE]
 ====
-**Retrieving the Resume Key:**  
-During forward execution (`doProcess`) or compensation (`doRevert`), the executor invokes `stepManager.getResumeKey()` to obtain the unique correlation token. This token encapsulates the transaction ID and step idempotency metadata (e.g., `transactionId:idempotencyKey`). Pass this key to external webhooks, asynchronous payment providers, or message broker headers so that the callback can supply it back upon completion.
+**Retrieving the Resume Key & Dual-Token Architecture:**  
+During forward execution (`doProcess`) or compensation (`doRevert`), the executor invokes `stepManager.getResumeKey()` to obtain the unique correlation token. StackSaga enforces a clear separation between two distinct tokens:
+
+* **Domain Idempotency Key (`idempotencyKey`)**: A business/domain-level hash computed by `getIdempotencyKey(...)`. Forward this key to downstream payment gateways, banking APIs, or external HTTP services (e.g. in `Idempotency-Key` headers) so that the remote service deduplicates calls if network retries occur.
+* **Correlation Resume Key (`resumeKey`)**: A runtime correlation token formatted as `transactionId:tryoutId`. It encapsulates the transaction ID and the unique **Tryout UID** of the current execution attempt. Pass this key to external callbacks, webhooks, or asynchronous messaging headers so that the callback can supply it back upon completion.
+
+**Stale Callback Protection:**  
+If an external wait state times out and the StackSaga Retry Coordinator re-invokes the executor, a **new** Tryout UID is allocated with a **new** `resumeKey`. If a delayed callback from the previous timed-out attempt arrives later, StackSaga detects that the callback's `tryoutId` does not match the active tryout UID. The engine safely rejects the stale callback with `InvalidTransactionResumeKeyException`, strictly preventing out-of-order execution or duplicate state transitions.
+
+**Event Store Compatibility:**  
+The Event Store query layer provides dual-matching (`rc.resume_key = tryout.transaction_execution_tryout_uid OR rc.resume_key = tryout.idempotency_key`), ensuring full backward compatibility with legacy callback formats while enforcing tryout-level precision.
 ====
 
 To wake up and continue the transaction once the external system completes its task, `SagaTemplate` provides the `resume(...)` operator.
@@ -277,9 +286,9 @@ public class ReactiveOrderCallbackController {
 
 When `resume(...)` is called:
 
-. StackSaga resolves the `resumeKey`, validating and correlating the callback to the exact transaction ID and execution checkpoint registered in the Event Store.
+. StackSaga resolves the `resumeKey`, validating that the supplied correlation token matches the active Tryout UID registered in the Event Store (stale callbacks from previous timed-out attempts are rejected immediately).
 . It durably records the serialized `ResumeContext` payload in the Event Store for complete auditing and tracing.
-. It clears the transaction wait-state, ensuring subsequent duplicate callbacks with the same resume key are rejected.
+. It clears the transaction wait-state (`is_paused = 0`), ensuring subsequent duplicate callbacks with the same resume key are rejected.
 . It restores the `OrderDomainEntity` with its pristine checkpoint state.
 . It invokes the target executor's `doProcess(...)` or `doRevert(...)`, injecting the populated `ResumeContext`. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[Pausable Long-Running Transactions in Executor Architecture] for how executors consume this data.
 
@@ -535,6 +544,16 @@ TransactionCompleteStatus status = state.getCurrentStatus();
 NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> history = state.getExecutionHistory();
 OrderDomainEntity entity = state.getCurrentDomainEntity();
 ----
+
+[IMPORTANT]
+====
+**Execution Status Semantics (`ExecutionStatus.NOT_YET` vs. `SUCCESS`):**  
+When inspecting `state.getExecutionHistory()`, note the lifecycle status of individual executor steps:
+
+* **Continuous Steps (`noPause()`):** When an executor completes without pausing, its event status in history is recorded immediately as `ExecutionStatus.SUCCESS`.
+* **Pausable Wait Steps (`pauseUntilResume(...)` in Pattern 2 & Pattern 3):** While a transaction is parked waiting for an external webhook callback or message event, the active step's execution status in history is recorded as **`ExecutionStatus.NOT_YET`** (with transaction `is_paused = 1`).
+* **Post-Resumption:** The parked step only transitions to `ExecutionStatus.SUCCESS` once `sagaTemplate.resume(...)` successfully delivers the callback context and the workflow resumes to the next executor.
+====
 
 ==== Reactive State Retrieval (Reactive / Spring WebFlux)
 

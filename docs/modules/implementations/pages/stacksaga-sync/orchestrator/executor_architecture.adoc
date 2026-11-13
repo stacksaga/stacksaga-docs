@@ -332,10 +332,14 @@ return stepManager
         .resumeToNextExecutor(CapturePaymentExecutor.class);
 ----
 
-* The SEC marks the transaction as `PAUSED`, commits the `resumeKey`, and **immediately frees the worker thread and DB connection**.
+* The SEC marks the transaction as `PAUSED` (`is_paused = 1`), registers the unique `resumeKey` (formatted as `transactionId:tryoutId`), records the step with **`ExecutionStatus.NOT_YET`**, and **immediately frees the worker thread and DB connection**.
 * The saga consumes zero CPU, threads, or memory while parked.
+* **Parked Step Execution Status (`ExecutionStatus.NOT_YET`):** While parked waiting for external input, the active step event remains in `ExecutionStatus.NOT_YET`. It only transitions to `ExecutionStatus.SUCCESS` once the external callback arrives and the orchestrator successfully resumes the transaction to the destination executor.
+* **Dual-Token Distinction:** The engine provides two tokens with separate responsibilities:
+** **`idempotencyKey`** (Method Parameter): Business-level idempotency hash. Pass this to external APIs (e.g. in HTTP `Idempotency-Key` headers) to prevent duplicate side effects on the external service upon network retries.
+** **`stepManager.getResumeKey()`** (`transactionId:tryoutId`): Runtime correlation token encapsulating the attempt-specific **Tryout UID**. Pass this in callback/webhook metadata so that late/stale callbacks from previous timed-out attempts are rejected automatically.
 * When the webhook arrives, call `sagaTemplate.resume(resumeKey, retentionDuration)` (fluent `.put(...)` or `.withContext(resumeContext)`) to wake the saga and invoke `CapturePaymentExecutor`.
-* **Timeout Re-Execution:** If the callback fails to arrive within the configured duration, the Retry Coordinator re-invokes this executor's `doProcess(...)`. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#advanced-architectural-faq[FAQ Q1 & Q2: Re-Invocation of Succeeded Steps and Tuning Wait-State Duration].
+* **Timeout Re-Execution:** If the callback fails to arrive within the configured duration, the Retry Coordinator re-invokes this executor's `doProcess(...)` with a newly generated Tryout UID. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#advanced-architectural-faq[FAQ Q1 & Q2: Re-Invocation of Succeeded Steps and Tuning Wait-State Duration].
 * See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP Pattern 2: Correlated Park-and-Resume] for complete thread lifecycle details.
 
 === Supporting Two-Stage Broker Dispatch with Commit Barrier (USIP Pattern 3)
@@ -366,8 +370,9 @@ public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
 }
 ----
 
-* **Commit Barrier**: The SEC commits the `PAUSED` transaction record to the Event Store *before* firing the lambda, completely eliminating fast-callback race conditions.
+* **Commit Barrier**: The SEC commits the `PAUSED` transaction record (`is_paused = 1`) to the Event Store *before* firing the lambda, recording the step in **`ExecutionStatus.NOT_YET`** and completely eliminating fast-callback race conditions.
 * **Strict Rule**: Never mutate `currentDomainEntity` inside the `invoker(...)` closure, as the entity snapshot is sealed prior to invocation.
+* **Lifecycle Status**: The step remains in `ExecutionStatus.NOT_YET` while waiting for the downstream consumer's callback response; it transitions to `ExecutionStatus.SUCCESS` only after resumption.
 * See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[USIP Pattern 3: Two-Stage Lazy Dispatch] for architectural details.
 
 === Reactive Command Executor (`ReactiveCommandExecutor`)
