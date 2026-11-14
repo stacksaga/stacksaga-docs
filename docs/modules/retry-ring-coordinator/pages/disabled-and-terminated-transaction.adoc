@@ -38,10 +38,10 @@ NOTE: This case is not raised as a warning in the Trace Window. Resources being 
 [[terminated-transactions]]
 == Terminated Transactions
 
-A transaction that *fails while reverting* is marked as a *terminated transaction*.
+A transaction that *fails while reverting* is marked as a *terminated transaction* (with status `TransactionCompleteStatus.REVERT_FAILED`).
 
-Compensation is not permitted to fail in StackSaga: the only exception a `doRevert()` method may throw is a retryable one.
-A non-retryable failure during compensation therefore has no recovery path — there is no compensation for a compensation — so the transaction stops at once.
+Compensation is not permitted to fail permanently in StackSaga: the only exception a `doRevert()` method or revert sub-executor may throw is a retryable one (`RetryableExecutorException`).
+If compensation encounters an unhandled non-retryable failure, or if a compensating step (`doRevert()`, `@PreExecutor`, or `@PostExecutor`) exhausts all its configured retry attempts, there is no further recovery path — because there is no compensation for a compensation. The transaction stops at once and transitions to `REVERT_FAILED`.
 
 The distinction between the two end states is *when* they happen:
 
@@ -52,7 +52,7 @@ The distinction between the two end states is *when* they happen:
 
 | Cause
 | Lifetime expired before completion
-| Compensation failed with a non-retryable error
+| Compensation failed with an unrecoverable error or exhausted all retries (`REVERT_FAILED`)
 
 | Timing
 | At the end of the lifetime

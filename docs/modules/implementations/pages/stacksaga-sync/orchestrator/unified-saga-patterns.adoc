@@ -231,6 +231,8 @@ When a step only needs to emit a message and expects no callback, do not park th
 Use Pattern 1: send the message inside `doProcess()`, wait for the broker acknowledgement (`.get()`, or return the `Mono` of a reactive producer), retry in memory as needed, and throw `RetryableExecutorException` once retries are exhausted.
 Return `.asSync().noPause().toNextExecutor(...)` afterwards.
 A crash before the commit re-publishes the message, so put the `idempotencyKey` in the message and deduplicate in the consumer (at-least-once, effectively-once).
+
+Keep the publish in its own executor, separate from any database write: that split is why a StackSaga application needs no Transactional Outbox (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#outbox-pattern-eliminated[Why StackSaga Eliminates the Transactional Outbox Pattern]).
 ====
 
 ==== Advantages of Pattern 1
@@ -643,7 +645,7 @@ An external service will never see a message unless that step is already durably
 The recovery latency is bounded by the *crash retention* (`defaultRestoreOnCrashDuration`) that the engine applies by default as soon as an executor starts, so a crashed step is re-exposed for re-execution after that configurable delay.
 * **Invoker Failure Contract**: The framework runs the `invoker(...)` lambda once; it does not re-run it.
 Immediate retries are the developer's responsibility and happen in memory *inside* the lambda.
-Once those retries are exhausted, throw the exception type declared in `.invoker(lambda, duration, ExceptionType.class)`: the engine then records the attempt as a transient failure and the Retry Subsystem re-invokes the step asynchronously after the given duration.
+Once those retries are exhausted, throw the exception type declared in `.invoker(lambda, duration, ExceptionType.class)`: the engine then records the attempt as a transient failure, keeps the transaction parked (`is_paused = 1`), temporarily clears the active `resume_key` in the Event Store (so no phantom callback can be accepted), sets `target_retention_end_time` to the retry duration, and the Retry Subsystem re-invokes the step asynchronously after the given duration has elapsed.
 Any exception that is *not* of the declared type is treated as a `NonRetryableExecutorException` and starts compensation.
 If that happens on a re-invocation, the step's own `doRevert()` runs first, because the earlier dispatch may already have been applied (see xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
 * **Await the Broker Acknowledgement**: In the imperative `invoker(...)`, `kafkaTemplate.send(...)` returns a future.
@@ -1361,6 +1363,20 @@ When control enters a step's `@StartPreExecutor` pre-compensation pipeline, the 
 | **Source has Post-Hooks** | `StepN+1.LastPostExecutor` | `StepN.doRevert()`
 | **Both Hooks Configured** | `StepN+1.LastPostExecutor` | `StepN.FirstPreExecutor`
 |===
+====
+
+[CAUTION]
+.Sub-Executor Failure During Rollback: Terminal Halting (`REVERT_FAILED`)
+====
+In distributed saga workflows, **there is no compensation for a compensation**.
+If a `@PreExecutor`, `doRevert()`, or `@PostExecutor` in the rollback pipeline encounters an unrecoverable failure or exhausts its configured retries (`RetryableExecutorException`), the engine **cannot roll back further**.
+
+Instead:
+
+* The transaction transitions immediately into **`TransactionCompleteStatus.REVERT_FAILED`** (terminal state).
+* All automated retries halt immediately to protect external systems from cascading failures or infinite retry loops.
+* The transaction snapshot is preserved in the Event Store with full error logs and diagnostic stack traces.
+* Operators can inspect the failure via the Trace Window dashboard and safely restore or remediate the transaction once the downstream issue is resolved.
 ====
 
 ==== Overview & Pre-Compensation Destination Roadmap
