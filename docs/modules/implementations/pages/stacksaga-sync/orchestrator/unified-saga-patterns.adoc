@@ -1175,12 +1175,17 @@ When an executor throws a `NonRetryableExecutorException`, the framework catches
 ----
 if (availableStock < requestedQuantity) {
     // Aborts forward pipeline immediately and engages Reverse Autopilot
-    throw new NonRetryableExecutorException("Out of stock for SKU: " + currentSku);
+    throw NonRetryableExecutorException
+            .buildWith(new IllegalStateException("Out of stock for SKU: " + currentSku))
+            .withEvent("OUT_OF_STOCK")
+            .withDefaultReexposeOnUnexpectedCrash()
+            .compensateThisStep(true)
+            .build();
 }
 ----
 
 NOTE: If the failing executor had already been re-executed after a transient failure, an earlier attempt may have been applied by the remote service.
-In that case the failing executor's own `doRevert()` runs first, before the reverse unwinding continues.
+If the exception is built with `compensateThisStep(true)`, the failing executor's own `doRevert()` runs first, before the reverse unwinding continues.
 See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
 
 '''
@@ -1206,7 +1211,7 @@ Instead, StackSaga handles rollback automatically via **Deterministic Reverse Au
 4. Calling `.toNextDefaultExecutor()` (or `.resumeToNextDefaultExecutor()` when entering a pausable wait-state) signals the engine to automatically route to the appropriate predecessor step in history.
 
 The step that failed is normally not part of this chain.
-The exception is a step that failed non-retryably *after being re-executed*: its own `doRevert()` is the first compensation, because an earlier attempt may have been applied.
+The exception is a step that failed non-retryably *after being re-executed* with `compensateThisStep(true)`: its own `doRevert()` is the first compensation, because an earlier attempt may have been applied.
 See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
 ====
 

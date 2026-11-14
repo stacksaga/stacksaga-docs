@@ -329,6 +329,9 @@ public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
             // Permanent business failure: triggers reverse compensation
             throw NonRetryableExecutorException
                     .buildWith(ex)
+                    .withEvent("ORDER_REJECTED")
+                    .withDefaultReexposeOnUnexpectedCrash()
+                    .compensateThisStep(true)
                     .put("reason", "Invalid order payload")
                     .build();
         }
@@ -769,6 +772,29 @@ StackSaga classifies faults strictly into transient infrastructure issues and pe
 | **Permanent Business Failure**: Indicates business rejections (e.g. insufficient funds, out of stock). Forward progress halts immediately and reverse compensation engages.
 |===
 
+[[building-non-retryable-exception]]
+=== Building a `NonRetryableExecutorException`
+
+A `NonRetryableExecutorException` is created with a staged builder.
+Every value is required and is set in a fixed order, so the compiler only offers `build()` once all of them have been decided:
+
+[source,java]
+----
+throw NonRetryableExecutorException
+        .buildWith(badRequestException)                       // 1. the real error
+        .withEvent("PAYMENT_DECLINED")                        // 2. the event recorded for this failure
+        .reexposeOnUnexpectedCrash(Duration.ofMinutes(10))    // 3. the crash re-expose delay
+        .compensateThisStep(true)                             // 4. compensation of the failing step
+        .put("reason", "insufficient_funds")                  // optional, repeatable
+        .build();
+----
+
+. **Real error** (`buildWith(...)`): the exception that caused the failure.
+. **Event** (`withEvent(String)` or `withEvent(SagaExecutionEventName)`): the event recorded for this failure in the transaction history. Use `withDefaultEvent()` to record the framework's default error event.
+. **Crash re-expose delay** (`reexposeOnUnexpectedCrash(Duration)`): how long the engine waits before it re-exposes the transaction if the instance crashes after this failure, before compensation has been handed over. Use `withDefaultReexposeOnUnexpectedCrash()` to apply the transaction's default restore-on-crash delay.
+. **Compensation of the failing step** (`compensateThisStep(boolean)`): whether the failing step's own `doRevert()` runs when this failure happens on a re-execution of the step. See <<non_retryable_after_retry,Non-Retryable Failure After a Retry>>.
+. **Metadata** (`put(key, value)`, optional): additional diagnostic details, available to listeners and compensating executors.
+
 [IMPORTANT]
 .Rollback Invariant: Non-Retryable Exceptions Forbidden in `doRevert()`
 ====
@@ -799,19 +825,18 @@ The situation arises only for the sequence "one or more transient failures, then
 
 ==== How StackSaga Handles It
 
-The engine remembers whether a step was executed before the current attempt:
+The engine remembers whether a step was executed before the current attempt, and every `NonRetryableExecutorException` states with `compensateThisStep(boolean)` whether the failing step may be compensated (see <<building-non-retryable-exception,Building a `NonRetryableExecutorException`>>):
 
-* If the step fails non-retryably on its *first* attempt, nothing was executed before, so its `doRevert()` is *not* run. Compensation starts from the previous step.
-* If the step fails non-retryably on a *re-execution*, an earlier attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, and then continues in the normal reverse order.
-
-This is the default behavior and needs no extra code in the executor.
-
-To opt out for a step whose `doRevert()` must never run for its own failure, set it on the exception:
+* If the step fails non-retryably on its *first* attempt, nothing was executed before, so its `doRevert()` is *not* run, whatever the value is. Compensation starts from the previous step.
+* If the step fails non-retryably on a *re-execution* with `compensateThisStep(true)`, an earlier attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, and then continues in the normal reverse order.
+* If the step fails non-retryably on a *re-execution* with `compensateThisStep(false)`, its `doRevert()` is *not* run. Use this for a step whose `doRevert()` must never run for its own failure.
 
 [source,java]
 ----
 throw NonRetryableExecutorException
         .buildWith(badRequestException)
+        .withEvent("PAYMENT_DECLINED")
+        .withDefaultReexposeOnUnexpectedCrash()
         .compensateThisStep(false)
         .build();
 ----
