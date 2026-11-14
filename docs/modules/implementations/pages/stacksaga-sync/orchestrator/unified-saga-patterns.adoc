@@ -647,7 +647,7 @@ The recovery latency is bounded by the *crash retention* (`defaultRestoreOnCrash
 Immediate retries are the developer's responsibility and happen in memory *inside* the lambda.
 Once those retries are exhausted, throw the exception type declared in `.invoker(lambda, duration, ExceptionType.class)`: the engine then records the attempt as a transient failure, keeps the transaction parked (`is_paused = 1`), temporarily clears the active `resume_key` in the Event Store (so no phantom callback can be accepted), sets `target_retention_end_time` to the retry duration, and the Retry Subsystem re-invokes the step asynchronously after the given duration has elapsed.
 Any exception that is *not* of the declared type is treated as a `NonRetryableExecutorException` and starts compensation.
-If that happens on a re-invocation, the step's own `doRevert()` runs first, because the earlier dispatch may already have been applied (see xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
+If that happens on a re-invocation, the step's own `doRevert()` runs first, because the earlier dispatch may already have been applied (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
 * **Await the Broker Acknowledgement**: In the imperative `invoker(...)`, `kafkaTemplate.send(...)` returns a future.
 Wait for it (for example `.get()` or `.join()`) and rethrow a failure as the declared exception type; otherwise a failed send never reaches the lambda and the step stays parked until the wait-state expires.
 * **Duplicates Are Possible, So Forward the `idempotencyKey`**: A re-executed step gets a new Tryout UID and therefore a new `resumeKey`.
@@ -1185,7 +1185,7 @@ if (availableStock < requestedQuantity) {
 
 NOTE: If the failing executor had already been re-executed after a transient failure, an earlier attempt may have been applied by the remote service.
 In that case the failing executor's own `doRevert()` runs first, before the reverse unwinding continues.
-See xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
 
 '''
 
@@ -1211,7 +1211,7 @@ Instead, StackSaga handles rollback automatically via **Deterministic Reverse Au
 
 The step that failed is normally not part of this chain.
 The exception is a step that failed non-retryably *after being re-executed*: its own `doRevert()` is the first compensation, because an earlier attempt may have been applied.
-See xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
 ====
 
 [IMPORTANT]

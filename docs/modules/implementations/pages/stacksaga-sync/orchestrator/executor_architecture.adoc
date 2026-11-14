@@ -769,9 +769,51 @@ If an unrecoverable compensation error occurs that can be safely tolerated (e.g.
 2. Return `.success("REVERT_TOLERATED").asSync().noPause().toNextDefaultExecutor()` to permit rollback to proceed.
 ====
 
-NOTE: When a `NonRetryableExecutorException` is thrown by a step that was *re-executed* after a transient failure, the failing step's own `doRevert()` runs first, because an earlier attempt may already have been applied by the remote service.
-A step that fails on its first attempt is not reverted.
-See xref:ROOT:non_retryable_executor_exception.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
+[[non_retryable_after_retry]]
+=== Non-Retryable Failure After a Retry
+
+When a `NonRetryableExecutorException` is thrown, the engine reverts the executors that completed *before* the failing one.
+By default, the failing executor's own `doRevert()` is not part of that chain: a step that failed on its first attempt never completed, so there is nothing to undo.
+One situation changes that.
+
+==== The Scenario
+
+A step can run more than once (see <<rule-idempotent-execution,Rule 2>>).
+A transient failure (`RetryableExecutorException`) makes the engine invoke the same step again later, and the attempt that failed that way may *already have had an effect* on the remote service — for example, a timeout where the remote service applied the request but the response was lost.
+
+. Attempt 1 calls the remote service and fails with a transient error. The engine schedules a retry.
+. Attempt 2 of the same step fails with a *non-retryable* error (for example, the service now answers `400 Bad Request`).
+. The transaction must now be compensated, but attempt 1 may have left an effect behind. Skipping the failing step's `doRevert()` would leave that effect in place.
+
+A transient failure never starts compensation on its own.
+The situation arises only for the sequence "one or more transient failures, then a non-retryable failure on the same step".
+
+==== How StackSaga Handles It
+
+The engine remembers whether a step was executed before the current attempt:
+
+* If the step fails non-retryably on its *first* attempt, nothing was executed before, so its `doRevert()` is *not* run. Compensation starts from the previous step.
+* If the step fails non-retryably on a *re-execution*, an earlier attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, and then continues in the normal reverse order.
+
+This is the default behavior and needs no extra code in the executor.
+
+To opt out for a step whose `doRevert()` must never run for its own failure, set it on the exception:
+
+[source,java]
+----
+throw NonRetryableExecutorException
+        .buildWith(badRequestException)
+        .compensateThisStep(false)
+        .build();
+----
+
+==== Writing a Safe `doRevert()`
+
+Because `doRevert()` can be called for an attempt that was only *possibly* applied, write it so that it is safe in both cases:
+
+* It must be idempotent (<<rule-idempotent-execution,Rule 2>>).
+* It must tolerate a target that was never created — for example, treat "not found" as success.
+* It must use the executor's `idempotencyKey` to address the same remote operation that the earlier attempt may have created.
 
 '''
 

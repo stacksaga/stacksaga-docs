@@ -115,7 +115,7 @@ This order introduces a dangerous race condition in high-throughput or asynchron
 ====
 
 * **Step 4 (`FinalizeOrderExecutor`): `CommandExecutor` with Resumed Continuous STP**
-** *Why Command?* Fulfilling an order and updating local order tables changes state. If fulfillment fails, or if the payment gateway returned a declined status in `ResumeContext`, `FinalizeOrderExecutor` throws a xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`], initiating reverse compensation across `InitiatePaymentExecutor` and `ReserveOrderExecutor`.
+** *Why Command?* Fulfilling an order and updating local order tables changes state. If fulfillment fails, or if the payment gateway returned a declined status in `ResumeContext`, `FinalizeOrderExecutor` throws a xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#exceptions[`NonRetryableExecutorException`], initiating reverse compensation across `InitiatePaymentExecutor` and `ReserveOrderExecutor`.
 ** *Why Resumed Continuous STP (`.noPause().complete()`)?* Once awakened by the webhook, final order confirmation is a fully automated internal operation that runs straight-through to terminal completion (`.complete()`), fulfilling xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-1-2-terminal-completion[USNP Pattern 1.2: Terminal Saga Completion].
 
 We build this up across three progressive stages:
@@ -548,7 +548,7 @@ The SEC restores the `OrderDomainEntity` snapshot, injects callback payload data
 .Pattern Rationale: Resumed Step, ResumeContext Decoupling & Terminal Completion
 ====
 * **Decoupled Payloads**: Callback parameters are injected into `ResumeContext` rather than directly mutating the domain aggregate in the REST controller. This preserves domain encapsulation and prevents race conditions (see xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resume-context-contract[ResumeContext Contract]).
-* **Failure Pivot**: If payment failed, throwing xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`] immediately halts forward progression and triggers reverse compensation.
+* **Failure Pivot**: If payment failed, throwing xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#exceptions[`NonRetryableExecutorException`] immediately halts forward progression and triggers reverse compensation.
 * **Completion**: If successful, calling `.complete()` concludes the saga with status `PROCESS_COMPLETED` (xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-1-2-terminal-completion[USNP Pattern 1.2: Terminal Saga Completion]).
 ====
 
@@ -948,7 +948,7 @@ curl -X POST http://localhost:8080/api/v1/order/callback/payment \
       }'
 ----
 
-`FinalizeOrderExecutor` throws xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`].
+`FinalizeOrderExecutor` throws xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#exceptions[`NonRetryableExecutorException`].
 The SEC halts forward progress and activates **Deterministic Reverse Autopilot** (xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-2-1-revert-to-core[USNP Pattern 2.1]):
 
 1. `FinalizeOrderExecutor.doRevert()` marks the order canceled (`ORDER_FINALIZATION_REVERTED`).
@@ -1201,7 +1201,7 @@ This quick example covered the essential mechanics of building a mixed-style sag
 
 | *Exception & Failure Taxonomy*
 | Distinguishing transient infrastructure failures (`RetryableExecutorException`) from definitive business errors (`NonRetryableExecutorException`).
-| xref:ROOT:retryable_executor_exception.adoc[Retryable] & xref:ROOT:non_retryable_executor_exception.adoc[Non-Retryable Exceptions]
+| xref:ROOT:retryable_executor_exception.adoc[Retryable] & xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#exceptions[Non-Retryable Exceptions]
 
 | *Configuration & Tuning*
 | Scheduler parallelism, pool capacities, event store retries, and cluster topology tuning.
