@@ -296,7 +296,7 @@ Now, we implement the four atomic executors. Each executor encapsulates **exactl
 
 Validates user purchasing standing against an external user microservice.
 Because read-only queries make no state mutations that require rollback, it implements `QueryExecutor` (no `doRevert()` required).
-Notice how it reads `currentDomainEntity.getUsername()` and enriches the aggregator with `userId`, `userEmail`, and `userValidated`.
+Notice how it reads `currentDomainEntityState.getUsername()` and enriches the aggregator with `userId`, `userEmail`, and `userValidated`.
 
 [NOTE]
 .Pattern Rationale: QueryExecutor + Continuous STP (USIP Pattern 1)
@@ -314,30 +314,29 @@ public class ValidateUserExecutor implements QueryExecutor<OrderDomainEntity> {
     @NonNull
     @Override
     public ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // 1. Read input data from the DomainEntity aggregator (set during saga initiation)
-        String username = currentDomainEntity.getUsername();
-        log.info("Step 1: Validating user '{}' [idempotencyKey: {}]", username, idempotencyKey);
+        String username = currentDomainEntityState.getUsername();
+        log.info("Step 1: Validating user '{}' [idempotencyKey: {}]", username, context.idempotencyKey());
 
         // 2. Simulated external microservice client call (e.g. FeignClient, WebClient, or RestTemplate)
         // In production: UserValidationResponse response = this.userServiceClient.validateUser(username, idempotencyKey);
-        log.info(">> [SIMULATION] External UserService call: GET /users/{}?idempotencyKey={}", username, idempotencyKey);
+        log.info(">> [SIMULATION] External UserService call: GET /users/{}?idempotencyKey={}", username, context.idempotencyKey());
         String simulatedUserId = "usr_" + Math.abs(username.hashCode() % 10000);
         String simulatedEmail = username + "@example.com";
         boolean isUserActive = true;
 
         // 3. Mutate DomainEntity aggregator with response data returned from external service
-        currentDomainEntity.setUserId(simulatedUserId);
-        currentDomainEntity.setUserEmail(simulatedEmail);
-        currentDomainEntity.setUserValidated(isUserActive);
-        currentDomainEntity.setOrderStatus("USER_VALIDATED");
+        currentDomainEntityState.setUserId(simulatedUserId);
+        currentDomainEntityState.setUserEmail(simulatedEmail);
+        currentDomainEntityState.setUserValidated(isUserActive);
+        currentDomainEntityState.setOrderStatus("USER_VALIDATED");
         log.info(">> [AGGREGATOR] Updated OrderDomainEntity: userId={}, email={}, status={}", 
-                simulatedUserId, simulatedEmail, currentDomainEntity.getOrderStatus());
+                simulatedUserId, simulatedEmail, currentDomainEntityState.getOrderStatus());
 
         // 4. Continuous STP Advance (USIP Pattern 1) to ReserveOrderExecutor
         return stepManager
@@ -371,32 +370,31 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
     @NonNull
     @Override
     public ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // 1. Read data contributed by previous steps from the DomainEntity aggregator
-        String userId = currentDomainEntity.getUserId(); // Populated by Step 1 (ValidateUserExecutor)
-        List<String> items = currentDomainEntity.getProductItems(); // Populated during saga initiation
-        double totalAmount = currentDomainEntity.getTotalAmount(); // Populated during saga initiation
+        String userId = currentDomainEntityState.getUserId(); // Populated by Step 1 (ValidateUserExecutor)
+        List<String> items = currentDomainEntityState.getProductItems(); // Populated during saga initiation
+        double totalAmount = currentDomainEntityState.getTotalAmount(); // Populated during saga initiation
         log.info("Step 2: Reserving inventory for userId '{}', items: {}, amount: {} [idempotencyKey: {}]", 
-                userId, items, totalAmount, idempotencyKey);
+                userId, items, totalAmount, context.idempotencyKey());
 
         // 2. Simulated external microservice client call (e.g., Inventory / Warehouse Service)
         // In production: ReservationResponse response = this.inventoryServiceClient.reserveStock(userId, items, idempotencyKey);
         log.info(">> [SIMULATION] External InventoryService call: POST /inventory/reservations [userId: {}, items: {}, idempotencyKey: {}]",
-                userId, items, idempotencyKey);
-        String simulatedReservationId = "resv_" + idempotencyKey.substring(0, 8);
+                userId, items, context.idempotencyKey());
+        String simulatedReservationId = "resv_" + context.idempotencyKey().substring(0, 8);
         String simulatedWarehouseCode = "WH-NORTH-01";
 
         // 3. Mutate aggregator with reservation details received from response
-        currentDomainEntity.setReservationId(simulatedReservationId);
-        currentDomainEntity.setWarehouseCode(simulatedWarehouseCode);
-        currentDomainEntity.setOrderStatus("INVENTORY_RESERVED");
+        currentDomainEntityState.setReservationId(simulatedReservationId);
+        currentDomainEntityState.setWarehouseCode(simulatedWarehouseCode);
+        currentDomainEntityState.setOrderStatus("INVENTORY_RESERVED");
         log.info(">> [AGGREGATOR] Updated OrderDomainEntity: reservationId={}, warehouseCode={}, status={}", 
-                simulatedReservationId, simulatedWarehouseCode, currentDomainEntity.getOrderStatus());
+                simulatedReservationId, simulatedWarehouseCode, currentDomainEntityState.getOrderStatus());
 
         // 4. Continuous STP Advance to Pausable Payment Step
         return stepManager
@@ -409,24 +407,21 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
     @NonNull
     @Override
     public RevertStepManager doRevert(
-            @NonNull NonRetryableExecutorException primaryExecutionException,
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull RevertContext<OrderDomainEntity> context,
             @NonNull RevertStepManager stepManager
     ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
 
         // 1. Read reservationId from the pristine historical state snapshot
         String reservationId = finalDomainEntityState.getReservationId();
         String userId = finalDomainEntityState.getUserId();
         log.warn("Reverting Step 2: Compensating inventory reservation '{}' for userId '{}' [idempotencyKey: {}]", 
-                reservationId, userId, idempotencyKey);
+                reservationId, userId, context.idempotencyKey());
 
         // 2. Simulated external compensation call to release stock
         // In production: this.inventoryServiceClient.releaseStock(reservationId, idempotencyKey);
         log.info(">> [SIMULATION] External InventoryService Compensation: POST /inventory/reservations/{}/release [idempotencyKey: {}]",
-                reservationId, idempotencyKey);
+                reservationId, context.idempotencyKey());
 
         // 3. Reverse Autopilot: unrolls to preceding command in history
         return stepManager
@@ -466,17 +461,16 @@ public class InitiatePaymentExecutor implements CommandExecutor<OrderDomainEntit
     @NonNull
     @Override
     public ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // 1. Read accumulated order and reservation data from aggregator
-        String userId = currentDomainEntity.getUserId(); // from Step 1
-        String userEmail = currentDomainEntity.getUserEmail(); // from Step 1
-        double amount = currentDomainEntity.getTotalAmount(); // from saga initiation
-        String reservationId = currentDomainEntity.getReservationId(); // from Step 2
+        String userId = currentDomainEntityState.getUserId(); // from Step 1
+        String userEmail = currentDomainEntityState.getUserEmail(); // from Step 1
+        double amount = currentDomainEntityState.getTotalAmount(); // from saga initiation
+        String reservationId = currentDomainEntityState.getReservationId(); // from Step 2
 
         // 2. Retrieve unique resumeKey to supply as the webhook callback correlation token
         String resumeKey = stepManager.getResumeKey();
@@ -487,15 +481,15 @@ public class InitiatePaymentExecutor implements CommandExecutor<OrderDomainEntit
         // In production: PaymentSessionResponse session = this.paymentGatewayClient.createCheckoutSession(userId, amount, reservationId, resumeKey);
         log.info(">> [SIMULATION] External Payment Gateway call: POST /checkout/sessions [amount: {}, ref: {}, callbackToken: {}]",
                 amount, reservationId, resumeKey);
-        String simulatedSessionId = "sess_" + idempotencyKey.substring(0, 8);
+        String simulatedSessionId = "sess_" + context.idempotencyKey().substring(0, 8);
         String simulatedRedirectUrl = "https://pay.gateway.com/checkout/" + simulatedSessionId;
 
         // 4. Mutate aggregator with payment session data received from payment gateway
-        currentDomainEntity.setPaymentSessionId(simulatedSessionId);
-        currentDomainEntity.setPaymentRedirectUrl(simulatedRedirectUrl);
-        currentDomainEntity.setOrderStatus("AWAITING_PAYMENT_CALLBACK");
+        currentDomainEntityState.setPaymentSessionId(simulatedSessionId);
+        currentDomainEntityState.setPaymentRedirectUrl(simulatedRedirectUrl);
+        currentDomainEntityState.setOrderStatus("AWAITING_PAYMENT_CALLBACK");
         log.info(">> [AGGREGATOR] Updated OrderDomainEntity: paymentSessionId={}, redirectUrl={}, status={}", 
-                simulatedSessionId, simulatedRedirectUrl, currentDomainEntity.getOrderStatus());
+                simulatedSessionId, simulatedRedirectUrl, currentDomainEntityState.getOrderStatus());
 
         // 5. Pausable Wait-State (USIP Pattern 2): Parks in Event Store for up to 15 minutes
         return stepManager
@@ -508,23 +502,20 @@ public class InitiatePaymentExecutor implements CommandExecutor<OrderDomainEntit
     @NonNull
     @Override
     public RevertStepManager doRevert(
-            @NonNull NonRetryableExecutorException primaryExecutionException,
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull RevertContext<OrderDomainEntity> context,
             @NonNull RevertStepManager stepManager
     ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
 
         // 1. Read payment session ID from the restored pristine historical state snapshot
         String sessionId = finalDomainEntityState.getPaymentSessionId();
         log.warn("Reverting Step 3: Canceling payment checkout session '{}' [idempotencyKey: {}]",
-                sessionId, idempotencyKey);
+                sessionId, context.idempotencyKey());
 
         // 2. Simulated external compensation call to void payment session
         // In production: this.paymentGatewayClient.cancelSession(sessionId, idempotencyKey);
         log.info(">> [SIMULATION] External Payment Gateway Compensation: POST /checkout/sessions/{}/void [idempotencyKey: {}]",
-                sessionId, idempotencyKey);
+                sessionId, context.idempotencyKey());
 
         return stepManager
                 .success("PAYMENT_SESSION_VOIDED")
@@ -561,20 +552,19 @@ public class FinalizeOrderExecutor implements CommandExecutor<OrderDomainEntity>
     @NonNull
     @Override
     public ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // 1. Extract callback metadata safely from ResumeContext (injected by controller during resume())
-        String paymentStatus = resumeContext.get("paymentStatus").orElse("DECLINED");
-        String referenceId = resumeContext.get("referenceId").orElse("UNKNOWN");
+        String paymentStatus = context.resumeContext().get("paymentStatus").orElse("DECLINED");
+        String referenceId = context.resumeContext().get("referenceId").orElse("UNKNOWN");
 
         // 2. Read accumulated data from earlier steps in the aggregator
-        String reservationId = currentDomainEntity.getReservationId(); // from Step 2
-        String userEmail = currentDomainEntity.getUserEmail(); // from Step 1
-        String paymentSessionId = currentDomainEntity.getPaymentSessionId(); // from Step 3
+        String reservationId = currentDomainEntityState.getReservationId(); // from Step 2
+        String userEmail = currentDomainEntityState.getUserEmail(); // from Step 1
+        String paymentSessionId = currentDomainEntityState.getPaymentSessionId(); // from Step 3
 
         log.info("Step 4: Awakened with payment callback. Status: {}, Ref: {}, Session: {}, Reservation: {}", 
                 paymentStatus, referenceId, paymentSessionId, reservationId);
@@ -582,8 +572,8 @@ public class FinalizeOrderExecutor implements CommandExecutor<OrderDomainEntity>
         if ("SUCCESS".equalsIgnoreCase(paymentStatus)) {
             // Happy path: payment succeeded
             // 3. Mutate aggregator with payment confirmation details
-            currentDomainEntity.setPaymentReferenceId(referenceId);
-            currentDomainEntity.setOrderStatus("CONFIRMED");
+            currentDomainEntityState.setPaymentReferenceId(referenceId);
+            currentDomainEntityState.setOrderStatus("CONFIRMED");
             log.info(">> [AGGREGATOR] Updated OrderDomainEntity: paymentReferenceId={}, status=CONFIRMED", referenceId);
 
             // 4. Simulated external calls: confirm warehouse fulfillment & dispatch customer receipt email
@@ -591,7 +581,7 @@ public class FinalizeOrderExecutor implements CommandExecutor<OrderDomainEntity>
             //   this.orderFulfillmentClient.confirmOrder(reservationId, referenceId, idempotencyKey);
             //   this.notificationClient.sendOrderConfirmation(userEmail, referenceId);
             log.info(">> [SIMULATION] External Order Fulfillment: POST /orders/{}/confirm [ref: {}, idempotencyKey: {}]",
-                    reservationId, referenceId, idempotencyKey);
+                    reservationId, referenceId, context.idempotencyKey());
             log.info(">> [SIMULATION] External Notification Service: POST /notifications/email [recipient: {}, ref: {}]",
                     userEmail, referenceId);
 
@@ -603,9 +593,9 @@ public class FinalizeOrderExecutor implements CommandExecutor<OrderDomainEntity>
                     .complete();
         } else {
             // Failure path: payment was declined -> mutate aggregator and trigger reverse compensation
-            currentDomainEntity.setOrderStatus("PAYMENT_DECLINED");
+            currentDomainEntityState.setOrderStatus("PAYMENT_DECLINED");
             log.warn("Step 4: Payment declined for tx: {}. Mutating aggregator and triggering reverse compensation.", 
-                    currentDomainEntity.getTransactionId());
+                    currentDomainEntityState.getTransactionId());
 
             throw NonRetryableExecutorException
                     .buildWith(new RuntimeException("Payment was declined by payment gateway (ref: " + referenceId + ")"))
@@ -618,13 +608,10 @@ public class FinalizeOrderExecutor implements CommandExecutor<OrderDomainEntity>
     @NonNull
     @Override
     public RevertStepManager doRevert(
-            @NonNull NonRetryableExecutorException primaryExecutionException,
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull RevertContext<OrderDomainEntity> context,
             @NonNull RevertStepManager stepManager
     ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
 
         String txId = finalDomainEntityState.getTransactionId();
         log.warn("Reverting Step 4: Canceling order finalization for tx: {}", txId);
@@ -1068,13 +1055,12 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
     @NonNull
     @Override
     public ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
-        String txId = currentDomainEntity.getTransactionId();
+        String txId = currentDomainEntityState.getTransactionId();
         int attempts = attemptCounter.get().compute(txId, (k, v) -> v == null ? 1 : v + 1);
 
         // 1. First attempt fails due to transient network timeout
@@ -1085,16 +1071,16 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
         }
 
         // 2. Second attempt (retry claimed and executed by Ring Coordinator) succeeds
-        String userId = currentDomainEntity.getUserId();
-        List<String> items = currentDomainEntity.getProductItems();
+        String userId = currentDomainEntityState.getUserId();
+        List<String> items = currentDomainEntityState.getProductItems();
         log.info("Attempt {} succeeded: Reserving inventory for userId '{}', items: {}", attempts, userId, items);
 
         log.info(">> [SIMULATION] External InventoryService call on retry: POST /inventory/reservations [userId: {}, items: {}]",
                 userId, items);
-        String simulatedReservationId = "resv_" + idempotencyKey.substring(0, 8);
-        currentDomainEntity.setReservationId(simulatedReservationId);
-        currentDomainEntity.setWarehouseCode("WH-NORTH-01");
-        currentDomainEntity.setOrderStatus("INVENTORY_RESERVED");
+        String simulatedReservationId = "resv_" + context.idempotencyKey().substring(0, 8);
+        currentDomainEntityState.setReservationId(simulatedReservationId);
+        currentDomainEntityState.setWarehouseCode("WH-NORTH-01");
+        currentDomainEntityState.setOrderStatus("INVENTORY_RESERVED");
         log.info(">> [AGGREGATOR] Updated OrderDomainEntity on retry: reservationId={}", simulatedReservationId);
 
         return stepManager
@@ -1107,13 +1093,10 @@ public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> 
     @NonNull
     @Override
     public RevertStepManager doRevert(
-            @NonNull NonRetryableExecutorException primaryExecutionException,
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull RevertContext<OrderDomainEntity> context,
             @NonNull RevertStepManager stepManager
     ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
 
         String reservationId = finalDomainEntityState.getReservationId();
         log.warn("Reverting Step 2: Calling InventoryService to release reservation '{}'", reservationId);

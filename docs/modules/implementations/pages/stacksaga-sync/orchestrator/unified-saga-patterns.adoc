@@ -238,7 +238,7 @@ Keep the publish in its own executor, separate from any database write: that spl
 ==== Advantages of Pattern 1
 
 * **Lowest Latency**: Fast execution because it avoids message queues, thread context switches, and background timers.
-* **Immediate Entity Updates**: You can read the response payload and update `currentDomainEntity` right away.
+* **Immediate Entity Updates**: You can read the response payload and update `currentDomainEntityState` right away.
 * **Mix and Match**: You can freely use blocking executors and reactive executors together in the same orchestrator service.
 
 ==== Reference Implementation
@@ -254,21 +254,20 @@ public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
 
     @Override
     public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // Synchronous blocking HTTP/gRPC invocation
         OrderResponse response = orderClient.createOrder(
-                currentDomainEntity.getOrderId(),
-                currentDomainEntity.getItems(),
-                idempotencyKey
+                currentDomainEntityState.getOrderId(),
+                currentDomainEntityState.getItems(),
+                context.idempotencyKey()
         );
 
         // Immediate aggregate mutation using response payload
-        currentDomainEntity.setTrackingNumber(response.getTrackingNumber());
+        currentDomainEntityState.setTrackingNumber(response.getTrackingNumber());
 
         // Pattern 1: Direct Synchronous Advance
         return stepManager
@@ -296,20 +295,20 @@ public class CreateOrderReactiveExecutor implements ReactiveCommandExecutor<Orde
 
     @Override
     public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
-            OrderDomainEntity currentDomainEntity,
-            String idempotencyKey,
-            ResumeContext resumeContext,
+            ProcessContext<OrderDomainEntity> context,
             ProcessStepManager<OrderDomainEntity> stepManager
     ) {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
         // Non-blocking reactive WebClient invocation (Zero thread blocking)
         return webClient.post()
                 .uri("/orders")
-                .header("Idempotency-Key", idempotencyKey)
-                .bodyValue(new CreateOrderRequest(currentDomainEntity.getOrderId(), currentDomainEntity.getItems()))
+                .header("Idempotency-Key", context.idempotencyKey())
+                .bodyValue(new CreateOrderRequest(currentDomainEntityState.getOrderId(), currentDomainEntityState.getItems()))
                 .retrieve()
                 .bodyToMono(OrderResponse.class)
                 .map(response -> {
-                    currentDomainEntity.setTrackingNumber(response.getTrackingNumber());
+                    currentDomainEntityState.setTrackingNumber(response.getTrackingNumber());
                     return stepManager
                             .success("ORDER_CREATED")
                             .asSync()
@@ -400,7 +399,7 @@ Controllers receiving external callbacks can catch `InvalidTransactionResumeKeyE
 ==== Advantages of Pattern 2
 
 * **Safe for Long Waits**: Safely handles long and unpredictable waiting periods without risking thread starvation or server crashes.
-* **Captures Initial Data**: The executor can read session tokens (like `paymentSessionId` or `redirectUrl`) from the initial response and save them into `currentDomainEntity` before pausing.
+* **Captures Initial Data**: The executor can read session tokens (like `paymentSessionId` or `redirectUrl`) from the initial response and save them into `currentDomainEntityState` before pausing.
 * **Ideal for Human Approvals**: Perfect for workflows requiring manual sign-offs, manager reviews, or multi-day review processes.
 
 ==== Reference Implementation
@@ -414,21 +413,20 @@ public class InitiatePaymentExecutor implements CommandExecutor<OrderDomainEntit
 
     @Override
     public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // Synchronous initiation: create 3DS session
         PaymentSessionResponse session = paymentGatewayClient.createSession(
-                currentDomainEntity.getOrderId(),
-                currentDomainEntity.getTotalAmount(),
-                idempotencyKey
+                currentDomainEntityState.getOrderId(),
+                currentDomainEntityState.getTotalAmount(),
+                context.idempotencyKey()
         );
 
         // Immediate session capture before pause
-        currentDomainEntity.setPaymentSessionId(session.getSessionId());
+        currentDomainEntityState.setPaymentSessionId(session.getSessionId());
 
         // Pattern 2: Correlated Park and Wait (15-minute retention window)
         return stepManager
@@ -666,15 +664,14 @@ public class DispatchShippingExecutor implements CommandExecutor<OrderDomainEnti
 
     @Override
     public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // Stage 1: Aggregate preparation (Committed BEFORE the network call)
         String trackingId = UUID.randomUUID().toString();
-        currentDomainEntity.setShippingTrackingId(trackingId);
+        currentDomainEntityState.setShippingTrackingId(trackingId);
 
         // Pattern 3: Two-Stage Lazy Dispatch with Commit Barrier
         return stepManager
@@ -684,13 +681,13 @@ public class DispatchShippingExecutor implements CommandExecutor<OrderDomainEnti
                         resumeKey -> {
                             // Stage 2: Lazy Invocation (Executed strictly AFTER the event store commit)
                             ShippingCommandMessage message = new ShippingCommandMessage(
-                                    currentDomainEntity.getOrderId(),
-                                    currentDomainEntity.getShippingTrackingId(),
-                                    currentDomainEntity.getShippingAddress(),
+                                    currentDomainEntityState.getOrderId(),
+                                    currentDomainEntityState.getShippingTrackingId(),
+                                    currentDomainEntityState.getShippingAddress(),
                                     resumeKey,      // Resume key included for the asynchronous callback
-                                    idempotencyKey  // Stable across re-executions: lets the consumer deduplicate
+                                    context.idempotencyKey()  // Stable across re-executions: lets the consumer deduplicate
                             );
-                            kafkaTemplate.send("shipping-commands-topic", currentDomainEntity.getOrderId(), message);
+                            kafkaTemplate.send("shipping-commands-topic", currentDomainEntityState.getOrderId(), message);
                         },
                         Duration.ofMinutes(15),     // Tier 2 scheduled retry window on transient network failure
                         KafkaException.class        // Exception type triggering framework scheduled retry
@@ -712,14 +709,13 @@ public class DispatchSmsFireAndForgetExecutor implements CommandExecutor<OrderDo
 
     @Override
     public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         // Stage 1: State preparation committed prior to dispatch
-        currentDomainEntity.setNotificationDispatched(true);
+        currentDomainEntityState.setNotificationDispatched(true);
 
         // Pattern 3: Immune to persistence layer latency even if SMS webhook arrives instantly
         return stepManager
@@ -729,9 +725,9 @@ public class DispatchSmsFireAndForgetExecutor implements CommandExecutor<OrderDo
                         resumeKey -> {
                             // Stage 2: Fire-and-forget HTTP call (No payload returned)
                             fastSmsGatewayClient.sendFireAndForget(
-                                    currentDomainEntity.getCustomerPhone(),
-                                    "Your order " + currentDomainEntity.getOrderId() + " is confirmed! Callback token: " + resumeKey,
-                                    idempotencyKey
+                                    currentDomainEntityState.getCustomerPhone(),
+                                    "Your order " + currentDomainEntityState.getOrderId() + " is confirmed! Callback token: " + resumeKey,
+                                    context.idempotencyKey()
                             );
                         },
                         Duration.ofMinutes(5),           // Retry window for transient network failure
@@ -754,13 +750,13 @@ public class DispatchShippingReactiveExecutor implements ReactiveCommandExecutor
 
     @Override
     public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
-            OrderDomainEntity currentDomainEntity,
-            String idempotencyKey,
-            ResumeContext resumeContext,
+            ProcessContext<OrderDomainEntity> context,
             ProcessStepManager<OrderDomainEntity> stepManager
     ) {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
         // Stage 1: State preparation committed before dispatch
-        currentDomainEntity.setShippingTrackingId(UUID.randomUUID().toString());
+        currentDomainEntityState.setShippingTrackingId(UUID.randomUUID().toString());
 
         // Pattern 3: Reactive Two-Stage Dispatch using reactiveInvoker
         return Mono.just(stepManager
@@ -769,8 +765,8 @@ public class DispatchShippingReactiveExecutor implements ReactiveCommandExecutor
                 .reactiveInvoker(
                         resumeKey -> kafkaTemplate.send(
                                 "shipping-commands-topic",
-                                currentDomainEntity.getOrderId(),
-                                new ShippingCommandMessage(currentDomainEntity.getOrderId(), resumeKey)
+                                currentDomainEntityState.getOrderId(),
+                                new ShippingCommandMessage(currentDomainEntityState.getOrderId(), resumeKey)
                         ),
                         Duration.ofHours(2),
                         KafkaDeliveryException.class
@@ -790,7 +786,7 @@ public class DispatchShippingReactiveExecutor implements ReactiveCommandExecutor
 
 Now that we have seen the code implementations of Pattern 3, note the key architectural boundary: **you cannot modify `DomainEntity` inside the `invoker(...)` lambda based on a response payload**.
 
-Because the coordinator has already committed the entity snapshot to the Event Store in Stage 1 *before* executing the lambda in Stage 2, any mutations made to `currentDomainEntity` inside the lambda will not be persisted.
+Because the coordinator has already committed the entity snapshot to the Event Store in Stage 1 *before* executing the lambda in Stage 2, any mutations made to `currentDomainEntityState` inside the lambda will not be persisted.
 
 * **Why This Is Fine in Practice**:
 
@@ -976,7 +972,7 @@ Used when a state-changing step completes and hands execution to another state-c
 @Override
 public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
     // Command 1 creates order in local database
-    orderService.createOrder(currentDomainEntity.getOrderId());
+    orderService.createOrder(context.currentDomainEntityState().getOrderId());
     
     // Direct Sync navigation to Command 2
     return stepManager
@@ -994,8 +990,8 @@ Used when the step initiates an operation requiring an external callback, user i
 ----
 @Override
 public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
-    SessionRedirect redirect = paymentClient.initiate3DSecure(currentDomainEntity.getTotalAmount());
-    currentDomainEntity.setPaymentSessionId(redirect.getSessionId());
+    SessionRedirect redirect = paymentClient.initiate3DSecure(context.currentDomainEntityState().getTotalAmount());
+    context.currentDomainEntityState().setPaymentSessionId(redirect.getSessionId());
 
     return stepManager
             .success("3DS_SESSION_INITIATED")
@@ -1012,7 +1008,7 @@ Used when publishing a command event over Apache Kafka or RabbitMQ with transact
 ----
 @Override
 public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
-    currentDomainEntity.setPickingBatchId(UUID.randomUUID().toString());
+    context.currentDomainEntityState().setPickingBatchId(UUID.randomUUID().toString());
 
     return stepManager
             .success("WAREHOUSE_PICKING_SUBMITTED")
@@ -1034,7 +1030,7 @@ Used when a state-changing command must be followed by a read-only query to fetc
 ----
 @Override
 public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
-    inventoryClient.reserveStock(currentDomainEntity.getItems());
+    inventoryClient.reserveStock(context.currentDomainEntityState().getItems());
     
     // Command navigating to QueryExecutor
     return stepManager
@@ -1056,8 +1052,8 @@ public class CheckCreditQueryExecutor implements QueryExecutor<OrderDomainEntity
 
     @Override
     public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
-        CreditReport report = creditClient.fetchCreditScore(currentDomainEntity.getCustomerId());
-        currentDomainEntity.setCreditApproved(report.isEligible());
+        CreditReport report = creditClient.fetchCreditScore(context.currentDomainEntityState().getCustomerId());
+        context.currentDomainEntityState().setCreditApproved(report.isEligible());
 
         // Query navigating to CommandExecutor
         return stepManager
@@ -1095,7 +1091,7 @@ image::implementations:executor/stacksaga-saga-forward-executor-to-end-of-lrt.sv
 ----
 @Override
 public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
-    notificationClient.sendOrderConfirmation(currentDomainEntity.getOrderId());
+    notificationClient.sendOrderConfirmation(context.currentDomainEntityState().getOrderId());
 
     // Concludes the Saga forward progression immediately
     return stepManager
@@ -1113,7 +1109,7 @@ Used when the final step in a saga must wait for an external confirmation (such 
 ----
 @Override
 public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
-    logisticsClient.dispatchCarrier(currentDomainEntity.getShippingTrackingId());
+    logisticsClient.dispatchCarrier(context.currentDomainEntityState().getShippingTrackingId());
 
     return stepManager
             .success("COURIER_DISPATCHED")
@@ -1138,10 +1134,10 @@ image::implementations:executor/stacksaga-saga-forward-dynamic-branching.svg[alt
 public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
     Class<? extends SagaExecutor<OrderDomainEntity>> nextStep;
 
-    if (currentDomainEntity.isVipCustomer()) {
+    if (context.currentDomainEntityState().isVipCustomer()) {
         // Option 1: Fast-track VIP dispatch (CommandExecutor)
         nextStep = PriorityLogisticsCommandExecutor.class;
-    } else if (currentDomainEntity.isInternationalShipping()) {
+    } else if (context.currentDomainEntityState().isInternationalShipping()) {
         // Option 2: Query cross-border tariff rules before dispatch (QueryExecutor)
         nextStep = CheckCustomsTariffQueryExecutor.class;
     } else {
@@ -1220,7 +1216,7 @@ See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_af
 During rollback execution, `finalDomainEntityState` represents the immutable domain entity snapshot frozen at the exact point of forward failure.
 
 * **No Domain Entity Persistence in Revert**: StackSaga intentionally does NOT persist any modifications made to `finalDomainEntityState` during rollback. The Event Store preserves the aggregate's forward state at the failure point for post-mortem forensics, auditing, and debugging.
-* **Passing Data Backward Across Compensations**: To transfer data backward between compensating steps (such as refund references, cancellation codes, or restock batch IDs), developers must use `RevertHintStore` (`revertHintStore.put(key, value)`).
+* **Passing Data Backward Across Compensations**: To transfer data backward between compensating steps (such as refund references, cancellation codes, or restock batch IDs), developers must use `RevertHintStore` (`context.revertHintStore().put(key, value)`).
 * The `RevertHintStore` is automatically propagated backward across the entire reverse cascade (`doRevert`, Pre-Executors, Post-Executors) and persisted immutably with each compensation execution in the Event Store for full auditability and trace parity.
 ====
 
@@ -1251,16 +1247,13 @@ image::implementations:executor/stacksaga-saga-compensation-core-revert-to-prece
 ----
 @Override
 public @NonNull RevertStepManager doRevert(
-        @NonNull NonRetryableExecutorException primaryExecutionException,
-        @NonNull OrderDomainEntity finalDomainEntityState,
-        @NonNull RevertHintStore revertHintStore,
-        @NonNull String idempotencyKey,
-        @NonNull ResumeContext resumeContext,
+        @NonNull RevertContext<OrderDomainEntity> context,
         @NonNull RevertStepManager stepManager
 ) throws RetryableExecutorException {
+    OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
 
     // Synchronously release stock
-    inventoryClient.releaseStock(finalDomainEntityState.getItems(), idempotencyKey);
+    inventoryClient.releaseStock(finalDomainEntityState.getItems(), context.idempotencyKey());
 
     // Signals the engine to roll back the previous command
     return stepManager
@@ -1278,10 +1271,10 @@ Used when a rollback action cannot finish immediately and must wait for an async
 ----
 @Override
 public @NonNull RevertStepManager doRevert(...) throws RetryableExecutorException {
-    if (!revertHintStore.containsKey("refundInitiated")) {
+    if (!context.revertHintStore().containsKey("refundInitiated")) {
         // Initial attempt: Send refund request
-        String refundRef = paymentClient.requestAsyncRefund(finalDomainEntityState.getPaymentId());
-        revertHintStore.put("refundInitiated", refundRef);
+        String refundRef = paymentClient.requestAsyncRefund(context.finalDomainEntityState().getPaymentId());
+        context.revertHintStore().put("refundInitiated", refundRef);
 
         // Pause rollback waiting for bank notification (webhook or Kafka event)
         return stepManager
@@ -1308,7 +1301,7 @@ public @NonNull RevertStepManager doRevert(...) {
             .asAsync()
             .invoker(
                     resumeKey -> {
-                        kafkaTemplate.send("logistics-cancel-topic", finalDomainEntityState.getOrderId(), resumeKey);
+                        kafkaTemplate.send("logistics-cancel-topic", context.finalDomainEntityState().getOrderId(), resumeKey);
                     },
                     Duration.ofHours(1),
                     KafkaException.class
@@ -1405,16 +1398,12 @@ image::implementations:executor/stacksaga-saga-compensation-pre-executor-to-host
 public class FetchRefundTokenPreExecutor implements PreExecutor<OrderDomainEntity, PaymentCommandExecutor> {
 
     @Override
-    public @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> doProcess(
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull NonRetryableExecutorException processException,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+    public @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(
+            @NonNull RevertContext<OrderDomainEntity> context,
             @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> stepManager
     ) throws RetryableExecutorException {
         String token = authClient.acquireCancellationScopeToken();
-        revertHintStore.put("CANCELLATION_TOKEN", token);
+        context.revertHintStore().put("CANCELLATION_TOKEN", token);
 
         // Transitions directly into PaymentCommandExecutor.doRevert()
         return stepManager
@@ -1454,8 +1443,8 @@ image::implementations:executor/stacksaga-saga-compensation-pre-executor-to-anot
 [source,java]
 ----
 @Override
-public @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> doProcess(...) {
-    distributedLockClient.releaseLock(currentDomainEntity.getOrderId());
+public @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(...) {
+    distributedLockClient.releaseLock(context.finalDomainEntityState().getOrderId());
 
     // Chains to the next pre-compensation hook
     return stepManager
@@ -1505,14 +1494,12 @@ image::implementations:executor/stacksaga-saga-compensation-post-executor-to-ano
 public class SendCancelEmailPostExecutor implements PostExecutor<OrderDomainEntity, PaymentCommandExecutor> {
 
     @Override
-    public @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> doProcess(
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull NonRetryableExecutorException processException,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+    public @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(
+            @NonNull RevertContext<OrderDomainEntity> context,
             @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> stepManager
     ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
+
         emailClient.sendOrderCancellation(finalDomainEntityState.getCustomerEmail());
 
         // Chains to next post-compensation hook
@@ -1539,8 +1526,8 @@ image::implementations:executor/stacksaga-saga-compensation-post-executor-to-pre
 [source,java]
 ----
 @Override
-public @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> doProcess(...) {
-    auditClient.recordRollbackAudit(currentDomainEntity.getOrderId());
+public @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(...) {
+    auditClient.recordRollbackAudit(context.finalDomainEntityState().getOrderId());
 
     // Concludes step compensation; engine unwinds to preceding command step in history
     return stepManager
@@ -1572,8 +1559,8 @@ image::implementations:executor/stacksaga-saga-compensation-post-executor-to-end
 [source,java]
 ----
 @Override
-public @NonNull PostStepManager<OrderDomainEntity, OrderCommandExecutor> doProcess(...) {
-    customerNotificationClient.sendFinalCancellationSummary(currentDomainEntity.getCustomerId());
+public @NonNull PostStepManager<OrderDomainEntity, OrderCommandExecutor> doRevert(...) {
+    customerNotificationClient.sendFinalCancellationSummary(context.finalDomainEntityState().getCustomerId());
 
     // Concludes total saga compensation
     return stepManager

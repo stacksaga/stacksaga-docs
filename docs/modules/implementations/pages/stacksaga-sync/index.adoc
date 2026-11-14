@@ -244,14 +244,13 @@ When the paused executor is resumed, the framework passes this `ResumeContext` d
 [source,java]
 ----
 public ProcessStepManager<OrderDomainEntity> doProcess(
-        OrderDomainEntity currentDomainEntity,
-        String idempotencyKey,
-        ResumeContext resumeContext,
+        ProcessContext<OrderDomainEntity> context,
         ProcessStepManager<OrderDomainEntity> stepManager) {
+    OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
     // Safely extract and validate external callback data
-    String gatewayId = resumeContext.get("gatewayPaymentId", String.class);
-    currentDomainEntity.setPaymentReference(gatewayId);
+    String gatewayId = context.resumeContext().get("gatewayPaymentId", String.class);
+    currentDomainEntityState.setPaymentReference(gatewayId);
 
     return stepManager.success("PAYMENT_CONFIRMED")
             .asSync()

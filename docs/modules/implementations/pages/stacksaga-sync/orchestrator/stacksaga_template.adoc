@@ -302,10 +302,10 @@ When `resume(...)` is called:
 +
 [source,java]
 ----
-String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
+String refundStatus = context.resumeContext().get("refundStatus").orElse("FAILED");
 ----
 
-* **Immutability Guarantee**: Once passed into an executor (`doProcess` or `doRevert`), the `ResumeContext` is marked read-only. Calling modifying operations (`put`, `remove`, `clear`) throws `UnsupportedOperationException`. This prevents executors from accidentally mutating callback audit records.
+* **Immutability Guarantee**: Once delivered to an executor (through `context.resumeContext()` in `doProcess` or `doRevert`), the `ResumeContext` is read-only. Calling modifying operations (`put`, `remove`, `clear`) throws `UnsupportedOperationException`. This prevents executors from accidentally mutating callback audit records.
 * **Serialization & Event Sourcing**: Provides `prettyPrintAsString(ApplicationContext)` and `printAsString(ApplicationContext)` using the framework's configured JSON mapper bean.
 * **Deep Comparison**: Provides `deepEquals(ResumeContext obj, ApplicationContext applicationContext)` for structural JSON equality checks.
 * **Event Store Durability**: Durably serialized and recorded in the underlying Event Store, providing an immutable audit trail for every callback payload received by the system. See xref:stacksaga-sync/index.adoc#resume-context-concept[Decoupling External Callback Payloads].
@@ -700,7 +700,7 @@ If the timeout duration expires before the callback arrives:
 
 StackSaga enforces the **Event Sourcing** paradigm. State transitions are committed immutably to the Event Store only at completed execution milestones.
 
-If an executor mutates in-memory fields on `currentDomainEntity` inside `doProcess()` and pauses, but the wait-state times out without a callback:
+If an executor mutates in-memory fields on `currentDomainEntityState` inside `doProcess()` and pauses, but the wait-state times out without a callback:
 * The engine **discards all uncommitted in-memory mutations** from that paused tryout.
 * Upon re-invocation, the engine reconstructs the `DomainEntity` cleanly from the Event Store up to the exact checkpoint preceding this executor (see xref:stacksaga-sync/index.adoc#pristine-state-restoration[Pristine State Restoration]).
 
