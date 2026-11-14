@@ -1,5 +1,5 @@
-:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, fire-and-forget, resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
-:keywords: StackSaga, SagaTemplate, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
+:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, transaction configuration (lifetime, restore-on-crash delay, transaction idempotency, event-store options), fire-and-forget, resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
+:keywords: StackSaga, SagaTemplate, configure, transactionLifetime, defaultRestoreOnCrashDelay, withoutIdempotency, idempotentOnTransactionId, transaction idempotency key, EventStoreOptions, CassandraOptions, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
 :page-priority: 0.7
 
 = SagaTemplate and Event Listeners
@@ -41,14 +41,19 @@ public class PlaceOrderHandler {
                     return orderDomainEntity;
                 })
                 //<3>
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
+                //<4>
                 .peek(orderDomainEntity -> {
                     log.info("transactionId {}:", orderDomainEntity.getTransactionId());
                 })
-                //<4>
-                .startWith(ValidateUserExecutor.class)
                 //<5>
-                .fireAndForget()
+                .startWith(ValidateUserExecutor.class)
                 //<6>
+                .fireAndForget()
+                //<7>
                 .execute();
         log.info("Started place order saga with transactionId: {}", transactionId);
         return transactionId;
@@ -57,17 +62,17 @@ public class PlaceOrderHandler {
     public void printCurrentState(String transactionId) {
         TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state = this
                 .sagaTemplate
-                //<7>
+                //<8>
                 .getCurrentState(transactionId)
                 .fetch();
 
-        TransactionCompleteStatus currentStatus = state.getCurrentStatus(); //<8>
+        TransactionCompleteStatus currentStatus = state.getCurrentStatus(); //<9>
         log.info("Current status of transaction {}: {}", transactionId, currentStatus);
-        NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory(); //<9>
+        NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory(); //<10>
         log.info("Execution history of transaction {}: {}", transactionId, executionHistory);
-        OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity(); //<10>
-        log.info("Current domain entity state: {}", currentDomainEntity); //<11>
-        ZonedDateTime startedDateTime = state.getStartedDateTime(); //<12>
+        OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity(); //<11>
+        log.info("Current domain entity state: {}", currentDomainEntity); //<12>
+        ZonedDateTime startedDateTime = state.getStartedDateTime(); //<13>
         log.info("Transaction {} started at: {}", transactionId, startedDateTime.toLocalDateTime());
     }
 }
@@ -75,16 +80,24 @@ public class PlaceOrderHandler {
 
 <1> Inject `SagaTemplate` configured for your custom xref:stacksaga-sync/orchestrator/domain-entity.adoc#creating_custom_domain_entity[`DomainEntity`] type.
 <2> Use `init()` to provide a `Supplier` creating the initial `DomainEntity`. The framework generates and assigns the unique `transactionId` during initialization.
-<3> Use `peek()` (optional) to inspect or enrich the initialized `DomainEntity` before execution begins.
-<4> Use `startWith()` to specify the initial xref:stacksaga-sync/orchestrator/executor_architecture.adoc[executor] that starts the transaction flow.
-<5> Use `fireAndForget()` to select the fire-and-forget execution mode.
-<6> Call `execute()` to initiate the transaction in a blocking manner. It returns the generated `transactionId` once initialized.
-<7> Call `getCurrentState(transactionId).fetch()` to retrieve a synchronous snapshot of the transaction state from the event-store.
-<8> Retrieve the overall completion status (`TransactionCompleteStatus`) of the transaction.
-<9> Retrieve the chronological execution history (`NavigableMap<Integer, ? extends SyncExecutionEvent<DE>>`) containing every executed span (primary and compensation) with metadata and status.
-<10> Retrieve the current domain entity snapshot representing all state mutations applied up to this point.
-<11> Log the domain entity snapshot.
-<12> Retrieve the start timestamp of the transaction.
+<3> Use `configure()` to set the transaction-level settings in one step: how long the transaction may live, how soon it is restored after a crash, and how it is protected against duplicate submissions. Every setting in this step is mandatory; see xref:#configuring-transactions[Configuring the Transaction].
+<4> Use `peek()` (optional) to inspect or enrich the initialized `DomainEntity` before execution begins.
+<5> Use `startWith()` to specify the initial xref:stacksaga-sync/orchestrator/executor_architecture.adoc[executor] that starts the transaction flow.
+<6> Use `fireAndForget()` to select the fire-and-forget execution mode.
+<7> Call `execute()` to initiate the transaction in a blocking manner. It returns the generated `transactionId` once initialized. A chain started by `init()` represents exactly one transaction, so it can be executed only once.
+<8> Call `getCurrentState(transactionId).fetch()` to retrieve a synchronous snapshot of the transaction state from the event-store.
+<9> Retrieve the overall completion status (`TransactionCompleteStatus`) of the transaction.
+<10> Retrieve the chronological execution history (`NavigableMap<Integer, ? extends SyncExecutionEvent<DE>>`) containing every executed span (primary and compensation) with metadata and status.
+<11> Retrieve the current domain entity snapshot representing all state mutations applied up to this point.
+<12> Log the domain entity snapshot.
+<13> Retrieve the start timestamp of the transaction.
+
+[WARNING]
+====
+`execute()` blocks the calling thread until the transaction is initialized.
+Calling it from a non-blocking thread (for example a Spring WebFlux / Reactor Netty event-loop thread) throws `IllegalStateException`.
+In reactive code, use `executeAsync()` as shown in the next section.
+====
 
 NOTE: For real-time updates without polling, implement a xref:#event_listener_for_stage_change_events[State Change Listener].
 
@@ -114,6 +127,10 @@ public class PlaceOrderHandler {
                     }
                     return orderDomainEntity;
                 })
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
                 .peek(orderDomainEntity -> {
                     log.info("transactionId {}:", orderDomainEntity.getTransactionId());
                 })
@@ -127,6 +144,338 @@ public class PlaceOrderHandler {
 ----
 
 <1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress.
+
+[[configuring-transactions]]
+=== Configuring the Transaction with `configure(...)`
+
+Every transaction carries a few settings that the engine needs before the first executor runs:
+
+* how long the transaction is allowed to live,
+* how soon it is restored if the instance running it crashes,
+* how it is protected against being started twice for the same request,
+* and, optionally, settings that only a specific event store understands.
+
+All of them are given in a single `configure(...)` step, directly after `init(...)`.
+The step receives a `TransactionConfigurer` and must return the `TransactionConfig` produced at the end of the configurer chain:
+
+[source,java]
+----
+String transactionId = this.sagaTemplate
+        .init(() -> orderDomainEntity)
+        .configure(config -> config
+                .transactionLifetime(Duration.ofHours(24))          //<1>
+                .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))  //<2>
+                .idempotencyKey("order-" + orderId)                 //<3>
+                .with(CassandraOptions.configure(c -> c             //<4>
+                        .writeProtection(ConsistencyMode.STRICT))))
+        .startWith(ValidateUserExecutor.class)
+        .fireAndForget()
+        .execute();
+----
+
+<1> *Required.* The maximum time the transaction may run. See xref:#transaction-lifetime-setting[Transaction Lifetime].
+<2> *Required.* How long the engine waits before restoring the transaction after an unexpected crash. See xref:#default-restore-on-crash-delay[Restore-on-Crash Delay].
+<3> *Required choice.* How the transaction is protected against duplicate submissions: `withoutIdempotency()`, `idempotentOnTransactionId()` or `idempotencyKey(String)`. See xref:#transaction-idempotency[Transaction Idempotency].
+<4> *Optional, repeatable.* Settings for a specific event store. Other event stores ignore them. See xref:#event-store-options[Event-Store Specific Options].
+
+==== Why One Step, and Why the Order Is Fixed
+
+Each method in the configurer chain returns a narrower type that only offers the next method.
+The lambda has to return a `TransactionConfig`, and the only way to obtain one is to walk the whole chain, so **leaving out a required setting is a compile error, not a runtime surprise**:
+
+[source,text]
+----
+TransactionConfigurer
+   └─ transactionLifetime(Duration)                 → RestoreConfigStage
+        └─ defaultRestoreOnCrashDelay(Duration)     → IdempotencyStage
+             ├─ withoutIdempotency()                ┐
+             ├─ idempotentOnTransactionId()         ├→ StoreOptionsStage  (is a TransactionConfig)
+             └─ idempotencyKey(String)              ┘
+                  └─ with(EventStoreOptions) ...    → StoreOptionsStage  (optional, repeatable)
+----
+
+Because `StoreOptionsStage` is itself a `TransactionConfig`, the chain may end directly after the idempotency choice, or continue with any number of `with(...)` calls.
+
+.Summary of the settings
+[cols="2,1,4",options="header"]
+|===
+| Setting | Required | What it controls
+
+| `transactionLifetime(Duration)`
+| Yes
+| The time window in which the transaction may still make progress (be retried or resumed).
+
+| `defaultRestoreOnCrashDelay(Duration)`
+| Yes
+| How long after the last known progress a silently crashed transaction becomes eligible for restore.
+
+| `withoutIdempotency()` / `idempotentOnTransactionId()` / `idempotencyKey(String)`
+| Yes (exactly one)
+| Whether, and by which key, a duplicate submission of the same request is recognised.
+
+| `with(EventStoreOptions)`
+| No
+| Event-store specific settings for this transaction only, such as `CassandraOptions`.
+|===
+
+[[transaction-lifetime-setting]]
+==== Transaction Lifetime: `transactionLifetime(Duration)`
+
+The lifetime is the period, counted from the moment the transaction starts, during which the transaction may still move forward.
+While the lifetime lasts, a transaction that fails with a retryable error is retried, and a paused transaction can be resumed.
+Once the lifetime has passed:
+
+* the transaction is **no longer exposed for retrying**, even if it is still incomplete;
+* **resume requests are rejected**;
+* an incomplete transaction ends up as a xref:retry-ring-coordinator:disabled-and-terminated-transaction.adoc#transaction-lifetime[disabled transaction].
+
+The lifetime exists so that a transaction that can never succeed (for example, because a target service was removed) does not circulate through the retry subsystem forever.
+
+*How to size it:* make the lifetime comfortably longer than the longest *legitimate* path through your saga.
+Add up the longest waits the saga may go through: pause windows (`pauseUntilResume(...)`), the retry delays you expect while a dependency is down, and any human approval steps.
+Then add a safety margin.
+
+[cols="1,3",options="header"]
+|===
+| If the lifetime is... | ...then
+
+| Too short
+| Transactions that are merely slow (a callback arriving late, a dependency down for an hour) are disabled even though they would have succeeded.
+
+| Too long
+| Transactions that can never succeed keep consuming retry capacity until the lifetime finally runs out.
+|===
+
+*Example:* an order saga waits up to 15 minutes for a payment callback, and its downstream services may be unavailable for a few hours during an incident.
+A lifetime of `Duration.ofHours(24)` covers both with plenty of margin.
+
+[[default-restore-on-crash-delay]]
+==== Restore-on-Crash Delay: `defaultRestoreOnCrashDelay(Duration)`
+
+When an instance dies silently (an OOM kill, a power loss, `kill -9`), nothing records that the transaction it was running has failed.
+To recover such transactions, the engine gives every transaction a point in time at which it becomes visible to the restore process if it has not made progress by then.
+`defaultRestoreOnCrashDelay` is the distance between the transaction's last known progress and that point.
+
+The value is the transaction's *default*:
+
+* It is used whenever a step does not set its own crash re-expose delay.
+A failing step can override it with `reexposeOnUnexpectedCrash(Duration)`, or explicitly fall back to it with `withDefaultReexposeOnUnexpectedCrash()`.
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#building-non-retryable-exception[Building a Non-Retryable Exception].
+* It is also used to push the restore time forward when an executor throws an unhandled exception.
+
+*How to size it:* make the delay longer than the normal running time of your slowest step.
+
+[cols="1,3",options="header"]
+|===
+| If the delay is... | ...then
+
+| Too short
+| A transaction that is only *slow* may be restored while it is still running on its original instance. The step is invoked again; write protection and the xref:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[step idempotency key] keep that safe, but it is avoidable work.
+
+| Too long
+| After a real crash, the transaction waits longer than necessary before another instance picks it up.
+|===
+
+For the background on how restores differ from retries, see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-vs-restore[Retry vs. Restore].
+
+[[transaction-idempotency]]
+==== Transaction Idempotency
+
+The transaction ID is generated by the framework on every `init(...)` call.
+That means the framework, on its own, cannot tell that two calls are really *the same request arriving twice*.
+If the trigger that starts your saga is delivered twice (a broker redelivers an event, a payment provider retries a webhook, an upstream service retries after a timeout, a user double-clicks), two independent long-running transactions start: two orders, two charges.
+
+A *transaction idempotency key* solves this at the level of the whole long-running transaction.
+It is checked once, when the transaction is admitted.
+A submission whose key is already held by a transaction does not start a new one.
+
+[NOTE]
+====
+This key is different from the *step idempotency key* that StackSaga generates for every executor and that your executors forward to downstream services.
+The step key protects each *downstream call*; the transaction key protects the *start of the whole saga*.
+See xref:#transaction-vs-step-idempotency-key[the comparison below], and xref:foundations:idempotency.adoc#lrt-idempotency[Idempotency for the Entire LRT] for the concept and for guidance on when you need it.
+====
+
+The choice is mandatory: you always state explicitly which of the three options applies.
+
+[cols="2,2,4",options="header"]
+|===
+| Option | Key used | When to use it
+
+| `withoutIdempotency()`
+| none
+| The trigger can never be delivered twice for the same business request, or starting the saga twice is harmless.
+
+| `idempotentOnTransactionId()`
+| the generated transaction ID
+| You want every transaction to carry a key, so that transactions can be looked up the same way whether or not the caller supplied a business key. Because the transaction ID is new for every `init(...)` call, this option does *not* recognise a repeated request; use `idempotencyKey(String)` for that.
+
+| `idempotencyKey(String)`
+| the key you supply
+| The saga can be triggered more than once for the same request, which is the normal case for event-driven, webhook-driven and service-to-service starts. Derive the key from something stable in the trigger.
+|===
+
+*Rules for `idempotencyKey(String)`:*
+
+* The key must not be null or blank, and must be at most 255 characters (`SagaTemplate.MAX_IDEMPOTENCY_KEY_LENGTH`).
+Violations throw `IllegalArgumentException` immediately, at the call.
+* Keys are unique *per domain entity*: the same key used by two different sagas does not collide.
+* Derive the key from the trigger, never from a value generated per attempt.
+A random UUID created inside your handler is different on every delivery and therefore recognises nothing.
+
+*What a duplicate submission returns:* when a transaction already holds the key, `execute()` / `executeAsync()` return *that* transaction's ID and start nothing new.
+Your calling code therefore looks exactly the same for the first delivery and for every repeat.
+
+===== Example: a saga started by a broker event
+
+The event carries a stable ID that the broker keeps across redeliveries, which makes it the ideal key:
+
+[source,java]
+----
+@KafkaListener(topics = "order-placed")
+public void onOrderPlaced(OrderPlacedEvent event) {
+    String transactionId = this.sagaTemplate
+            .init(() -> OrderDomainEntity.from(event))
+            .configure(config -> config
+                    .transactionLifetime(Duration.ofHours(24))
+                    .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                    .idempotencyKey("order-placed:" + event.getEventId())) //<1>
+            .startWith(ValidateUserExecutor.class)
+            .fireAndForget()
+            .execute(); //<2>
+    log.info("Order saga for event {} is transaction {}", event.getEventId(), transactionId);
+}
+----
+
+<1> A redelivered event carries the same `eventId`, so it produces the same key. A prefix keeps keys from different trigger types apart.
+<2> On a redelivery, this returns the ID of the transaction started by the first delivery.
+
+===== Example: a saga started by an HTTP request
+
+Clients that retry requests usually send an `Idempotency-Key` header. Fall back to a stable business identifier when the header is absent:
+
+[source,java]
+----
+@PostMapping("/orders")
+public ResponseEntity<String> placeOrder(@RequestHeader(value = "Idempotency-Key", required = false) String clientKey,
+                                         @RequestBody PlaceOrderRequest request) {
+    String key = clientKey != null ? clientKey : "order:" + request.getOrderNumber(); //<1>
+    String transactionId = this.sagaTemplate
+            .init(() -> OrderDomainEntity.from(request))
+            .configure(config -> config
+                    .transactionLifetime(Duration.ofHours(24))
+                    .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                    .idempotencyKey(key))
+            .startWith(ValidateUserExecutor.class)
+            .fireAndForget()
+            .execute();
+    return ResponseEntity.accepted().body(transactionId);
+}
+----
+
+<1> Either value stays the same when the client resends the request.
+
+[IMPORTANT]
+.Current availability
+====
+Currently, the event stores do not yet enforce transaction idempotency keys.
+Choosing `idempotentOnTransactionId()` or `idempotencyKey(String)` makes `execute()` / `executeAsync()` fail with `UnsupportedOperationException`, instead of silently starting duplicate transactions.
+Until enforcement is available, use `withoutIdempotency()`.
+====
+
+[[transaction-vs-step-idempotency-key]]
+===== Transaction Idempotency Key vs. Step Idempotency Key
+
+[cols="1,3,3",options="header"]
+|===
+| | Transaction idempotency key | Step idempotency key
+
+| *Scope*
+| The whole long-running transaction.
+| One atomic step (one `doProcess` or `doRevert` attempt).
+
+| *Who provides it*
+| You, in `configure(...)` (or the transaction ID with `idempotentOnTransactionId()`).
+| StackSaga generates it (see xref:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[`generateIdempotencyKey`]) and passes it to your executor.
+
+| *Who checks it*
+| The StackSaga event store, once, when the transaction is admitted.
+| The downstream service you call, which you hand the key to (for example in an `Idempotency-Key` header).
+
+| *Protects against*
+| The same request starting the saga twice.
+| A retried step causing a duplicate side effect in a downstream service.
+
+| *Typical source*
+| Event ID, webhook delivery ID, upstream request ID, order number.
+| Derived automatically from the transaction and the step.
+|===
+
+[[event-store-options]]
+==== Event-Store Specific Options: `with(...)`
+
+StackSaga runs on several event stores (the SQL family and Cassandra / ScyllaDB), and some of them offer tuning that only makes sense for that database.
+For example, Cassandra can protect writes with Paxos-based lightweight transactions, while a relational database gets the same guarantee from its constraints.
+
+Rather than putting database-specific methods on `SagaTemplate`, every event-store module ships its own options type that implements `EventStoreOptions`.
+You attach it with `with(...)`:
+
+[source,java]
+----
+.configure(config -> config
+        .transactionLifetime(Duration.ofHours(24))
+        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+        .idempotencyKey("order-" + orderId)
+        .with(CassandraOptions.configure(c -> c
+                .writeProtection(ConsistencyMode.STRICT)      // use Paxos (LWT) for this transaction
+                .leaseDuration(Duration.ofSeconds(10)))))
+----
+
+*How `with(...)` behaves:*
+
+* *Optional and repeatable.* Attach options for several event stores if the same code runs against more than one.
+* *One instance per type.* Attaching two options objects of the same type throws `IllegalArgumentException`; set everything for one store in one object.
+* *Portable.* The active event store applies the options of its own type and ignores all others, so code that attaches `CassandraOptions` runs unchanged on a SQL event store.
+* *Overrides properties for this transaction only.* An option you set wins over the event store's per-domain property, which wins over its global default. Options you leave unset fall back to the properties.
+* *Kept for the life of the transaction.* `configure(...)` runs only once, when the transaction starts. The event store saves the effective values with the transaction, so a transaction restored after a crash on another instance keeps the same behaviour.
+
+For the available Cassandra options, their defaults and their current availability, see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#cassandra-per-transaction-options[Per-Transaction Override with CassandraOptions].
+
+[[configure-validation-errors]]
+==== Configuration and Execution Errors
+
+[cols="3,2,4",options="header"]
+|===
+| Situation | Exception | How to fix it
+
+| A `Duration` or the options passed to the configurer is `null`, or the `configure(...)` lambda returns `null`
+| `IllegalArgumentException`
+| Pass non-null values and return the result of the configurer chain.
+
+| `idempotencyKey(..)` receives a null, empty or blank key, or a key longer than 255 characters
+| `IllegalArgumentException`
+| Derive a non-blank key of at most 255 characters from the trigger.
+
+| `with(..)` receives a second options object of the same type
+| `IllegalArgumentException`
+| Put all settings for one event store into a single options object.
+
+| `CassandraOptions` is built with a non-positive lease, or with a lease and `RELAXED_WITH_DEDUP` write protection
+| `IllegalArgumentException`
+| A lease only applies to `STRICT` write protection and must be positive.
+
+| `execute()` or `executeAsync()` is called a second time on the same chain
+| `IllegalStateException`
+| A chain started by `init(...)` is one transaction. Start a new chain for a new transaction.
+
+| `execute()` is called on a non-blocking (event-loop) thread
+| `IllegalStateException`
+| Use `executeAsync()` in reactive code.
+
+| `idempotentOnTransactionId()` or `idempotencyKey(..)` is used
+| `UnsupportedOperationException` (at execution)
+| See xref:#transaction-idempotency[Current availability]; use `withoutIdempotency()` for now.
+|===
 
 [[resuming-paused-transactions]]
 === Resuming Paused Transactions (Pausable LRT)
@@ -595,6 +944,10 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
                     orderDomainEntity.setTotalAmount(amount);
                     return orderDomainEntity;
                 })
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
                 .startWith(ValidateUserExecutor.class)
                 .fireAndForget()
                 .execute();
@@ -640,6 +993,10 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
                     orderDomainEntity.setTotalAmount(amount);
                     return orderDomainEntity;
                 })
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
                 .startWith(ValidateUserExecutor.class)
                 .fireAndForget()
                 .executeAsync();

@@ -690,6 +690,11 @@ public class PlaceOrderController {
                     entity.setOrderStatus("INITIALIZED");
                     return entity;
                 })
+                // transaction-level settings: lifetime, restore-on-crash delay and transaction idempotency
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
                 .peek(entity -> log.info("Starting order transaction: {}", entity.getTransactionId()))
                 .startWith(ValidateUserExecutor.class)
                 .fireAndForget()
@@ -745,6 +750,8 @@ public class PlaceOrderController {
     }
 }
 ----
+
+TIP: The demo starts each saga with `withoutIdempotency()` to stay minimal. When a saga can be triggered more than once for the same request (a client resending the order, an event redelivered by a broker), give it a transaction idempotency key instead. See xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#transaction-idempotency[Transaction Idempotency].
 
 [[tuning-configuration]]
 === Tune Configuration

@@ -208,6 +208,33 @@ image::stacksaga-database-support:cassandra/stacksaga-transaction-throughput.svg
 . **Murmur3 Partitioner:** Cassandra's 64-bit Murmur3 hash uniformly scatters `transaction_id` across the token space with zero coordination and zero lock contention.
 . **Even Cluster Scattering:** Writes land uniformly across physical nodes, ensuring CPU, memory, and disk I/O remain balanced without hot spots.
 
+[[es-transaction-write-protection-columns]]
+*Write-protection settings stored with the transaction*
+
+`es_transaction` also records the effective write-protection settings that were resolved for the transaction when it was initialized:
+
+[cols="1,1,3",options="header"]
+|===
+| Column | Type | Holds
+
+| `write_protection_mode`
+| `text`
+| The effective write-protection mode (`STRICT` or `RELAXED_WITH_DEDUP`), stored as the `ConsistencyMode` name.
+
+| `write_protection_lease_ms`
+| `bigint`
+| The effective lease (lock TTL) in milliseconds, used by `STRICT` write protection.
+|===
+
+Both values are resolved once, at transaction initialization, from the transaction's `CassandraOptions`, the per-domain property and the global default (see xref:#cassandra-per-transaction-options[Per-Transaction Override with CassandraOptions]).
+
+*Why store them instead of resolving them again?* +
+A transaction may be resumed long after it started — by the Retry subsystem, a resume-window expiry, or crash recovery on a different pod.
+The per-transaction `CassandraOptions` exist only in the memory of the pod that started the transaction, and the property values may have been edited and redeployed in the meantime.
+Persisting the effective values on the transaction row means a crash-restored or retried transaction keeps exactly the write-protection settings it started with.
+
+The columns are written only when they have a value: the insert omits a column instead of binding `null`, so no `null` cells or tombstones are created in `es_transaction`.
+
 === `es_transaction_tryout` — Step Execution History
 
 Each saga step attempt (called a "tryout") is stored as an individual row under the same `transaction_id` partition key.
@@ -360,6 +387,231 @@ stacksaga:
         notification-saga:
           mode: RELAXED_WITH_DEDUP          # High-throughput mode for notifications
 ----
+
+The domain key is the saga domain entity name from `@SagaDomainEntity#name()` and is matched case-insensitively.
+A domain entry that leaves `mode` or `lease-duration` unset falls back to `default-mode` / `default-lease-duration` for that value.
+
+[[cassandra-per-transaction-options]]
+=== Per-Transaction Override with CassandraOptions
+
+Domain-level configuration sets one write-protection policy for every transaction of a saga domain.
+That is not always fine-grained enough: a domain can default to `RELAXED_WITH_DEDUP` for throughput while one particular saga — for example, one whose listeners call a payment gateway or notify a customer — must run with `STRICT` mutual exclusion.
+
+`CassandraOptions` overrides the Cassandra settings for a single transaction.
+It is attached in `SagaTemplate.configure(..)` with `with(..)`, alongside the other per-transaction settings (see xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#configuring-transactions[Configuring Transactions] and xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#event-store-options[Event Store Options]):
+
+[source,java]
+----
+import org.stacksaga.cassandra.reactive.options.CassandraOptions;
+import org.stacksaga.core.enums.ConsistencyMode;
+
+import java.time.Duration;
+
+sagaTemplate
+        .init(..)
+        .configure(config -> config
+                .transactionLifetime(Duration.ofDays(2))
+                .defaultRestoreOnCrashDelay(Duration.ofMillis(100))
+                .withoutIdempotency() // <1>
+                .with(CassandraOptions.configure(c -> c // <2>
+                        .writeProtection(ConsistencyMode.STRICT) // <3>
+                        .leaseDuration(Duration.ofSeconds(10))))) // <4>
+        // .peek(..).startWith(..) ... .execute()
+        ;
+----
+<1> The idempotency choice is required on every transaction. `withoutIdempotency()` is used here; see xref:#cassandra-idempotency-check[Transaction Idempotency-Key Check].
+<2> `CassandraOptions.configure(..)` builds the options. `with(..)` is optional and accepts one instance per options type. Other event stores ignore `CassandraOptions`, so the same code runs unchanged on any event store.
+<3> Write-protection mode for this transaction only, overriding `stacksaga.cassandra.write-protection`.
+<4> Lease (lock TTL) used by `STRICT` write protection for this transaction only.
+
+.`CassandraOptions.Builder` methods
+[cols="2,3,3,3",options="header"]
+|===
+| Method | Meaning | Falls back to (when not set) | Validation
+
+| `writeProtection(ConsistencyMode)`
+| Write-protection mode for this transaction's listener executions. `STRICT` uses a Paxos (LWT) lease; `RELAXED_WITH_DEDUP` avoids it.
+| `stacksaga.cassandra.write-protection.domains.<domain-name>.mode`, then `stacksaga.cassandra.write-protection.default-mode`
+| Must not be `null`.
+
+| `leaseDuration(Duration)`
+| Lease (lock TTL) used by `STRICT` write protection.
+| `stacksaga.cassandra.write-protection.domains.<domain-name>.lease-duration`, then `stacksaga.cassandra.write-protection.default-lease-duration`
+| Must not be `null`; must be positive. Rejected when combined with `writeProtection(RELAXED_WITH_DEDUP)`, because the lease only applies to `STRICT`.
+
+| `idempotencyCheck(ConsistencyMode)`
+| Mode of the transaction idempotency-key check. See xref:#cassandra-idempotency-check[Transaction Idempotency-Key Check].
+| `stacksaga.cassandra.idempotency.domains.<domain-name>.mode`, then `stacksaga.cassandra.idempotency.default-mode`
+| Must not be `null`.
+|===
+
+All three methods are optional — an option that is not set falls back as shown.
+A `null` argument fails immediately with a `NullPointerException`; the lease checks fail in `CassandraOptions.configure(..)` with an `IllegalArgumentException`, before the transaction is started.
+
+*Precedence*
+
+The effective value of each setting is resolved per transaction, highest precedence first:
+
+[cols="1,3,3",options="header"]
+|===
+| Precedence | Source | Example
+
+| 1 (highest)
+| The transaction's `CassandraOptions`
+| `.with(CassandraOptions.configure(c -> c.writeProtection(ConsistencyMode.STRICT)))`
+
+| 2
+| The per-domain property, keyed by the saga domain entity name
+| `stacksaga.cassandra.write-protection.domains.order-saga.mode: STRICT`
+
+| 3 (lowest)
+| The global default property
+| `stacksaga.cassandra.write-protection.default-mode: RELAXED_WITH_DEDUP`
+|===
+
+Each setting is resolved independently: a transaction that sets only `writeProtection(..)` still takes its lease from the domain property or the global default.
+
+.Worked example
+[source,yaml]
+----
+stacksaga:
+  cassandra:
+    write-protection:
+      default-mode: RELAXED_WITH_DEDUP
+      default-lease-duration: 5s
+      domains:
+        order-saga:
+          lease-duration: 8s                # mode not set for this domain
+----
+
+[source,java]
+----
+// a transaction of the order-saga domain
+.configure(config -> config
+        .transactionLifetime(Duration.ofDays(2))
+        .defaultRestoreOnCrashDelay(Duration.ofMillis(100))
+        .withoutIdempotency()
+        .with(CassandraOptions.configure(c -> c
+                .writeProtection(ConsistencyMode.STRICT))))
+----
+
+[cols="1,1,3",options="header"]
+|===
+| Setting | Effective value | Resolved from
+
+| Write-protection mode
+| `STRICT`
+| The transaction's `CassandraOptions` (precedence 1). The domain entry sets no mode, and the global `RELAXED_WITH_DEDUP` is overridden.
+
+| Lease duration
+| `8s`
+| The `order-saga` domain property (precedence 2). The transaction sets no lease, and the global `5s` is overridden.
+
+| Transaction idempotency-key check
+| `STRICT`
+| The global `stacksaga.cassandra.idempotency.default-mode` default (precedence 3). Neither the transaction nor the domain sets it.
+|===
+
+Any other `order-saga` transaction without `CassandraOptions` runs with `RELAXED_WITH_DEDUP` and an `8s` lease.
+
+*Persistence across recovery*
+
+The effective write-protection mode and lease are saved on the transaction's `es_transaction` row (columns `write_protection_mode` and `write_protection_lease_ms`, see xref:#es-transaction-write-protection-columns[`es_transaction`]) when the transaction is initialized.
+A transaction that is retried or restored after a crash — possibly on another pod, possibly after the properties were redeployed — therefore keeps the settings it started with, even though the original `CassandraOptions` object no longer exists.
+
+[NOTE]
+.Current limitation
+====
+The effective write-protection mode and lease are resolved and stored on `es_transaction`, but the runtime does not yet apply the per-transaction write-protection override when guarding listener executions.
+Until it does, write protection follows the domain and global `stacksaga.cassandra.write-protection` properties.
+====
+
+[[cassandra-idempotency-check]]
+=== Transaction Idempotency-Key Check: STRICT vs RELAXED_WITH_DEDUP
+
+Write protection guards individual *steps* inside a running transaction.
+The transaction idempotency key guards the *whole long-running transaction*: when the same business request is submitted twice with the same transaction idempotency key, only one transaction should start.
+The key is chosen in `SagaTemplate.configure(..)` with `idempotentOnTransactionId()` or `idempotencyKey(String)` (see xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#transaction-idempotency[Transaction Idempotency] and xref:foundations:idempotency.adoc#lrt-idempotency[Idempotency for Long-Running Transactions]).
+
+NOTE: The transaction idempotency key is distinct from the per-step idempotency key returned by `getIdempotencyKey(..)` and forwarded to downstream APIs.
+The check described here applies only to the transaction idempotency key.
+
+*Why the key has to be claimed* +
+On a relational event store, a unique constraint rejects the second insert of the same key.
+Cassandra has no such signal — every `INSERT` is an upsert, so a second submission would silently overwrite the first.
+The Cassandra event store therefore has to *claim* the transaction idempotency key explicitly, and `ConsistencyMode` selects how:
+
+[cols="1,2,2",options="header"]
+|===
+| | `STRICT` | `RELAXED_WITH_DEDUP`
+
+| How the key is claimed
+| `INSERT ... IF NOT EXISTS` — a Cassandra lightweight transaction (Paxos).
+| A plain existence check (read), then a normal write. No Paxos.
+
+| Two submissions at the same moment
+| Exactly one claims the key; the other sees it is taken. Only one transaction starts.
+| Both can read "not found" before either write lands, so both can start a transaction.
+
+| Sequential duplicates (a resubmission after the first has been recorded)
+| Detected.
+| Detected.
+
+| Cost
+| One Paxos consensus round-trip per transaction start.
+| One ordinary read per transaction start — faster, higher throughput.
+|===
+
+*Why the default is `STRICT`* +
+A transaction idempotency key exists precisely to stop the same request from starting two transactions, and the most common source of duplicates — client retries after a timeout, double clicks, broker re-deliveries — tends to arrive close together.
+`RELAXED_WITH_DEDUP` cannot stop two simultaneous submissions, so it silently weakens the guarantee the key is meant to provide.
+`STRICT` is therefore the default, and relaxing it is an explicit, per-domain or per-transaction choice.
+
+.Example `application.yml`
+[source,yaml]
+----
+stacksaga:
+  cassandra:
+    idempotency:
+      default-mode: STRICT                  # <1>
+      domains:
+        notification-saga:                  # <2>
+          mode: RELAXED_WITH_DEDUP          # <3>
+----
+<1> Default check mode for every domain without an override. Defaults to `STRICT` when omitted.
+<2> The saga domain entity name from `@SagaDomainEntity#name()`, matched case-insensitively.
+<3> Check mode for this domain. When unset, `default-mode` applies.
+
+A single transaction can override both properties with `CassandraOptions.idempotencyCheck(..)`:
+
+[source,java]
+----
+.configure(config -> config
+        .transactionLifetime(Duration.ofDays(2))
+        .defaultRestoreOnCrashDelay(Duration.ofMillis(100))
+        .idempotencyKey(request.getRequestId()) // <1>
+        .with(CassandraOptions.configure(c -> c
+                .idempotencyCheck(ConsistencyMode.STRICT)))) // <2>
+----
+<1> The transaction idempotency key for this transaction.
+<2> Claim the key with Paxos for this transaction, regardless of the domain or global property.
+
+The precedence is the same as for write protection: `CassandraOptions.idempotencyCheck(..)` > `stacksaga.cassandra.idempotency.domains.<domain-name>.mode` > `stacksaga.cassandra.idempotency.default-mode`.
+
+*When to choose which*
+
+* *Choose `STRICT`* when starting the transaction twice would cause a real business effect — a second payment, a second order, a second shipment — and duplicate submissions can arrive concurrently (client retries, at-least-once brokers, load-balanced replicas receiving the same request).
+This is the right choice for most domains, which is why it is the default.
+* *Choose `RELAXED_WITH_DEDUP`* when a duplicate transaction is harmless or is reconciled downstream anyway (for example, notifications, cache refreshes, audit trails), when duplicate submissions are known to arrive sequentially rather than simultaneously, and when the extra Paxos round-trip per transaction start is a measurable cost.
+* *Mix them* — keep `default-mode: STRICT` and relax only the specific domains, or the specific transactions via `idempotencyCheck(..)`, that meet the criteria above.
+
+[NOTE]
+.Current limitation
+====
+The check mode is resolved per transaction, but the event stores do not yet enforce transaction idempotency keys, so `idempotencyCheck(..)` and the `stacksaga.cassandra.idempotency` properties have no effect yet.
+`idempotentOnTransactionId()` and `idempotencyKey(..)` currently fail at `execute()` with an `UnsupportedOperationException`; use `withoutIdempotency()` until enforcement is available.
+Once enforced, a duplicate submission is expected to return the existing transaction's ID from `execute()` without starting another transaction.
+====
 
 '''
 
@@ -1207,22 +1459,35 @@ The following properties configure the Cassandra reactive support module.
 | `stacksaga.cassandra.write-protection.default-mode`
 | `RELAXED_WITH_DEDUP`
 | `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
-| Default write-protection mode applied to sagas that do not specify a per-domain override.
+| Default write-protection mode applied to sagas that do not specify a per-domain override. A single transaction can override it with `CassandraOptions.writeProtection(..)` (see xref:#cassandra-per-transaction-options[Per-Transaction Override with CassandraOptions]).
 
 | `stacksaga.cassandra.write-protection.default-lease-duration`
 | `5s`
 | `Duration`
-| Default temporary marker lease duration for `STRICT` mode. Specifies how long an in-flight worker holds an exclusive lock in Cassandra before expiring via TTL.
+| Default temporary marker lease duration for `STRICT` mode. Specifies how long an in-flight worker holds an exclusive lock in Cassandra before expiring via TTL. A single transaction can override it with `CassandraOptions.leaseDuration(..)`.
 
 | `stacksaga.cassandra.write-protection.domains.<domain-name>.mode`
 | `null`
 | `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
-| Per-domain consistency mode override, keyed by saga domain entity name.
+| Per-domain consistency mode override, keyed by saga domain entity name (case-insensitive). Falls back to `default-mode` if null. A single transaction can override it with `CassandraOptions.writeProtection(..)`.
 
 | `stacksaga.cassandra.write-protection.domains.<domain-name>.lease-duration`
 | `null`
 | `Duration`
-| Per-domain lease duration override for `STRICT` mode. Falls back to `default-lease-duration` if null.
+| Per-domain lease duration override for `STRICT` mode. Falls back to `default-lease-duration` if null. A single transaction can override it with `CassandraOptions.leaseDuration(..)`.
+
+4+|
+*Idempotency Properties* (Configure the transaction idempotency-key check under `stacksaga.cassandra.idempotency.*`)
+
+| `stacksaga.cassandra.idempotency.default-mode`
+| `STRICT`
+| `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
+| Default mode of the transaction idempotency-key check for domains without an override. `STRICT` claims the key with `INSERT ... IF NOT EXISTS` (Paxos); `RELAXED_WITH_DEDUP` uses a plain existence check that can let simultaneous duplicates through. A single transaction can override it with `CassandraOptions.idempotencyCheck(..)`. See xref:#cassandra-idempotency-check[Transaction Idempotency-Key Check].
+
+| `stacksaga.cassandra.idempotency.domains.<domain-name>.mode`
+| `null`
+| `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
+| Per-domain mode of the transaction idempotency-key check, keyed by saga domain entity name (case-insensitive). Falls back to `default-mode` if null. A single transaction can override it with `CassandraOptions.idempotencyCheck(..)`.
 
 4+|
 *Transaction Lifetime*
@@ -1313,6 +1578,12 @@ stacksaga:
           mode: STRICT
         notification-saga:
           mode: RELAXED_WITH_DEDUP
+
+    idempotency:
+      default-mode: STRICT                  # Claim transaction idempotency keys with Paxos (LWT)
+      domains:
+        notification-saga:
+          mode: RELAXED_WITH_DEDUP          # Plain existence check for a low-risk domain
 
     recovery:
       concurrency: 100                      # Concurrent re-invocations per cycle

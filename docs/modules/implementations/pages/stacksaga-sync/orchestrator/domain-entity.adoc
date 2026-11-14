@@ -75,11 +75,17 @@ The lifecycle begins with the client application before the transaction is hande
 +
 [source,java,subs="attributes+"]
 ----
-sagaTemplate.init(orderDomainEntity)
+sagaTemplate.init(() -> orderDomainEntity)
+    .configure(config -> config
+            .transactionLifetime(Duration.ofHours(24))
+            .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+            .withoutIdempotency())
     .startWith(UserDetailExecutor.class)
-    ...
+    .fireAndForget()
     .execute();
 ----
++
+The transaction-level settings in `configure(...)` are explained in xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#configuring-transactions[Configuring the Transaction].
 . **Baseline Event Persistence**: Before invoking the first executor, the orchestration engine serializes the entity and commits the initial snapshot (Version 0) to the Event Store, tagging the transaction with status `STARTED`.
 
 === Phase 2: Progressive Evolution & Forward Mutation
@@ -204,7 +210,7 @@ The diagram is organized into three architectural columns across the execution t
 
 To define a custom Domain-Entity, create a class that extends the `DomainEntity` base class provided by the framework and annotate it with `@SagaDomainEntity`.
 
-You can declare any fields required to maintain state across the saga workflow (such as `username`, `totalAmount`, `productItems`, etc.). When starting a transaction, pass an initialized instance of this custom class to `{template-class}.init(...).startWith(...).execute()`.
+You can declare any fields required to maintain state across the saga workflow (such as `username`, `totalAmount`, `productItems`, etc.). When starting a transaction, supply an initialized instance of this custom class to `{template-class}.init(...).configure(...).startWith(...).fireAndForget().execute()`.
 
 [source,java]
 ----

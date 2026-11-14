@@ -71,7 +71,8 @@ Consider a distributed E-Commerce checkout saga coordinating across `user-servic
 | **Inbound Trigger**
 | `POST /orders` request arrives at `order-service`.
 | Controller initializes an `OrderDomainEntity` and invokes: +
-`sagaTemplate.process(domainEntity).startWith(CheckEligibilityExecutor.class).execute();`
+`sagaTemplate.init(() -> domainEntity).configure(...).startWith(CheckEligibilityExecutor.class).fireAndForget().execute();` +
+(see xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#configuring-transactions[Configuring the Transaction])
 
 | **Initial Span Dispatch**
 | SEC kicks off the saga.
@@ -284,7 +285,7 @@ A fundamental architectural advantage of StackSaga's Event Sourcing engine is th
 To maintain separation of concerns in enterprise Spring Boot microservices, StackSaga introduces the **CHES & D layered architecture** (extending Spring's standard 3-layer architecture):
 
 * **C - Controller Layer**: Receives external REST/GraphQL/Webhook requests and invokes Handlers or `sagaTemplate.resume()`.
-* **H - Handler Layer**: Orchestrates business entry points, initializes the `DomainEntity`, and triggers `sagaTemplate.process()`.
+* **H - Handler Layer**: Orchestrates business entry points, initializes the `DomainEntity`, and starts the saga with `sagaTemplate.init(...).configure(...)`.
 * **E - Executor Layer**: Encapsulates atomic saga spans (`CommandExecutor` and `QueryExecutor`), staged navigation, and compensating logic (`doRevert()`).
 * **S - Service Layer**: Standard Spring business domain services invoked by executors (zero StackSaga awareness).
 * **D - Data Access Layer**: Standard Spring Data repositories (JPA, JDBC, R2DBC) for local business persistence.
