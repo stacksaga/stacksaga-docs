@@ -39,6 +39,56 @@ An executor must interact with **exactly one microservice or one local database 
 Never combine multiple external state-changing actions inside a single executor's `doProcess()` method (for example, creating a database record AND charging a credit card in the same step).
 ====
 
+[[keeping-step-data-locally]]
+==== Keeping Step Data in Your Own Database
+
+The domain entity and the revert hint store carry data from one executor to the next, forward and backward, and the event store saves them with every step.
+You are not required to put everything there.
+Sensitive or bulky data can stay in your service's own database instead, with only a reference (for example an ID) in the domain entity.
+A later executor, or a `doRevert()`, then reads it back; reading is not a state change, so it never conflicts with Rule 1.
+
+Writing that data is a state change, so it must take one of these two shapes:
+
+[cols="1,3",options="header"]
+|===
+| Shape | Rule
+
+| *The main action is local too*
+| Save the data and perform the main action in **one local database transaction**. That is still one atomic effect, so Rule 1 holds as it is.
+
+| *The main action is a remote call*
+| Save the data first, then make the remote call. This is allowed only if the save is:
+
+* *idempotent* -- keyed by the transaction ID and the executor, written as an upsert, so a re-execution overwrites the row instead of adding a second one (executors run at least once, see <<rule-idempotent-execution,Rule 2>>);
+* *private to the saga* -- data that only later executors of this transaction read, never business state that other code acts on, because if the remote call fails and the saga compensates, the row is still there.
+
+Delete the rows when the transaction finishes (or let your normal retention remove them).
+|===
+
+[source,java]
+----
+// main action is remote: idempotent, saga-private save first, then the call
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+        @NonNull ProcessContext<OrderDomainEntity> context,
+        @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+) throws RetryableExecutorException, NonRetryableExecutorException {
+    OrderDomainEntity order = context.currentDomainEntityState();
+
+    // [0] saga-private data for later executors: an upsert keyed by transaction + executor, so a re-execution overwrites it
+    paymentScratchRepository.upsert(order.getTransactionId(), "processPaymentExecutor", cardToken);
+
+    // [1] the one real effect, forwarding the step's idempotency key
+    paymentClient.charge(order.getPaymentAmount(), context.idempotencyKey());
+
+    return stepManager
+            .success("PAYMENT_CHARGED")
+            .asSync()
+            .noPause()
+            .toNextExecutor(ReserveStockExecutor.class);
+}
+----
+
 ==== Real-World Scenario: E-Commerce Checkout Saga
 
 Consider an e-commerce order checkout where a customer places an order. The business transaction spans four distinct microservice boundaries:
@@ -792,44 +842,57 @@ throw NonRetryableExecutorException
 . **Real error** (`buildWith(...)`): the exception that caused the failure.
 . **Event** (`withEvent(String)` or `withEvent(SagaExecutionEventName)`): the event recorded for this failure in the transaction history. Use `withDefaultEvent()` to record the framework's default error event.
 . **Crash re-expose delay** (`reexposeOnUnexpectedCrash(Duration)`): how long the engine waits before it re-exposes the transaction if the instance crashes after this failure, before compensation has been handed over. Use `withDefaultReexposeOnUnexpectedCrash()` to apply the transaction's default restore-on-crash delay.
-. **Compensation of the failing step** (`compensateThisStep(boolean)`): whether the failing step's own `doRevert()` runs when this failure happens on a re-execution of the step. See <<non_retryable_after_retry,Non-Retryable Failure After a Retry>>.
+. **Compensation of the failing step** (`compensateThisStep(boolean)`): whether the failing step's own `doRevert()` may run when an attempt of the step may have taken effect -- on a re-execution, or when the failure was never classified. See <<non_retryable_after_retry,Compensating the Failing Step>>.
 . **Metadata** (`put(key, value)`, optional): additional diagnostic details, available to listeners and compensating executors.
 
 [IMPORTANT]
 .Rollback Invariant: Non-Retryable Exceptions Forbidden in `doRevert()`
 ====
 During compensation (`doRevert()`, `PreExecutor`, or `PostExecutor`), throwing unhandled non-retryable exceptions is prohibited because it would stall the rollback pipeline.
-If an unrecoverable compensation error occurs that can be safely tolerated (e.g., account already closed):
-1. Catch the exception and record diagnostic metadata in `context.revertHintStore().put("key", errorMsg)`.
-2. Return `.success("REVERT_TOLERATED").asSync().noPause().toNextDefaultExecutor()` to permit rollback to proceed.
+
+*What happens if one escapes anyway.* Any exception other than `RetryableExecutorException` -- including an unexpected one such as a `NullPointerException` -- stops the unwind at that reversal.
+The transaction is terminated with the compensations of the earlier commands still pending, and is surfaced to operators.
+When an operator fixes the cause and restores the transaction, the unwind resumes at the reversal that failed; no committed command is skipped.
+
+*How to tolerate an error instead.* If an unrecoverable compensation error can be safely tolerated (e.g., account already closed, or a known data problem you would rather record than halt on):
+
+1. Wrap the reversal's logic in `try`/`catch`, and record diagnostic metadata in `context.revertHintStore().put("key", errorMsg)`.
+2. Return `.success("REVERT_TOLERATED").asSync().noPause().toNextDefaultExecutor()` as usual, so the rollback proceeds to the next compensation.
+
+The tolerated error stays in the transaction's record through the hint store, so it is visible afterwards rather than silently skipped.
 ====
 
 [[non_retryable_after_retry]]
-=== Non-Retryable Failure After a Retry
+=== Compensating the Failing Step
 
 When a `NonRetryableExecutorException` is thrown, the engine reverts the executors that completed *before* the failing one.
-By default, the failing executor's own `doRevert()` is not part of that chain: a step that failed on its first attempt never completed, so there is nothing to undo.
-One situation changes that.
+The failing executor's own `doRevert()` is not part of that chain when the step raised the failure itself on its first attempt: by raising it, the step asserts that the attempt had no effect.
+Two situations change that.
 
-==== The Scenario
+==== The Scenarios
 
-A step can run more than once (see <<rule-idempotent-execution,Rule 2>>).
-A transient failure (`RetryableExecutorException`) makes the engine invoke the same step again later, and the attempt that failed that way may *already have had an effect* on the remote service — for example, a timeout where the remote service applied the request but the response was lost.
+A step can run more than once (see <<rule-idempotent-execution,Rule 2>>), and an attempt that failed may *already have had an effect* on the remote service — for example, a timeout where the remote service applied the request but the response was lost.
 
-. Attempt 1 calls the remote service and fails with a transient error. The engine schedules a retry.
+*A re-execution fails.*
+
+. Attempt 1 calls the remote service and fails with a transient error (or parks and its wait expires). The engine invokes the step again later.
 . Attempt 2 of the same step fails with a *non-retryable* error (for example, the service now answers `400 Bad Request`).
 . The transaction must now be compensated, but attempt 1 may have left an effect behind. Skipping the failing step's `doRevert()` would leave that effect in place.
 
+*A first attempt fails in a way nobody classified.*
+The executor lets an exception escape that it did not map — a read timeout, a connection reset.
+The engine wraps it as a non-retryable failure with `compensateThisStep(true)`, because nothing shows that the attempt had no effect.
+
 A transient failure never starts compensation on its own.
-The situation arises only for the sequence "one or more transient failures, then a non-retryable failure on the same step".
 
 ==== How StackSaga Handles It
 
-The engine remembers whether a step was executed before the current attempt, and every `NonRetryableExecutorException` states with `compensateThisStep(boolean)` whether the failing step may be compensated (see <<building-non-retryable-exception,Building a `NonRetryableExecutorException`>>):
+When compensation starts, the engine reads the failing step's `compensateThisStep(boolean)` (see <<building-non-retryable-exception,Building a `NonRetryableExecutorException`>>) and the step's attempt history:
 
-* If the step fails non-retryably on its *first* attempt, nothing was executed before, so its `doRevert()` is *not* run, whatever the value is. Compensation starts from the previous step.
-* If the step fails non-retryably on a *re-execution* with `compensateThisStep(true)`, an earlier attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, and then continues in the normal reverse order.
-* If the step fails non-retryably on a *re-execution* with `compensateThisStep(false)`, its `doRevert()` is *not* run. Use this for a step whose `doRevert()` must never run for its own failure.
+* If the step raised the failure itself on its *first* attempt, its `doRevert()` is *not* run, whatever the value is. Compensation starts from the previous step. If you are not sure the attempt had no effect (for example, you caught a timeout), throw `RetryableExecutorException` or let the exception escape instead.
+* If the failure was *not classified* (the engine wrapped it), the attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, then continues in the normal reverse order.
+* If the step fails non-retryably on a *re-execution* with `compensateThisStep(true)`, an earlier attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, then continues in the normal reverse order.
+* With `compensateThisStep(false)`, the failing step's `doRevert()` is *not* run in any of these cases. Use this for a step whose `doRevert()` must never run for its own failure.
 
 [source,java]
 ----
@@ -907,6 +970,18 @@ _or_ `.toNextPostExecutor(Next.class)`
 For the comprehensive **19-row Master Navigation Matrix**, runtime dynamic content branching, and failure pivot mechanics, see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#master-navigation-matrix[Master Navigation Matrix in Unified Saga Patterns].
 ====
 
+[[no-revisit-rule]]
+[IMPORTANT]
+.An executor runs at most once per transaction
+====
+`toNextExecutor(..)` and `resumeToNextExecutor(..)` may branch and merge, but they must not name an executor that has already run in the same transaction -- including the current one.
+The engine identifies an executed step by its executor: the step's idempotency key and its place in the compensation order are both tied to that identity, so a second visit cannot be told apart from a re-execution of the first.
+The engine therefore rejects a revisit: it records the current step's success and then starts compensation from it.
+
+Model a loop such as "retry the payment with another card" as a distinct executor (for example `AuthorizeAlternativePaymentExecutor`), or as a re-attempt inside one step.
+Re-execution of the same step by the engine -- after a transient failure, a crash or an expired wait -- is not a revisit and is always allowed.
+====
+
 '''
 
 == Guidelines for Creating Executors
@@ -919,6 +994,8 @@ When designing saga executors, follow these essential implementation best practi
 4. **Enforce Event Naming Format**: Step event names must match the regex `^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$` (e.g. `ORDER_CREATED`, `PAYMENT_AUTHORIZED`). Hyphens, spaces, and consecutive underscores (e.g. `ORDER__CREATED`) are rejected at runtime.
 5. **Separate Continuous vs. Pausable Steps**: Keep initial request dispatches (pausing steps) and subsequent callback validations (resumed steps) cleanly separated in your saga topology.
 6. **Tolerate Unrecoverable Rollback Errors**: Record diagnostic details in `context.revertHintStore()` rather than letting exceptions crash and stall compensating pipelines.
+7. **Never Revisit an Executor**: An executor runs at most once per transaction; model loops as distinct executors (<<no-revisit-rule,No-revisit rule>>).
+8. **Treat the `@SagaExecutor` Value as Permanent**: The declared name is stored in the transaction history, in the pointer to the next step, and in every idempotency key derived for the step. Renaming an executor while transactions are in flight leaves their history pointing at a name that no longer exists, so they cannot be recovered, and changes the keys their participants receive. To rename, keep the old executor registered until every transaction that used it has finished, and add the new one under the new name.
 
 '''
 

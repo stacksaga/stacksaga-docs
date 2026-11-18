@@ -313,6 +313,11 @@ They do not need to be within the application's component scan package. Instead,
 [[securing_sensitive_data]]
 === Securing Sensitive Data & Trace-Window Protection (Data Masking)
 
+// TODO [WP-B10] When engine-side encryption ships, document it here: what is encrypted (domain entity, revert hint
+//  store, resume context), how the key is supplied and rotated, and that the trace connector decrypts in-service.
+//  Keep the masking techniques below as the way to keep data out of the record altogether, and link to
+//  executor_architecture.adoc#keeping-step-data-locally for keeping data in the service's own database.
+
 Because the `DomainEntity` represents the complete state of a transaction, it is serialized and committed to the Event Store at every atomic span snapshot.
 These serialized snapshots are retrieved and displayed directly on the **Trace-Window dashboard** (`/execution/binary`) for forensic analysis, debugging, and observability.
 
@@ -992,7 +997,10 @@ public class OrderDomainEntity extends DomainEntity {
 [WARNING]
 ====
 If an inner nested class removes properties without extending `UnknownPropertyArchive`, deserializing legacy events will fail.
-StackSaga validates domain-entity schemas against sample payloads (configured via `SagaSerializable`) during application startup, failing fast if casting incompatibilities are detected.
+StackSaga checks this at application startup: if any nested class of a domain entity does not extend `UnknownPropertyArchive`, the application fails to start with `MissingPropertyCollectorException`.
+
+Changing the *type* of an existing property is not detected at startup.
+A legacy value that cannot be read into the new type fails only when a recovered transaction is deserialized, so add a new property instead of retyping an existing one.
 ====
 
 ==== Accessing Preserved Properties in Executors

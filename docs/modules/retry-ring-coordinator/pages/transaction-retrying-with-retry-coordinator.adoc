@@ -48,7 +48,7 @@ Examples include validation failures, authorization errors, or any condition tha
 These errors can occur in both the primary flow and the compensation flow.
 In the primary flow, a non-retryable error triggers compensation; if it occurs during compensation, the transaction is marked as permanently failed.
 In either case, the transaction *will not be retried*.
-A step that was retried after a transient failure can still end with a non-retryable error. In that case, an earlier attempt may already have been applied, so the failing step's own compensation runs first when the exception is built with `compensateThisStep(true)` (see xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
+A step that was retried after a transient failure can still end with a non-retryable error. In that case, an earlier attempt may already have been applied, so the failing step's own compensation runs first when the exception is built with `compensateThisStep(true)` (see xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
 
 *Retryable error* — a transient condition, such as a downstream service being unavailable, a database connection timeout, or a network partition.
 The transaction is paused and will be replayed automatically.
@@ -705,7 +705,8 @@ Both levels of the hierarchy issue grants for the *same* window:
 . Each Retry-Coordinator-Slave divides its own slice across its registered Orchestrators for that same window `T+1`.
 
 A Retry-Node receives nothing beyond this.
-There is no lock to acquire, no fencing token to present and no dispatcher to ask — the range and the interval are the entire contract.
+There is no distributed lock to acquire, no fencing token to present and no dispatcher to ask — the range and the interval are the entire ownership contract.
+Claiming an individual due transaction inside that range is a separate, atomic step in the event store; see <<per-transaction-claim>>.
 
 === Expiry Is Enforced by the Holder
 
@@ -714,7 +715,13 @@ The holder itself decides whether it is still inside the granted interval by rea
 
 . *Before polling* — the window must be current, or the node does not query the event store at all.
 . *Before every single transaction invocation* — the check is repeated.
-If the clock has passed `validUntil`, that transaction is *skipped without being retried*.
+If the clock has passed `validUntil` less the boundary guard, that transaction is *skipped without being retried*.
+
+Both checks stop one second short of `validUntil`.
+That *boundary guard* keeps the departing holder of a range and the arriving one apart whenever their clocks agree to within a second.
+The guard is affordable because only the asynchronous path passes through here.
+Immediate retries run in-thread inside the executor and never reach the retry subsystem (see <<immediate-vs-asynchronous-retry>>).
+What does reach it was registered for a later window and already waits roughly 10 to 70 seconds, so the guard costs about 1.7% of each one-minute window and at most one second on top of that floor.
 
 The second check is the load-bearing one.
 A batch fetched while the window was still open but which crosses the boundary mid-processing *stops mid-batch*: the remaining transactions in that batch are skipped rather than retried under an expired grant.
@@ -745,10 +752,10 @@ This is why scaling Retry-Nodes up does not take effect within the window alread
 [[conflict-avoidance]]
 === Conflict Avoidance
 
-Two Orchestrator instances can never claim responsibility for the same transaction, and no distributed locking is used to achieve it.
+Two Orchestrator instances never hold the same token range in the same window, and no distributed locking is used to achieve it.
 
 The guarantee does *not* follow from the sub-ranges being disjoint alone — disjointness closes only one of four routes to a conflict.
-It follows from four separate properties of the protocol, which together leave no interval in which one range has two holders:
+It follows from four separate properties of the protocol, which together leave no interval in which one range has two holders, up to clock agreement at the boundary:
 
 [cols="1,2",options="header"]
 [.google-anno-skip]
@@ -764,7 +771,7 @@ If its holder is lost mid-window, the range is left *uncovered* until that windo
 It stays idle until a later division includes it.
 
 | *A range outliving its window*
-| Expiry is part of the grant, and the holder re-checks it against its own UTC clock before every transaction invocation.
+| Expiry is part of the grant, and the holder re-checks it against its own UTC clock, less a one-second guard, before every transaction invocation.
 
 | *Two sub-ranges of one division intersecting*
 | Each division is a partition of the 64-bit ring — the sub-ranges are disjoint by construction.
@@ -777,12 +784,54 @@ Systems that **reclaim** a work assignment when it expires must also *fence* the
 A fencing token — such as the `rangeID` used by Cadence and Temporal — exists to make the displaced holder's writes fail.
 
 StackSaga never reclaims.
-Declining to reassign a vacated range is precisely what guarantees that a second holder is never created, which is why no fencing token, row lock or distributed lock appears anywhere in this design.
+Declining to reassign a vacated range is precisely what guarantees that a second holder is never created, which is why no fencing token or distributed lock is needed at range level.
+The only locks in the design are per transaction and last one statement; see <<per-transaction-claim>>.
 ====
 
 The cost of this choice is paid in *liveness*, never in safety: transactions inside an uncovered range are not retried until a later division covers that part of the ring again.
 They are never lost.
 See <<costs-and-trade-offs>> for the full accounting.
+
+[[per-transaction-claim]]
+=== Per-Transaction Claim
+
+Range ownership decides which node *looks* at a transaction.
+Which node *runs* it is decided by an atomic claim in the event store, made on each due transaction before it is re-invoked.
+Because ranges are disjoint, a claim meets another node's claim only at a boundary where two holders' clocks disagree by more than the guard; in steady state it is uncontended.
+
+[cols="1,2,2",options="header"]
+[.google-anno-skip]
+|===
+| | Relational (MySQL, PostgreSQL, Oracle) | Cassandra
+
+| *Claim*
+| One short local transaction: `SELECT ... FOR UPDATE SKIP LOCKED`, restricted to the node's own token range, then an `UPDATE` that writes a fresh allocation key and moves `next_expose_time` forward by the transaction's retention.
+| One lightweight transaction (Paxos) on the transaction's own partition, applied only if the pointer's registration token is still current and no other claim is live.
+See xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#pickup-claim[Pickup Claim].
+
+| *Two nodes at once*
+| `SKIP LOCKED` skips a row another node is claiming, and once claimed the row is no longer due.
+| Only one conditional update applies; the other node sees `[applied] = false`.
+
+| *A claimant crashes*
+| The row becomes due again when `next_expose_time` passes.
+| The transaction becomes claimable again when its claim expires; the pointer is kept until then.
+
+| *A late resume meets a re-invocation*
+| The resume locks the same row `FOR UPDATE` and rotates the allocation key, so a retry that claimed earlier is rejected when it loads the transaction.
+| The resume takes the same conditional claim on its resume key.
+
+| *A superseded run keeps going*
+| Every claim and resume advances the transaction's `run_epoch`, and every state write of a run carries `AND run_epoch = <its epoch>`.
+The displaced run's next write matches no row, the batch rolls back, and the run stops without terminating or compensating the transaction.
+| The claim and resume advance the same `run_epoch`.
+A recovery run checks it with a lightweight transaction before appending history; when the check is not applied, the run stops.
+First runs skip the check to keep Paxos off the happy path.
+|===
+
+The lock is held for one statement and never across a remote call, so this is not the shared-queue polling the token ring exists to avoid.
+What remains is a re-invocation that outlives its claim -- it runs longer than the lease, or its process is suspended past it -- which a second node may then join.
+The run epoch stops the displaced run at its next write, so only the step it had in flight can repeat, and that repeat is absorbed by the participant's idempotency key, not prevented.
 
 [[multi-region-deployment]]
 == Multi-Region Deployment
@@ -877,7 +926,7 @@ There the isolation is physical rather than filtered: queries from two virtual c
 [[costs-and-trade-offs]]
 == Costs and Operational Trade-offs
 
-The ownership model buys lock-free safety, and it is not free.
+The ownership model buys safety without a distributed lock, and it is not free.
 This section states what it costs, so the trade can be evaluated rather than discovered in production.
 
 Almost every cost below is paid in *liveness* — work waits — and not in correctness.
@@ -923,6 +972,11 @@ A retry that fails again is registered forward once more, so each successive att
 
 IMPORTANT: This floor applies to the asynchronous path only. A fault that should be retried in milliseconds belongs in an in-thread re-attempt inside the executor — see <<immediate-vs-asynchronous-retry>>.
 
+*The boundary guard idles the last second of every window.*
+Each holder stops claiming one second before its window ends, which is about 1.7% of a one-minute window and adds at most one second to a retry.
+No caller waits on that second: immediate retries stay in-thread inside the executor (see <<immediate-vs-asynchronous-retry>>), and everything that reaches this path already waits for a later window.
+That makes one second the cheapest way to keep consecutive holders of a range apart.
+
 *Silent-crash detection is far-dated by default.*
 The Restore watchdog is armed hundreds of windows ahead of the transaction that set it — ten hours ahead in the default Cassandra configuration — because it must not fire while a transaction is merely slow.
 A pod that dies silently is therefore recovered on the order of hours, not minutes, unless that delay is tuned down.
@@ -934,6 +988,8 @@ The delay is configurable per domain entity; see xref:stacksaga-database-support
 Each holder decides whether it is inside its granted window by reading its own clock, so clock discipline is a deployment requirement for the Master, every Slave and every Retry-Node — not a recommendation.
 
 The degradation is bounded rather than sudden.
+Drift below the one-second boundary guard keeps consecutive holders fully apart.
+Larger drift lets two holders' claims meet at a boundary, where the per-transaction claim still gives each transaction to one of them, so the cost is contention rather than a duplicate (see <<per-transaction-claim>>).
 Window granularity is one minute, registration happens a window ahead, directory pruning re-checks the wall clock before deleting anything, and recovery windows are traversed chronologically, so sub-second to few-second drift — the normal case in a cloud VPC — is absorbed outright.
 Severe drift of several minutes on a degraded pod causes it to register a window early or late; that window is still discovered and recovered later, rather than lost.
 See xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc[Cassandra Support] for the detailed analysis.

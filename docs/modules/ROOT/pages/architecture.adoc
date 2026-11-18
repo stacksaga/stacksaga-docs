@@ -100,9 +100,10 @@ The ring coordinator grants each orchestrator instance a deterministic sub-range
 While that grant is valid, the instance recovers the transactions falling inside its range — those registered after a `RetryableExecutorException`, those whose `pauseUntilResume(...)` wait-state expired without a callback, and those orphaned by a pod that died silently — and re-submits each to the SEC for re-execution.
 How a token range is resolved to concrete transactions depends on the event-store implementation; see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#resolving-a-token-range-to-transactions[Resolving a Token Range to Transactions].
 
-This guarantees that **each stuck transaction is retried by exactly one instance without distributed locking or multi-node race conditions**.
+This ensures that **each stuck transaction is retried by one instance at a time, without distributed locking**.
 The guarantee does not rest on the sub-ranges being disjoint alone — it rests on the fact that a range grant is *never reclaimed* from its holder.
 If a Retry Node is lost mid-window its range is left uncovered until the next division, rather than being handed to a survivor, so a second claimant for the same range is never created.
+At the boundary between two windows, a one-second guard keeps consecutive holders apart, and each due transaction is claimed atomically in the event store, so two nodes whose clocks disagree still cannot take the same transaction at the same time.
 See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#conflict-avoidance[Conflict Avoidance] for the full argument, including why no fencing token is required.
 
 [[stacksaga-architecture-3rd-stage]]

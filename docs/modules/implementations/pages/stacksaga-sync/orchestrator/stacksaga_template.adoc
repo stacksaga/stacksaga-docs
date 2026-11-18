@@ -167,7 +167,7 @@ String transactionId = this.sagaTemplate
                 .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))  //<2>
                 .idempotencyKey("order-" + orderId)                 //<3>
                 .with(CassandraOptions.configure(c -> c             //<4>
-                        .writeProtection(ConsistencyMode.STRICT))))
+                        .idempotencyCheck(ConsistencyMode.STRICT))))
         .startWith(ValidateUserExecutor.class)
         .fireAndForget()
         .execute();
@@ -415,7 +415,7 @@ Until enforcement is available, use `withoutIdempotency()`.
 ==== Event-Store Specific Options: `with(...)`
 
 StackSaga runs on several event stores (the SQL family and Cassandra / ScyllaDB), and some of them offer tuning that only makes sense for that database.
-For example, Cassandra can protect writes with Paxos-based lightweight transactions, while a relational database gets the same guarantee from its constraints.
+For example, Cassandra can claim a transaction idempotency key either with a Paxos-based lightweight transaction or with a cheaper read check.
 
 Rather than putting database-specific methods on `SagaTemplate`, every event-store module ships its own options type that implements `EventStoreOptions`.
 You attach it with `with(...)`:
@@ -427,8 +427,7 @@ You attach it with `with(...)`:
         .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
         .idempotencyKey("order-" + orderId)
         .with(CassandraOptions.configure(c -> c
-                .writeProtection(ConsistencyMode.STRICT)      // use Paxos (LWT) for this transaction
-                .leaseDuration(Duration.ofSeconds(10)))))
+                .idempotencyCheck(ConsistencyMode.STRICT))))  // claim the idempotency key with Paxos (LWT)
 ----
 
 *How `with(...)` behaves:*
@@ -437,7 +436,7 @@ You attach it with `with(...)`:
 * *One instance per type.* Attaching two options objects of the same type throws `IllegalArgumentException`; set everything for one store in one object.
 * *Portable.* The active event store applies the options of its own type and ignores all others, so code that attaches `CassandraOptions` runs unchanged on a SQL event store.
 * *Overrides properties for this transaction only.* An option you set wins over the event store's per-domain property, which wins over its global default. Options you leave unset fall back to the properties.
-* *Kept for the life of the transaction.* `configure(...)` runs only once, when the transaction starts. The event store saves the effective values with the transaction, so a transaction restored after a crash on another instance keeps the same behaviour.
+* *Applied when the transaction starts.* `configure(...)` runs only once, when the transaction starts, and event-store options take effect at that point (for example, the idempotency-key check at admission).
 
 For the available Cassandra options, their defaults and their current availability, see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#cassandra-per-transaction-options[Per-Transaction Override with CassandraOptions].
 
@@ -459,10 +458,6 @@ For the available Cassandra options, their defaults and their current availabili
 | `with(..)` receives a second options object of the same type
 | `IllegalArgumentException`
 | Put all settings for one event store into a single options object.
-
-| `CassandraOptions` is built with a non-positive lease, or with a lease and `RELAXED_WITH_DEDUP` write protection
-| `IllegalArgumentException`
-| A lease only applies to `STRICT` write protection and must be positive.
 
 | `execute()` or `executeAsync()` is called a second time on the same chain
 | `IllegalStateException`
@@ -1040,7 +1035,7 @@ However, if the external callback (e.g. payment gateway webhook or courier confi
 * Therefore, the StackSaga xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem] re-executes the transaction directly from the executor where it was paused, **even though its initial execution previously succeeded before entering the pause**. See xref:#pausable-lrt-timeout-reexecution[Timeout Re-Execution Mechanics].
 
 *Architectural Takeaway:* Any executor that returns `.pauseUntilResume(...)` must implement its `doProcess()` (or `doRevert()`) idempotently, so that a timeout re-execution does not generate duplicate business side-effects.
-If the re-execution then fails non-retryably with `compensateThisStep(true)`, the executor's own `doRevert()` runs first during compensation (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
+If the re-execution then fails non-retryably with `compensateThisStep(true)`, the executor's own `doRevert()` runs first during compensation (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
 
 === Q2: What happens if an external callback arrives after the wait-state timeout has expired, and how should duration be tuned?
 
@@ -1072,7 +1067,7 @@ If an executor mutates in-memory fields on `currentDomainEntityState` inside `do
 * **Permanent Rollback Errors (The Risk):** If an unhandled `RuntimeException` occurs in `doRevert()`, the saga becomes a xref:retry-ring-coordinator:disabled-and-terminated-transaction.adoc#terminated-transactions[Terminated Transaction] (permanently frozen in partial compensation). The issue must be investigated and resolved via the xref:trace-window:stacksaga-trace-window.adoc[Trace Window] dashboard before restoring the transaction.
 
 *Architectural Takeaway:* Write `doRevert()` methods defensively and idempotently. For example, if a downstream resource was never created in the forward step, `doRevert()` should treat cancellation as successful rather than throwing an error.
-This also matters for a forward step that was retried and then failed non-retryably with `compensateThisStep(true)`: its own `doRevert()` runs first and may target an operation that an earlier attempt only possibly applied (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
+This also matters for a forward step that was retried and then failed non-retryably with `compensateThisStep(true)`: its own `doRevert()` runs first and may target an operation that an earlier attempt only possibly applied (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
 
 === Q5: Why can `onStateChanged` be called multiple times, but also ZERO times during crashes?
 
@@ -1090,9 +1085,14 @@ StackSaga eliminates distributed locking entirely through **Murmur3 64-bit Consi
 * Every transaction ID is deterministically hashed into a 64-bit token (`-2^63` to `2^63 - 1`).
 * The Retry-Coordinator Master and Slaves partition this token space into strictly non-overlapping sub-ranges assigned to active Retry-Nodes.
 * Each Retry-Node holds exclusive ownership of its assigned sub-range for a defined one-minute time window, granted with the absolute UTC interval it covers.
+* Each Retry-Node stops claiming one second before its window ends, so consecutive holders of a range do not overlap under normal clock synchronisation.
 
 Disjoint sub-ranges alone would not settle the question, because a system that reclaims an expired assignment must additionally *fence* the displaced holder to stop it writing.
-StackSaga never reclaims: if a Retry-Node is lost mid-window its range is left uncovered until the next division rather than handed to a survivor, so a second claimant for the same range is never created — and no fencing token, row lock or distributed lock is needed anywhere.
+StackSaga never reclaims: if a Retry-Node is lost mid-window its range is left uncovered until the next division rather than handed to a survivor, so a second claimant for the same range is never created, and no fencing token or distributed lock is needed.
+
+Inside its range, StackSaga claims each due transaction atomically in the event store before re-invoking it: a short `SELECT ... FOR UPDATE SKIP LOCKED` claim on relational stores, a lightweight transaction on Cassandra.
+That claim settles the rare boundary case in which two nodes' windows touch.
+It covers one transaction for one statement and is internal to StackSaga; it is not a lock you add.
 
 See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#token-ring-partitioning[Token Ring Partitioning Architecture] and xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#conflict-avoidance[Conflict Avoidance] for the full argument.
 

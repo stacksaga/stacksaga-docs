@@ -1,6 +1,6 @@
 :impl_name: cassandra
 :toc-title: StackSaga Cassandra Reactive Support | Cassandra Database Integration Guide
-:description: Complete guide to integrating StackSaga with Apache Cassandra using the reactive support module. Covers the event store schema, connection configuration, write protection, and the 5-tier hierarchical Recovery Engine powering both Retry and Restore in distributed systems.
+:description: Complete guide to integrating StackSaga with Apache Cassandra using the reactive support module. Covers the event store schema, connection configuration, how duplicate execution is bounded, and the 5-tier hierarchical Recovery Engine powering both Retry and Restore in distributed systems.
 :revnumber: 1.0.0
 :revdate: {localdate}
 :keywords: StackSaga, Cassandra, Reactive Support, Database Integration, Event Store, Transaction Recovery, Distributed Systems, Java, Orchestrator, Schema Creation, Connection Configuration, High Throughput, Multi-Region, Idempotency, Saga design pattern, Spring Boot, Spring WebFlux, Spring Saga, Tombstone-Free, Murmur3
@@ -14,7 +14,7 @@ It handles two core concerns that every distributed transaction system must addr
 * **Event Store** — persisting the transactional state, execution tryout history, and idempotency markers of every saga.
 * **Recovery Engine** — an autonomous, tombstone-free 5-tier directory architecture that automatically recovers transactions that encountered transient network failures (**Retry**) or disappeared due to ungraceful server crashes (**Restore**), without developer intervention.
 
-This guide covers both concerns comprehensively, starting with setup steps and progressing into a deep dive of the database schema, write protection mechanics, and the Recovery Engine internal architecture.
+This guide covers both concerns comprehensively, starting with setup steps and progressing into a deep dive of the database schema, how duplicate execution is bounded, and the Recovery Engine internal architecture.
 
 .StackSaga Cassandra Ecosystem Architecture
 image::stacksaga-database-support:cassandra/stacksaga-ecosystem-overview.svg[alt="StackSaga Cassandra Ecosystem Architecture"]
@@ -115,7 +115,7 @@ The unified schema script creates 9 static tables divided into two coordinated g
 | `es_transaction` | Primary transaction state and metadata store (Single-Row Partition).
 | `es_transaction_tryout` | Transaction step execution history, physically co-located by transaction ID.
 | `es_frozen_transaction` | Quarantined transactions where compensation (rollback) failed unrecoverably.
-| `es_execution_markers` | Step execution markers and idempotency leases guarding against duplicate step execution.
+| `stacksaga_schema_version` | Applied schema version. Read once at startup; the application refuses to start when the version it requires is missing.
 
 .5+| *5-Tier Recovery Engine* (5 tables)
 | `es_days_by_year` | Tier 1: Directory of active calendar dates with pending retries or restores.
@@ -129,6 +129,13 @@ The unified schema script creates 9 static tables divided into two coordinated g
 
 [#step-3-configure-cassandra-connection]
 === Step 3: Configure the Cassandra Connection
+
+[IMPORTANT]
+====
+Keep `stacksaga.cassandra.write-consistency-level` at a level whose quorum includes the node or data centre you would fail over to.
+The default `LOCAL_QUORUM` survives the loss of a node inside one data centre; if a whole data-centre failover is part of your recovery plan, a write acknowledged by `LOCAL_QUORUM` in the failed data centre may not exist in the surviving one.
+The commit barrier dispatches as soon as a write is acknowledged, so a lost write leaves a sent message with no record behind it (see xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[Pattern 3]).
+====
 
 `stacksaga-cassandra-reactive-support` utilizes the standard DataStax Java Driver configuration format.
 Create a file named `stacksaga-cassandra.conf` in your project's `src/main/resources` directory:
@@ -208,33 +215,6 @@ image::stacksaga-database-support:cassandra/stacksaga-transaction-throughput.svg
 . **Murmur3 Partitioner:** Cassandra's 64-bit Murmur3 hash uniformly scatters `transaction_id` across the token space with zero coordination and zero lock contention.
 . **Even Cluster Scattering:** Writes land uniformly across physical nodes, ensuring CPU, memory, and disk I/O remain balanced without hot spots.
 
-[[es-transaction-write-protection-columns]]
-*Write-protection settings stored with the transaction*
-
-`es_transaction` also records the effective write-protection settings that were resolved for the transaction when it was initialized:
-
-[cols="1,1,3",options="header"]
-|===
-| Column | Type | Holds
-
-| `write_protection_mode`
-| `text`
-| The effective write-protection mode (`STRICT` or `RELAXED_WITH_DEDUP`), stored as the `ConsistencyMode` name.
-
-| `write_protection_lease_ms`
-| `bigint`
-| The effective lease (lock TTL) in milliseconds, used by `STRICT` write protection.
-|===
-
-Both values are resolved once, at transaction initialization, from the transaction's `CassandraOptions`, the per-domain property and the global default (see xref:#cassandra-per-transaction-options[Per-Transaction Override with CassandraOptions]).
-
-*Why store them instead of resolving them again?* +
-A transaction may be resumed long after it started — by the Retry subsystem, a resume-window expiry, or crash recovery on a different pod.
-The per-transaction `CassandraOptions` exist only in the memory of the pod that started the transaction, and the property values may have been edited and redeployed in the meantime.
-Persisting the effective values on the transaction row means a crash-restored or retried transaction keeps exactly the write-protection settings it started with.
-
-The columns are written only when they have a value: the insert omits a column instead of binding `null`, so no `null` cells or tombstones are created in `es_transaction`.
-
 === `es_transaction_tryout` — Step Execution History
 
 Each saga step attempt (called a "tryout") is stored as an individual row under the same `transaction_id` partition key.
@@ -258,146 +238,48 @@ No — it is safely quarantined. `es_frozen_transaction` stores transactions whe
 These transactions are isolated to protect downstream systems from further side effects.
 They require developer diagnosis and manual re-triggering via the administrative restore endpoint.
 
-=== `es_execution_markers` — The Idempotency Lease Table
-
-`es_execution_markers` stores step execution markers and idempotency leases to prevent duplicate saga step execution, whether the repeat originates in a retry, a resume-window expiry, crash recovery, or a broker re-delivery.
-
-*Partition lifecycle and storage cleanup:*
-
-Each transaction's execution markers share the composite partition key `((region, cluster, service_name, transaction_id))` — the same as `es_transaction` and `es_transaction_tryout`.
-Over the lifetime of a saga, each executed step appends one clustering row (`step_id`) to this partition.
-When the transaction reaches a terminal state (`PROCESS_COMPLETED` or `REVERT_COMPLETED`), the engine issues a **single partition-level delete** against `es_execution_markers`:
-
-[source,sql]
-----
-DELETE FROM es_execution_markers
-WHERE region = :region AND cluster = :cluster
-  AND service_name = :service_name AND transaction_id = :transaction_id;
-----
-
-Because this targets the full composite partition key, Cassandra writes a **single partition tombstone** — not one cell tombstone per step marker.
-The entire partition (all step markers for that transaction) is dropped in O(1) time during SSTable compaction, regardless of how many steps the saga executed.
-This guarantees that `es_execution_markers` storage is **self-bounded**: rows are written only during the active transaction window and fully reclaimed at transaction end, with no periodic cleanup job required.
-
 '''
 
-== Part 3: Write Protection (Duplicate Execution Guard)
+[[duplicate-execution]]
+== Part 3: Duplicate Execution and How It Is Bounded
 
-A saga step can be invoked more than once for several independent reasons.
-Write protection guards every step against all of them, so that a repeated *invocation* does not become a repeated *side effect*.
+A saga step can be invoked more than once for several independent reasons:
 
-=== Why Duplicate Executions Occur
+* **Retry subsystem re-invocation** -- a span that failed with a retryable error is re-invoked by whichever Retry-Node currently owns its token range.
+* **Resume-window expiry** -- a span that returned `.pauseUntilResume(...)` is re-executed when the window elapses without a callback arriving.
+* **Crash recovery** -- a pod that dies mid-execution leaves a span whose outcome is unknown, so recovery must re-invoke it.
+* **Ownership-window transition** -- at a token-range handover, two Retry-Nodes may briefly see the same transaction.
 
-StackSaga re-invokes a step whenever it cannot prove the previous attempt completed.
-That is deliberate — it is what makes the framework self-healing — which means duplicate invocation is a normal operating condition rather than an exceptional one:
+StackSaga does not keep a per-step deduplication table on Cassandra.
+It bounds repeats with two conditional writes on the transaction's own partition, and both are made on the recovery path only:
 
-* **Retry subsystem re-invocation** — a span that failed with a retryable error is re-invoked by whichever Retry-Node currently owns its token range.
-* **Resume-window expiry** — a span that returned `.pauseUntilResume(...)` is re-executed when the window elapses without a callback arriving.
-* **Crash recovery** — a pod that dies mid-execution leaves a span whose outcome is unknown, so recovery must re-invoke it.
-* **Ownership-window transition** — during a token-range handover, two instances may briefly consider the same transaction theirs.
+[cols="1,3",options="header"]
+|===
+| Mechanism | What it guarantees
+
+| **Pickup claim** -- one lightweight transaction per re-invocation
+| Only one Retry-Node re-invokes a transaction at a time, even when two of them read the same pointer. See <<pickup-claim>>.
+
+| **Run epoch** -- one lightweight transaction before each state write of a recovery run
+| A run whose claim has lapsed and been taken over stops at its next write, instead of writing history alongside its successor.
+|===
+
+What remains is the one step a displaced run had in flight.
+That repeat reaches the participant with the same idempotency key as the original attempt, and the participant recognizes it (see xref:foundations:idempotency.adoc[Idempotency]).
+First runs pay no Paxos at all: the happy path is plain writes.
 
 [NOTE]
+.Removed: `stacksaga.cassandra.write-protection.*`
 ====
-If the pipeline includes a messaging system such as Kafka or RabbitMQ, the probability is **materially higher**: at-least-once broker delivery, consumer group rebalances, and restarts before offset commits are acknowledged each add their own duplicate deliveries on top of the causes above.
-That is why the stricter mode is usually selected for broker-driven domains — but the protection itself is not specific to any transport.
+Earlier versions documented a per-step write-protection guard: `STRICT` and `RELAXED_WITH_DEDUP` execution markers in an `es_execution_markers` table.
+The sync orchestrator does not use it; the pickup claim and run epoch above replace it.
+The `stacksaga.cassandra.write-protection.*` properties and `CassandraOptions.writeProtection(..)` / `leaseDuration(..)` are being removed, and setting them has no effect.
 ====
-
-Without protection, the same saga step could execute twice — charging a credit card twice, reserving duplicate inventory, or sending multiple customer confirmations.
-
-=== Why Two Modes Exist — Cassandra Has No Native Duplicate Signal
-
-On a relational event store an `INSERT` is genuinely an insert: a primary-key or unique constraint rejects the second write, so *at most one execution per idempotency key* is supplied natively by the storage engine.
-
-**Cassandra has no such signal — every `INSERT` is an upsert.**
-A duplicate write succeeds silently, overwriting rather than failing, so nothing in the storage engine will tell the pod that this step already ran.
-
-The duplicate-execution guard therefore has to be *constructed* rather than inherited, and the two modes are the two ways of constructing it:
-
-* `STRICT` buys a real conditional insert with Paxos (`IF NOT EXISTS`), at the cost of a consensus round-trip.
-* `RELAXED_WITH_DEDUP` trades that round-trip for a fast read check.
-
-Choosing between them is therefore a question about how much a given step tolerates duplicate execution — not about which transport delivered the attempt.
-
-=== STRICT Mode — Mutual Exclusion with Cassandra LWT
-
-`STRICT` mode uses Cassandra Lightweight Transactions (Paxos-based LWT) to acquire an exclusive temporary execution lease before running any business logic:
-
-[source,text]
-----
-STEP 1: INSERT INTO es_execution_markers ... IF NOT EXISTS USING TTL <leaseDuration>
-         → If the row was NOT there: this pod holds the lease ([applied] == true). Proceed.
-         → If the row WAS already there (TTL > 0): another pod is executing. Back off and retry.
-         → If the row WAS already there (TTL = 0): already committed permanently. Skip safely.
-
-STEP 2: Execute saga step business logic.
-
-STEP 3: UPDATE es_execution_markers SET execution_state = 'COMMITTED', TTL = 0
-         → Converts the temporary lease to a permanent marker.
-         → All other pods now see TTL = 0 and terminate cleanly.
-----
-
-If a pod crashes between Step 1 and Step 3, the temporary lease expires when its TTL finishes, permitting another pod to retry and complete the saga step cleanly.
-
-.STRICT Mode Write Protection Flow
-image::stacksaga-database-support:cassandra/stacksaga-write-protection-strict.svg[alt="STRICT Mode Write Protection Flow"]
-
-. **Execution Attempt Inflow:** A step execution attempt arrives — a first invocation, a retry, a resume, or a broker re-delivery — with no guarantee that it is the only one.
-. **Paxos LWT Lease Acquisition:** The pod executes an atomic `INSERT ... IF NOT EXISTS USING TTL 5s` into `es_execution_markers`.
-If a lease exists with `TTL > 0`, the pod backs off; if `TTL = 0`, it skips.
-. **Mutual Exclusive Execution:** The single pod holding the active lease executes the saga business logic.
-. **Permanent Marker Commit:** On success, the marker is committed with `TTL = 0`, conferring permanent duplicate immunity.
-
-=== RELAXED_WITH_DEDUP Mode — Lightweight Read Check
-
-`RELAXED_WITH_DEDUP` skips the Paxos LWT overhead entirely.
-Before executing, the engine performs a fast read against `es_execution_markers`.
-If a completed marker is found, execution is skipped.
-This mode avoids Cassandra LWT round-trips, maximizing throughput.
-
-.RELAXED_WITH_DEDUP Mode Execution Flow
-image::stacksaga-database-support:cassandra/stacksaga-write-protection-relaxed.svg[alt="RELAXED_WITH_DEDUP Mode Execution Flow"]
-
-. **Execution Attempt Inflow:** An attempt arrives on a high-throughput path where the operation is inherently idempotent.
-. **Non-Blocking Read Check:** Executes a fast read against `es_execution_markers` without Paxos consensus overhead.
-If a marker exists, execution terminates immediately.
-. **Atomic Batch Write:** Step results and execution markers are committed together in a single logged batch write.
-
-*When to use `RELAXED_WITH_DEDUP`:*
-* When downstream operations are naturally idempotent (e.g. setting an absolute value, updating a cache, writing to an audit log).
-* When throughput is critical and duplicate execution carries zero business risk.
-
-=== Domain-Level Configuration
-
-Write protection can be configured globally and overridden per saga domain:
-
-.Example `application.yml`
-[source,yaml]
-----
-stacksaga:
-  cassandra:
-    write-protection:
-      default-mode: RELAXED_WITH_DEDUP      # Default high-throughput mode
-      default-lease-duration: 5s            # Default LWT lease TTL (for STRICT mode)
-      domains:
-        order-saga:
-          mode: STRICT                      # Strict mutual exclusion for order creation
-          lease-duration: 10s               # Custom lease TTL override
-        payment-saga:
-          mode: STRICT                      # Strict mode using default 5s lease
-        notification-saga:
-          mode: RELAXED_WITH_DEDUP          # High-throughput mode for notifications
-----
-
-The domain key is the saga domain entity name from `@SagaDomainEntity#name()` and is matched case-insensitively.
-A domain entry that leaves `mode` or `lease-duration` unset falls back to `default-mode` / `default-lease-duration` for that value.
 
 [[cassandra-per-transaction-options]]
 === Per-Transaction Override with CassandraOptions
 
-Domain-level configuration sets one write-protection policy for every transaction of a saga domain.
-That is not always fine-grained enough: a domain can default to `RELAXED_WITH_DEDUP` for throughput while one particular saga — for example, one whose listeners call a payment gateway or notify a customer — must run with `STRICT` mutual exclusion.
-
-`CassandraOptions` overrides the Cassandra settings for a single transaction.
+`CassandraOptions` overrides Cassandra settings for a single transaction.
 It is attached in `SagaTemplate.configure(..)` with `with(..)`, alongside the other per-transaction settings (see xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#configuring-transactions[Configuring Transactions] and xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#event-store-options[Event Store Options]):
 
 [source,java]
@@ -405,131 +287,33 @@ It is attached in `SagaTemplate.configure(..)` with `with(..)`, alongside the ot
 import org.stacksaga.cassandra.reactive.options.CassandraOptions;
 import org.stacksaga.core.enums.ConsistencyMode;
 
-import java.time.Duration;
-
 sagaTemplate
         .init(..)
         .configure(config -> config
                 .transactionLifetime(Duration.ofDays(2))
                 .defaultRestoreOnCrashDelay(Duration.ofMillis(100))
-                .withoutIdempotency() // <1>
+                .idempotencyKey(request.getRequestId()) // <1>
                 .with(CassandraOptions.configure(c -> c // <2>
-                        .writeProtection(ConsistencyMode.STRICT) // <3>
-                        .leaseDuration(Duration.ofSeconds(10))))) // <4>
+                        .idempotencyCheck(ConsistencyMode.STRICT)))) // <3>
         // .peek(..).startWith(..) ... .execute()
         ;
 ----
-<1> The idempotency choice is required on every transaction. `withoutIdempotency()` is used here; see xref:#cassandra-idempotency-check[Transaction Idempotency-Key Check].
+<1> The idempotency choice is required on every transaction; see <<cassandra-idempotency-check>>.
 <2> `CassandraOptions.configure(..)` builds the options. `with(..)` is optional and accepts one instance per options type. Other event stores ignore `CassandraOptions`, so the same code runs unchanged on any event store.
-<3> Write-protection mode for this transaction only, overriding `stacksaga.cassandra.write-protection`.
-<4> Lease (lock TTL) used by `STRICT` write protection for this transaction only.
-
-.`CassandraOptions.Builder` methods
-[cols="2,3,3,3",options="header"]
-|===
-| Method | Meaning | Falls back to (when not set) | Validation
-
-| `writeProtection(ConsistencyMode)`
-| Write-protection mode for this transaction's listener executions. `STRICT` uses a Paxos (LWT) lease; `RELAXED_WITH_DEDUP` avoids it.
-| `stacksaga.cassandra.write-protection.domains.<domain-name>.mode`, then `stacksaga.cassandra.write-protection.default-mode`
-| Must not be `null`.
-
-| `leaseDuration(Duration)`
-| Lease (lock TTL) used by `STRICT` write protection.
-| `stacksaga.cassandra.write-protection.domains.<domain-name>.lease-duration`, then `stacksaga.cassandra.write-protection.default-lease-duration`
-| Must not be `null`; must be positive. Rejected when combined with `writeProtection(RELAXED_WITH_DEDUP)`, because the lease only applies to `STRICT`.
-
-| `idempotencyCheck(ConsistencyMode)`
-| Mode of the transaction idempotency-key check. See xref:#cassandra-idempotency-check[Transaction Idempotency-Key Check].
-| `stacksaga.cassandra.idempotency.domains.<domain-name>.mode`, then `stacksaga.cassandra.idempotency.default-mode`
-| Must not be `null`.
-|===
-
-All three methods are optional — an option that is not set falls back as shown.
-A `null` argument fails immediately with a `NullPointerException`; the lease checks fail in `CassandraOptions.configure(..)` with an `IllegalArgumentException`, before the transaction is started.
-
-*Precedence*
-
-The effective value of each setting is resolved per transaction, highest precedence first:
-
-[cols="1,3,3",options="header"]
-|===
-| Precedence | Source | Example
-
-| 1 (highest)
-| The transaction's `CassandraOptions`
-| `.with(CassandraOptions.configure(c -> c.writeProtection(ConsistencyMode.STRICT)))`
-
-| 2
-| The per-domain property, keyed by the saga domain entity name
-| `stacksaga.cassandra.write-protection.domains.order-saga.mode: STRICT`
-
-| 3 (lowest)
-| The global default property
-| `stacksaga.cassandra.write-protection.default-mode: RELAXED_WITH_DEDUP`
-|===
-
-Each setting is resolved independently: a transaction that sets only `writeProtection(..)` still takes its lease from the domain property or the global default.
-
-.Worked example
-[source,yaml]
-----
-stacksaga:
-  cassandra:
-    write-protection:
-      default-mode: RELAXED_WITH_DEDUP
-      default-lease-duration: 5s
-      domains:
-        order-saga:
-          lease-duration: 8s                # mode not set for this domain
-----
-
-[source,java]
-----
-// a transaction of the order-saga domain
-.configure(config -> config
-        .transactionLifetime(Duration.ofDays(2))
-        .defaultRestoreOnCrashDelay(Duration.ofMillis(100))
-        .withoutIdempotency()
-        .with(CassandraOptions.configure(c -> c
-                .writeProtection(ConsistencyMode.STRICT))))
-----
-
-[cols="1,1,3",options="header"]
-|===
-| Setting | Effective value | Resolved from
-
-| Write-protection mode
-| `STRICT`
-| The transaction's `CassandraOptions` (precedence 1). The domain entry sets no mode, and the global `RELAXED_WITH_DEDUP` is overridden.
-
-| Lease duration
-| `8s`
-| The `order-saga` domain property (precedence 2). The transaction sets no lease, and the global `5s` is overridden.
-
-| Transaction idempotency-key check
-| `STRICT`
-| The global `stacksaga.cassandra.idempotency.default-mode` default (precedence 3). Neither the transaction nor the domain sets it.
-|===
-
-Any other `order-saga` transaction without `CassandraOptions` runs with `RELAXED_WITH_DEDUP` and an `8s` lease.
-
-*Persistence across recovery*
-
-The effective write-protection mode and lease are saved on the transaction's `es_transaction` row (columns `write_protection_mode` and `write_protection_lease_ms`, see xref:#es-transaction-write-protection-columns[`es_transaction`]) when the transaction is initialized.
-A transaction that is retried or restored after a crash — possibly on another pod, possibly after the properties were redeployed — therefore keeps the settings it started with, even though the original `CassandraOptions` object no longer exists.
-
-[NOTE]
-.Current limitation
-====
-The effective write-protection mode and lease are resolved and stored on `es_transaction`, but the runtime does not yet apply the per-transaction write-protection override when guarding listener executions.
-Until it does, write protection follows the domain and global `stacksaga.cassandra.write-protection` properties.
-====
+<3> The mode of the transaction idempotency-key check for this transaction only. It falls back to `stacksaga.cassandra.idempotency.domains.<domain-name>.mode`, then to `stacksaga.cassandra.idempotency.default-mode`.
 
 [[cassandra-idempotency-check]]
 === Transaction Idempotency-Key Check: STRICT vs RELAXED_WITH_DEDUP
 
-Write protection guards individual *steps* inside a running transaction.
+[NOTE]
+.Status
+====
+The admission-key contract is in place, but the event stores do not enforce the key yet.
+Until they do, the engine refuses to start a transaction that requests an idempotency key, rather than accept a key it cannot enforce.
+The modes below describe the design.
+====
+
+The pickup claim and the run epoch bound repeats of individual *steps* inside a running transaction (see <<duplicate-execution>>).
 The transaction idempotency key guards the *whole long-running transaction*: when the same business request is submitted twice with the same transaction idempotency key, only one transaction should start.
 The key is chosen in `SagaTemplate.configure(..)` with `idempotentOnTransactionId()` or `idempotencyKey(String)` (see xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#transaction-idempotency[Transaction Idempotency] and xref:foundations:idempotency.adoc#lrt-idempotency[Idempotency for Long-Running Transactions]).
 
@@ -596,7 +380,7 @@ A single transaction can override both properties with `CassandraOptions.idempot
 <1> The transaction idempotency key for this transaction.
 <2> Claim the key with Paxos for this transaction, regardless of the domain or global property.
 
-The precedence is the same as for write protection: `CassandraOptions.idempotencyCheck(..)` > `stacksaga.cassandra.idempotency.domains.<domain-name>.mode` > `stacksaga.cassandra.idempotency.default-mode`.
+The precedence is: `CassandraOptions.idempotencyCheck(..)` > `stacksaga.cassandra.idempotency.domains.<domain-name>.mode` > `stacksaga.cassandra.idempotency.default-mode`.
 
 *When to choose which*
 
@@ -887,7 +671,11 @@ WHERE region = :region AND cluster = :cluster AND service_name = :service_name
 
 Because leases do not overlap, two Retry-Nodes never process the same instances.
 Throughput scales **linearly** as more Retry-Nodes are added.
-Every query verifies that the current timestamp is within the lease validity window; if a lease expires due to a network partition, execution terminates immediately, preventing split-brain processing.
+Every query verifies that the current timestamp is within the lease validity window, less a one-second guard at its end; if a lease expires due to a network partition, execution terminates immediately, preventing split-brain processing.
+
+Leases alone do not settle every case.
+At a window boundary, two Retry-Nodes whose clocks disagree by more than the guard can both read the same pointer, and a successor re-reads a partly processed bucket while transactions its predecessor dispatched may still be running.
+Each transaction is therefore claimed with one lightweight transaction before it is re-invoked; see <<pickup-claim>>.
 
 .Murmur3 Token Ring Slicing & Spatial Worker Isolation
 image::stacksaga-database-support:cassandra/stacksaga-spatial-token-ring.svg[alt="Murmur3 Token Ring Slicing & Spatial Worker Isolation"]
@@ -895,7 +683,7 @@ image::stacksaga-database-support:cassandra/stacksaga-spatial-token-ring.svg[alt
 . **64-bit Murmur3 Token Ring:** Spans `-2^63` to `+2^63 - 1`.
 . **Ring Coordinator:** Divides the token ring into non-overlapping sectors and issues time-bounded leases.
 . **Worker Leases:** Each Retry-Node queries Tier 3 using its leased sector bounds (`WHERE token >= min AND token < max`).
-. **Autonomous Slicing:** Linear horizontal scaling with zero duplicate processing and zero database row locks.
+. **Autonomous Slicing:** Linear horizontal scaling with no database row locks; the only Paxos round is one per re-invoked transaction (the pickup claim).
 
 ==== Processing a Retry Bucket: Step-by-Step
 
@@ -903,9 +691,9 @@ Once a Retry-Node identifies an `instance_id` in its leased token range, it exec
 
 1. **Read Tier 4** (`es_buckets_by_instance`) to discover all bucket indexes for this instance + window.
 2. **Read Tier 5** (`es_recovery_transactions_by_instance`) for each even bucket to stream `transaction_id` pointers.
-3. **Fetch the saga payload lazily** from `es_transaction` using `transaction_id`.
+3. **Claim each transaction** with one lightweight transaction on `es_transaction` (see <<pickup-claim>>), then **fetch the saga payload lazily** from `es_transaction` using `transaction_id`.
 4. **Re-invoke the saga step** with controlled concurrency (`recovery.concurrency`, default: 100).
-5. **Drop the bucket partition** from Tier 5 when all transactions in the bucket are dispatched:
+5. **Drop the bucket partition** from Tier 5 when every transaction in the bucket was either dispatched or found stale. A transaction whose claim is held by another live worker keeps the bucket, so it can be claimed again if that worker crashes:
 +
 [source,sql]
 ----
@@ -929,6 +717,40 @@ The pipeline's empty-bucket path handles this identically to a normally complete
 No manual intervention is required — the pipeline is **fully idempotent** across all crash-between-steps scenarios.
 ====
 
+[#pickup-claim]
+==== Pickup Claim: One Lightweight Transaction per Re-Invoked Transaction
+
+*If leases do not overlap, why claim a transaction at all?* +
+Two situations put the same pointer in front of two workers.
+At a window boundary, two Retry-Nodes whose clocks disagree by more than the one-second guard can both read it.
+And a bucket is kept whenever it was only partly processed, so its next owner re-reads it from the first row while transactions the previous owner dispatched may still be running.
+The relational adapter settles both with its `FOR UPDATE SKIP LOCKED` claim; Cassandra has no row lock, so it settles them with a conditional write.
+
+The pointer carries the token written when the failure was registered.
+Before re-invoking, the worker claims the transaction on the transaction's own partition:
+
+[source,sql]
+----
+UPDATE es_transaction
+   SET retry_claimed_until = :now_plus_lease
+ WHERE region = :region AND cluster = :cluster
+   AND service_name = :service_name AND transaction_id = :transaction_id
+    IF recent_retry_allocation_key = :pointer_token
+   AND retry_claimed_until < :now;
+----
+
+* `[applied] = true` -- this worker re-invokes the transaction.
+* `[applied] = false` with a different token -- the pointer is stale, because the transaction was registered again; it is skipped and counts as done.
+* `[applied] = false` with the same token -- another worker holds a live claim; the pointer is skipped, but the bucket is kept so the transaction can be claimed again if that worker crashes and its claim expires.
+
+The claim costs one Paxos round per re-invoked transaction, on the recovery path only; the happy path never pays it.
+A resume of a paused transaction takes the same claim on its resume key, so a late resume and a re-invocation of the same transaction cannot both proceed.
+
+The same conditional update also advances the transaction's `run_epoch`.
+Every later write of a recovery run is preceded by one more lightweight transaction, `IF run_epoch = <its epoch>`, so a run whose claim has lapsed and been taken over is stopped at its next write instead of writing history alongside its successor.
+First runs skip that check, keeping Paxos off the happy path. Because the restore pickup re-arms a run that is still progressing, the only first run that can be restored while still alive is one that records no progress for a whole horizon -- blocked inside a single call -- and that run is not fenced.
+What remains is the step a displaced run had in flight; that repeat is absorbed by the participant's idempotency key, not prevented.
+
 [#safe-shutdown-guarantee]
 ==== Safe Shutdown & Zero Data Loss Guarantee
 
@@ -950,7 +772,7 @@ function onBucketBatchComplete(bucket, totalTransactions, executedCount):
 
 When a Retry-Node is killed mid-bucket, the partition stays intact in Cassandra.
 Upon restart, the next worker picks up the bucket from row 1.
-Execution markers (`es_execution_markers`) ensure that already-completed saga steps are detected as `COMMITTED` and skipped immediately without re-calling downstream APIs — only genuinely uncompleted steps are executed.
+The pickup claim makes the re-read safe: a pointer whose transaction has already moved on fails the claim as stale, and one whose re-invocation is still running fails it as claimed (see <<pickup-claim>>), so only transactions that still need recovery are re-invoked.
 
 .Top-Down Traversal & Compaction Lifecycle Pipeline
 image::stacksaga-database-support:cassandra/stacksaga-traversal-pipeline.svg[alt="Top-Down Traversal & Compaction Lifecycle Pipeline"]
@@ -1024,7 +846,7 @@ image::stacksaga-database-support:cassandra/stacksaga-restore-dead-mans-switch.s
 . **Path Stored in Ledger:** Partition path stored in `es_transaction` for targeted deletion.
 . **Path A (Normal Completion):** Targeted O(1) delete removes watchdog row; window stays clean.
 . **Path B (Pod Crash):** Watchdog row persists in Cassandra.
-When window arrives, Retry-Node checks status and automatically re-invokes.
+When the window arrives, a Retry-Node reads the transaction and either drops the pointer, re-arms it, or restores the transaction (see <<restore-pickup-decision,Status Check on Restore Pickup>>).
 
 [cols="1,3",options="header"]
 |===
@@ -1036,28 +858,44 @@ _(success or compensation)_
 
 | **Pod crashes mid-transaction** +
 _(power outage, OOM kill, hardware fault)_
-| The watchdog row was never deleted. When the far-future window eventually arrives and becomes a sealed read window (<= W), a Retry-Node discovers it through the normal 5-tier traversal, checks the status, and automatically re-invokes the transaction.
+| The watchdog row was never deleted. When the far-future window eventually arrives and becomes a sealed read window (<= W), a Retry-Node discovers it through the normal 5-tier traversal, finds that the transaction has made no progress, and restores it.
+
+| **Transaction is still waiting or progressing** +
+_(a long human approval, a slow run)_
+| The Retry-Node re-arms the watchdog for later instead of restoring the transaction.
 |===
 
+[#restore-pickup-decision]
 ==== Status Check on Restore Pickup
 
-When a Retry-Node picks up a transaction from a restore bucket (odd `bucket_index`), the saga engine performs a **mandatory status check** against `es_transaction.running_status` before attempting re-invocation:
+When a Retry-Node picks up a transaction from a restore bucket (odd `bucket_index`), it does not trust the watchdog blindly: the watchdog was armed once, at admission, and a transaction may legitimately still be alive when it comes due.
+The pickup reads the transaction first and decides:
 
 [source,text]
 ----
-status = SELECT running_status FROM es_transaction WHERE transaction_id = :id
+tx = read es_transaction for :id
 
-if status == PROCESS_COMPLETED or status == REVERT_COMPLETED:
-    // Transaction already finished. The watchdog row delete must have failed
-    // due to a network blip at completion time. Silently delete and skip.
-    deleteRestoreRow(path)
+if tx is terminal (PROCESS_COMPLETED, REVERT_COMPLETED, terminated) or the pointer's token is stale:
+    // Already finished; the watchdog delete must have been lost. Drop the pointer.
     return
 
-// Status shows transaction is still in-flight (or unknown). Re-invoke it.
-reInvoke(transaction)
+if tx.lifetime has ended:
+    expire tx (disabled transaction), as the retry path does
+    return
+
+if (tx is parked and its wait deadline is still ahead)
+   or (tx.last_progress + horizon is still ahead):
+    // Still alive: a long human approval, or a slow but progressing run.
+    re-arm: file a new watchdog at min(lifetime end, max(wait deadline, last_progress + horizon))
+    return
+
+// No progress for a whole horizon and no wait pending: it is abandoned.
+claim it (pickup claim + run epoch, see <<pickup-claim>>), then restore it from its last committed step
 ----
 
-This guarantees **at-most-once re-invocation** for completed transactions and **at-least-once recovery** for genuinely orphaned ones.
+Re-arming means a deliberate wait longer than the restore horizon -- a day-long approval with the default ten-hour horizon -- costs one directory write per horizon instead of a false restore.
+The effective horizon is measured from the transaction's last progress, as it is on the relational adapter.
+What bounds every wait is the transaction's lifetime, set per transaction in `SagaTemplate.configure(..)` (see xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#transaction-lifetime-setting[Transaction Lifetime]).
 
 [#odd-even-bucket-segregation]
 ==== Why Restore Buckets Use Odd Indexes
@@ -1454,29 +1292,6 @@ The following properties configure the Cassandra reactive support module.
 | Path to the DataStax Java driver configuration file.
 
 4+|
-*Write Protection Properties* (Configure idempotency under `stacksaga.cassandra.write-protection.*`)
-
-| `stacksaga.cassandra.write-protection.default-mode`
-| `RELAXED_WITH_DEDUP`
-| `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
-| Default write-protection mode applied to sagas that do not specify a per-domain override. A single transaction can override it with `CassandraOptions.writeProtection(..)` (see xref:#cassandra-per-transaction-options[Per-Transaction Override with CassandraOptions]).
-
-| `stacksaga.cassandra.write-protection.default-lease-duration`
-| `5s`
-| `Duration`
-| Default temporary marker lease duration for `STRICT` mode. Specifies how long an in-flight worker holds an exclusive lock in Cassandra before expiring via TTL. A single transaction can override it with `CassandraOptions.leaseDuration(..)`.
-
-| `stacksaga.cassandra.write-protection.domains.<domain-name>.mode`
-| `null`
-| `ConsistencyMode` [STRICT, RELAXED_WITH_DEDUP]
-| Per-domain consistency mode override, keyed by saga domain entity name (case-insensitive). Falls back to `default-mode` if null. A single transaction can override it with `CassandraOptions.writeProtection(..)`.
-
-| `stacksaga.cassandra.write-protection.domains.<domain-name>.lease-duration`
-| `null`
-| `Duration`
-| Per-domain lease duration override for `STRICT` mode. Falls back to `default-lease-duration` if null. A single transaction can override it with `CassandraOptions.leaseDuration(..)`.
-
-4+|
 *Idempotency Properties* (Configure the transaction idempotency-key check under `stacksaga.cassandra.idempotency.*`)
 
 | `stacksaga.cassandra.idempotency.default-mode`
@@ -1566,18 +1381,6 @@ stacksaga:
 
     transaction:
       lifetime: 24h                         # Quarantine threshold for stalled transactions
-
-    write-protection:
-      default-mode: RELAXED_WITH_DEDUP      # High-throughput read-check mode by default
-      default-lease-duration: 5s            # Default LWT lease TTL for STRICT mode
-      domains:
-        payment-saga:
-          mode: STRICT                      # Strict mutual exclusion for payments
-          lease-duration: 10s
-        order-saga:
-          mode: STRICT
-        notification-saga:
-          mode: RELAXED_WITH_DEDUP
 
     idempotency:
       default-mode: STRICT                  # Claim transaction idempotency keys with Paxos (LWT)
@@ -1731,15 +1534,16 @@ See <<node-0-compactor-overseer,Directory Compaction: Node-0 Compactor Overseer 
 === Category 3: Concurrency, Locking, & Coordination
 
 [#faq-q7]
-==== Q7: How does StackSaga achieve distributed recovery across dozens of worker nodes without distributed locks (ZooKeeper, Redis, or Cassandra Paxos/LWT)?
+==== Q7: How does StackSaga achieve distributed recovery across dozens of worker nodes without distributed locks (ZooKeeper, Redis)?
 
 StackSaga replaces runtime database locking with **Spatial Worker Isolation** based on Cassandra's native Murmur3 hashing ring:
 
 1. **Token Registration:** During transient failure registration, every pod writes its `token(instance_id)` into Tier 3 as a clustering key alongside its `instance_id`.
 2. **Mutually Exclusive Token Leases:** The RSocket Ring Coordinator divides the 64-bit Murmur3 integer space (`[-2^63 .. 2^63 - 1]`) into non-overlapping token sectors and leases them to connected Retry-Nodes.
 3. **Partition-Filtered Queries:** When a worker queries Tier 3, it restricts its query using `WHERE instance_id_token >= :min AND instance_id_token < :max`.
-4. **Zero Lock Contention:** Because each token lease is mutually exclusive, workers are physically incapable of claiming the same pod's recovery buckets.
-Workers process transactions in parallel with zero lock contention, zero Paxos rounds, and zero external coordination infrastructure.
+4. **No Lock Contention:** Because token leases are mutually exclusive within a window, and each worker stops one second before its window ends, workers do not process the same pod's recovery buckets at the same time.
+Workers process transactions in parallel with no lock contention and no external coordination infrastructure.
+5. **One Claim per Re-Invocation:** The only Paxos round is the pickup claim made on each transaction before it is re-invoked, which settles the rare boundary case where two workers see the same pointer (see <<pickup-claim>>).
 
 See <<spatial-worker-isolation,Spatial Worker Isolation via Murmur3 Token Leases>>.
 
@@ -1776,8 +1580,7 @@ if isShutdownRequested() or executedCount < totalTransactions:
     return // Do NOT delete bucket partition!
 ----
 2. **Preserved Work State:** If a Retry-Node is killed at transaction 25,000 out of 50,000, the bucket partition and its Tier 3 instance marker remain fully intact in Cassandra.
-3. **Idempotent Step Skipping:** Upon worker restart (or reassignment of the token lease to a healthy node by the Ring Coordinator), the new worker re-scans the bucket from row 1. To prevent duplicate execution of the first 25,000 transactions, the engine inspects `es_execution_markers` before executing each saga step.
-Completed steps are detected as `COMMITTED` and skipped immediately; only uncommitted steps are executed.
+3. **Claim-Guarded Re-Scan:** Upon worker restart (or reassignment of the token lease to a healthy node by the Ring Coordinator), the new worker re-scans the bucket from row 1. The first 25,000 transactions are not re-invoked: each pointer is claimed before re-invocation, and the claim fails for a transaction that has already moved on or is still being re-invoked (see <<pickup-claim>>).
 
 See <<safe-shutdown-guarantee,Safe Shutdown & Zero Data Loss Guarantee>>.
 

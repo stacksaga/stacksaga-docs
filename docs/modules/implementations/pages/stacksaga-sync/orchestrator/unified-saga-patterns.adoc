@@ -638,6 +638,7 @@ At this point, the network request has not been sent yet.
 
 * **Commit Barrier**: State persistence in the Event Store always precedes the network call.
 An external service will never see a message unless that step is already durably persisted in the Event Store.
+"Durably" means that the database's acknowledgement survives a failover: see the note on replication below.
 * **Entity Immutability**: The domain entity snapshot is sealed before Stage 2. Code inside the `invoker(...)` lambda must not modify the entity.
 * **Safe Crash Recovery**: If the orchestrator server crashes after state persistence but before the message is sent, the background recovery process safely retries sending the message.
 The recovery latency is bounded by the *crash retention* (`defaultRestoreOnCrashDuration`) that the engine applies by default as soon as an executor starts, so a crashed step is re-exposed for re-execution after that configurable delay.
@@ -645,11 +646,22 @@ The recovery latency is bounded by the *crash retention* (`defaultRestoreOnCrash
 Immediate retries are the developer's responsibility and happen in memory *inside* the lambda.
 Once those retries are exhausted, throw the exception type declared in `.invoker(lambda, duration, ExceptionType.class)`: the engine then records the attempt as a transient failure, keeps the transaction parked (`is_paused = 1`), temporarily clears the active `resume_key` in the Event Store (so no phantom callback can be accepted), sets `target_retention_end_time` to the retry duration, and the Retry Subsystem re-invokes the step asynchronously after the given duration has elapsed.
 Any exception that is *not* of the declared type is treated as a `NonRetryableExecutorException` and starts compensation.
-If that happens on a re-invocation, the step's own `doRevert()` runs first, because the earlier dispatch may already have been applied (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry]).
+If that happens on a re-invocation, the step's own `doRevert()` runs first, because the earlier dispatch may already have been applied (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
 * **Await the Broker Acknowledgement**: In the imperative `invoker(...)`, `kafkaTemplate.send(...)` returns a future.
 Wait for it (for example `.get()` or `.join()`) and rethrow a failure as the declared exception type; otherwise a failed send never reaches the lambda and the step stays parked until the wait-state expires.
 * **Duplicates Are Possible, So Forward the `idempotencyKey`**: A re-executed step gets a new Tryout UID and therefore a new `resumeKey`.
 The `resumeKey` alone cannot identify a duplicate message, so always put the engine-provided `idempotencyKey` in the message (key or header) and deduplicate on it in the consumer.
+
+[IMPORTANT]
+.The barrier is only as durable as the database's acknowledgement
+====
+The engine dispatches as soon as the database acknowledges the Stage 1 commit.
+With *asynchronous* replication, a primary can acknowledge that commit and fail before the record reaches its replica.
+After failover, the message has been sent but the record it belongs to is gone: the reply finds nothing to match, and the saga is stranded.
+
+Run the event store on a configuration where an acknowledged commit survives failover: synchronous or semi-synchronous replication (for example MySQL semi-sync, a PostgreSQL synchronous standby, or a managed multi-AZ deployment with synchronous replication), or, on Cassandra, a write consistency level whose quorum includes the failover target.
+This applies to every design that keeps its state in an ordinary database, the transactional outbox included; StackSaga cannot detect the replication mode it runs on.
+====
 
 ==== Reference Implementation
 
@@ -1186,7 +1198,7 @@ if (availableStock < requestedQuantity) {
 
 NOTE: If the failing executor had already been re-executed after a transient failure, an earlier attempt may have been applied by the remote service.
 If the exception is built with `compensateThisStep(true)`, the failing executor's own `doRevert()` runs first, before the reverse unwinding continues.
-See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step].
 
 '''
 
@@ -1212,7 +1224,7 @@ Instead, StackSaga handles rollback automatically via **Deterministic Reverse Au
 
 The step that failed is normally not part of this chain.
 The exception is a step that failed non-retryably *after being re-executed* with `compensateThisStep(true)`: its own `doRevert()` is the first compensation, because an earlier attempt may have been applied.
-See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Non-Retryable Failure After a Retry].
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step].
 ====
 
 [IMPORTANT]
