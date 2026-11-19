@@ -99,13 +99,13 @@ Add the `stacksaga-ring-coordinator-spring-boot-starter` dependency to your proj
 </dependencies>
 ----
 
-[IMPORTANT]
+[NOTE]
 ====
-To run the retry ring-coordinator as a Spring application, you do not need any web-related dependencies such as `spring-boot-starter-web` or `spring-boot-starter-webflux` — the retry ring-coordinator exposes no HTTP endpoints of its own, only `RSocket` endpoints for `slave` instances to connect to.
-It can therefore run as a non-web application.
+The `stacksaga-ring-coordinator-spring-boot-starter` includes a built-in reactive WebFlux and Thymeleaf engine that automatically provides the xref:#live-visual-dashboard[Real-Time Visual Dashboard], Terminal ASCII Banner, and Reactive SSE Live Stream out of the box.
 
-In production, however, you will usually want visibility into its metrics and other monitoring data.
-Add the `spring-boot-starter-actuator` dependency to expose those endpoints, and additionally add one of the web starters only if you need the actuator endpoints reachable over `HTTP`.
+If you are running the coordinator in a non-web environment or wish to disable the web UI endpoints completely, set `stacksaga.coordinator.dashboard.enabled=false`.
+
+In production, you can additionally include `spring-boot-starter-actuator` to expose health probes (`/actuator/health`) and metrics (`/actuator/metrics`).
 ====
 
 === Configuration
@@ -286,6 +286,234 @@ In standard Docker containers and standalone Linux environments, `stacksaga.coor
 When disabled, StackSaga will not attempt to parse container IDs or hostnames as StatefulSet ordinals, and will use the explicitly configured `stacksaga.coordinator.instance-type`.
 ====
 
+[[live-visual-dashboard]]
+== Real-Time Visual Dashboard & Observability
+
+The Ring-Coordinator provides a built-in real-time dashboard and observability endpoints, allowing developers and operators to monitor live cluster activities, connected slave nodes, token range allocations, and connected microservice retry nodes (Orchestrators).
+
+=== Accessing the Dashboard & Endpoints
+
+When the Ring-Coordinator is running, the following endpoints are available:
+
+[cols="2,2,4", options="header"]
+|===
+|Endpoint|Format|Description
+|`/dashboard` (or `/`)|HTML|Interactive real-time web dashboard displaying live cluster topology, active slave nodes, assigned token ranges, and connected retry nodes.
+|`/banner` (or `/`)|Plain Text|ASCII status banner providing instant cluster diagnostics via `curl` in terminal or CI/CD scripts.
+|`/api/live/stream`|`text/event-stream`|Reactive Server-Sent Events (SSE) stream emitting real-time cluster state updates every second.
+|`/api/live/snapshot`|`application/json`|Instant JSON snapshot of live coordinator state, slave connections, and token ranges.
+|`/actuator/health`|`application/json`|Health check probe endpoint.
+|`/actuator/metrics`|`application/json`|JVM and runtime metrics.
+|===
+
+=== Terminal Access Example
+
+You can inspect the live status directly from your terminal using `curl`:
+
+[source,bash]
+----
+curl -s http://localhost:8080/banner
+----
+
+[[docker-deployment]]
+== Deploying with Docker & Docker Compose
+
+Instead of building and maintaining a standalone Spring Boot project from scratch, developers and DevOps teams can deploy the official, pre-built **StackSaga Ring-Coordinator Docker image**.
+
+=== Official Docker Image Flavors
+
+The official images are published on Docker Hub and GitHub Container Registry:
+
+[cols="2,1,1,4", options="header"]
+|===
+|Tag|Base OS|C Library|Recommended Use
+|`stacksaga/ring-coordinator:latest`|Ubuntu Jammy|`glibc`|**Enterprise Production**: 100% compatible with APM profilers (Dynatrace, Datadog, New Relic) and native Netty epoll.
+|`stacksaga/ring-coordinator:alpine`|Alpine Linux|`musl`|**Lightweight**: Minimal image footprint (~180MB) and hardened attack surface.
+|===
+
+IMPORTANT: Every coordinator container must maintain **NTP-class UTC clock discipline**. The official Docker image sets `TZ=Etc/UTC` by default. Ensure your host machine or Kubernetes worker nodes run active NTP synchronization (e.g., `chrony` or `systemd-timesyncd`).
+
+=== Deployment Scenarios with Docker Compose
+
+Below are copy-paste ready Docker Compose configurations for common deployment topologies.
+
+[IMPORTANT]
+====
+The Docker Compose configurations below default to the lightweight **`stacksaga/ring-coordinator:alpine`** image for fast startup and minimal footprint (~180MB).
+
+For **enterprise production environments**, switch the image tag to **`stacksaga/ring-coordinator:latest`** (Ubuntu Jammy / `glibc`), which provides full compatibility with enterprise APM profilers (Dynatrace, Datadog, New Relic) and native Netty epoll socket transport.
+====
+
+==== Scenario 1: Minimal Standalone / Hybrid (`master,slave`)
+
+For local microservice development and single-host testing, running the coordinator in **Hybrid mode** combines the Master and Slave into a single container:
+
+.docker-compose.minimal.yml
+[source,yaml]
+----
+services:
+  ring-coordinator:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-ring-coordinator
+    ports:
+      - "7777:7777"   # RSocket server (Microservice Orchestrators connect here)
+      - "8080:8080"   # HTTP Live Dashboard & Health Endpoints
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=master,slave #<1>
+      - STACKSAGA_TARGET_SERVICES=*                      #<2>
+      - STACKSAGA_CLUSTER=dev-cluster
+      - STACKSAGA_REGION=default
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+----
+<1> `master,slave` runs both the Master and Slave embedded in a single instance.
+<2> `*` coordinates retries for all microservice domains.
+
+Run with:
+[source,bash]
+----
+docker compose -f docker-compose.minimal.yml up -d
+----
+Open `\http://localhost:8080/` in your browser to view the interactive live dashboard.
+
+==== Scenario 2: Minimal Clustered (1 Master + 1 Slave)
+
+For verifying Master-Slave RSocket communication and token partition handshakes:
+
+.docker-compose.two-node.yml
+[source,yaml]
+----
+services:
+  coordinator-master:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-master
+    hostname: coordinator-master
+    ports:
+      - "7777:7777"   # Master RSocket port
+      - "8080:8080"   # Master Dashboard
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=master
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=prod-cluster
+      - STACKSAGA_REGION=default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  coordinator-slave:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-slave
+    hostname: coordinator-slave
+    depends_on:
+      coordinator-master:
+        condition: service_healthy
+    ports:
+      - "7771:7777"   # Slave RSocket port (Orchestrators connect here)
+      - "8081:8080"   # Slave Dashboard
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=slave
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=prod-cluster
+      - STACKSAGA_REGION=default
+      - STACKSAGA_MASTER_HOST=coordinator-master #<1>
+      - STACKSAGA_MASTER_PORT=7777
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+----
+<1> The Slave connects to the Master container using Docker's internal DNS name `coordinator-master`.
+
+==== Scenario 3: Horizontally Scalable Cluster (`--scale coordinator-slave=N`)
+
+In high-throughput enterprise deployments, a single Master coordinates a horizontally scalable pool of Slaves.
+By omitting fixed host port mappings on the Slave service, Docker Compose can dynamically spawn any number of Slave instances:
+
+.docker-compose.scalable.yml
+[source,yaml]
+----
+services:
+  coordinator-master:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-master
+    hostname: coordinator-master
+    ports:
+      - "7777:7777"   # Master RSocket (Internal Slaves connect here)
+      - "8080:8080"   # Master Live Dashboard (Open in browser)
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=master
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=production-cluster
+      - STACKSAGA_REGION=default
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  coordinator-slave:
+    image: stacksaga/ring-coordinator:alpine
+    depends_on:
+      coordinator-master:
+        condition: service_healthy
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=slave
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=production-cluster
+      - STACKSAGA_REGION=default
+      - STACKSAGA_MASTER_HOST=coordinator-master
+      - STACKSAGA_MASTER_PORT=7777
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+----
+
+Launch the cluster with 3 (or any desired number of) Slaves:
+[source,bash]
+----
+docker compose -f docker-compose.scalable.yml up -d --scale coordinator-slave=3
+----
+
+Scale out to 5 Slaves on demand:
+[source,bash]
+----
+docker compose -f docker-compose.scalable.yml up -d --scale coordinator-slave=5
+----
+
+===== How Dynamic Partitioning Works:
+1. Each new Slave container boots up and connects to `coordinator-master:7777` over RSocket.
+2. The Master registers the Slave in its active membership registry.
+3. At the next **30-second boundary**, the Master recalculates token partition boundaries, dividing the Murmur3 64-bit token universe into `N` equal non-overlapping slices.
+4. The Master broadcasts the updated ranges to all `N` Slaves for the upcoming 1-minute window (T+1 to T+2).
+5. Visiting `\http://localhost:8080/` instantly reflects the new Slaves and their rebalanced token ranges on the dashboard.
+
 [[configuration-properties]]
 == Configuration Properties Reference
 
@@ -299,6 +527,21 @@ NOTE: Properties shown with a dash (`-`) in the *Default* column are mandatory a
 |Property Name|Default|Type|Description
 
 4+s| Common — applies to both Master and Slave instances
+
+|`stacksaga.coordinator.dashboard.enabled`
+|`true`
+|`boolean`
+|Whether the real-time visual dashboard, terminal banner, and reactive SSE stream are enabled.
+
+|`stacksaga.coordinator.dashboard.path`
+|`/dashboard`
+|`String`
+|The base web path where the live HTML dashboard is served.
+
+|`stacksaga.coordinator.dashboard.expose-root`
+|`true`
+|`boolean`
+|Whether to expose the dashboard and terminal banner at the root path (`/`). Set to `false` if your host Spring Boot application defines its own root (`/`) route.
 
 |`stacksaga.coordinator.deploy.index-based`
 |`false`
