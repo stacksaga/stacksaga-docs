@@ -1,0 +1,334 @@
+:description: Comprehensive architectural guide on building Modular Monoliths with StackSaga and scaling seamlessly to Distributed Microservices with zero transactional rewrite.
+:keywords: StackSaga, Modular Monolith, Modulith, Spring Modulith, microservices migration, saga orchestration, distributed transactions, zero rewrite, Spring Boot, event sourcing, in-process execution, service extraction
+:page-priority: 0.85
+
+= From Modular Monolith to Microservices: Architecting for Scale with Zero Transactional Rewrite
+
+[.lead]
+**StackSaga provides the architectural foundation to build clean, high-performance Modular Monoliths on Day 1 and scale seamlessly to Distributed Microservices without rewriting a single line of your transactional saga workflows.**
+By decoupling business operations into atomic, compiler-verified executors from the beginning, software teams eliminate the fatal "Extraction Trap" that plagues traditional monolith-to-microservice migrations.
+
+[NOTE]
+.The Architectural Shift: Why Start with a Modular Monolith?
+====
+In modern enterprise software engineering, building distributed microservices prematurely is widely recognized as an anti-pattern.
+Early-stage architectures face unnecessary network latency, complex deployment pipelines, distributed data consistency headaches, and high cloud infrastructure costs.
+Starting as a **Modular Monolith** (or *Modulith*) allows teams to develop rapidly within a single Spring Boot application.
+However, standard monoliths almost always use shared database transactions (`@Transactional`), creating deep relational entanglement that makes future service extraction a painful, multi-month rewrite.
+StackSaga eliminates this compromise entirely: **you get the sub-millisecond in-process speed of a monolith today, with the distributed transactional integrity of microservices tomorrow.**
+====
+
+== The Industry Dilemma: "The Extraction Trap"
+
+To understand why StackSaga's model is so transformative, consider how organizations traditionally evolve their backend systems:
+
+=== Phase 1: The Monolithic `@Transactional` Trap
+
+When developers build a traditional Spring Boot modular monolith:
+
+1. **Shared Database & ACID Locks**: Modules communicate by injecting each other's Spring beans or writing directly to shared database tables within a single Spring `@Transactional` boundary.
+2. **Database Entanglement**: The `order-module` directly calls `@Transactional OrderService.placeOrder()` which internally invokes `PaymentRepository.save()` and `InventoryRepository.decrementStock()`.
+3. **Hidden Relational Couplings**: Foreign keys, lazy-loaded Hibernate relationships, and database-level locks tie modules together across physical domain boundaries.
+
+image::ROOT:registration-sequence.svg[alt="Monolithic Entanglement vs. Modular Domain Boundaries",width=80%]
+
+=== Phase 2: The Impossible Microservice Migration
+
+When the business scales and high-throughput components (such as `payment-service` or `inventory-service`) must be extracted into standalone microservices:
+
+* **ACID Transactions Cannot Cross the Network**: The moment `PaymentService` is moved to a separate container and accessed via REST, gRPC, or Kafka, Spring's `@Transactional` boundary breaks.
+* **Dual-Write & Partial Failure Disasters**: If the remote payment call succeeds but the local inventory update fails, the database rollback only affects local tables. The remote payment remains charged, corrupting system consistency.
+* **The Full Rewrite**: Teams are forced to discard their transaction code and embark on a risky, multi-month architectural rewrite to introduce distributed sagas or event-driven choreography after the fact.
+
+---
+
+== The StackSaga Solution: Atomic Executor Boundaries
+
+StackSaga solves this dilemma by introducing **Atomic Domain Boundaries** via the **Saga Executor Pattern** (`CommandExecutor<T>` and `QueryExecutor<T>`):
+
+[cols="1,2,2",options="header"]
+|===
+| Architectural Capability | Traditional Monolith (`@Transactional`) | StackSaga Modular Monolith
+
+| *Execution Speed*
+| In-process (<1ms)
+| **In-process (<1ms)**
+
+| *Infrastructure Required*
+| 0 external servers
+| **0 external servers** (embedded Spring Boot starter)
+
+| *Domain Isolation*
+| Leaky (shared DB entities & in-memory mutations)
+| **Strict** (encapsulated in atomic `CommandExecutor` steps)
+
+| *State Progression*
+| Mutable entity snapshots
+| **Immutable Event Sourcing** (persisted to Event Store)
+
+| *Rollback Architecture*
+| DB rollback only (breaks across network)
+| **Symmetrical Compensation** (`doRevert()` & pre/post revert chains)
+
+| *Service Extraction Effort*
+| **Complete Architectural Rewrite** (Months)
+| **Zero Saga Rewrite** (Hours — update method invocation only)
+|===
+
+Instead of tying modules through shared relational transactions, every transactional step is encapsulated in an atomic Executor:
+
+* **Forward Progression (`doProcess()`)**: Executes the module's business operation and enriches the shared `DomainEntity`.
+* **Reverse Compensation (`doRevert()`)**: Defines the deterministic compensation logic should downstream steps fail later.
+* **Event Sourced Snapshotting**: Every milestone is immutably committed to the Event Store using the monolith's existing database.
+
+---
+
+== Phase 1: Building a Modular Monolith with StackSaga (Day 1)
+
+In the initial stage of your application, your entire architecture resides within a single Spring Boot deployable artifact.
+
+=== Architectural Topology
+
+[source]
+----
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       SPRING BOOT MODULAR MONOLITH                          │
+│                                                                             │
+│  ┌───────────────────────┐      ┌──────────────────┐      ┌──────────────┐  │
+│  │     Order Module      │      │  Payment Module  │      │ Stock Module │  │
+│  │                       │      │                  │      │              │  │
+│  │ ┌───────────────────┐ │      │ ┌──────────────┐ │      │ ┌──────────┐ │  │
+│  │ │CreateOrderExecutor│ │      │ │PaymentService│ │      │ │StockSvc  │ │  │
+│  │ └─────────┬─────────┘ │      │ └──────▲───────┘ │      │ └────▲─────┘ │  │
+│  │           │           │      │        │         │      │      │       │  │
+│  │ ┌─────────▼─────────┐ │In-Memory Call │         │      │      │       │  │
+│  │ │MakePaymentExecutor├─┼───────────────┘         │      │      │       │  │
+│  │ └─────────┬─────────┘ │                         │      │      │       │  │
+│  │           │           │In-Memory Call           │      │      │       │  │
+│  │ ┌─────────▼─────────┐ │─────────────────────────┼──────┼──────┘       │  │
+│  │ │ReserveItemExecutor├─┼─────────────────────────┼──────┘              │  │
+│  │ └───────────────────┘ │                         │                     │  │
+│  └───────────────────────┴─────────────────────────┴─────────────────────┘  │
+│                                      │                                      │
+│                        Embedded SEC Engine & Event Store                    │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+                         ┌─────────────▼────────────┐
+                         │ Primary RDBMS (Postgres) │
+                         │   • Business Tables      │
+                         │   • Saga Event Store     │
+                         └──────────────────────────┘
+----
+
+=== In-Process Execution at Memory Speeds
+
+Within the modular monolith, executors invoke other module services directly in memory via standard Spring bean injection:
+
+[source,java]
+----
+@Component
+@SagaExecutor(executeFor = "order-service", liveCheck = true, value = "MakePaymentExecutor")
+public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentInternalService paymentInternalService; // <1>
+
+    public MakePaymentExecutor(PaymentInternalService paymentInternalService) {
+        this.paymentInternalService = paymentInternalService;
+    }
+
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            ProcessContext<OrderDomainEntity> context, 
+            ProcessStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity order = context.currentDomainEntityState();
+
+        // <2> In-Process Memory Call: Executes in <1 millisecond
+        PaymentResult result = paymentInternalService.charge(
+                order.getOrderId(), 
+                order.getTotalAmount()
+        );
+
+        order.setPaymentReferenceId(result.getTransactionId());
+
+        return stepManager
+                .success(order)
+                .asSync()
+                .noPause()
+                .toNextExecutor(ReserveInventoryExecutor.class);
+    }
+
+    @Override
+    public RevertStepManager<OrderDomainEntity> doRevert(
+            RevertContext<OrderDomainEntity> context, 
+            RevertStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity finalState = context.finalDomainEntityState();
+
+        // <3> In-Process Reversal
+        paymentInternalService.refund(finalState.getPaymentReferenceId());
+
+        return stepManager
+                .success()
+                .asSync()
+                .noPause()
+                .toNextDefaultExecutor();
+    }
+}
+----
+<1> The executor injects the internal Spring bean from `payment-module`.
+<2> Execution occurs in-process with zero network hops, zero HTTP serialization, and zero latency.
+<3> Compensations (`doRevert()`) execute cleanly if downstream steps (e.g. `ReserveInventoryExecutor`) fail.
+
+=== Advantages in Phase 1
+
+* **Zero Dedicated Infrastructure**: No Temporal clusters, Camunda servers, or Kafka brokers needed. `stacksaga-spring-boot-starter` embeds directly into the monolith.
+* **Shared Database Storage**: The monolith's existing database (PostgreSQL, MySQL, Oracle) stores both domain tables and the immutable saga Event Store.
+* **Instant Observability**: Developers inspect transactions, step latency, and rollback forensically using the Trace Window dashboard right from localhost.
+
+---
+
+== Phase 2: Extracting a Microservice with Zero Rewrite (Scale Phase)
+
+When transaction volumes surge or domain teams expand, you decide to extract `payment-module` into an independent microservice (`payment-service`).
+
+=== What Changes: Only the Transport Call
+
+Because the transactional boundaries, rollback responsibilities, and event-sourced state were already decoupled into StackSaga Executors on Day 1, **the saga workflow requires zero rewrite**.
+
+You only update the internal invocation mechanism inside `doProcess()` from a local Spring bean call to a remote HTTP/REST, gRPC, or WebClient call:
+
+[source,java]
+----
+@Component
+@SagaExecutor(executeFor = "order-service", liveCheck = true, value = "MakePaymentExecutor")
+public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentServiceClient paymentServiceClient; // <1>
+
+    public MakePaymentExecutor(PaymentServiceClient paymentServiceClient) {
+        this.paymentServiceClient = paymentServiceClient;
+    }
+
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            ProcessContext<OrderDomainEntity> context, 
+            ProcessStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity order = context.currentDomainEntityState();
+
+        // <2> Remote Microservice Call (HTTP/REST or gRPC)
+        PaymentResult result = paymentServiceClient.chargeRemote(
+                order.getOrderId(), 
+                order.getTotalAmount()
+        );
+
+        order.setPaymentReferenceId(result.getTransactionId());
+
+        return stepManager
+                .success(order)
+                .asSync()
+                .noPause()
+                .toNextExecutor(ReserveInventoryExecutor.class); // <3>
+    }
+
+    @Override
+    public RevertStepManager<OrderDomainEntity> doRevert(
+            RevertContext<OrderDomainEntity> context, 
+            RevertStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity finalState = context.finalDomainEntityState();
+
+        // <4> Remote Compensation Call
+        paymentServiceClient.refundRemote(finalState.getPaymentReferenceId());
+
+        return stepManager
+                .success()
+                .asSync()
+                .noPause()
+                .toNextDefaultExecutor();
+    }
+}
+----
+<1> Replace internal service bean with a WebClient / Feign / gRPC client stub.
+<2> Invoke the extracted remote microservice over the network.
+<3> **100% Identical Workflow**: The step transition `.toNextExecutor(...)` is completely unchanged.
+<4> **100% Identical Compensation**: The rollback contract (`doRevert()`) remains completely unchanged.
+
+=== Everything That Remains Untouched
+
+When extracting services in StackSaga, none of the following components are rewritten:
+
+1. **`OrderDomainEntity`**: State structure, JSON annotations, and versioning remain identical.
+2. **Workflow Graph & Step Managers**: Navigation sequence, conditional branches, and routing remain unchanged.
+3. **Compensation Topology**: Reverse LIFO unwinding, query pruning, and pre/post-revert executors execute without modification.
+4. **Idempotency Guarantees**: `context.idempotencyKey()` continues providing immutable unique keys to prevent duplicate remote charges.
+5. **Event Store Audit Trail**: Historical snapshots and transaction forensic logs remain seamlessly continuous across the migration.
+
+---
+
+== Phase 3: Hybrid Mixed Topologies (The Enterprise Reality)
+
+In production enterprise architectures, systems rarely fit into pure extremes of "100% monolith" or "100% microservices."
+Real-world enterprise systems operate in **Hybrid Mixed Topologies**:
+
+image::ROOT:stacksaga-diagram-how-stacksaga-agent-distribute-transactions.drawio.svg[alt="StackSaga Hybrid Modular Topology",width=85%]
+
+With StackSaga, a single saga pipeline can seamlessly combine:
+
+* **In-Process Modular Executions**: High-speed internal modules (e.g., local customer validation, ledger calculation) running inside the core monolith.
+* **Synchronous Remote Microservices**: Extracted services (e.g., `payment-service`, `tax-calculation-service`) invoked via REST/gRPC.
+* **Asynchronous Message Broker Steps**: Long-running asynchronous commands dispatched to Kafka/RabbitMQ via Two-Stage commit.
+* **Intentional Pauses & HITL Wait-States**: Waiting for customer 3D-Secure webhooks or manual KYC verification.
+
+StackSaga's **Unified Saga Model (USM)** treats all of these execution types with equal fidelity under one unified reverse rollback autopilot.
+
+---
+
+== Best Practices for Spring Boot Modular Monoliths
+
+To ensure your Modular Monolith can extract microservices effortlessly in the future, follow these architectural principles from Day 1:
+
+=== 1. Package by Module (Domain Encapsulation)
+
+Organize your Spring Boot application by business domain modules rather than technical layers:
+
+[source]
+----
+com.example.ecommerce/
+├── order/                      # The Orchestrator Domain
+│   ├── OrderDomainEntity.java  # Saga Domain Entity
+│   ├── CreateOrderExecutor.java
+│   ├── MakePaymentExecutor.java
+│   └── ReserveStockExecutor.java
+├── payment/                    # Payment Module Boundary
+│   ├── PaymentInternalService.java
+│   └── model/
+└── stock/                      # Inventory Module Boundary
+    ├── StockInternalService.java
+    └── model/
+----
+
+=== 2. Never Share Database Entities Across Modules
+
+* Avoid JPA relationships (e.g. `@OneToMany`, `@ManyToOne`) that cross module boundaries.
+* The `payment-module` must have its own internal tables, and `order-module` must have its own tables.
+* Use the saga `DomainEntity` as the **sole transactional data carrier** that passes state between modules.
+
+=== 3. Leverage `UnknownPropertyArchive` for Safe Schema Evolution
+
+As modules evolve independently, utilize StackSaga's xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc#collect_missing_properties[Safe Domain-Entity Casting] (`UnknownPropertyArchive`).
+When fields are removed or deprecated during modular refactoring, legacy attributes are automatically archived without deserialization errors or data loss during rolling deployments.
+
+---
+
+== Summary: Why StackSaga is the Ideal Monolith-First Engine
+
+| Dimension | Standard Monolith | Traditional Orchestrators (Temporal / Camunda) | StackSaga Monolith-to-Microservices |
+| :--- | :--- | :--- | :--- |
+| **Day-1 Complexity** | Minimal | High (Requires external servers & worker setups) | **Minimal** (Single Spring Boot starter dependency) |
+| **Execution Overhead** | None | Network hops between poller workers and cluster | **Sub-millisecond in-process memory speed** |
+| **Extraction Feasibility** | **Near Impossible** without architectural rewrite | Difficult (SDK lock-in, poller boilerplate) | **Instant** (Only transport call changes inside `doProcess`) |
+| **Event Sourcing** | None (ad-hoc audit logs) | External cluster database | **Native zero-infrastructure in your existing DB** |
+
+By adopting StackSaga from Day 1, software architects guarantee that their systems are **born modern, run fast, and scale forever without rewrites.**
