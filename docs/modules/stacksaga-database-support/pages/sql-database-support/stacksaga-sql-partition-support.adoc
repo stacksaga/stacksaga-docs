@@ -1,5 +1,5 @@
 :title: StackSaga SQL Database Partition Support
-:description: Learn how StackSaga SQL Partition Support automatically maintains range partitions for event-store tables across multiple databases and vendors (MySQL & PostgreSQL) from a single centralized runner.
+:description: Learn how StackSaga SQL Partition Support automatically maintains range partitions for event-store tables across MySQL and PostgreSQL — as a Maven dependency or a pre-built Docker image, with one dedicated runner per database engine.
 :doctitle: StackSaga SQL Database Partition Support
 :revnumber: 1.0.0
 :revdate: {localdate}
@@ -12,34 +12,34 @@
 
 In high-throughput distributed systems using the Saga design pattern, the event-store tables—primarily `es_transaction` and `es_transaction_execution_tryout`—experience heavy sequential insert volumes as every transaction state and tryout execution is recorded.
 
-To maintain optimal read/write query performance, rapid indexing, and predictable disk usage over time, these tables are partitioned by range (e.g. daily intervals based on `created_at`).
+To maintain optimal read/write query performance, rapid indexing, and predictable disk usage over time, these tables are partitioned by range (e.g. daily intervals based on the transaction timestamp).
 
 `stacksaga-sql-partition-support` is a lightweight, non-blocking Spring Boot Starter designed to **automate the creation and maintenance of future partitions** across all SQL-based event-store databases in your ecosystem.
 
-=== Architectural Design: Centralized Partition Runner
+=== Architecture: A Dedicated Partition Runner
 
-In a microservice architecture, each service embeds its respective database reactive starter (`stacksaga-mysql-reactive-support` or `stacksaga-pg-reactive-support`) to execute saga transactions.
+In a microservice architecture, each service embeds its respective database reactive starter (`stacksaga-mysql-reactive-support` or `stacksaga-pg-reactive-support`) to execute saga transactions. Partition maintenance, however, is handled by a separate dedicated runner — not by the microservices themselves.
 
 [IMPORTANT]
 ====
-*Only One Central Instance Needed*: +
-Unlike the runtime database support modules which run inside every microservice instance, **`stacksaga-sql-partition-support` should be deployed as only one single instance** (or a scheduled standalone utility job) for your entire system.
+*A dedicated runner, one per database engine*: +
+Unlike the runtime database support modules that run inside every microservice instance, partition maintenance runs in a separate dedicated runner (a daemon or a scheduled job). Deploy **one runner per database engine** — one for MySQL and one for PostgreSQL — each serving all event-store databases of that engine.
 ====
 
-Why is a single centralized runner the recommended architecture?
+Why run partition maintenance in a dedicated runner rather than inside the microservices?
 
 1. **Avoids Multi-Instance DDL Conflicts & Lock Contention**:
 If every replica or pod of every microservice attempted to execute `ALTER TABLE ... REORGANIZE PARTITION` or schema DDLs at application startup or on a cron trigger, database servers would suffer from metadata lock contention, connection spikes, and deadlocks.
 2. **Strict Runtime Privilege Boundaries**:
-Application microservices should run with minimal database privileges (DML only: `SELECT`, `INSERT`, `UPDATE`, `DELETE`). They do not need DDL or schema alteration rights. With a centralized runner, only this single runner is granted the necessary `ALTER` / `CREATE` privileges.
-3. **Multi-Database & Multi-Vendor Consolidation**:
-Even if different microservices in your architecture use different databases (e.g., Order Service uses MySQL, Payment Service uses PostgreSQL, Inventory Service uses another MySQL database), you **do not** need separate partition runners for each. A single `stacksaga-sql-partition-support` instance can configure **multiple datasources** across **multiple database engines** and process them concurrently.
+Application microservices should run with minimal database privileges (DML only: `SELECT`, `INSERT`, `UPDATE`, `DELETE`). They do not need DDL or schema alteration rights. With a dedicated runner, only the partition runner is granted the necessary `ALTER` / `CREATE` privileges.
+3. **One Runner Per Database Engine**:
+A single runner handles **any number of datasources of the same engine** concurrently — e.g. one MySQL runner maintains the Order Service DB, the Inventory Service DB, and every other MySQL event-store at once. When your architecture mixes engines (some services on MySQL, others on PostgreSQL), deploy **one runner per engine**: one MySQL runner and one PostgreSQL runner. This keeps each runner's driver and database privileges scoped to a single engine. The pre-built Docker images (see <<docker-image>>) follow exactly this model — one image per engine.
 
 image::stacksaga-database-support:stacksaga-diagram-sql-partition-architecture.drawio.svg[StackSaga SQL Partition Architecture]
 
 ==== Single Point of Failure (SPOF) Consideration: Why It Is Not An Issue
 
-A common architectural question is: _"Does having only one partition runner instance for the entire system introduce a single point of failure?"_
+A common architectural question is: _"Does having a single partition runner per engine introduce a single point of failure?"_
 
 The answer is **no**. In practice, this design is resilient and poses no risk to your production workloads:
 
@@ -49,7 +49,7 @@ For example, configuring `unit: DAYS` with `ahead-count: 7` or `unit: MONTH` wit
 * **Completely Decoupled Runtime Transactions**:
 Runtime microservices (`order-service`, `payment-service`, etc.) insert saga events directly into the database. They do *not* communicate with or depend on the partition runner during transaction execution.
 * **Resilience to Runner Downtime**:
-Even if the single partition runner instance goes offline, encounters an infrastructure crash, or is undergoing extended maintenance for multiple days, your microservices continue writing events without interruption because future partition tables are already present in the database.
+Even if a partition runner goes offline, encounters an infrastructure crash, or is undergoing extended maintenance for multiple days, your microservices continue writing events without interruption because future partition tables are already present in the database.
 * **Automatic Catch-Up Upon Restart**:
 As soon as the partition runner restarts or triggers next, it queries the database, detects any missing future intervals, and idempotently provisions them.
 
@@ -82,8 +82,32 @@ Validates database connectivity (`validate-on-startup=true`) and inspects user p
 * **Pre-Creation (`ahead-count`)**:
 Configurable per datasource. Setting `ahead-count: 2` pre-creates partitions for today plus the next 2 days ahead, preventing data rejection when midnight arrives.
 
+[[usage-options]]
+== How to Use: Two Options
+
+There are two ways to use SQL Database Partition Support. Both run the exact same partition logic — choose
+based on whether you want to build and operate your own service or just run a ready-made container.
+
+[cols="1,3,3",options="header"]
+|===
+|Option|What you do|Best for
+
+|<<option-a,*A — Build your own application*>>
+|Create a small Spring Boot service, add the `stacksaga-sql-partition-support` dependency plus the matching
+R2DBC driver(s), configure your datasources, and deploy it.
+|Teams that want to embed and customize the runner — a custom `PartitionDefinitionProvider`,
+`PartitionExecutionCompletedEvent` listeners, or extra application beans.
+
+|<<docker-image,*B — Use the pre-built Docker images*>>
+|Run the official `stacksaga/partition-runner-<engine>` image and inject datasources at runtime (environment
+variables or a mounted config file). No code, no build.
+|Teams that just want partition maintenance running with zero code — a `docker run` daemon or a Kubernetes
+CronJob.
+|===
+
+[[option-a]]
 [[adding-dependency]]
-== Adding as a Dependency
+== Option A: Build Your Own Application (Maven Dependency)
 
 Add `stacksaga-sql-partition-support` to your standalone partition runner service:
 
@@ -116,6 +140,204 @@ Add `stacksaga-sql-partition-support` to your standalone partition runner servic
         <artifactId>r2dbc-postgresql</artifactId>
     </dependency>
 </dependencies>
+----
+
+[[docker-image]]
+== Option B: Use the Pre-Built Docker Images (No Code)
+
+With this option you do **not** build a project at all. Run the official pre-built runner image and supply
+your datasources at runtime. Choose this when you simply need partition maintenance running; choose
+<<option-a>> instead when you need to customize the runner.
+
+=== Images: One Per Database Engine
+
+Because each image bundles exactly one R2DBC driver, there is one image per engine. Run one MySQL runner and,
+if needed, one PostgreSQL runner (see <<One Runner Per Database Engine>>). All images are published under the
+https://hub.docker.com/u/stacksaga[StackSaga organization on Docker Hub^].
+
+[cols="2,3",options="header"]
+|===
+|Image|Purpose
+
+|https://hub.docker.com/r/stacksaga/partition-runner-mysql[`stacksaga/partition-runner-mysql`^]
+|Maintains partitions on MySQL event-store databases.
+
+|https://hub.docker.com/r/stacksaga/partition-runner-postgres[`stacksaga/partition-runner-postgres`^]
+|Maintains partitions on PostgreSQL event-store databases.
+|===
+
+=== Tags & Versioning
+
+Every image shares **one version — the release version**. The engine is part of the image name; the variant
+is a tag suffix. Images never carry independent versions — the whole set is built from one release and the
+image version matches the `stacksaga-sql-partition-support` library version it embeds.
+
+[cols="2,3",options="header"]
+|===
+|Tag (for release `1.0.0`)|Meaning
+
+|`1.0.0`
+|Immutable production image (distroless, hardened). **Pin this in production.**
+
+|`1.0`, `1`, `latest`
+|Rolling production tags (latest patch / latest minor / latest stable).
+
+|`1.0.0-alpine`
+|Immutable minimal Alpine image — small, for local/developer use.
+
+|`1.0-alpine`, `1-alpine`, `latest-alpine`
+|Rolling Alpine (developer) tags.
+|===
+
+=== Base Images & Runtime
+
+The images are built with and run on **Java 21** (Eclipse Temurin). The exact base images are pinned in the
+runner's `Dockerfile`:
+
+[cols="2,3",options="header"]
+|===
+|Stage / variant|Base image
+
+|Build
+|`maven:3.9-eclipse-temurin-21`
+
+|Alpine (developer)
+|`eclipse-temurin:21-jre-alpine`
+
+|Production
+|`gcr.io/distroless/java21-debian12:nonroot` (non-root, no shell, minimal CVE surface)
+|===
+
+The runner is a self-contained container that talks to your databases over R2DBC, so your **database server
+version is independent of the image**. The bundled drivers — `io.asyncer:r2dbc-mysql` and
+`org.postgresql:r2dbc-postgresql`, at the versions managed by the StackSaga BOM for the release — connect to
+current MySQL and PostgreSQL servers (verified against MySQL 8.x). Running a newer database or a newer JDK in
+your own services does not affect these images.
+
+=== Providing Datasources at Runtime
+
+The image ships with **no datasources**. Inject them at run time with either environment variables or a
+mounted config file.
+
+**Option 1 — Environment variables** (relaxed binding; use lowercase-alphanumeric datasource names):
+
+[source,bash]
+----
+docker run --rm stacksaga/partition-runner-mysql:1.0.0 \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_URL=r2dbc:mysql://db-host:3306/order_db \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_USERNAME=partition_admin \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_PASSWORD=secret \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_UNIT=DAYS \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_AHEAD_COUNT=2
+----
+
+**Option 2 — Mounted `application.yml`** (cleaner for many datasources; keep passwords in env/secrets):
+
+[source,yaml]
+----
+# my-datasources.yml  (mount at /app/config/application.yml)
+stacksaga:
+  partitioning:
+    sql:
+      datasources:
+        orderdb:   { url: "r2dbc:mysql://db-host:3306/order_db", username: partition_admin, unit: DAYS, ahead-count: 2 }
+        inventorydb: { url: "r2dbc:mysql://db-host:3306/inventory_db", username: partition_admin, unit: MONTH, ahead-count: 1 }
+----
+
+[source,bash]
+----
+docker run --rm \
+  -v "$(pwd)/my-datasources.yml:/app/config/application.yml:ro" \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_PASSWORD=secret \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_INVENTORYDB_PASSWORD=secret \
+  stacksaga/partition-runner-mysql:1.0.0
+----
+
+TIP: The image bundles only one engine's driver, so the datasource URLs for a given runner must all target
+that engine (all `r2dbc:mysql://...` for the MySQL image, all `r2dbc:postgresql://...` for the PostgreSQL image).
+
+=== Daemon vs. Kubernetes CronJob
+
+The same image serves both deployment modes described in <<Deployment Strategies>>. For the ephemeral
+CronJob pattern, set `STACKSAGA_PARTITIONING_SQL_CRON=none` and
+`STACKSAGA_PARTITIONING_SQL_EXIT_ON_COMPLETION=true` — the container runs once, exits `0` on success or `1`
+on failure, and Kubernetes reclaims its resources. In the CronJob manifest under <<Deployment Strategies>>,
+use `stacksaga/partition-runner-mysql:1.0.0` (or the `-postgres` image) as the container `image`.
+
+=== Quick Start with Docker Compose
+
+The following `docker-compose.yml` brings up a seeded MySQL and runs the partition runner against it as a
+one-shot job. A ready-to-run copy also ships in the source repository at
+`stacksaga-partition-runner/examples/docker-compose.yml`.
+
+[source,yaml,subs="attributes+"]
+----
+name: stacksaga-partition-demo
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: stacksaga_demo
+      MYSQL_USER: partition_admin
+      MYSQL_PASSWORD: partition_pw
+    volumes:
+      - ./init/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpw"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  partition-runner:
+    image: stacksaga/partition-runner-mysql:{stacksaga-version}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      # Run once and exit (0 success / 1 failure) — the Kubernetes CronJob pattern.
+      STACKSAGA_PARTITIONING_SQL_CRON: "none"
+      STACKSAGA_PARTITIONING_SQL_EXIT_ON_COMPLETION: "true"
+      # Datasource injected at runtime. The host is the compose service name 'mysql'.
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_URL: "r2dbc:mysql://mysql:3306/stacksaga_demo"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_USERNAME: "partition_admin"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_PASSWORD: "partition_pw"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_UNIT: "DAYS"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_AHEAD_COUNT: "7"
+----
+
+The event-store tables must already exist as range-partitioned tables with a `p_max` catch-all (in production
+they are created by the StackSaga MySQL/PostgreSQL reactive support). For this demo, seed them by placing the
+file below at `init/mysql/01-schema.sql` next to the compose file — shown for one table; repeat the same
+pattern for `es_transaction_execution_tryout`, `es_resume_context` and `es_terminated_transaction`:
+
+[source,sql]
+----
+CREATE TABLE IF NOT EXISTS es_transaction (
+    id                       BIGINT       NOT NULL AUTO_INCREMENT,
+    transaction_tx_datetime  DATETIME     NOT NULL,
+    payload                  VARCHAR(255) NULL,
+    PRIMARY KEY (id, transaction_tx_datetime)
+) ENGINE = InnoDB
+PARTITION BY RANGE COLUMNS (transaction_tx_datetime) (
+    PARTITION p_max VALUES LESS THAN (MAXVALUE)
+);
+----
+
+Run it, then inspect the partitions that were created:
+
+[source,bash]
+----
+docker compose up --abort-on-container-exit --exit-code-from partition-runner
+
+# While MySQL is still up, list the created partitions:
+docker compose up -d mysql
+docker compose exec mysql mysql -upartition_admin -ppartition_pw stacksaga_demo \
+  -e "SELECT table_name, partition_name FROM information_schema.partitions \
+      WHERE table_schema='stacksaga_demo' AND partition_name IS NOT NULL ORDER BY 1,2;"
+docker compose down -v
 ----
 
 == Configuration Reference
@@ -298,7 +520,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: partition-runner
-              image: your-docker-registry.internal/stacksaga/stacksaga-partition-runner:1.0.0
+              image: stacksaga/partition-runner-mysql:1.0.0  # one runner per engine; use -postgres for PostgreSQL
               env:
                 # Execute partition creation immediately upon pod start
                 - name: STACKSAGA_PARTITIONING_SQL_RUN_ON_STARTUP

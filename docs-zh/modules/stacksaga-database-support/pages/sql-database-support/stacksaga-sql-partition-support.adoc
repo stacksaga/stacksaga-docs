@@ -1,5 +1,5 @@
 :title: StackSaga SQL 数据库分区支持 (SQL Database Partition Support)
-:description: 学习 StackSaga SQL 分区支持如何通过单个集中式运行器，自动跨多个数据库和厂商（MySQL 与 PostgreSQL）维护事件存储表的范围分区。
+:description: 了解 StackSaga SQL 分区支持如何自动维护 MySQL 与 PostgreSQL 事件存储表的范围分区——可作为 Maven 依赖或预构建的 Docker 镜像使用，每种数据库引擎部署一个专用运行器。
 :doctitle: StackSaga SQL 数据库分区支持 (SQL Database Partition Support)
 :revnumber: 1.0.0
 :revdate: {localdate}
@@ -12,34 +12,34 @@
 
 在使用 Saga 设计模式的高并发分布式系统中，事件存储表（主要是 `es_transaction` 和 `es_transaction_execution_tryout`）承受着极高频度的连续写入操作，因为系统需要详尽记录每一步事务状态与试算执行日志。
 
-为了长期维持最优的读写查询性能、快速的索引构建以及可预测的磁盘空间开销，这些表均采用了范围分区 (Range Partitioning，例如基于 `created_at` 的按日自然区间分区)。
+为了长期维持最优的读写查询性能、快速的索引构建以及可预测的磁盘空间开销，这些表均采用了范围分区 (Range Partitioning，例如基于事务时间戳的按日自然区间分区)。
 
 `stacksaga-sql-partition-support` 是一个轻量级、非阻塞的 Spring Boot Starter，旨在**自动化创建和维护您整个生态中所有基于 SQL 的事件存储数据库的未来分区**。
 
-=== 架构设计：集中式分区运行器 (Centralized Partition Runner)
+=== 架构：专用分区运行器 (Dedicated Partition Runner)
 
-在微服务架构中，每个业务服务都会引入各自对应的数据库响应式 Starter（`stacksaga-mysql-reactive-support` 或 `stacksaga-pg-reactive-support`）来执行分布式 Saga 事务。
+在微服务架构中，每个业务服务都会引入各自对应的数据库响应式 Starter（`stacksaga-mysql-reactive-support` 或 `stacksaga-pg-reactive-support`）来执行分布式 Saga 事务。而分区维护则由一个独立的专用运行器负责——而非由各微服务自身执行。
 
 [IMPORTANT]
 ====
-*全系统仅需部署一个中心实例*： +
-与嵌入在每个微服务实例内部的运行时数据库支持模块不同，**`stacksaga-sql-partition-support` 在整个系统中应当仅作为单个独立实例部署**（或作为一个定时调度的独立运维任务）。
+*专用运行器，每种数据库引擎一个*： +
+与嵌入在每个微服务实例内部的运行时数据库支持模块不同，分区维护在一个独立的专用运行器（常驻守护进程或定时作业）中运行。请**每种数据库引擎部署一个运行器**——MySQL 一个、PostgreSQL 一个——分别服务该引擎下的所有事件存储数据库。
 ====
 
-为什么推荐采用单一的集中式运行器架构？
+为什么要在专用运行器中执行分区维护，而不是放在微服务内部？
 
 1. **避免多实例并发 DDL 冲突与锁争用**：
 如果每个微服务的每个 Pod 或副本在启动时或通过定时任务都尝试执行 `ALTER TABLE ... REORGANIZE PARTITION` 等 Schema DDL，数据库将遭遇严重的元数据锁争用、连接数激增甚至是死锁。
 2. **严格的运行时数据访问权限边界**：
-应用微服务应以最小数据库权限运行（仅需 DML 权限：`SELECT`、`INSERT`、`UPDATE`、`DELETE`），绝不应赋予 DDL 表结构变更权限。通过集中式运行器，只有这单个运行器需要被授予必要的 `ALTER` / `CREATE` 权限。
-3. **跨多数据库与多引擎厂商的大一统归集**：
-即使您架构中的不同微服务使用了不同的数据库类型（例如订单服务使用 MySQL、支付服务使用 PostgreSQL、库存服务使用另一个独立的 MySQL），您也**不需要**为每个服务分别编写分区脚本。单个 `stacksaga-sql-partition-support` 实例可以配置**多个数据源 (Multiple Datasources)**，跨越**多种数据库引擎**并并发统一处理。
+应用微服务应以最小数据库权限运行（仅需 DML 权限：`SELECT`、`INSERT`、`UPDATE`、`DELETE`），绝不应赋予 DDL 表结构变更权限。通过专用运行器，只有该分区运行器需要被授予必要的 `ALTER` / `CREATE` 权限。
+3. **每种数据库引擎运行一个运行器**：
+单个运行器可并发处理**任意数量的同引擎数据源**——例如一个 MySQL 运行器可同时维护订单服务库、库存服务库以及其余所有 MySQL 事件存储库。当架构中混用了多种引擎（部分服务用 MySQL、部分用 PostgreSQL）时，请**每种引擎部署一个运行器**：一个 MySQL 运行器和一个 PostgreSQL 运行器。这样可将每个运行器的驱动与数据库权限都限定在单一引擎范围内。预构建的 Docker 镜像（见 <<docker-image>>）正是遵循此模型——每种引擎一个镜像。
 
 image::stacksaga-database-support:stacksaga-diagram-sql-partition-architecture.drawio.svg[StackSaga SQL 分区架构图]
 
 ==== 单点故障 (SPOF) 考量：为什么这完全不是问题
 
-架构师常有的顾虑是：_“整个系统仅有一个分区运行器实例，是否会引入单点故障 (SPOF)？”_
+架构师常有的顾虑是：_“每种引擎只有一个分区运行器，是否会引入单点故障 (SPOF)？”_
 
 答案是**完全不会**。在实际生产实践中，该设计具备极高的韧性弹性，对生产业务负载毫无风险：
 
@@ -49,7 +49,7 @@ image::stacksaga-database-support:stacksaga-diagram-sql-partition-architecture.d
 * **与运行时业务事务完全解耦**：
 运行时的微服务（`order-service`、`payment-service` 等）直接向数据库插入 Saga 事件。在事务执行期间，它们与分区运行器之间*没有任何*网络通信或直接依赖。
 * **从容容忍运行器停机维护**：
-即便该单一分区运行器实例长时间下线、遭遇基础设施崩溃，或经历数天的停机维护，您的微服务依然能够毫无阻碍地持续写入事件，因为未来的分区表早已预先就绪在数据库中。
+即便某个分区运行器长时间下线、遭遇基础设施崩溃，或经历数天的停机维护，您的微服务依然能够毫无阻碍地持续写入事件，因为未来的分区表早已预先就绪在数据库中。
 * **重启后自动化追赶补偿**：
 一旦分区运行器重启或再次触发，它会自动探测数据库，发现任何缺失的未来时间区间，并幂等地完成增补建表。
 
@@ -82,8 +82,27 @@ CREATE TABLE IF NOT EXISTS es_transaction_p2026_09_13 PARTITION OF es_transactio
 * **提前预建机制 (`ahead-count`)**：
 可针对每个数据源独立配置。设置 `ahead-count: 2` 会提前为今天以及未来 2 天预先创建分区，彻底杜绝跨过午夜零点时的数据写入拒绝异常。
 
+[[usage-options]]
+== 使用方式：两种选择
+
+使用 SQL 数据库分区支持有两种方式。两者运行的分区逻辑完全相同——请根据您是想自行构建并运维一个服务，还是只想运行一个现成的容器来选择。
+
+[cols="1,3,3",options="header"]
+|===
+|方式|您要做的|适用场景
+
+|<<option-a,*A —— 构建自己的应用*>>
+|创建一个小型 Spring Boot 服务，引入 `stacksaga-sql-partition-support` 依赖及匹配的 R2DBC 驱动，配置数据源并部署。
+|希望内嵌并定制运行器的团队——自定义 `PartitionDefinitionProvider`、`PartitionExecutionCompletedEvent` 监听器或额外的应用 Bean。
+
+|<<docker-image,*B —— 使用预构建的 Docker 镜像*>>
+|运行官方 `stacksaga/partition-runner-<engine>` 镜像，并在运行时注入数据源（环境变量或挂载配置文件）。无需编码、无需构建。
+|只想让分区维护零编码跑起来的团队——`docker run` 常驻进程或 Kubernetes CronJob。
+|===
+
+[[option-a]]
 [[adding-dependency]]
-== 引入依赖 (Adding as a Dependency)
+== 方式 A：构建自己的应用（Maven 依赖）
 
 在您的独立分区运行器微服务中引入 `stacksaga-sql-partition-support`：
 
@@ -116,6 +135,182 @@ CREATE TABLE IF NOT EXISTS es_transaction_p2026_09_13 PARTITION OF es_transactio
         <artifactId>r2dbc-postgresql</artifactId>
     </dependency>
 </dependencies>
+----
+
+[[docker-image]]
+== 方式 B：使用预构建的 Docker 镜像（无需编码）
+
+此方式**完全不必**从零搭建项目。直接运行官方预构建的运行器镜像，并在运行时提供数据源即可。只想让分区维护跑起来时选此方式；需要定制运行器时请改用 <<option-a>>。
+
+=== 镜像：每种引擎一个
+
+由于每个镜像只内置一种 R2DBC 驱动，因此每种引擎对应一个镜像。请运行一个 MySQL 运行器，必要时再运行一个 PostgreSQL 运行器（见 <<每种数据库引擎运行一个运行器>>）。所有镜像均发布于 https://hub.docker.com/u/stacksaga[StackSaga 的 Docker Hub 组织^]下。
+
+[cols="2,3",options="header"]
+|===
+|镜像|用途
+
+|https://hub.docker.com/r/stacksaga/partition-runner-mysql[`stacksaga/partition-runner-mysql`^]
+|维护 MySQL 事件存储库的分区。
+
+|https://hub.docker.com/r/stacksaga/partition-runner-postgres[`stacksaga/partition-runner-postgres`^]
+|维护 PostgreSQL 事件存储库的分区。
+|===
+
+=== 标签与版本
+
+所有镜像共享**同一个版本——即发布版本**。引擎体现在镜像名称中，变体体现为标签后缀。镜像不会各自独立编号——整套镜像由同一次发布构建，镜像版本与其内嵌的 `stacksaga-sql-partition-support` 库版本一致。
+
+[cols="2,3",options="header"]
+|===
+|标签（以发布版 `1.0.0` 为例）|含义
+
+|`1.0.0`
+|不可变的生产镜像（distroless，已加固）。**生产环境请锁定此标签。**
+
+|`1.0`、`1`、`latest`
+|滚动的生产标签（最新补丁 / 最新小版本 / 最新稳定版）。
+
+|`1.0.0-alpine`
+|不可变的精简 Alpine 镜像——体积小，供本地/开发使用。
+
+|`1.0-alpine`、`1-alpine`、`latest-alpine`
+|滚动的 Alpine（开发）标签。
+|===
+
+=== 基础镜像与运行时
+
+镜像基于 **Java 21**（Eclipse Temurin）构建并运行。所用的基础镜像在运行器的 `Dockerfile` 中已固定版本：
+
+[cols="2,3",options="header"]
+|===
+|阶段 / 变体|基础镜像
+
+|构建
+|`maven:3.9-eclipse-temurin-21`
+
+|Alpine（开发）
+|`eclipse-temurin:21-jre-alpine`
+
+|生产
+|`gcr.io/distroless/java21-debian12:nonroot`（非 root、无 shell、CVE 面最小）
+|===
+
+运行器是一个自包含容器，通过 R2DBC 与您的数据库通信，因此您的**数据库服务器版本与镜像相互独立**。内置的驱动——`io.asyncer:r2dbc-mysql` 与 `org.postgresql:r2dbc-postgresql`，版本由该发布对应的 StackSaga BOM 统一管理——可连接当前的 MySQL 与 PostgreSQL 服务器（已在 MySQL 8.x 上验证）。您自己的服务中运行更高版本的数据库或 JDK，并不会影响这些镜像。
+
+=== 在运行时提供数据源
+
+镜像本身**不含任何数据源**。请在运行时通过环境变量或挂载配置文件注入。
+
+**方式一 —— 环境变量**（宽松绑定；数据源名称请使用小写字母与数字）：
+
+[source,bash]
+----
+docker run --rm stacksaga/partition-runner-mysql:1.0.0 \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_URL=r2dbc:mysql://db-host:3306/order_db \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_USERNAME=partition_admin \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_PASSWORD=secret \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_UNIT=DAYS \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_AHEAD_COUNT=2
+----
+
+**方式二 —— 挂载 `application.yml`**（数据源较多时更清晰；密码请放在环境变量/密钥中）：
+
+[source,yaml]
+----
+# my-datasources.yml （挂载至 /app/config/application.yml）
+stacksaga:
+  partitioning:
+    sql:
+      datasources:
+        orderdb:   { url: "r2dbc:mysql://db-host:3306/order_db", username: partition_admin, unit: DAYS, ahead-count: 2 }
+        inventorydb: { url: "r2dbc:mysql://db-host:3306/inventory_db", username: partition_admin, unit: MONTH, ahead-count: 1 }
+----
+
+[source,bash]
+----
+docker run --rm \
+  -v "$(pwd)/my-datasources.yml:/app/config/application.yml:ro" \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_ORDERDB_PASSWORD=secret \
+  -e STACKSAGA_PARTITIONING_SQL_DATASOURCES_INVENTORYDB_PASSWORD=secret \
+  stacksaga/partition-runner-mysql:1.0.0
+----
+
+TIP: 每个镜像仅内置一种引擎的驱动，因此同一运行器的所有数据源 URL 必须指向该引擎（MySQL 镜像全部为 `r2dbc:mysql://...`，PostgreSQL 镜像全部为 `r2dbc:postgresql://...`）。
+
+=== 常驻守护进程 vs. Kubernetes CronJob
+
+同一镜像同时支持 <<部署策略 (Deployment Strategies)>> 中描述的两种部署模式。对于瞬态 CronJob 模式，请设置 `STACKSAGA_PARTITIONING_SQL_CRON=none` 与 `STACKSAGA_PARTITIONING_SQL_EXIT_ON_COMPLETION=true`——容器运行一次，成功退出码为 `0`、失败为 `1`，随后 Kubernetes 回收其资源。在 <<部署策略 (Deployment Strategies)>> 的 CronJob 清单中，将容器 `image` 设为 `stacksaga/partition-runner-mysql:1.0.0`（或 `-postgres` 镜像）即可。
+
+=== 使用 Docker Compose 快速开始
+
+下面的 `docker-compose.yml` 会启动一个预置数据的 MySQL，并以一次性作业的方式对其运行分区运行器。源码仓库的 `stacksaga-partition-runner/examples/docker-compose.yml` 也提供了一份开箱即用的副本。
+
+[source,yaml,subs="attributes+"]
+----
+name: stacksaga-partition-demo
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: stacksaga_demo
+      MYSQL_USER: partition_admin
+      MYSQL_PASSWORD: partition_pw
+    volumes:
+      - ./init/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpw"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  partition-runner:
+    image: stacksaga/partition-runner-mysql:{stacksaga-version}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      # 运行一次后退出（成功 0 / 失败 1）—— 即 Kubernetes CronJob 模式。
+      STACKSAGA_PARTITIONING_SQL_CRON: "none"
+      STACKSAGA_PARTITIONING_SQL_EXIT_ON_COMPLETION: "true"
+      # 数据源在运行时注入。主机名即 compose 服务名 'mysql'。
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_URL: "r2dbc:mysql://mysql:3306/stacksaga_demo"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_USERNAME: "partition_admin"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_PASSWORD: "partition_pw"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_UNIT: "DAYS"
+      STACKSAGA_PARTITIONING_SQL_DATASOURCES_DEMODB_AHEAD_COUNT: "7"
+----
+
+事件存储表必须已经是带 `p_max` 兜底分区的范围分区表（生产环境中由 StackSaga MySQL/PostgreSQL 响应式支持模块创建）。本演示可将下面的文件放在与 compose 文件相邻的 `init/mysql/01-schema.sql` 来预置——此处仅示范一张表，其余 `es_transaction_execution_tryout`、`es_resume_context`、`es_terminated_transaction` 按相同模式重复即可：
+
+[source,sql]
+----
+CREATE TABLE IF NOT EXISTS es_transaction (
+    id                       BIGINT       NOT NULL AUTO_INCREMENT,
+    transaction_tx_datetime  DATETIME     NOT NULL,
+    payload                  VARCHAR(255) NULL,
+    PRIMARY KEY (id, transaction_tx_datetime)
+) ENGINE = InnoDB
+PARTITION BY RANGE COLUMNS (transaction_tx_datetime) (
+    PARTITION p_max VALUES LESS THAN (MAXVALUE)
+);
+----
+
+运行后，查看已创建的分区：
+
+[source,bash]
+----
+docker compose up --abort-on-container-exit --exit-code-from partition-runner
+
+# 在 MySQL 仍在运行时，列出已创建的分区：
+docker compose up -d mysql
+docker compose exec mysql mysql -upartition_admin -ppartition_pw stacksaga_demo \
+  -e "SELECT table_name, partition_name FROM information_schema.partitions \
+      WHERE table_schema='stacksaga_demo' AND partition_name IS NOT NULL ORDER BY 1,2;"
+docker compose down -v
 ----
 
 == 配置参数参考 (Configuration Reference)
@@ -298,7 +493,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: partition-runner
-              image: your-docker-registry.internal/stacksaga/stacksaga-partition-runner:1.0.0
+              image: stacksaga/partition-runner-mysql:1.0.0  # 每种引擎一个运行器；PostgreSQL 请用 -postgres
               env:
                 # Pod 启动后立即执行分区创建
                 - name: STACKSAGA_PARTITIONING_SQL_RUN_ON_STARTUP
