@@ -375,12 +375,16 @@ public ResponseEntity<String> placeOrder(@RequestHeader(value = "Idempotency-Key
 
 <1> Either value stays the same when the client resends the request.
 
-[IMPORTANT]
-.Current availability
+[NOTE]
+.Engine-Level Idempotency Guarantees & Deduplication Semantics
 ====
-Currently, the event stores do not yet enforce transaction idempotency keys.
-Choosing `idempotentOnTransactionId()` or `idempotencyKey(String)` makes `execute()` / `executeAsync()` fail with `UnsupportedOperationException`, instead of silently starting duplicate transactions.
-Until enforcement is available, use `withoutIdempotency()`.
+When you configure a transaction idempotency key via `idempotencyKey(key)` or `idempotentOnTransactionId()`, the StackSaga engine provides the following guarantees:
+
+* **Atomic Admission**: The idempotency key is registered atomically during transaction initialization before any saga steps execute.
+* **Duplicate Detection**: If a request arrives with an idempotency key that has already been admitted for that domain entity, the engine detects the duplicate, logs the duplicate submission, and **immediately returns the existing `transactionId` without re-executing any saga steps or re-evaluating initial state**.
+* **Concurrent Race Resolution**: If two duplicate requests arrive simultaneously at the exact same millisecond (e.g. concurrent webhook deliveries or parallel client retries), atomic admission arbitrates the race: one request initializes the saga while the sibling request resolves to and returns the same `transactionId`.
+* **Scope Isolation**: Idempotency keys are scoped strictly per domain entity. Identical keys across different domain entity types do not collide.
+* **Uniform Client Semantics**: The caller invokes `execute()` or `executeAsync()` identically on every attempt; on first delivery it initiates execution, and on every redelivery it cleanly returns the original transaction's identifier.
 ====
 
 [[transaction-vs-step-idempotency-key]]
@@ -466,10 +470,6 @@ For the available Cassandra options, their defaults and their current availabili
 | `execute()` is called on a non-blocking (event-loop) thread
 | `IllegalStateException`
 | Use `executeAsync()` in reactive code.
-
-| `idempotentOnTransactionId()` or `idempotencyKey(..)` is used
-| `UnsupportedOperationException` (at execution)
-| See xref:#transaction-idempotency[Current availability]; use `withoutIdempotency()` for now.
 |===
 
 [[resuming-paused-transactions]]

@@ -305,6 +305,27 @@ Two different custom domain-entity classes cannot declare the same `name`.
 ====
 
 [IMPORTANT]
+.Critical Impact of Changing `@SagaDomainEntity(name = "...")`
+====
+The `name` attribute in `@SagaDomainEntity(name = "...")` acts as the immutable logical contract between your application code and the StackSaga engine across all event-store backends. **Once transactions have been admitted or persisted, changing this name causes critical operational failures:**
+
+1. **Permanent Failure of In-Flight Transaction Recovery & Resumption**:
+   * Every active, paused (xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable LRT]), or crashed transaction in the Event Store stores the logical `domain_entity_name`.
+   * When the recovery engine restores transactions after node crashes, or when an external service calls `sagaTemplate.resume(resumeKey)` to wake a paused saga, the engine resolves the domain entity Java class by matching this registered name.
+   * If the name has been changed in code, the engine throws `DomainEntityNameNotFoundException` (error code `SS_1007`), causing in-flight and paused transactions to become permanently unrecoverable and stalled.
+
+2. **Idempotency Scope Invalidation & Duplicate Saga Execution**:
+   * Transaction idempotency keys are namespaced by domain entity: `(domainEntityName, idempotencyKey)`.
+   * If you rename the domain entity, incoming client retries or redelivered broker messages will evaluate under the new name. Because the existing transaction is recorded under the old domain entity name, deduplication lookup misses, and the engine will initiate a duplicate saga transaction for the same business event.
+
+3. **Telemetry & Historical Observability Fragmentation**:
+   * Historical transactions recorded in the Event Store remain tagged with the historical domain entity name.
+   * Changing the name fragments audit histories, telemetry dashboards, and the StackSaga trace visualizer, splitting what should be a contiguous stream of transaction metrics into separate, orphaned entities.
+
+**Architectural Rule**: While you can freely refactor Java class names, package hierarchies, and source files (because the engine decouples Java types from persistent identifiers via `name`), **the string declared in `@SagaDomainEntity(name = "...")` must remain permanent across the entire lifecycle of the application**.
+====
+
+[IMPORTANT]
 ====
 **Spring Bean Notice**: In StackSaga, custom domain entities are lightweight state carriers—they are **not** Spring beans.
 They do not need to be within the application's component scan package. Instead, register the package containing your domain entities using the `{domain-entity-scan-prop}` configuration property.
