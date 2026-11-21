@@ -168,44 +168,40 @@ https://hub.docker.com/u/stacksaga[StackSaga organization on Docker Hub^].
 
 === Tags & Versioning
 
-Every image shares **one version — the release version**. The engine is part of the image name; the variant
-is a tag suffix. Images never carry independent versions — the whole set is built from one release and the
-image version matches the `stacksaga-sql-partition-support` library version it embeds.
+The engine is part of the image name; the flavor is a tag suffix. Images are published to Docker Hub
+(`stacksaga/partition-runner-<engine>`) and GitHub Container Registry
+(`ghcr.io/stacksaga/partition-runner-<engine>`). The image version matches the
+`stacksaga-sql-partition-support` library version it embeds.
 
 [cols="2,3",options="header"]
 |===
-|Tag (for release `1.0.0`)|Meaning
+|Tag (release `1.0.0`)|Meaning
 
-|`1.0.0`
-|Immutable production image (distroless, hardened). **Pin this in production.**
+|`1.0.0` / `latest`
+|Production image (Ubuntu Jammy / glibc). `latest` tracks the newest release; pin `1.0.0` in production.
 
-|`1.0`, `1`, `latest`
-|Rolling production tags (latest patch / latest minor / latest stable).
-
-|`1.0.0-alpine`
-|Immutable minimal Alpine image — small, for local/developer use.
-
-|`1.0-alpine`, `1-alpine`, `latest-alpine`
-|Rolling Alpine (developer) tags.
+|`1.0.0-alpine` / `alpine`
+|Lightweight Alpine image — small, for local / developer use.
 |===
+
+Version tags come from pushing a `vX.Y.Z` git tag (or running the workflow manually with a version input);
+there are no rolling minor/major tags.
 
 === Base Images & Runtime
 
-The images are built with and run on **Java 21** (Eclipse Temurin). The exact base images are pinned in the
-runner's `Dockerfile`:
+The images are built with and run on **Java 21** (Eclipse Temurin). The jar is built in CI and copied in, so
+the images are small and multi-arch (amd64 + arm64). Both flavors run as a non-root user and pin
+`TZ=Etc/UTC` so partition date boundaries never shift across hosts.
 
 [cols="2,3",options="header"]
 |===
-|Stage / variant|Base image
+|Flavor|Base image
 
-|Build
-|`maven:3.9-eclipse-temurin-21`
+|Production (`latest` / `<version>`)
+|`eclipse-temurin:21-jre-jammy` (glibc)
 
-|Alpine (developer)
-|`eclipse-temurin:21-jre-alpine`
-
-|Production
-|`gcr.io/distroless/java21-debian12:nonroot` (non-root, no shell, minimal CVE surface)
+|Alpine (`alpine` / `<version>-alpine`)
+|`eclipse-temurin:21-jre-alpine` (musl)
 |===
 
 The runner is a self-contained container that talks to your databases over R2DBC, so your **database server

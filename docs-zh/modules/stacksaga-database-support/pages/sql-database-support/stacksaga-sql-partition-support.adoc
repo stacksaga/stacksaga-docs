@@ -159,41 +159,34 @@ CREATE TABLE IF NOT EXISTS es_transaction_p2026_09_13 PARTITION OF es_transactio
 
 === 标签与版本
 
-所有镜像共享**同一个版本——即发布版本**。引擎体现在镜像名称中，变体体现为标签后缀。镜像不会各自独立编号——整套镜像由同一次发布构建，镜像版本与其内嵌的 `stacksaga-sql-partition-support` 库版本一致。
+引擎体现在镜像名称中，变体体现为标签后缀。镜像同时发布到 Docker Hub（`stacksaga/partition-runner-<engine>`）与 GitHub Container Registry（`ghcr.io/stacksaga/partition-runner-<engine>`）。镜像版本与其内嵌的 `stacksaga-sql-partition-support` 库版本一致。
 
 [cols="2,3",options="header"]
 |===
-|标签（以发布版 `1.0.0` 为例）|含义
+|标签（发布版 `1.0.0`）|含义
 
-|`1.0.0`
-|不可变的生产镜像（distroless，已加固）。**生产环境请锁定此标签。**
+|`1.0.0` / `latest`
+|生产镜像（Ubuntu Jammy / glibc）。`latest` 指向最新发布；生产环境请锁定 `1.0.0`。
 
-|`1.0`、`1`、`latest`
-|滚动的生产标签（最新补丁 / 最新小版本 / 最新稳定版）。
-
-|`1.0.0-alpine`
-|不可变的精简 Alpine 镜像——体积小，供本地/开发使用。
-
-|`1.0-alpine`、`1-alpine`、`latest-alpine`
-|滚动的 Alpine（开发）标签。
+|`1.0.0-alpine` / `alpine`
+|精简 Alpine 镜像——体积小，供本地/开发使用。
 |===
+
+版本标签通过推送 `vX.Y.Z` git 标签（或手动带版本参数运行工作流）产生；不提供滚动的小版本/大版本标签。
 
 === 基础镜像与运行时
 
-镜像基于 **Java 21**（Eclipse Temurin）构建并运行。所用的基础镜像在运行器的 `Dockerfile` 中已固定版本：
+镜像基于 **Java 21**（Eclipse Temurin）构建并运行。jar 在 CI 中构建并拷入镜像，因此镜像体积小且为多架构（amd64 + arm64）。两种变体均以非 root 用户运行，并固定 `TZ=Etc/UTC`，使分区日期边界在不同主机上不会偏移：
 
 [cols="2,3",options="header"]
 |===
-|阶段 / 变体|基础镜像
+|变体|基础镜像
 
-|构建
-|`maven:3.9-eclipse-temurin-21`
+|生产（`latest` / `<version>`）
+|`eclipse-temurin:21-jre-jammy`（glibc）
 
-|Alpine（开发）
-|`eclipse-temurin:21-jre-alpine`
-
-|生产
-|`gcr.io/distroless/java21-debian12:nonroot`（非 root、无 shell、CVE 面最小）
+|Alpine（`alpine` / `<version>-alpine`）
+|`eclipse-temurin:21-jre-alpine`（musl）
 |===
 
 运行器是一个自包含容器，通过 R2DBC 与您的数据库通信，因此您的**数据库服务器版本与镜像相互独立**。内置的驱动——`io.asyncer:r2dbc-mysql` 与 `org.postgresql:r2dbc-postgresql`，版本由该发布对应的 StackSaga BOM 统一管理——可连接当前的 MySQL 与 PostgreSQL 服务器（已在 MySQL 8.x 上验证）。您自己的服务中运行更高版本的数据库或 JDK，并不会影响这些镜像。
