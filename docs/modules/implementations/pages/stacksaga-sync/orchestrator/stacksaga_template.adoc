@@ -1,5 +1,5 @@
-:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, transaction configuration (lifetime, restore-on-crash delay, transaction idempotency, event-store options), fire-and-forget, resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
-:keywords: StackSaga, SagaTemplate, configure, transactionLifetime, defaultRestoreOnCrashDelay, withoutIdempotency, idempotentOnTransactionId, transaction idempotency key, EventStoreOptions, CassandraOptions, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
+:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, transaction configuration (lifetime, restore-on-crash delay, transaction idempotency, event-store options), fire-and-forget, fire-and-wait (bounding how many transactions run at once), resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
+:keywords: StackSaga, SagaTemplate, fireAndWait, executeAndWait, executeAndWaitAsync, TransactionRunResult, TransactionRunOutcome, backpressure, concurrency control, configure, transactionLifetime, defaultRestoreOnCrashDelay, withoutIdempotency, idempotentOnTransactionId, transaction idempotency key, EventStoreOptions, CassandraOptions, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
 :page-priority: 0.7
 
 = SagaTemplate and Event Listeners
@@ -143,7 +143,170 @@ public class PlaceOrderHandler {
 }
 ----
 
-<1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress.
+<1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress. To wait until the transaction's run has ended instead, use xref:#fire-and-wait[`fireAndWait()`].
+
+[[fire-and-wait]]
+=== Waiting for the Run: `fireAndWait`
+
+With `fireAndForget()`, `execute()` and `executeAsync()` return as soon as the transaction is initialized.
+The saga then runs in the background of the StackSaga engine, and the caller no longer sees it.
+That is what you want when a request only needs the transaction ID.
+It is not enough when the trigger is a stream of messages or requests: if they arrive faster than sagas finish, the number of sagas running at the same time grows without a bound, together with the memory, threads and event-store connections they use.
+`resume(...).execute()` and `resume(...).executeAsync()` behave the same way: they return once the resumption is accepted.
+
+`fireAndWait()` returns only after the transaction's *run segment* has ended.
+The caller therefore knows when the work it handed to the engine is finished, and can decide how much more to take on.
+
+[cols="2,3,3",options="header"]
+|===
+| | `fireAndForget()` | `fireAndWait()`
+
+| Returns when
+| The transaction is initialized.
+| The run segment of the transaction has ended.
+
+| Result
+| The transaction ID (`String`).
+| A `TransactionRunResult` with the transaction ID and the outcome.
+
+| Use it when
+| The caller only needs the transaction ID.
+| The caller controls the rate at which work is submitted: a message listener, a batch job, a reactive pipeline.
+|===
+
+==== Run Segment and Outcome
+
+A *run segment* is one continuous stretch of execution by the engine.
+It starts when the transaction is initialized or resumed, and it ends when the engine stops driving the transaction.
+A transaction that is paused, or parked for a retry, ends its current segment even though the transaction itself is not finished.
+The time a transaction spends paused or waiting for its next retry is not part of the wait.
+
+The `TransactionRunResult` exposes `transactionId()`, `outcome()` and `isDuplicate()`.
+The outcome is one of:
+
+[cols="2,5",options="header"]
+|===
+| `TransactionRunOutcome` | Meaning
+
+| `COMPLETED`
+| Every executor of the forward flow finished and the transaction is completed.
+
+| `REVERTED`
+| A non-retryable failure occurred and the compensation flow finished.
+
+| `REVERT_FAILED`
+| The compensation flow itself failed and the transaction ended as revert-failed.
+
+| `PAUSED`
+| The transaction is waiting for an external callback. It continues when `sagaTemplate.resume(...)` is called, or is re-executed on timeout. See xref:#resuming-paused-transactions[Resuming Paused Transactions].
+
+| `RETRY_PARKED`
+| A retryable failure stopped the run. The transaction stays active and is picked up by the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-vs-restore[retry subsystem].
+
+| `DUPLICATE`
+| The submission was recognised as a duplicate through the xref:#transaction-idempotency[transaction idempotency key]. Nothing was started, and `transactionId()` is the ID of the transaction that already holds the key.
+
+| `NOT_RESUMED`
+| Returned by the resume variant only. The resumption was accepted but there was nothing to resume, for example because the transaction has already been resumed.
+|===
+
+What the wait covers is the time the engine spends running executors, plus the xref:#state-change-listeners[state change listeners], which run sequentially between steps.
+Keep listeners lightweight so that they do not stretch the wait.
+
+==== Example: A Message Listener That Acknowledges After the Run
+
+The listener thread handles one message at a time, so the listener container's concurrency is the number of transactions that run at the same time:
+
+[source,java]
+----
+@KafkaListener(topics = "order-placed", concurrency = "4")  //<1>
+public void onOrderPlaced(OrderPlacedEvent event, Acknowledgment acknowledgment) {
+    TransactionRunResult result = this.sagaTemplate
+            .init(() -> OrderDomainEntity.from(event))
+            .configure(config -> config
+                    .transactionLifetime(Duration.ofHours(24))
+                    .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                    .idempotencyKey("order-placed:" + event.getEventId())) //<2>
+            .startWith(ValidateUserExecutor.class)
+            .fireAndWait()
+            .execute(); //<3>
+    log.info("Order saga {} ended its run segment: {}", result.transactionId(), result.outcome());
+    acknowledgment.acknowledge(); //<4>
+}
+----
+
+<1> Four consumer threads means at most four sagas running at once from this listener.
+<2> A redelivered event produces the same key, so it resolves to `DUPLICATE` instead of starting a second saga. See xref:#transaction-idempotency[Transaction Idempotency].
+<3> Blocks until the run segment has ended. It does not wait for a pause or a retry delay.
+<4> The message is acknowledged after the run segment.
+
+[NOTE]
+====
+While the listener thread waits, it is not polling.
+Make sure the consumer's maximum poll interval (`max.poll.interval.ms`) is longer than the number of records fetched per poll (`max.poll.records`) multiplied by the longest run segment you expect, or reduce the records per poll.
+====
+
+==== Example: A Reactive Pipeline With Bounded Concurrency
+
+[source,java]
+----
+Flux<TransactionRunResult> results = events
+        .flatMap(event -> this.sagaTemplate
+                        .init(() -> OrderDomainEntity.from(event))
+                        .configure(config -> config
+                                .transactionLifetime(Duration.ofHours(24))
+                                .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                                .idempotencyKey("order-placed:" + event.getEventId()))
+                        .startWith(ValidateUserExecutor.class)
+                        .fireAndWait()
+                        .executeAsync(),
+                8); //<1>
+----
+
+<1> At most eight transactions run at the same time; upstream demand is held back until one of them ends its run segment.
+
+==== Resuming and Waiting
+
+The resume operator has the same pair of methods, `executeAndWaitAsync()` and `executeAndWait()`, described in xref:#fluent-resume-spec[The Fluent `ResumeSpec` Builder API]:
+
+[source,java]
+----
+TransactionRunResult result = this.sagaTemplate
+        .resume(message.getResumeKey(), Duration.ofMinutes(15))
+        .put("status", message.getStatus())
+        .executeAndWait();
+----
+
+The outcome describes the resumed run segment: the transaction may complete, be reverted, pause again, or be parked for a retry.
+
+==== Who Controls the Limit
+
+StackSaga does not queue submissions or cap the number of running transactions for you.
+The right limit depends on the source of the work: the consumer concurrency of a Kafka listener, the prefetch of a RabbitMQ consumer, the concurrency argument of `flatMap`, or an HTTP `429` response in a REST endpoint.
+`fireAndWait()` gives each of them the one thing they need, the signal that the transaction's run has ended, and the source applies its own policy.
+
+==== Errors
+
+[cols="3,2,4",options="header"]
+|===
+| Situation | Exception | How to fix it
+
+| The transaction cannot be initialized (for example, the event store is unreachable)
+| `TransactionInitializationFailedException` or `EventStoreConnectionFailedException`, signalled when the chain is executed
+| Handle it in the caller; no transaction was accepted, so the message can be redelivered safely.
+
+| `execute()` or `executeAndWait()` is called on a non-blocking (event-loop) thread
+| `IllegalStateException`
+| Use `executeAsync()` or `executeAndWaitAsync()` in reactive code.
+
+| `execute()` or `executeAsync()` is called a second time on the same `init(...)` chain
+| `IllegalStateException`
+| A chain is one transaction. Start a new chain for a new transaction.
+
+| The resume key is invalid or stale
+| `InvalidTransactionResumeKeyException`
+| See xref:#resuming-paused-transactions[Resuming Paused Transactions].
+|===
 
 [[configuring-transactions]]
 === Configuring the Transaction with `configure(...)`
@@ -324,6 +487,7 @@ Violations throw `IllegalArgumentException` immediately, at the call.
 A random UUID created inside your handler is different on every delivery and therefore recognises nothing.
 
 *What a duplicate submission returns:* when a transaction already holds the key, `execute()` / `executeAsync()` return *that* transaction's ID and start nothing new.
+With xref:#fire-and-wait[`fireAndWait()`], the result has the outcome `DUPLICATE` and carries that transaction's ID.
 Your calling code therefore looks exactly the same for the first delivery and for every repeat.
 
 ===== Example: a saga started by a broker event
@@ -349,6 +513,8 @@ public void onOrderPlaced(OrderPlacedEvent event) {
 
 <1> A redelivered event carries the same `eventId`, so it produces the same key. A prefix keeps keys from different trigger types apart.
 <2> On a redelivery, this returns the ID of the transaction started by the first delivery.
+
+TIP: To also limit how many sagas run at the same time, wait for the run with xref:#fire-and-wait[`fireAndWait()`] and acknowledge the message afterwards.
 
 ===== Example: a saga started by an HTTP request
 
@@ -467,9 +633,9 @@ For the available Cassandra options, their defaults and their current availabili
 | `IllegalStateException`
 | A chain started by `init(...)` is one transaction. Start a new chain for a new transaction.
 
-| `execute()` is called on a non-blocking (event-loop) thread
+| `execute()` (also `fireAndWait().execute()` and `resume(...).executeAndWait()`) is called on a non-blocking (event-loop) thread
 | `IllegalStateException`
-| Use `executeAsync()` in reactive code.
+| Use `executeAsync()` (or `executeAndWaitAsync()`) in reactive code.
 |===
 
 [[resuming-paused-transactions]]
@@ -535,6 +701,10 @@ Mono<Void> resumeMono = this.sagaTemplate
 * **`.withContext(ResumeContext resumeContext)`**: Supplies or replaces a pre-built `ResumeContext` (e.g., from `DefaultResumeContext.of(map)`).
 * **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments). Throws `InvalidTransactionResumeKeyException` if the resume key is invalid or unrecognized. Throws `IllegalStateException` if invoked from a non-blocking Reactor/Netty event-loop thread.
 * **`.executeAsync()`**: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments). Signals `InvalidTransactionResumeKeyException` via `onError` if invalid.
+* **`.executeAndWait()`**: Synchronously blocks until the resumed run segment has ended, and returns a `TransactionRunResult`. Throws `InvalidTransactionResumeKeyException` if the resume key is invalid, and `IllegalStateException` if invoked from a non-blocking Reactor/Netty event-loop thread.
+* **`.executeAndWaitAsync()`**: Returns a `Mono<TransactionRunResult>` that emits once the resumed run segment has ended. Signals `InvalidTransactionResumeKeyException` via `onError` if invalid.
+
+`execute()` and `executeAsync()` return once the resumption is accepted; the resumed run continues in the background. Use `executeAndWait()` or `executeAndWaitAsync()` when the caller needs to know when the resumed run has ended, for example to limit how many resumed transactions run at once. See xref:#fire-and-wait[Waiting for the Run: `fireAndWait`].
 
 NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(resumeKey, resumeContext, retentionDuration).execute()`.
 
