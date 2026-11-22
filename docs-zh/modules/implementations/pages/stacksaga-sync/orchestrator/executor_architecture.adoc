@@ -62,7 +62,7 @@ _(Saga 编排器服务)_
 | `CheckCustomerEligibility` +
 ➔ `用户服务` +
 _(只读查询边界)_
-| **目标服务**：用户服务（`GET /users/{userId}/eligibility`）。 +
+| **目标服务**：用户服务（`GET /users/\{userId\}/eligibility`）。 +
 **前向主执行（`doProcess`）**：在用户数据库中查询客户账户状态与授信额度。 +
 **逆向补偿（`doRevert`）**：_自动跳过_。因本步骤仅执行只读查询、绝不修改任何外部持久化状态，故实现 `QueryExecutor` 接口，无补偿回滚方法。
 
@@ -206,8 +206,8 @@ image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg
 * **xref:#command-executors[命令执行器]** (`CommandExecutor` / `ReactiveCommandExecutor`)：用于修改业务状态且需要补偿的操作。
 * **xref:#query-executors[查询执行器]** (`QueryExecutor` / `ReactiveQueryExecutor`)：用于无需补偿的只读操作。
 * **xref:#sub-executors[子执行器]**：用于将复杂的多阶段补偿拆分为原子步骤：
-** **xref:#sub-before-executors[前置补偿子执行器]** (`RevertBeforeExecutor` / `ReactiveRevertBeforeExecutor`)
-** **xref:#sub-after-executors[后置补偿子执行器]** (`RevertAfterExecutor` / `ReactiveRevertAfterExecutor`)
+** **xref:#sub-before-executors[前置补偿子执行器]** (`PreExecutor` / `ReactivePreExecutor`)
+** **xref:#sub-after-executors[后置补偿子执行器]** (`PostExecutor` / `ReactivePostExecutor`)
 
 IMPORTANT: 上述每种执行器类型均提供了阻塞式 (Imperative / Blocking) 与非阻塞响应式 (Reactive via Project Reactor) 两种实现。您可以在同一个 Saga 中根据技术栈自由选用或混合搭配。
 
@@ -215,7 +215,7 @@ IMPORTANT: 上述每种执行器类型均提供了阻塞式 (Imperative / Blocki
 .密封接口架构与编译期类型安全 (Sealed Interface Foundation)
 ====
 StackSaga 的所有执行器契约均建立在现代 Java 21 **密封接口 (sealed interfaces)** 体系之上，以 `SagaExecutor<DE>` 为根契约。
-中间层契约如 `SagaCommandExecutor<DE>` 统一了同步 (`CommandExecutor`) 与响应式 (`ReactiveCommandExecutor`) 命令，并作为子执行器钩子 (`@RevertBefore` 与 `@RevertAfter`) 的通用目标泛型上限 `<E extends SagaCommandExecutor<DE>>`。
+中间层契约如 `SagaCommandExecutor<DE>` 统一了同步 (`CommandExecutor`) 与响应式 (`ReactiveCommandExecutor`) 命令，并作为子执行器钩子 (`@StartPreExecutor` 与 `@StartPostExecutor`) 的通用目标泛型上限 `<E extends SagaCommandExecutor<DE>>`。
 同理，`SagaQueryExecutor<DE>` 统一定义只读查询，而 `SagaReactiveExecutor<DE>` 标识所有基于 Project Reactor `Mono` 的非阻塞流。
 ====
 
@@ -333,8 +333,8 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
     }
 
     @Override
-    @RevertBefore(startFrom = OrderInitializeSubBeforeExecutor.class) //<12>
-    @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<13>
+    @StartPreExecutor(OrderInitializePreExecutor.class) //<12>
+    @StartPostExecutor(OrderInitializePostExecutor.class) //<13>
     public @NonNull RevertStepManager doRevert(
             @NonNull NonRetryableExecutorException processException,
             @NonNull OrderDomainEntity finalDomainEntityState,
@@ -386,8 +386,8 @@ public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntit
 <9> 在 `doRevert` 中实现回滚补偿逻辑：反向撤销 `doProcess` 所做的修改。
 <10> 调用 `stepManager.success("CANCELLED_ORDER").noPause()` 结束当前步骤的补偿。SEC 引擎将自动按照逆序调用前一个命令执行器的补偿。
 <11> 补偿中的瞬时故障通过 `RetryableExecutorException` 触发自动重试。
-<12> `@RevertBefore`：声明在调用当前执行器的 `doRevert()` 之前执行的前置子补偿执行器。
-<13> `@RevertAfter`：声明在调用当前执行器的 `doRevert()` 之后执行的后置子补偿执行器。
+<12> `@StartPreExecutor`：声明在调用当前执行器的 `doRevert()` 之前执行的前置子补偿执行器。
+<13> `@StartPostExecutor`：声明在调用当前执行器的 `doRevert()` 之后执行的后置子补偿执行器。
 
 [[reactive-command-executors]]
 ==== 非阻塞响应式命令执行器 (Non-Blocking Reactive Command-Executor)
@@ -589,18 +589,18 @@ image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.dra
 ----
 @SagaExecutor(executeFor = "order-service", value = "orderInitializeSubBeforeExecutor")
 @AllArgsConstructor
-public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<OrderDomainEntity, InitializeOrderExecutor> {
+public class OrderInitializePreExecutor implements PreExecutor<OrderDomainEntity, InitializeOrderExecutor> {
 
     private final OrderService orderService;
 
     @Override
-    public @NonNull RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
+    public @NonNull PreStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
             @NonNull OrderDomainEntity finalDomainEntityState,
             @NonNull NonRetryableExecutorException processException,
             @NonNull RevertHintStore revertHintStore,
             @NonNull String idempotencyKey,
             @NonNull ResumeContext resumeContext,
-            @NonNull RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
+            @NonNull PreStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
     ) throws RetryableExecutorException {
 
         try {
@@ -608,12 +608,12 @@ public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<Or
             return stepManager
                     .success("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE")
                     .noPause()
-                    .noMoreRevertBeforeExecutors(); // 结束前置子链，移交父命令执行器的 doRevert()
+                    .toNextDefaultExecutor(); // 结束前置子链，移交父命令执行器的 doRevert()
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             return stepManager
                     .success("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE")
                     .noPause()
-                    .noMoreRevertBeforeExecutors();
+                    .toNextDefaultExecutor();
         } catch (FeignException.ServiceUnavailable unavailableException) {
             throw RetryableExecutorException.of(unavailableException);
         }
@@ -630,18 +630,18 @@ public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<Or
 ----
 @SagaExecutor(executeFor = "order-service", value = "orderInitializeSubAfterExecutor")
 @AllArgsConstructor
-public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<OrderDomainEntity, InitializeOrderExecutor> {
+public class OrderInitializePostExecutor implements PostExecutor<OrderDomainEntity, InitializeOrderExecutor> {
 
     private final OrderService orderService;
 
     @Override
-    public @NonNull RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
+    public @NonNull PostStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
             @NonNull OrderDomainEntity finalDomainEntityState,
             @NonNull NonRetryableExecutorException processException,
             @NonNull RevertHintStore revertHintStore,
             @NonNull String idempotencyKey,
             @NonNull ResumeContext resumeContext,
-            @NonNull RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
+            @NonNull PostStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
     ) throws RetryableExecutorException {
 
         try {
@@ -649,12 +649,12 @@ public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<Orde
             return stepManager
                     .success("REVERTED_ORDER_INITIALIZATION_SUB_AFTER")
                     .noPause()
-                    .noMoreRevertAfterExecutors(); // 结束该步骤的后置补偿，SEC 将推进至上一个命令执行器
+                    .toNextDefaultExecutor(); // 结束该步骤的后置补偿，SEC 将推进至上一个命令执行器
         } catch (OperationAlreadyExecutedException alreadyExecutedException) {
             return stepManager
                     .success("REVERTED_ORDER_INITIALIZATION_SUB_AFTER")
                     .noPause()
-                    .noMoreRevertAfterExecutors();
+                    .toNextDefaultExecutor();
         } catch (FeignException.ServiceUnavailable unavailableException) {
             throw RetryableExecutorException.of(unavailableException);
         }
@@ -1000,11 +1000,11 @@ public class PaymentCommandExecutor implements CommandExecutor<OrderDomainEntity
 |✔
 |✔
 
-|前置补偿子执行器 (Revert Before)
+|前置执行器 (Pre-Executor)
 |✔
 |N/A
 
-|后置补偿子执行器 (Revert After)
+|后置执行器 (Post-Executor)
 |✔
 |N/A
 |===
@@ -1025,11 +1025,11 @@ public class PaymentCommandExecutor implements CommandExecutor<OrderDomainEntity
 |✔
 |✖ _(补偿阶段禁止抛出未捕获的不可重试异常)_
 
-|前置补偿子执行器 (Revert Before)
+|前置执行器 (Pre-Executor)
 |✖
 |N/A
 
-|后置补偿子执行器 (Revert After)
+|后置执行器 (Post-Executor)
 |✖
 |N/A
 |===
@@ -1067,25 +1067,25 @@ _或_ +
 | N/A +
 _(SEC 引擎自动按逆序反向推进)_
 
-| **`RevertBeforeStepManager<DE, E>`** +
+| **`PreStepManager<DE, E>`** +
 _(前置子补偿流程)_
 | `.success(event)`
 | `.noPause()` +
 _或_ +
 `.pause(duration)`
-| `.setNextRevertBeforeExecutor(Next.class)` +
+| `.toNextPreExecutor(Next.class)` +
 _或_ +
-`.noMoreRevertBeforeExecutors()` _(移交父命令执行器)_
+`.toNextDefaultExecutor()` _(移交父命令执行器)_
 
-| **`RevertAfterStepManager<DE, E>`** +
+| **`PostStepManager<DE, E>`** +
 _(后置子补偿流程)_
 | `.success(event)`
 | `.noPause()` +
 _或_ +
 `.pause(duration)`
-| `.setNextRevertAfterExecutor(Next.class)` +
+| `.toNextPostExecutor(Next.class)` +
 _或_ +
-`.noMoreRevertAfterExecutors()` _(终结后置补偿)_
+`.toNextDefaultExecutor()` _(终结后置补偿)_
 |===
 
 详见 xref:stacksaga-sync/index.adoc#glossary-step-manager[术语表中的 Step Manager]、xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[双向可暂停架构] 以及 xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[通过 SagaTemplate 恢复事务]。

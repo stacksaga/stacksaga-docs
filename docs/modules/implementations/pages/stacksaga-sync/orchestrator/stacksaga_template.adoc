@@ -1,5 +1,5 @@
-:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, fire-and-forget, fire-and-watch, resuming pausable transactions via correlation keys, blocking vs. reactive execution, and real-time event listeners.
-:keywords: StackSaga, SagaTemplate, resume, correlationKey, idempotencyKey, pausable LRT, callback webhook, fireAndForget, fireAndWatch, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
+:description: Reference guide for SagaTemplate and transaction event listeners in the synchronous StackSaga orchestrator -- fluent API, transaction configuration (lifetime, restore-on-crash delay, transaction idempotency, event-store options), fire-and-forget, fire-and-wait (bounding how many transactions run at once), resuming pausable transactions via resumeKey and retentionDuration, blocking vs. reactive execution, and real-time event listeners.
+:keywords: StackSaga, SagaTemplate, fireAndWait, executeAndWait, executeAndWaitAsync, TransactionRunResult, TransactionRunOutcome, backpressure, concurrency control, configure, transactionLifetime, defaultRestoreOnCrashDelay, withoutIdempotency, idempotentOnTransactionId, transaction idempotency key, EventStoreOptions, CassandraOptions, resume, resumeKey, retentionDuration, idempotencyKey, pausable LRT, callback webhook, fireAndForget, getCurrentState, fetch, fetchAsync, TransactionState, TransactionEventListener, ReactiveTransactionEventListener, synchronous orchestrator
 :page-priority: 0.7
 
 = SagaTemplate and Event Listeners
@@ -9,7 +9,7 @@
 == SagaTemplate
 
 `SagaTemplate` is the main entry point for interacting with the StackSaga engine (SEC) in an orchestrator service.
-It provides a fluent builder API to initialize transactions, configure execution modes (fire-and-forget or fire-and-watch), and query the current state and execution history of any transaction.
+It provides a fluent builder API to initialize transactions, trigger execution (`fireAndForget`), and query the current state and execution history of any transaction.
 
 `SagaTemplate` seamlessly supports both imperative (blocking) and reactive (non-blocking) application architectures.
 
@@ -41,14 +41,19 @@ public class PlaceOrderHandler {
                     return orderDomainEntity;
                 })
                 //<3>
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
+                //<4>
                 .peek(orderDomainEntity -> {
                     log.info("transactionId {}:", orderDomainEntity.getTransactionId());
                 })
-                //<4>
-                .startWith(ValidateUserExecutor.class)
                 //<5>
-                .fireAndForget()
+                .startWith(ValidateUserExecutor.class)
                 //<6>
+                .fireAndForget()
+                //<7>
                 .execute();
         log.info("Started place order saga with transactionId: {}", transactionId);
         return transactionId;
@@ -57,17 +62,17 @@ public class PlaceOrderHandler {
     public void printCurrentState(String transactionId) {
         TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state = this
                 .sagaTemplate
-                //<7>
+                //<8>
                 .getCurrentState(transactionId)
                 .fetch();
 
-        TransactionCompleteStatus currentStatus = state.getCurrentStatus(); //<8>
+        TransactionCompleteStatus currentStatus = state.getCurrentStatus(); //<9>
         log.info("Current status of transaction {}: {}", transactionId, currentStatus);
-        NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory(); //<9>
+        NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> executionHistory = state.getExecutionHistory(); //<10>
         log.info("Execution history of transaction {}: {}", transactionId, executionHistory);
-        OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity(); //<10>
-        log.info("Current domain entity state: {}", currentDomainEntity); //<11>
-        ZonedDateTime startedDateTime = state.getStartedDateTime(); //<12>
+        OrderDomainEntity currentDomainEntity = state.getCurrentDomainEntity(); //<11>
+        log.info("Current domain entity state: {}", currentDomainEntity); //<12>
+        ZonedDateTime startedDateTime = state.getStartedDateTime(); //<13>
         log.info("Transaction {} started at: {}", transactionId, startedDateTime.toLocalDateTime());
     }
 }
@@ -75,16 +80,24 @@ public class PlaceOrderHandler {
 
 <1> Inject `SagaTemplate` configured for your custom xref:stacksaga-sync/orchestrator/domain-entity.adoc#creating_custom_domain_entity[`DomainEntity`] type.
 <2> Use `init()` to provide a `Supplier` creating the initial `DomainEntity`. The framework generates and assigns the unique `transactionId` during initialization.
-<3> Use `peek()` (optional) to inspect or enrich the initialized `DomainEntity` before execution begins.
-<4> Use `startWith()` to specify the initial xref:stacksaga-sync/orchestrator/executor_architecture.adoc[executor] that starts the transaction flow.
-<5> Use `fireAndForget()` to select the fire-and-forget execution mode.
-<6> Call `execute()` to initiate the transaction in a blocking manner. It returns the generated `transactionId` once initialized.
-<7> Call `getCurrentState(transactionId).fetch()` to retrieve a synchronous snapshot of the transaction state from the event-store.
-<8> Retrieve the overall completion status (`TransactionCompleteStatus`) of the transaction.
-<9> Retrieve the chronological execution history (`NavigableMap<Integer, ? extends SyncExecutionEvent<DE>>`) containing every executed span (primary and compensation) with metadata and status.
-<10> Retrieve the current domain entity snapshot representing all state mutations applied up to this point.
-<11> Log the domain entity snapshot.
-<12> Retrieve the start timestamp of the transaction.
+<3> Use `configure()` to set the transaction-level settings in one step: how long the transaction may live, how soon it is restored after a crash, and how it is protected against duplicate submissions. Every setting in this step is mandatory; see xref:#configuring-transactions[Configuring the Transaction].
+<4> Use `peek()` (optional) to inspect or enrich the initialized `DomainEntity` before execution begins.
+<5> Use `startWith()` to specify the initial xref:stacksaga-sync/orchestrator/executor_architecture.adoc[executor] that starts the transaction flow.
+<6> Use `fireAndForget()` to select the fire-and-forget execution mode.
+<7> Call `execute()` to initiate the transaction in a blocking manner. It returns the generated `transactionId` once initialized. A chain started by `init()` represents exactly one transaction, so it can be executed only once.
+<8> Call `getCurrentState(transactionId).fetch()` to retrieve a synchronous snapshot of the transaction state from the event-store.
+<9> Retrieve the overall completion status (`TransactionCompleteStatus`) of the transaction.
+<10> Retrieve the chronological execution history (`NavigableMap<Integer, ? extends SyncExecutionEvent<DE>>`) containing every executed span (primary and compensation) with metadata and status.
+<11> Retrieve the current domain entity snapshot representing all state mutations applied up to this point.
+<12> Log the domain entity snapshot.
+<13> Retrieve the start timestamp of the transaction.
+
+[WARNING]
+====
+`execute()` blocks the calling thread until the transaction is initialized.
+Calling it from a non-blocking thread (for example a Spring WebFlux / Reactor Netty event-loop thread) throws `IllegalStateException`.
+In reactive code, use `executeAsync()` as shown in the next section.
+====
 
 NOTE: For real-time updates without polling, implement a xref:#event_listener_for_stage_change_events[State Change Listener].
 
@@ -92,14 +105,7 @@ NOTE: For real-time updates without polling, implement a xref:#event_listener_fo
 
 In a reactive environment (e.g., Spring WebFlux), `SagaTemplate` provides non-blocking operators across all lifecycle phases.
 
-There are two primary modes to execute a saga transaction reactively:
-
-. *Fire-and-Forget* -- Start the transaction and immediately receive a `Mono<String>` emitting the transaction ID once the saga is accepted. The saga executes in the background. Use this when you only need the transaction ID and will rely on `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track progress.
-. *Fire-and-Watch* -- Start the transaction and observe real-time state transitions as a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>`. Ideal for streaming live execution events to clients (e.g., via Server-Sent Events or WebSockets).
-
-==== Fire-and-Forget
-
-Calling `.fireAndForget().executeAsync()` hands the transaction off to the StackSaga engine and returns a `Mono<String>` emitting the generated transaction ID:
+Calling `.fireAndForget().executeAsync()` hands the transaction off to the StackSaga engine in a non-blocking manner and returns a `Mono<String>` emitting the generated transaction ID once initialized:
 
 [source,java]
 ----
@@ -121,6 +127,10 @@ public class PlaceOrderHandler {
                     }
                     return orderDomainEntity;
                 })
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
                 .peek(orderDomainEntity -> {
                     log.info("transactionId {}:", orderDomainEntity.getTransactionId());
                 })
@@ -133,96 +143,579 @@ public class PlaceOrderHandler {
 }
 ----
 
-<1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress.
+<1> `executeAsync()` returns a `Mono<String>` that emits the transaction ID once the saga is initialised. The transaction continues running in the background; use `getCurrentState(transactionId).fetchAsync()` or the xref:#event_listener_for_stage_change_events[EventListener] to track its progress. To wait until the transaction's run has ended instead, use xref:#fire-and-wait[`fireAndWait()`].
 
-==== Fire-and-Watch
+[[fire-and-wait]]
+=== Waiting for the Run: `fireAndWait`
 
-Calling `.fireAndWatch(Duration waitTimeout).toFlux()` initiates the transaction and returns a `Flux<TransactionState<DE, SyncExecutionEvent<DE>>>` that emits an updated `TransactionState` snapshot after each executor span completes:
+With `fireAndForget()`, `execute()` and `executeAsync()` return as soon as the transaction is initialized.
+The saga then runs in the background of the StackSaga engine, and the caller no longer sees it.
+That is what you want when a request only needs the transaction ID.
+It is not enough when the trigger is a stream of messages or requests: if they arrive faster than sagas finish, the number of sagas running at the same time grows without a bound, together with the memory, threads and event-store connections they use.
+`resume(...).execute()` and `resume(...).executeAsync()` behave the same way: they return once the resumption is accepted.
+
+`fireAndWait()` returns only after the transaction's *run segment* has ended.
+The caller therefore knows when the work it handed to the engine is finished, and can decide how much more to take on.
+
+[cols="2,3,3",options="header"]
+|===
+| | `fireAndForget()` | `fireAndWait()`
+
+| Returns when
+| The transaction is initialized.
+| The run segment of the transaction has ended.
+
+| Result
+| The transaction ID (`String`).
+| A `TransactionRunResult` with the transaction ID and the outcome.
+
+| Use it when
+| The caller only needs the transaction ID.
+| The caller controls the rate at which work is submitted: a message listener, a batch job, a reactive pipeline.
+|===
+
+==== Run Segment and Outcome
+
+A *run segment* is one continuous stretch of execution by the engine.
+It starts when the transaction is initialized or resumed, and it ends when the engine stops driving the transaction.
+A transaction that is paused, or parked for a retry, ends its current segment even though the transaction itself is not finished.
+The time a transaction spends paused or waiting for its next retry is not part of the wait.
+
+The `TransactionRunResult` exposes `transactionId()`, `outcome()` and `isDuplicate()`.
+The outcome is one of:
+
+[cols="2,5",options="header"]
+|===
+| `TransactionRunOutcome` | Meaning
+
+| `COMPLETED`
+| Every executor of the forward flow finished and the transaction is completed.
+
+| `REVERTED`
+| A non-retryable failure occurred and the compensation flow finished.
+
+| `REVERT_FAILED`
+| The compensation flow itself failed and the transaction ended as revert-failed.
+
+| `PAUSED`
+| The transaction is waiting for an external callback. It continues when `sagaTemplate.resume(...)` is called, or is re-executed on timeout. See xref:#resuming-paused-transactions[Resuming Paused Transactions].
+
+| `RETRY_PARKED`
+| A retryable failure stopped the run. The transaction stays active and is picked up by the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-vs-restore[retry subsystem].
+
+| `DUPLICATE`
+| The submission was recognised as a duplicate through the xref:#transaction-idempotency[transaction idempotency key]. Nothing was started, and `transactionId()` is the ID of the transaction that already holds the key.
+
+| `NOT_RESUMED`
+| Returned by the resume variant only. The resumption was accepted but there was nothing to resume, for example because the transaction has already been resumed.
+|===
+
+What the wait covers is the time the engine spends running executors, plus the xref:#state-change-listeners[state change listeners], which run sequentially between steps.
+Keep listeners lightweight so that they do not stretch the wait.
+
+==== Example: A Message Listener That Acknowledges After the Run
+
+The listener thread handles one message at a time, so the listener container's concurrency is the number of transactions that run at the same time:
 
 [source,java]
 ----
-@GetMapping(value = "/order/watch", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-public Flux<TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>>> createOrderAndWatch() {
-    return sagaTemplate
-            .init(OrderDomainEntity::new)
-            .peek(orderDomainEntity -> {
-                log.info("Started Transaction ID: {}", orderDomainEntity.getTransactionId());
-            })
+@KafkaListener(topics = "order-placed", concurrency = "4")  //<1>
+public void onOrderPlaced(OrderPlacedEvent event, Acknowledgment acknowledgment) {
+    TransactionRunResult result = this.sagaTemplate
+            .init(() -> OrderDomainEntity.from(event))
+            .configure(config -> config
+                    .transactionLifetime(Duration.ofHours(24))
+                    .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                    .idempotencyKey("order-placed:" + event.getEventId())) //<2>
             .startWith(ValidateUserExecutor.class)
-            .fireAndWatch(Duration.ofSeconds(40)) //<1>
-            .toFlux()
-            .doOnNext(state -> {
-                log.info("Received state change: {}", state);
-            });
+            .fireAndWait()
+            .execute(); //<3>
+    log.info("Order saga {} ended its run segment: {}", result.transactionId(), result.outcome());
+    acknowledgment.acknowledge(); //<4>
 }
 ----
 
-<1> `waitTimeout` defines the maximum duration the subscriber will wait for execution results before the pipeline signals a `WaitTimeExceededException`.
+<1> Four consumer threads means at most four sagas running at once from this listener.
+<2> A redelivered event produces the same key, so it resolves to `DUPLICATE` instead of starting a second saga. See xref:#transaction-idempotency[Transaction Idempotency].
+<3> Blocks until the run segment has ended. It does not wait for a pause or a retry delay.
+<4> The message is acknowledged after the run segment.
 
-===== Key Behaviors and Error Handling
+[NOTE]
+====
+While the listener thread waits, it is not polling.
+Make sure the consumer's maximum poll interval (`max.poll.interval.ms`) is longer than the number of records fetched per poll (`max.poll.records`) multiplied by the longest run segment you expect, or reduce the records per poll.
+====
 
-* *Timeout (`WaitTimeExceededException`)*: If execution exceeds the specified `Duration waitTimeout`, the pipeline terminates with a `WaitTimeExceededException` via `onError`. This **only ends the subscription** -- the saga execution continues asynchronously in the background. After the subscription ends, you can still observe progress in two ways:
-+
-** If you have registered a xref:#event_listener_for_stage_change_events[State Change Listener] (`TransactionEventListener` or `ReactiveTransactionEventListener`), it continues to receive event callbacks.
-** Alternatively, query the state at any time using `getCurrentState(transactionId).fetchAsync()`.
+==== Example: A Reactive Pipeline With Bounded Concurrency
 
-* *Execution Pause (`TransactionPausedException`)*: If a step encounters a retryable exception (such as a transient database failure or custom `RetryableExecutorException`), execution is paused and rescheduled. Because `TransactionState` only represents completed saga states, the live subscription halts and emits a `TransactionPausedException` via `onError`. This indicates a temporary retry pause, not a fatal failure.
-Once rescheduled and retried, state notifications continue via listeners, or you can query state using `getCurrentState(transactionId).fetchAsync()`.
+[source,java]
+----
+Flux<TransactionRunResult> results = events
+        .flatMap(event -> this.sagaTemplate
+                        .init(() -> OrderDomainEntity.from(event))
+                        .configure(config -> config
+                                .transactionLifetime(Duration.ofHours(24))
+                                .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                                .idempotencyKey("order-placed:" + event.getEventId()))
+                        .startWith(ValidateUserExecutor.class)
+                        .fireAndWait()
+                        .executeAsync(),
+                8); //<1>
+----
+
+<1> At most eight transactions run at the same time; upstream demand is held back until one of them ends its run segment.
+
+==== Resuming and Waiting
+
+The resume operator has the same pair of methods, `executeAndWaitAsync()` and `executeAndWait()`, described in xref:#fluent-resume-spec[The Fluent `ResumeSpec` Builder API]:
+
+[source,java]
+----
+TransactionRunResult result = this.sagaTemplate
+        .resume(message.getResumeKey(), Duration.ofMinutes(15))
+        .put("status", message.getStatus())
+        .executeAndWait();
+----
+
+The outcome describes the resumed run segment: the transaction may complete, be reverted, pause again, or be parked for a retry.
+
+==== Who Controls the Limit
+
+StackSaga does not queue submissions or cap the number of running transactions for you.
+The right limit depends on the source of the work: the consumer concurrency of a Kafka listener, the prefetch of a RabbitMQ consumer, the concurrency argument of `flatMap`, or an HTTP `429` response in a REST endpoint.
+`fireAndWait()` gives each of them the one thing they need, the signal that the transaction's run has ended, and the source applies its own policy.
+
+==== Errors
+
+[cols="3,2,4",options="header"]
+|===
+| Situation | Exception | How to fix it
+
+| The transaction cannot be initialized (for example, the event store is unreachable)
+| `TransactionInitializationFailedException` or `EventStoreConnectionFailedException`, signalled when the chain is executed
+| Handle it in the caller; no transaction was accepted, so the message can be redelivered safely.
+
+| `execute()` or `executeAndWait()` is called on a non-blocking (event-loop) thread
+| `IllegalStateException`
+| Use `executeAsync()` or `executeAndWaitAsync()` in reactive code.
+
+| `execute()` or `executeAsync()` is called a second time on the same `init(...)` chain
+| `IllegalStateException`
+| A chain is one transaction. Start a new chain for a new transaction.
+
+| The resume key is invalid or stale
+| `InvalidTransactionResumeKeyException`
+| See xref:#resuming-paused-transactions[Resuming Paused Transactions].
+|===
+
+[[configuring-transactions]]
+=== Configuring the Transaction with `configure(...)`
+
+Every transaction carries a few settings that the engine needs before the first executor runs:
+
+* how long the transaction is allowed to live,
+* how soon it is restored if the instance running it crashes,
+* how it is protected against being started twice for the same request,
+* and, optionally, settings that only a specific event store understands.
+
+All of them are given in a single `configure(...)` step, directly after `init(...)`.
+The step receives a `TransactionConfigurer` and must return the `TransactionConfig` produced at the end of the configurer chain:
+
+[source,java]
+----
+String transactionId = this.sagaTemplate
+        .init(() -> orderDomainEntity)
+        .configure(config -> config
+                .transactionLifetime(Duration.ofHours(24))          //<1>
+                .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))  //<2>
+                .idempotencyKey("order-" + orderId)                 //<3>
+                .with(CassandraOptions.configure(c -> c             //<4>
+                        .idempotencyCheck(ConsistencyMode.STRICT))))
+        .startWith(ValidateUserExecutor.class)
+        .fireAndForget()
+        .execute();
+----
+
+<1> *Required.* The maximum time the transaction may run. See xref:#transaction-lifetime-setting[Transaction Lifetime].
+<2> *Required.* How long the engine waits before restoring the transaction after an unexpected crash. See xref:#default-restore-on-crash-delay[Restore-on-Crash Delay].
+<3> *Required choice.* How the transaction is protected against duplicate submissions: `withoutIdempotency()`, `idempotentOnTransactionId()` or `idempotencyKey(String)`. See xref:#transaction-idempotency[Transaction Idempotency].
+<4> *Optional, repeatable.* Settings for a specific event store. Other event stores ignore them. See xref:#event-store-options[Event-Store Specific Options].
+
+==== Why One Step, and Why the Order Is Fixed
+
+Each method in the configurer chain returns a narrower type that only offers the next method.
+The lambda has to return a `TransactionConfig`, and the only way to obtain one is to walk the whole chain, so **leaving out a required setting is a compile error, not a runtime surprise**:
+
+[source,text]
+----
+TransactionConfigurer
+   └─ transactionLifetime(Duration)                 → RestoreConfigStage
+        └─ defaultRestoreOnCrashDelay(Duration)     → IdempotencyStage
+             ├─ withoutIdempotency()                ┐
+             ├─ idempotentOnTransactionId()         ├→ StoreOptionsStage  (is a TransactionConfig)
+             └─ idempotencyKey(String)              ┘
+                  └─ with(EventStoreOptions) ...    → StoreOptionsStage  (optional, repeatable)
+----
+
+Because `StoreOptionsStage` is itself a `TransactionConfig`, the chain may end directly after the idempotency choice, or continue with any number of `with(...)` calls.
+
+.Summary of the settings
+[cols="2,1,4",options="header"]
+|===
+| Setting | Required | What it controls
+
+| `transactionLifetime(Duration)`
+| Yes
+| The time window in which the transaction may still make progress (be retried or resumed).
+
+| `defaultRestoreOnCrashDelay(Duration)`
+| Yes
+| How long after the last known progress a silently crashed transaction becomes eligible for restore.
+
+| `withoutIdempotency()` / `idempotentOnTransactionId()` / `idempotencyKey(String)`
+| Yes (exactly one)
+| Whether, and by which key, a duplicate submission of the same request is recognised.
+
+| `with(EventStoreOptions)`
+| No
+| Event-store specific settings for this transaction only, such as `CassandraOptions`.
+|===
+
+[[transaction-lifetime-setting]]
+==== Transaction Lifetime: `transactionLifetime(Duration)`
+
+The lifetime is the period, counted from the moment the transaction starts, during which the transaction may still move forward.
+While the lifetime lasts, a transaction that fails with a retryable error is retried, and a paused transaction can be resumed.
+Once the lifetime has passed:
+
+* the transaction is **no longer exposed for retrying**, even if it is still incomplete;
+* **resume requests are rejected**;
+* an incomplete transaction ends up as a xref:retry-ring-coordinator:disabled-and-terminated-transaction.adoc#transaction-lifetime[disabled transaction].
+
+The lifetime exists so that a transaction that can never succeed (for example, because a target service was removed) does not circulate through the retry subsystem forever.
+
+*How to size it:* make the lifetime comfortably longer than the longest *legitimate* path through your saga.
+Add up the longest waits the saga may go through: pause windows (`pauseUntilResume(...)`), the retry delays you expect while a dependency is down, and any human approval steps.
+Then add a safety margin.
+
+[cols="1,3",options="header"]
+|===
+| If the lifetime is... | ...then
+
+| Too short
+| Transactions that are merely slow (a callback arriving late, a dependency down for an hour) are disabled even though they would have succeeded.
+
+| Too long
+| Transactions that can never succeed keep consuming retry capacity until the lifetime finally runs out.
+|===
+
+*Example:* an order saga waits up to 15 minutes for a payment callback, and its downstream services may be unavailable for a few hours during an incident.
+A lifetime of `Duration.ofHours(24)` covers both with plenty of margin.
+
+[[default-restore-on-crash-delay]]
+==== Restore-on-Crash Delay: `defaultRestoreOnCrashDelay(Duration)`
+
+When an instance dies silently (an OOM kill, a power loss, `kill -9`), nothing records that the transaction it was running has failed.
+To recover such transactions, the engine gives every transaction a point in time at which it becomes visible to the restore process if it has not made progress by then.
+`defaultRestoreOnCrashDelay` is the distance between the transaction's last known progress and that point.
+
+The value is the transaction's *default*:
+
+* It is used whenever a step does not set its own crash re-expose delay.
+A failing step can override it with `reexposeOnUnexpectedCrash(Duration)`, or explicitly fall back to it with `withDefaultReexposeOnUnexpectedCrash()`.
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#building-non-retryable-exception[Building a Non-Retryable Exception].
+* It is also used to push the restore time forward when an executor throws an unhandled exception.
+
+*How to size it:* make the delay longer than the normal running time of your slowest step.
+
+[cols="1,3",options="header"]
+|===
+| If the delay is... | ...then
+
+| Too short
+| A transaction that is only *slow* may be restored while it is still running on its original instance. The step is invoked again; write protection and the xref:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[step idempotency key] keep that safe, but it is avoidable work.
+
+| Too long
+| After a real crash, the transaction waits longer than necessary before another instance picks it up.
+|===
+
+For the background on how restores differ from retries, see xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-vs-restore[Retry vs. Restore].
+
+[[transaction-idempotency]]
+==== Transaction Idempotency
+
+The transaction ID is generated by the framework on every `init(...)` call.
+That means the framework, on its own, cannot tell that two calls are really *the same request arriving twice*.
+If the trigger that starts your saga is delivered twice (a broker redelivers an event, a payment provider retries a webhook, an upstream service retries after a timeout, a user double-clicks), two independent long-running transactions start: two orders, two charges.
+
+A *transaction idempotency key* solves this at the level of the whole long-running transaction.
+It is checked once, when the transaction is admitted.
+A submission whose key is already held by a transaction does not start a new one.
+
+[NOTE]
+====
+This key is different from the *step idempotency key* that StackSaga generates for every executor and that your executors forward to downstream services.
+The step key protects each *downstream call*; the transaction key protects the *start of the whole saga*.
+See xref:#transaction-vs-step-idempotency-key[the comparison below], and xref:foundations:idempotency.adoc#lrt-idempotency[Idempotency for the Entire LRT] for the concept and for guidance on when you need it.
+====
+
+The choice is mandatory: you always state explicitly which of the three options applies.
+
+[cols="2,2,4",options="header"]
+|===
+| Option | Key used | When to use it
+
+| `withoutIdempotency()`
+| none
+| The trigger can never be delivered twice for the same business request, or starting the saga twice is harmless.
+
+| `idempotentOnTransactionId()`
+| the generated transaction ID
+| You want every transaction to carry a key, so that transactions can be looked up the same way whether or not the caller supplied a business key. Because the transaction ID is new for every `init(...)` call, this option does *not* recognise a repeated request; use `idempotencyKey(String)` for that.
+
+| `idempotencyKey(String)`
+| the key you supply
+| The saga can be triggered more than once for the same request, which is the normal case for event-driven, webhook-driven and service-to-service starts. Derive the key from something stable in the trigger.
+|===
+
+*Rules for `idempotencyKey(String)`:*
+
+* The key must not be null or blank, and must be at most 255 characters (`SagaTemplate.MAX_IDEMPOTENCY_KEY_LENGTH`).
+Violations throw `IllegalArgumentException` immediately, at the call.
+* Keys are unique *per domain entity*: the same key used by two different sagas does not collide.
+* Derive the key from the trigger, never from a value generated per attempt.
+A random UUID created inside your handler is different on every delivery and therefore recognises nothing.
+
+*What a duplicate submission returns:* when a transaction already holds the key, `execute()` / `executeAsync()` return *that* transaction's ID and start nothing new.
+With xref:#fire-and-wait[`fireAndWait()`], the result has the outcome `DUPLICATE` and carries that transaction's ID.
+Your calling code therefore looks exactly the same for the first delivery and for every repeat.
+
+===== Example: a saga started by a broker event
+
+The event carries a stable ID that the broker keeps across redeliveries, which makes it the ideal key:
+
+[source,java]
+----
+@KafkaListener(topics = "order-placed")
+public void onOrderPlaced(OrderPlacedEvent event) {
+    String transactionId = this.sagaTemplate
+            .init(() -> OrderDomainEntity.from(event))
+            .configure(config -> config
+                    .transactionLifetime(Duration.ofHours(24))
+                    .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                    .idempotencyKey("order-placed:" + event.getEventId())) //<1>
+            .startWith(ValidateUserExecutor.class)
+            .fireAndForget()
+            .execute(); //<2>
+    log.info("Order saga for event {} is transaction {}", event.getEventId(), transactionId);
+}
+----
+
+<1> A redelivered event carries the same `eventId`, so it produces the same key. A prefix keeps keys from different trigger types apart.
+<2> On a redelivery, this returns the ID of the transaction started by the first delivery.
+
+TIP: To also limit how many sagas run at the same time, wait for the run with xref:#fire-and-wait[`fireAndWait()`] and acknowledge the message afterwards.
+
+===== Example: a saga started by an HTTP request
+
+Clients that retry requests usually send an `Idempotency-Key` header. Fall back to a stable business identifier when the header is absent:
+
+[source,java]
+----
+@PostMapping("/orders")
+public ResponseEntity<String> placeOrder(@RequestHeader(value = "Idempotency-Key", required = false) String clientKey,
+                                         @RequestBody PlaceOrderRequest request) {
+    String key = clientKey != null ? clientKey : "order:" + request.getOrderNumber(); //<1>
+    String transactionId = this.sagaTemplate
+            .init(() -> OrderDomainEntity.from(request))
+            .configure(config -> config
+                    .transactionLifetime(Duration.ofHours(24))
+                    .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                    .idempotencyKey(key))
+            .startWith(ValidateUserExecutor.class)
+            .fireAndForget()
+            .execute();
+    return ResponseEntity.accepted().body(transactionId);
+}
+----
+
+<1> Either value stays the same when the client resends the request.
+
+[NOTE]
+.Engine-Level Idempotency Guarantees & Deduplication Semantics
+====
+When you configure a transaction idempotency key via `idempotencyKey(key)` or `idempotentOnTransactionId()`, the StackSaga engine provides the following guarantees:
+
+* **Atomic Admission**: The idempotency key is registered atomically during transaction initialization before any saga steps execute.
+* **Duplicate Detection**: If a request arrives with an idempotency key that has already been admitted for that domain entity, the engine detects the duplicate, logs the duplicate submission, and **immediately returns the existing `transactionId` without re-executing any saga steps or re-evaluating initial state**.
+* **Concurrent Race Resolution**: If two duplicate requests arrive simultaneously at the exact same millisecond (e.g. concurrent webhook deliveries or parallel client retries), atomic admission arbitrates the race: one request initializes the saga while the sibling request resolves to and returns the same `transactionId`.
+* **Scope Isolation**: Idempotency keys are scoped strictly per domain entity. Identical keys across different domain entity types do not collide.
+* **Uniform Client Semantics**: The caller invokes `execute()` or `executeAsync()` identically on every attempt; on first delivery it initiates execution, and on every redelivery it cleanly returns the original transaction's identifier.
+====
+
+[[transaction-vs-step-idempotency-key]]
+===== Transaction Idempotency Key vs. Step Idempotency Key
+
+[cols="1,3,3",options="header"]
+|===
+| | Transaction idempotency key | Step idempotency key
+
+| *Scope*
+| The whole long-running transaction.
+| One atomic step (one `doProcess` or `doRevert` attempt).
+
+| *Who provides it*
+| You, in `configure(...)` (or the transaction ID with `idempotentOnTransactionId()`).
+| StackSaga generates it (see xref:stacksaga-sync/orchestrator/domain-entity.adoc#generateIdempotencyKey[`generateIdempotencyKey`]) and passes it to your executor.
+
+| *Who checks it*
+| The StackSaga event store, once, when the transaction is admitted.
+| The downstream service you call, which you hand the key to (for example in an `Idempotency-Key` header).
+
+| *Protects against*
+| The same request starting the saga twice.
+| A retried step causing a duplicate side effect in a downstream service.
+
+| *Typical source*
+| Event ID, webhook delivery ID, upstream request ID, order number.
+| Derived automatically from the transaction and the step.
+|===
+
+[[event-store-options]]
+==== Event-Store Specific Options: `with(...)`
+
+StackSaga runs on several event stores (the SQL family and Cassandra / ScyllaDB), and some of them offer tuning that only makes sense for that database.
+For example, Cassandra can claim a transaction idempotency key either with a Paxos-based lightweight transaction or with a cheaper read check.
+
+Rather than putting database-specific methods on `SagaTemplate`, every event-store module ships its own options type that implements `EventStoreOptions`.
+You attach it with `with(...)`:
+
+[source,java]
+----
+.configure(config -> config
+        .transactionLifetime(Duration.ofHours(24))
+        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+        .idempotencyKey("order-" + orderId)
+        .with(CassandraOptions.configure(c -> c
+                .idempotencyCheck(ConsistencyMode.STRICT))))  // claim the idempotency key with Paxos (LWT)
+----
+
+*How `with(...)` behaves:*
+
+* *Optional and repeatable.* Attach options for several event stores if the same code runs against more than one.
+* *One instance per type.* Attaching two options objects of the same type throws `IllegalArgumentException`; set everything for one store in one object.
+* *Portable.* The active event store applies the options of its own type and ignores all others, so code that attaches `CassandraOptions` runs unchanged on a SQL event store.
+* *Overrides properties for this transaction only.* An option you set wins over the event store's per-domain property, which wins over its global default. Options you leave unset fall back to the properties.
+* *Applied when the transaction starts.* `configure(...)` runs only once, when the transaction starts, and event-store options take effect at that point (for example, the idempotency-key check at admission).
+
+For the available Cassandra options, their defaults and their current availability, see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#cassandra-per-transaction-options[Per-Transaction Override with CassandraOptions].
+
+[[configure-validation-errors]]
+==== Configuration and Execution Errors
+
+[cols="3,2,4",options="header"]
+|===
+| Situation | Exception | How to fix it
+
+| A `Duration` or the options passed to the configurer is `null`, or the `configure(...)` lambda returns `null`
+| `IllegalArgumentException`
+| Pass non-null values and return the result of the configurer chain.
+
+| `idempotencyKey(..)` receives a null, empty or blank key, or a key longer than 255 characters
+| `IllegalArgumentException`
+| Derive a non-blank key of at most 255 characters from the trigger.
+
+| `with(..)` receives a second options object of the same type
+| `IllegalArgumentException`
+| Put all settings for one event store into a single options object.
+
+| `execute()` or `executeAsync()` is called a second time on the same chain
+| `IllegalStateException`
+| A chain started by `init(...)` is one transaction. Start a new chain for a new transaction.
+
+| `execute()` (also `fireAndWait().execute()` and `resume(...).executeAndWait()`) is called on a non-blocking (event-loop) thread
+| `IllegalStateException`
+| Use `executeAsync()` (or `executeAndWaitAsync()`) in reactive code.
+|===
 
 [[resuming-paused-transactions]]
 === Resuming Paused Transactions (Pausable LRT)
 
-When a saga executor participates in a *xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transaction]* and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pause(...)`].
-Similarly, when a compensation step must undo a transaction via an asynchronous gateway or banking transfer, it halts compensation by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pause(...)`]. See xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Workflows] for the conceptual background.
+When a saga executor participates in a *xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transaction]* and delegates to an external asynchronous service (such as an asynchronous payment provider or human restaurant order confirmation), it intentionally halts forward execution by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#stepManager_pause[`stepManager.pauseUntilResume(...)`].
+Similarly, when a compensation step must undo a transaction via an asynchronous gateway or banking transfer, it halts compensation by returning xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[`stepManager.pauseUntilResume(...)`]. See xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Workflows] for the conceptual background.
 
 At the moment of pausing, the transaction enters an intentional business wait state:
 
-* The `SagaDomainEntity` state is persisted to the event store.
-* `es_transaction` marks `is_paused = 1` and records `current_resume_key = <idempotencyKey>`.
-* CPU worker threads are freed immediately.
+* The `DomainEntity` state is persisted to the Event Store.
+* The orchestrator marks the transaction as paused and registers the active correlation token (generated and accessible during execution via `stepManager.getResumeKey()`).
+* CPU worker threads and database connections are freed immediately.
+
+[NOTE]
+====
+**Retrieving the Resume Key & Dual-Token Architecture:**  
+During forward execution (`doProcess`) or compensation (`doRevert`), the executor invokes `stepManager.getResumeKey()` to obtain the unique correlation token. StackSaga enforces a clear separation between two distinct tokens:
+
+* **Domain Idempotency Key (`idempotencyKey`)**: A business/domain-level hash computed by `getIdempotencyKey(...)`. Forward this key to downstream payment gateways, banking APIs, or external HTTP services (e.g. in `Idempotency-Key` headers) so that the remote service deduplicates calls if network retries occur.
+* **Correlation Resume Key (`resumeKey`)**: A runtime correlation token formatted as `transactionId:tryoutId`. It encapsulates the transaction ID and the unique **Tryout UID** of the current execution attempt. Pass this key to external callbacks, webhooks, or asynchronous messaging headers so that the callback can supply it back upon completion.
+
+**Stale Callback Protection:**  
+If an external wait state times out and the StackSaga Retry Coordinator re-invokes the executor, a **new** Tryout UID is allocated with a **new** `resumeKey`. If a delayed callback from the previous timed-out attempt arrives later, StackSaga detects that the callback's `tryoutId` does not match the active tryout UID. The engine safely rejects the stale callback with `InvalidTransactionResumeKeyException`, strictly preventing out-of-order execution or duplicate state transitions.
+
+**Event Store Compatibility:**  
+The Event Store query layer provides dual-matching (`rc.resume_key = tryout.transaction_execution_tryout_uid OR rc.resume_key = tryout.idempotency_key`), ensuring full backward compatibility with legacy callback formats while enforcing tryout-level precision.
+====
 
 To wake up and continue the transaction once the external system completes its task, `SagaTemplate` provides the `resume(...)` operator.
 
 [[fluent-resume-spec]]
 ==== The Fluent `ResumeSpec` Builder API
 
-Calling `sagaTemplate.resume(...)` returns a `SagaTemplate.ResumeSpec<DE>` fluent builder that configures callback metadata and initiates transaction resumption:
+Calling `sagaTemplate.resume(resumeKey, retentionDuration)` returns a `SagaTemplate.ResumeSpec<DE>` fluent builder that configures callback metadata and initiates transaction resumption:
 
 [source,java]
 ----
-// Resuming with fluent key-value context entries:
+// Resuming synchronously with fluent key-value context entries:
 this.sagaTemplate
-        .resume(transactionId, correlationKey)
+        .resume(resumeKey, Duration.ofMinutes(15))
         .put("status", "SUCCESS")
         .put("gatewayReference", "REF-987654")
         .execute(); // Blocking (Spring MVC)
 
 // Reactive non-blocking resumption:
 Mono<Void> resumeMono = this.sagaTemplate
-        .resume(transactionId, correlationKey)
+        .resume(resumeKey, Duration.ofMinutes(15))
         .put("status", "SUCCESS")
         .put("gatewayReference", "REF-987654")
         .executeAsync(); // Reactive (Spring WebFlux)
 ----
+
+`sagaTemplate.resume(...)` requires two parameters:
+
+* **`resumeKey`** (`String`): The unique correlation key that was generated for the paused span (retrieved via `stepManager.getResumeKey()`). It uniquely identifies the paused transaction and tryout checkpoint in the event store.
+* **`retentionDuration`** (`Duration`): The duration to retain the transaction without being exposed for restoring by the Ring Coordinator's scheduled recovery workers (e.g., `Duration.ofMinutes(15)` or `Duration.ofHours(1)`). In case of an unexpected system termination during resumption, the transaction will be exposed for restoring only after this retention duration has elapsed.
 
 `ResumeSpec<DE>` exposes the following fluent methods:
 
 * **`.put(String key, String value)`**: Adds an individual key-value entry to the `ResumeContext`.
 * **`.putAll(Map<String, String> map)`**: Adds all entries from the specified map to the `ResumeContext`.
 * **`.withContext(ResumeContext resumeContext)`**: Supplies or replaces a pre-built `ResumeContext` (e.g., from `DefaultResumeContext.of(map)`).
-* **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments).
-* **`.executeAsync()`**: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments).
+* **`.execute()`**: Synchronously blocks until the transaction is resumed by the engine (for Spring MVC / imperative environments). Throws `InvalidTransactionResumeKeyException` if the resume key is invalid or unrecognized. Throws `IllegalStateException` if invoked from a non-blocking Reactor/Netty event-loop thread.
+* **`.executeAsync()`**: Returns a `Mono<Void>` that completes asynchronously once resumption is processed (for Spring WebFlux / reactive environments). Signals `InvalidTransactionResumeKeyException` via `onError` if invalid.
+* **`.executeAndWait()`**: Synchronously blocks until the resumed run segment has ended, and returns a `TransactionRunResult`. Throws `InvalidTransactionResumeKeyException` if the resume key is invalid, and `IllegalStateException` if invoked from a non-blocking Reactor/Netty event-loop thread.
+* **`.executeAndWaitAsync()`**: Returns a `Mono<TransactionRunResult>` that emits once the resumed run segment has ended. Signals `InvalidTransactionResumeKeyException` via `onError` if invalid.
 
-NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(transactionId, correlationKey, resumeContext).execute()`.
+`execute()` and `executeAsync()` return once the resumption is accepted; the resumed run continues in the background. Use `executeAndWait()` or `executeAndWaitAsync()` when the caller needs to know when the resumed run has ended, for example to limit how many resumed transactions run at once. See xref:#fire-and-wait[Waiting for the Run: `fireAndWait`].
+
+NOTE: A convenient overloaded shortcut is also available: `sagaTemplate.resume(resumeKey, resumeContext, retentionDuration).execute()`.
 
 [[uniform-resumption]]
 ==== Uniform Resumption: Seamless Handling of Forward and Compensation Flows
 
 A major strength of StackSaga's architecture is that **resumption is completely uniform from the orchestrator's perspective**:
 
-* You invoke the exact same method -- `sagaTemplate.resume(transactionId, correlationKey)` -- whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
-* The StackSaga Execution Coordinator (SEC) queries the event store, determines the transaction status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, resets `is_paused = 0` and `current_resume_key = NULL`, and dispatches the execution:
-** **If paused in forward flow**: Advances to the target `NextExecutor` designated by xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).pause(duration).nextExecutor(NextExecutor.class)`], invoking its `doProcess(...)` with the supplied `ResumeContext`.
+* You invoke the exact same method -- `sagaTemplate.resume(resumeKey, retentionDuration)` -- whether the saga paused during forward execution (`doProcess`) or during backward compensation (`doRevert`).
+* The StackSaga Execution Coordinator (SEC) queries the Event Store, resolves the `resumeKey`, determines the transaction lifecycle status (`PROCESSING` vs `REVERTING`), restores the domain entity snapshot up to the paused checkpoint, clears the wait-state markers, and dispatches execution:
+** **If paused in forward flow**: Advances to the target `NextExecutor` designated by xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[`stepManager.success(...).asSync().pauseUntilResume(duration).resumeToNextExecutor(NextExecutor.class)`] (or `asAsync()`), invoking its `doProcess(...)` with the supplied `ResumeContext`.
 ** **If paused in compensation flow**: Re-invokes the paused `CommandExecutor`'s `doRevert(...)` with the supplied `ResumeContext`, allowing it to finalize reversal actions. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pausable-compensation[Implementing Pausable Compensation].
 
 [[callback-controller-pattern]]
@@ -247,11 +740,10 @@ public class OrderCallbackController {
      */
     @PostMapping("/order-ready")
     public ResponseEntity<Void> onOrderReadyCallback(@RequestBody OrderReadyCallbackDto callbackDto) {
-        log.info("Received order-ready callback for transaction: {} with correlationKey: {}",
-                callbackDto.getTransactionId(), callbackDto.getCorrelationKey());
+        log.info("Received order-ready callback for resumeKey: {}", callbackDto.getResumeKey());
 
         this.sagaTemplate
-                .resume(callbackDto.getTransactionId(), callbackDto.getCorrelationKey())
+                .resume(callbackDto.getResumeKey(), Duration.ofMinutes(15))
                 .put("kitchenStatus", callbackDto.getKitchenStatus())
                 .put("readyTimestamp", callbackDto.getReadyTimestamp().toString())
                 .execute();
@@ -264,11 +756,10 @@ public class OrderCallbackController {
      */
     @PostMapping("/refund-confirmed")
     public ResponseEntity<Void> onRefundConfirmed(@RequestBody RefundWebhookDto refundDto) {
-        log.info("Received refund webhook for transaction: {} with correlationKey: {}",
-                refundDto.getTransactionId(), refundDto.getCorrelationKey());
+        log.info("Received refund webhook for resumeKey: {}", refundDto.getResumeKey());
 
         this.sagaTemplate
-                .resume(refundDto.getTransactionId(), refundDto.getCorrelationKey())
+                .resume(refundDto.getResumeKey(), Duration.ofHours(1))
                 .put("refundStatus", refundDto.getRefundStatus())
                 .put("gatewayRefundRef", refundDto.getGatewayRefundReference())
                 .execute();
@@ -294,11 +785,10 @@ public class ReactiveOrderCallbackController {
     public Mono<ResponseEntity<Void>> onRefundConfirmed(@RequestBody Mono<RefundWebhookDto> refundDtoMono) {
         return refundDtoMono
                 .flatMap(dto -> {
-                    log.info("Received reactive refund webhook for tx: {} key: {}",
-                            dto.getTransactionId(), dto.getCorrelationKey());
+                    log.info("Received reactive refund webhook for resumeKey: {}", dto.getResumeKey());
 
                     return this.sagaTemplate
-                            .resume(dto.getTransactionId(), dto.getCorrelationKey())
+                            .resume(dto.getResumeKey(), Duration.ofHours(1))
                             .put("refundStatus", dto.getRefundStatus())
                             .put("gatewayRefundRef", dto.getGatewayRefundReference())
                             .executeAsync()
@@ -310,9 +800,9 @@ public class ReactiveOrderCallbackController {
 
 When `resume(...)` is called:
 
-. StackSaga validates that the supplied `correlationKey` matches the `current_resume_key` registered on `es_transaction`.
-. It stores the serialized `ResumeContext` JSON into `es_transaction_execution_tryout.resume_context`.
-. It resets `is_paused = 0` and clears `current_resume_key = NULL`.
+. StackSaga resolves the `resumeKey`, validating that the supplied correlation token matches the active Tryout UID registered in the Event Store (stale callbacks from previous timed-out attempts are rejected immediately).
+. It durably records the serialized `ResumeContext` payload in the Event Store for complete auditing and tracing.
+. It clears the transaction wait-state (`is_paused = 0`), ensuring subsequent duplicate callbacks with the same resume key are rejected.
 . It restores the `OrderDomainEntity` with its pristine checkpoint state.
 . It invokes the target executor's `doProcess(...)` or `doRevert(...)`, injecting the populated `ResumeContext`. See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#usage-2-pausable-lrt[Pausable Long-Running Transactions in Executor Architecture] for how executors consume this data.
 
@@ -326,18 +816,18 @@ When `resume(...)` is called:
 +
 [source,java]
 ----
-String refundStatus = resumeContext.get("refundStatus").orElse("FAILED");
+String refundStatus = context.resumeContext().get("refundStatus").orElse("FAILED");
 ----
 
-* **Immutability Guarantee**: Once passed into an executor (`doProcess` or `doRevert`), the `ResumeContext` is marked read-only. Calling modifying operations (`put`, `remove`, `clear`) throws `UnsupportedOperationException`. This prevents executors from accidentally mutating callback audit records.
+* **Immutability Guarantee**: Once delivered to an executor (through `context.resumeContext()` in `doProcess` or `doRevert`), the `ResumeContext` is read-only. Calling modifying operations (`put`, `remove`, `clear`) throws `UnsupportedOperationException`. This prevents executors from accidentally mutating callback audit records.
 * **Serialization & Event Sourcing**: Provides `prettyPrintAsString(ApplicationContext)` and `printAsString(ApplicationContext)` using the framework's configured JSON mapper bean.
 * **Deep Comparison**: Provides `deepEquals(ResumeContext obj, ApplicationContext applicationContext)` for structural JSON equality checks.
-* **Event Store Durability**: Serialized into the `resume_context` JSON column of `es_transaction_execution_tryout`, providing complete auditability for every callback payload received by the system. See xref:stacksaga-sync/index.adoc#resume-context-concept[Decoupling External Callback Payloads].
+* **Event Store Durability**: Durably serialized and recorded in the underlying Event Store, providing an immutable audit trail for every callback payload received by the system. See xref:stacksaga-sync/index.adoc#resume-context-concept[Decoupling External Callback Payloads].
 
 [[pausable-lrt-timeout-reexecution]]
 === Timeout Re-Execution Mechanics (When No Callback Arrives)
 
-When an executor pauses with a maximum duration (e.g., `stepManager.success("ORDER_PREPARING").pause(Duration.ofHours(5)).nextExecutor(DeliveryDispatchExecutor.class)`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
+When an executor pauses with a maximum duration (e.g., `stepManager.success("ORDER_PREPARING").asSync().pauseUntilResume(Duration.ofHours(5)).resumeToNextExecutor(DeliveryDispatchExecutor.class)`), the application expects an external callback to trigger `sagaTemplate.resume(...)` before the 5 hours expire.
 
 However, in worst-case scenarios where the external system crashes, network connectivity is lost, or the callback is never delivered within the configured timeout:
 
@@ -347,7 +837,7 @@ Furthermore, the logic required to invoke the external target service, verify or
 Therefore, StackSaga's retry coordinator re-executes the transaction directly from the executor where it was paused (`MakePaymentExecutor`), even though its primary execution had previously succeeded before entering the pause.
 
 * **Re-Invocation Flow:**
-Upon timeout expiration, the retry coordinator claims ownership of the stalled transaction, safely reconstructs the pristine `SagaDomainEntity` up to the checkpoint prior to that executor, and invokes `doProcess(...)` again. This gives the executor an opportunity to query the external system's status (e.g., checking if the payment went through), re-trigger the external call, or throw `NonRetryableExecutorException` to initiate compensation.
+Upon timeout expiration, the retry coordinator claims ownership of the stalled transaction, safely reconstructs the pristine `DomainEntity` up to the checkpoint prior to that executor, and invokes `doProcess(...)` again. This gives the executor an opportunity to query the external system's status (e.g., checking if the payment went through), re-trigger the external call, or throw `NonRetryableExecutorException` to initiate compensation.
 
 * **Impact on State Listeners:**
 Because the paused executor is executed again, this directly affects registered state change listeners. See the detailed guidance in xref:#at-least-once-listener-semantics[At-Least-Once Notification in Pausable LRT] below.
@@ -387,26 +877,94 @@ Keep `onStateChanged` lightweight (e.g., publishing a quick notification or logg
 
 [[at-least-once-listener-semantics]]
 [WARNING]
-.At-Least-Once Notification in Pausable LRT (Duplicate Listener Invocations)
+.Crucial: Atomicity, the Crash Window, and the Two Failure Hazards of Placing Business Logic in Listeners
 ====
-In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses awaiting an external callback with a timeout `Duration` (e.g., 5 hours), the listener callback (`onStateChanged`) can be invoked **multiple times** for that same executor:
+While `TransactionEventListener` and `ReactiveTransactionEventListener` logically receive at-least-once notifications during normal workflow progression, developers must understand the technical lifecycle boundaries, the Event Store commit barrier, and failure semantics to avoid critical architectural bugs:
 
-. **First Invocation (Initial Success):** When the executor successfully completes its initial forward logic (such as dispatching an asynchronous request to an external payment provider) and pauses via `stepManager.pause(...)`, the engine invokes `onStateChanged`.
-. **Second Invocation (Timeout Re-Execution):** If no external callback arrives to resume the saga before the configured duration expires, the framework re-executes the paused executor. Upon successful re-execution, the engine invokes `onStateChanged` **again** for that same executor.
+*1. The Atomicity Mandate: Why the Engine Persists State BEFORE Invoking Listeners*
 
-*Crucial Design Rules:*
+A fundamental design invariant of the StackSaga Execution Coordinator (SEC) is: **The SEC immutably persists the executor's state transition and domain snapshot to the Event Store BEFORE invoking the `onStateChanged` listener callback.**
 
-* **Never place critical business logic or state mutations in a listener:**
-Because listener callbacks follow at-least-once semantics and can be re-triggered during retries and timeout recoveries, placing non-idempotent business logic, state mutations, or external charges inside `onStateChanged` will cause duplicate side-effects. Listeners should be strictly reserved for observational tasks (logging, metrics, or pushing user notifications).
+To understand why this sequence is mandatory, consider what would happen if the engine violated this rule and invoked the listener *before* persisting to the Event Store:
 
-* **Recommended Pattern -- Use a `QueryExecutor`:**
-If your workflow requires an operation to execute immediately following an executor (such as generating an internal receipt, updating a read model, or creating an audit log) that does not require compensation, **do not place it in `TransactionEventListener`**.
-Instead, model it as a formal **`QueryExecutor`** within the saga flow (e.g., chaining it via `stepManager.next(RecordAuditQueryExecutor.class, ...)`).
-As a first-class saga participant, a `QueryExecutor` guarantees:
-+
-** Durable recording and tracking in the Event Store.
-** Deterministic execution aligned with the saga's forward progression.
-** Full idempotency protection and visibility in the transaction execution history.
+* Suppose the listener runs first and executes external side-effects (e.g. sending a customer SMS, email, or webhook confirmation: *"Your payment of $100 succeeded! Order #123 is confirmed"*).
+* The user's phone receives the notification.
+* A millisecond later, before the database write commits (or while the write is in progress), the JVM process suffers an Out-Of-Memory (OOM) kill, a node eviction, or a database connection timeout.
+* **The Catastrophic Inconsistency (Phantom Notification):** When the cluster recovers, the Event Store contains **no record** of that payment or order confirmation. From the system's perspective, the step never happened (or will be rolled back). Yet the customer has already received an authoritative confirmation of success! This represents a total breach of atomicity and consistency.
+
+Therefore, StackSaga enforces that **no step is considered complete until it is durably committed to disk in the Event Store**. The Event Store Commit Barrier must always precede listener notification.
+
+*2. The Resulting Crash Window & The Silent Omission Hazard*
+
+Because the Event Store commit barrier *must* precede listener execution to guarantee atomicity, there is an unavoidable physical window in distributed computing:
+
+[source,text]
+----
+[1. Executor doProcess()] ──► [2. Event Store Commit Barrier] ──► [3. onStateChanged()] ──► [4. Next Executor]
+                                                                     ▲
+                                                        CRASH WINDOW: If JVM dies here,
+                                                        Executor A is COMMITTED in Event Store.
+                                                        On restore, saga resumes directly at [4]!
+----
+
+If the JVM process crashes (e.g. OOM kill, hardware fault, pod eviction, host power cut) immediately after step 2 or while step 3 is executing:
+
+* The Event Store has already durably recorded that Executor A succeeded and committed its milestone snapshot.
+* When the Retry-Node or dead-man's switch restore worker detects the stalled transaction and restores it, it inspects the Event Store and determines that Executor A is already `COMMITTED`.
+* Consequently, the engine resumes transaction execution directly from **Executor B (the Next Executor)**.
+* The framework **does NOT re-invoke the listener** for the already-committed Executor A!
+* If a developer placed critical business logic inside `onStateChanged` (such as generating an invoice, decrementing another resource, or notifying a downstream ledger), **that critical invocation is permanently lost and will never execute**, without triggering any retry or compensation.
+
+*3. Summary: The Two Failure Hazards of Listeners*
+
+Placing business logic, financial operations, or state mutations in an event listener exposes the system to two complementary hazards:
+
+[arabic]
+. *Hazard 1: At-Least-Once Duplication (Timeout Re-Executions)* +
+In a xref:#pausable-lrt-timeout-reexecution[Pausable LRT], if an executor pauses awaiting an external callback with a timeout `Duration` (e.g. 5 hours), the listener callback (`onStateChanged`) can be invoked **multiple times** for that same executor (once when entering the pause, and again upon timeout re-execution if no callback arrives). Non-idempotent logic will execute redundantly.
+. *Hazard 2: Zero-Invocation Omission (The JVM Crash Window)* +
+If the application crashes after the executor commits but before the listener completes, the listener will be invoked **zero times** for that attempt upon cluster restoration. Non-skippable logic will be dropped permanently.
+
+*4. The Architectural Solution: The Re-Invokable Executor Pattern (`QueryExecutor` / `CommandExecutor`)*
+
+If an invocation must run definitely as part of the Long-Running Transaction and must **never be skipped under any circumstance (including application crashes)**:
+
+* **Rule 1: Never execute transactional or critical business logic inside `TransactionEventListener`.** Listeners are strictly reserved for ephemeral, non-transactional observations (pushing Prometheus metrics, emitting debug logs, or sending best-effort UI WebSocket updates).
+* **Rule 2: Model and chain the invocation as a formal Executor as the immediate next step in your saga flow.**
+** *If the operation is non-compensable* (e.g. creating an internal invoice, recording an immutable audit ledger, reading verification data, or dispatching a non-rollbackable receipt): implement it as a formal **`QueryExecutor`** (e.g. `stepManager.success("ORDER_PROCESSED").asSync().noPause().toNextExecutor(CreateInvoiceQueryExecutor.class)`).
+** *If the operation is state-changing and requires rollback on failure*: implement it as a formal **`CommandExecutor`** with an appropriate `doRevert()` compensation method.
+
+*Why Executors Guarantee Non-Skippability & Durability:*
+
+. **Re-Invokable by Default:** Executors are first-class saga participants. If the JVM crashes before, during, or after an executor, StackSaga's Event Store and xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem] detect the uncommitted state, restore the pristine `DomainEntity` snapshot, and re-invoke the executor deterministically until completion.
+. **Automatic Rollback Pruning for `QueryExecutor`:** Because `QueryExecutor` does not implement `doRevert()`, StackSaga's Reverse Autopilot automatically skips and prunes it during rollback (see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[USNP Query Pruning Pattern]). It provides durability without complicating the compensation path.
+. **Trace Window Observability:** Unlike logic hidden inside listeners, every Executor span is fully visible in the xref:trace-window:stacksaga-trace-window.adoc[Trace Window] dashboard—including execution latency, domain entity snapshots before and after execution, and transient retry attempts.
+
+.Developer Decision Matrix: Where Should Your Logic Live?
+[cols="2,2,1,2,1",options="header"]
+|===
+| Task / Goal | Recommended Component | Crash-Safe? | Rollback Behavior | Trace Window Visibility
+
+| Real-time UI progress bars, Prometheus metrics, debug logging
+| xref:#state-change-listeners[`TransactionEventListener`]
+| ❌ Ephemeral (Skipped on crash)
+| Ignored (Does not participate in rollback)
+| ❌ Not tracked as a span
+
+| Invoices, email receipts, audit logs, read-model sync, non-compensable queries
+| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor`]
+| ✔ Yes (Durable & Re-invokable)
+| **Automatically pruned & skipped** (xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[Zero rollback impact])
+| ✔ First-class span with latency & status (xref:trace-window:stacksaga-trace-window.adoc[Trace Window])
+
+| Charging cards, inventory reservations, state-modifying business commands
+| xref:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[`CommandExecutor`]
+| ✔ Yes (Durable & Re-invokable)
+| Executes `doRevert()` in reverse LIFO order
+| ✔ First-class span with latency & snapshots (xref:trace-window:stacksaga-trace-window.adoc[Trace Window])
+|===
+
+TIP: For a hands-on walkthrough demonstrating `TransactionEventListener` implementation alongside saga controllers, see the xref:demo:page$mysql/stacksaga-mysql-quick-example.adoc#create-handler[MySQL Quick Example: Order Handler Guide].
 ====
 
 ==== TransactionEventListener
@@ -501,6 +1059,16 @@ NavigableMap<Integer, ? extends SyncExecutionEvent<OrderDomainEntity>> history =
 OrderDomainEntity entity = state.getCurrentDomainEntity();
 ----
 
+[IMPORTANT]
+====
+**Execution Status Semantics (`ExecutionStatus.NOT_YET` vs. `SUCCESS`):**  
+When inspecting `state.getExecutionHistory()`, note the lifecycle status of individual executor steps:
+
+* **Continuous Steps (`noPause()`):** When an executor completes without pausing, its event status in history is recorded immediately as `ExecutionStatus.SUCCESS`.
+* **Pausable Wait Steps (`pauseUntilResume(...)` in Pattern 2 & Pattern 3):** While a transaction is parked waiting for an external webhook callback or message event, the active step's execution status in history is recorded as **`ExecutionStatus.NOT_YET`** (with transaction `is_paused = 1`).
+* **Post-Resumption:** The parked step only transitions to `ExecutionStatus.SUCCESS` once `sagaTemplate.resume(...)` successfully delivers the callback context and the workflow resumes to the next executor.
+====
+
 ==== Reactive State Retrieval (Reactive / Spring WebFlux)
 
 [source,java]
@@ -541,6 +1109,10 @@ public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEn
                     orderDomainEntity.setTotalAmount(amount);
                     return orderDomainEntity;
                 })
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
                 .startWith(ValidateUserExecutor.class)
                 .fireAndForget()
                 .execute();
@@ -586,6 +1158,10 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
                     orderDomainEntity.setTotalAmount(amount);
                     return orderDomainEntity;
                 })
+                .configure(config -> config
+                        .transactionLifetime(Duration.ofHours(24))
+                        .defaultRestoreOnCrashDelay(Duration.ofMinutes(5))
+                        .withoutIdempotency())
                 .startWith(ValidateUserExecutor.class)
                 .fireAndForget()
                 .executeAsync();
@@ -612,3 +1188,81 @@ public class ReactivePlaceOrderHandler implements ReactiveTransactionEventListen
 <1> Non-blocking transaction initiation returning `Mono<String>` with the transaction ID.
 <2> Non-blocking state query using `.getCurrentState(orderId).fetchAsync()`.
 <3> Implement `onStateChanged` from `ReactiveTransactionEventListener` returning `Mono<Void>` for non-blocking event handling.
+
+[[advanced-architectural-faq]]
+== Advanced Architectural FAQ & Production Edge Cases
+
+In distributed systems, workflow implementations often rely on intuitive assumptions that break down under real-world production conditions (such as network latency, late callbacks, pod evictions, and infrastructure timeouts).
+The following Q&A addresses six critical, real-world edge cases to help architects and developers design resilient, bug-free sagas before encountering these scenarios in production.
+
+=== Q1: Can an executor action (`doProcess()` or `doRevert()`) be re-invoked even after being marked as success?
+
+*Yes.* In a xref:stacksaga-sync/index.adoc#pausable-lrt[Pausable Long-Running Transaction] where an executor enters a wait-state via `stepManager.pauseUntilResume(duration)`, the executor's initial execution is marked as `SUCCESS` and the transaction enters `PAUSED` status.
+
+However, if the external callback (e.g. payment gateway webhook or courier confirmation) fails to arrive before the configured `duration` expires:
+* The framework **cannot advance** to the next executor because the business operation remains unconfirmed.
+* Furthermore, the domain logic to query the external system's status or re-trigger the call resides **inside that paused executor**.
+* Therefore, the StackSaga xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem] re-executes the transaction directly from the executor where it was paused, **even though its initial execution previously succeeded before entering the pause**. See xref:#pausable-lrt-timeout-reexecution[Timeout Re-Execution Mechanics].
+
+*Architectural Takeaway:* Any executor that returns `.pauseUntilResume(...)` must implement its `doProcess()` (or `doRevert()`) idempotently, so that a timeout re-execution does not generate duplicate business side-effects.
+If the re-execution then fails non-retryably with `compensateThisStep(true)`, the executor's own `doRevert()` runs first during compensation (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
+
+=== Q2: What happens if an external callback arrives after the wait-state timeout has expired, and how should duration be tuned?
+
+When configuring a wait-state via `stepManager.pauseUntilResume(Duration duration)`, developers should tune the validity period based on the expected turnaround SLA and real-world response behavior of the target external system (e.g. 15 minutes for customer 3D-Secure redirects, 2 hours for restaurant kitchen preparation, or 24 hours for asynchronous bank clearing).
+
+If the timeout duration expires before the callback arrives:
+. The Retry Subsystem re-invokes the paused executor.
+. When re-invoked, the executor may re-query or re-call the target service using the **exact same deterministic `resumeKey` / `idempotencyKey`** generated for that span, allowing the downstream system to match the operation idempotently.
+. If a late callback arrives while re-invocation is underway or after compensation has commenced, `sagaTemplate.resume(resumeKey, retentionDuration)` may detect that the active resume token has expired or transitioned.
+
+*Best Practice Recommendation:* Webhook controllers should handle late callbacks flexibly according to partner integration policies. Rather than throwing unhandled exceptions that cause third-party gateways to retry endlessly, controllers can inspect the current transaction state via `sagaTemplate.getCurrentState(orderId).fetch()` and acknowledge the callback (e.g. returning HTTP 200/202 with an informational audit log).
+
+=== Q3: Why do in-memory field mutations on `DomainEntity` disappear upon timeout re-execution?
+
+StackSaga enforces the **Event Sourcing** paradigm. State transitions are committed immutably to the Event Store only at completed execution milestones.
+
+If an executor mutates in-memory fields on `currentDomainEntityState` inside `doProcess()` and pauses, but the wait-state times out without a callback:
+* The engine **discards all uncommitted in-memory mutations** from that paused tryout.
+* Upon re-invocation, the engine reconstructs the `DomainEntity` cleanly from the Event Store up to the exact checkpoint preceding this executor (see xref:stacksaga-sync/index.adoc#pristine-state-restoration[Pristine State Restoration]).
+
+*Architectural Takeaway:* Never rely on ephemeral in-memory object state across retries or pauses. Only domain state committed to the Event Store through successful tryout barriers is preserved.
+
+=== Q4: Can `doRevert()` throw `NonRetryableExecutorException`? What happens if compensation encounters an error?
+
+*No.* In StackSaga, `NonRetryableExecutorException` is **strictly forbidden in `doRevert()`** (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#exceptions[Exception Handling & Fault Classification]). Compensating transactions are allowed to throw `RetryableExecutorException` only.
+
+*The Architectural Rationale:* In the Saga pattern, there is no compensation for a compensation. If a forward step fails, backward rollback must run until completion to guarantee eventual consistency.
+* **Transient Rollback Errors:** If a downstream service is temporarily unavailable during compensation, throwing `RetryableExecutorException` pauses the rollback, and the Retry Subsystem will automatically re-attempt `doRevert()`.
+* **Permanent Rollback Errors (The Risk):** If an unhandled `RuntimeException` occurs in `doRevert()`, the saga becomes a xref:retry-ring-coordinator:disabled-and-terminated-transaction.adoc#terminated-transactions[Terminated Transaction] (permanently frozen in partial compensation). The issue must be investigated and resolved via the xref:trace-window:stacksaga-trace-window.adoc[Trace Window] dashboard before restoring the transaction.
+
+*Architectural Takeaway:* Write `doRevert()` methods defensively and idempotently. For example, if a downstream resource was never created in the forward step, `doRevert()` should treat cancellation as successful rather than throwing an error.
+This also matters for a forward step that was retried and then failed non-retryably with `compensateThisStep(true)`: its own `doRevert()` runs first and may target an operation that an earlier attempt only possibly applied (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
+
+=== Q5: Why can `onStateChanged` be called multiple times, but also ZERO times during crashes?
+
+State Change Listeners follow **At-Least-Once notification semantics** during normal operations, but have a physical **Crash Window**:
+* **Multiple Invocations:** In a Pausable LRT, `onStateChanged` is invoked on the initial pause and **again** upon timeout re-execution.
+* **Zero Invocations:** To guarantee atomicity and prevent phantom notifications (such as sending an SMS confirmation before data is committed to the database), the SEC persists state to the Event Store *before* calling listeners. If the JVM crashes after commit but before the listener finishes, cluster restoration resumes directly from the *next* executor, meaning the listener is never re-invoked for the completed step.
+
+*Architectural Takeaway:* As summarized in the xref:#at-least-once-listener-semantics[Developer Decision Matrix], never place non-skippable transactional operations in `TransactionEventListener`. Always model critical post-step actions as formal xref:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor`] steps.
+
+=== Q6: Do we need a distributed lock (e.g. Redis / Redlock) to prevent multiple pods from retrying the same transaction?
+
+*No.* Developers must **never** implement external distributed locks (such as Redis locks, Hazelcast mutexes, or database row locks) around StackSaga sagas or retry schedulers.
+
+StackSaga eliminates distributed locking entirely through **Murmur3 64-bit Consistent Hashing Token Ring Partitioning** and **30-Second Forward Time-Window Publishing**:
+* Every transaction ID is deterministically hashed into a 64-bit token (`-2^63` to `2^63 - 1`).
+* The Retry-Coordinator Master and Slaves partition this token space into strictly non-overlapping sub-ranges assigned to active Retry-Nodes.
+* Each Retry-Node holds exclusive ownership of its assigned sub-range for a defined one-minute time window, granted with the absolute UTC interval it covers.
+* Each Retry-Node stops claiming one second before its window ends, so consecutive holders of a range do not overlap under normal clock synchronisation.
+
+Disjoint sub-ranges alone would not settle the question, because a system that reclaims an expired assignment must additionally *fence* the displaced holder to stop it writing.
+StackSaga never reclaims: if a Retry-Node is lost mid-window its range is left uncovered until the next division rather than handed to a survivor, so a second claimant for the same range is never created, and no fencing token or distributed lock is needed.
+
+Inside its range, StackSaga claims each due transaction atomically in the event store before re-invoking it: a short `SELECT ... FOR UPDATE SKIP LOCKED` claim on relational stores, a lightweight transaction on Cassandra.
+That claim settles the rare boundary case in which two nodes' windows touch.
+It covers one transaction for one statement and is internal to StackSaga; it is not a lock you add.
+
+See xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#token-ring-partitioning[Token Ring Partitioning Architecture] and xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#conflict-avoidance[Conflict Avoidance] for the full argument.
+

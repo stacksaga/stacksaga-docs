@@ -98,12 +98,13 @@ end note
 </dependencies>
 ----
 
-[IMPORTANT]
+[NOTE]
 ====
-要将重试环协调器作为 Spring 应用程序运行，您*不需要*引入任何 Web 相关依赖（如 `spring-boot-starter-web` 或 `spring-boot-starter-webflux`）——重试环协调器自身不暴露任何 HTTP 端点，仅暴露供 `slave` 实例连接的 `RSocket` 端点。
-因此，它可以作为非 Web 应用程序（Non-web Application）高效运行。
+`stacksaga-ring-coordinator-spring-boot-starter` 内置了响应式 WebFlux 与 Thymeleaf 引擎，在响应式 Web 环境下开箱即用提供 xref:#live-visual-dashboard[实时可视化监控面板 (Real-Time Visual Dashboard)]、终端 ASCII Banner 以及响应式 SSE 实时事件流。
 
-但在生产环境中，通常需要监控其指标（Metrics）和其他健康数据。您可以添加 `spring-boot-starter-actuator` 依赖来暴露这些监控端点；仅当您需要通过 `HTTP` 访问 Actuator 端点时，才需要额外添加 Web starter。
+如果您在非 Web 环境中运行协调器，或希望完全关闭 Web 界面端点，可配置 `stacksaga.coordinator.dashboard.enabled=false`。
+
+在生产环境中，您还可以额外引入 `spring-boot-starter-actuator` 来暴露健康检查 (`/actuator/health`) 与指标端点 (`/actuator/metrics`)。
 ====
 
 === 配置 (Configuration)
@@ -272,6 +273,234 @@ stacksaga.instance.zone=us-east-1a
 禁用时，StackSaga 不会尝试将容器 ID 或主机名解析为 StatefulSet 序号，而是严格采用显式配置的 `stacksaga.coordinator.instance-type`。
 ====
 
+[[live-visual-dashboard]]
+== 实时可视化监控面板与可观测性 (Real-Time Visual Dashboard & Observability)
+
+重试环协调器内置了实时可视化面板与可观测性端点，供开发与运维人员实时监控集群运行状态、在线 Slave 节点、令牌范围分配以及连接的微服务重试节点 (Orchestrators)。
+
+=== 访问监控面板与端点 (Accessing the Dashboard & Endpoints)
+
+当环协调器运行时，提供以下访问端点：
+
+[cols="2,2,4", options="header"]
+|===
+|端点 (Endpoint)|格式 (Format)|描述 (Description)
+|`/dashboard` (或 `/`)|HTML|交互式实时 Web 监控面板，展示实时集群拓扑、在线 Slave 节点、分配的令牌范围以及已连接的重试节点。
+|`/banner` (或 `/`)|纯文本 (Plain Text)|ASCII 状态横幅，供终端命令行或脚本使用 `curl` 快速查看集群诊断信息。
+|`/api/live/stream`|`text/event-stream`|响应式 Server-Sent Events (SSE) 事件流，每秒推送最新的集群状态快照。
+|`/api/live/snapshot`|`application/json`|协调器当前运行状态、Slave 连接列表与令牌范围的即时 JSON 快照。
+|`/actuator/health`|`application/json`|健康检查探针端点。
+|`/actuator/metrics`|`application/json`|JVM 与运行时指标。
+|===
+
+=== 终端命令行快速查看示例
+
+您可以在终端中使用 `curl` 直接查看实时诊断状态：
+
+[source,bash]
+----
+curl -s http://localhost:8080/banner
+----
+
+[[docker-deployment]]
+== 使用 Docker 与 Docker Compose 部署 (Deploying with Docker & Docker Compose)
+
+社区开发者与 DevOps 团队无需从零创建和维护独立的 Spring Boot 项目，可以直接使用官方预构建的 **StackSaga Ring-Coordinator Docker 镜像**。
+
+=== 官方 Docker 镜像规格
+
+官方镜像发布于 Docker Hub 与 GitHub Container Registry：
+
+[cols="2,1,1,4", options="header"]
+|===
+|镜像标签 (Tag)|基础系统 (Base OS)|C 库 (C Library)|推荐使用场景 (Recommended Use)
+|`stacksaga/ring-coordinator:latest`|Ubuntu Jammy|`glibc`|**企业级生产环境**：100% 兼容各类 APM 探针（Dynatrace, Datadog, New Relic）与 Netty epoll 本地加速。
+|`stacksaga/ring-coordinator:alpine`|Alpine Linux|`musl`|**超轻量级部署**：极小镜像体积 (~180MB) 与加固安全底座。
+|===
+
+IMPORTANT: 每个协调器容器必须维持 **NTP 级 UTC 时钟纪律**。官方镜像默认设置了 `TZ=Etc/UTC`。请确保宿主机或 Kubernetes 节点运行着活跃的 NTP 同步服务（如 `chrony` 或 `systemd-timesyncd`）。
+
+=== Docker Compose 部署拓扑示例
+
+以下提供了适用于不同开发与生产场景的即开即用 Docker Compose 配置示例。
+
+[IMPORTANT]
+====
+以下 Docker Compose 示例默认采用轻量级的 **`stacksaga/ring-coordinator:alpine`** 镜像，具备秒级启动和极低的资源占用 (~180MB)。
+
+在**企业级生产环境**中，建议将镜像标签替换为 **`stacksaga/ring-coordinator:latest`** (Ubuntu Jammy / `glibc`)，以获得对各类企业级 APM 探针（Dynatrace、Datadog、New Relic）以及 Netty epoll 原生传输的完全兼容性。
+====
+
+==== 场景 1：极简单容器混合模式 (Minimal Standalone / Hybrid: `master,slave`)
+
+适用于本地微服务开发与单机测试，在单个容器内同时运行嵌入式 Master 与 Slave：
+
+.docker-compose.minimal.yml
+[source,yaml]
+----
+services:
+  ring-coordinator:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-ring-coordinator
+    ports:
+      - "7777:7777"   # RSocket 服务端口 (微服务编排器连接于此)
+      - "8080:8080"   # HTTP 实时监控面板与健康检查端点
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=master,slave #<1>
+      - STACKSAGA_TARGET_SERVICES=*                      #<2>
+      - STACKSAGA_CLUSTER=dev-cluster
+      - STACKSAGA_REGION=default
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+----
+<1> `master,slave` 在单个容器实例中内嵌运行 Master 和 Slave。
+<2> `*` 代表协调所有业务微服务域的重试请求。
+
+启动命令：
+[source,bash]
+----
+docker compose -f docker-compose.minimal.yml up -d
+----
+在浏览器中打开 `\http://localhost:8080/` 即可直接体验交互式实时面板。
+
+==== 场景 2：极简双节点集群模式 (1 Master + 1 Slave)
+
+适用于验证 Master 与 Slave 之间的 RSocket 网络通信与令牌范围周期握手：
+
+.docker-compose.two-node.yml
+[source,yaml]
+----
+services:
+  coordinator-master:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-master
+    hostname: coordinator-master
+    ports:
+      - "7777:7777"   # Master RSocket 端口
+      - "8080:8080"   # Master 监控面板
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=master
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=prod-cluster
+      - STACKSAGA_REGION=default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  coordinator-slave:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-slave
+    hostname: coordinator-slave
+    depends_on:
+      coordinator-master:
+        condition: service_healthy
+    ports:
+      - "7771:7777"   # Slave RSocket 端口 (业务服务连接于此)
+      - "8081:8080"   # Slave 监控面板
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=slave
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=prod-cluster
+      - STACKSAGA_REGION=default
+      - STACKSAGA_MASTER_HOST=coordinator-master #<1>
+      - STACKSAGA_MASTER_PORT=7777
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+----
+<1> Slave 通过 Docker 内部网络主机名 `coordinator-master` 连接 Master 容器。
+
+==== 场景 3：水平可伸缩集群模式 (Horizontally Scalable Cluster: `--scale coordinator-slave=N`)
+
+在企业高吞吐生产部署中，单个 Master 协调一组可水平弹性伸缩的 Slave 节点池。
+通过在 Slave 服务配置中省略固定的宿主机端口绑定，Docker Compose 可以任意横向扩展 Slave 实例数量：
+
+.docker-compose.scalable.yml
+[source,yaml]
+----
+services:
+  coordinator-master:
+    image: stacksaga/ring-coordinator:alpine
+    container_name: stacksaga-master
+    hostname: coordinator-master
+    ports:
+      - "7777:7777"   # Master RSocket 端口 (内部 Slave 注册通信)
+      - "8080:8080"   # Master 实时面板 (浏览器直接访问)
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=master
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=production-cluster
+      - STACKSAGA_REGION=default
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  coordinator-slave:
+    image: stacksaga/ring-coordinator:alpine
+    depends_on:
+      coordinator-master:
+        condition: service_healthy
+    environment:
+      - TZ=Etc/UTC
+      - STACKSAGA_COORDINATOR_INSTANCE_TYPE=slave
+      - STACKSAGA_TARGET_SERVICES=*
+      - STACKSAGA_CLUSTER=production-cluster
+      - STACKSAGA_REGION=default
+      - STACKSAGA_MASTER_HOST=coordinator-master
+      - STACKSAGA_MASTER_PORT=7777
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+----
+
+一键启动具有 3 个 Slave 节点的分布式集群：
+[source,bash]
+----
+docker compose -f docker-compose.scalable.yml up -d --scale coordinator-slave=3
+----
+
+根据负载动态无缝扩容至 5 个 Slave 节点：
+[source,bash]
+----
+docker compose -f docker-compose.scalable.yml up -d --scale coordinator-slave=5
+----
+
+===== 动态分区再平衡机制：
+1. 每个新增的 Slave 容器启动后，自动通过 RSocket 连接至 `coordinator-master:7777`。
+2. Master 将新 Slave 注册至在线成员拓扑表中。
+3. 在下一个 **30 秒时间边界**，Master 重新计算令牌范围，将 Murmur3 $2^{64}$ 全局哈希空间均匀划分为 `N` 份互不重叠的分区扇区。
+4. Master 将新分区广播给所有 `N` 个 Slave 节点，生效时间为未来的 1 分钟窗口 (T+1 至 T+2)。
+5. 打开 `\http://localhost:8080/` 即可直接查看新增的 Slave 及其重新平衡后的令牌范围。
+
 [[configuration-properties]]
 == 配置属性参考手册 (Configuration Properties Reference)
 
@@ -285,6 +514,21 @@ NOTE: *默认值 (Default)* 列中显示连字符 (`-`) 的属性为必填项且
 |属性名称 (Property Name)|默认值 (Default)|类型 (Type)|描述 (Description)
 
 4+s| 通用配置 — 适用于 Master 和 Slave 实例
+
+|`stacksaga.coordinator.dashboard.enabled`
+|`true`
+|`boolean`
+|是否启用实时可视化监控面板、终端 ASCII 横幅以及响应式 SSE 事件流。
+
+|`stacksaga.coordinator.dashboard.path`
+|`/dashboard`
+|`String`
+|提供实时 HTML 监控面板的基础 Web 路径。
+
+|`stacksaga.coordinator.dashboard.expose-root`
+|`true`
+|`boolean`
+|是否在根路径 (`/`) 同时暴露监控面板与终端横幅。如果宿主 Spring Boot 应用程序定义了自己的根路径路由，可将其设置为 `false`。
 
 |`stacksaga.coordinator.deploy.index-based`
 |`false`

@@ -14,7 +14,8 @@ In a distributed microservices architecture, transactions often span multiple se
 The StackSaga framework addresses this challenge with a robust *transaction retry subsystem* that ensures reliability and consistency without risking duplicate processing or conflicts.
 
 This subsystem detects paused transactions and re-invokes them safely across a cluster of microservice instances, using a combination of token ring partitioning, RSocket communication, and time-windowed publishing.
-The result is high availability and resilience even in the face of transient failures, while guaranteeing that transactions are processed exactly once.
+The result is high availability and resilience even in the face of transient failures, while guaranteeing that a stalled transaction is owned by exactly one node at a time.
+Delivery semantics are *at-least-once*: a step may be re-invoked, so executors forward the engine-provided `idempotencyKey` downstream, which makes the result *effectively-once*.
 
 === Scope of This Document
 
@@ -47,11 +48,35 @@ Examples include validation failures, authorization errors, or any condition tha
 These errors can occur in both the primary flow and the compensation flow.
 In the primary flow, a non-retryable error triggers compensation; if it occurs during compensation, the transaction is marked as permanently failed.
 In either case, the transaction *will not be retried*.
+A step that was retried after a transient failure can still end with a non-retryable error. In that case, an earlier attempt may already have been applied, so the failing step's own compensation runs first when the exception is built with `compensateThisStep(true)` (see xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
 
 *Retryable error* — a transient condition, such as a downstream service being unavailable, a database connection timeout, or a network partition.
 The transaction is paused and will be replayed automatically.
 Retryable errors can occur in both the primary flow and the compensation flow.
 This is precisely where the retry subsystem comes into play, ensuring that the transaction is retried safely without duplication or conflict.
+
+[[immediate-vs-asynchronous-retry]]
+=== Immediate Retry vs Asynchronous Retry
+
+A transient fault does not have to reach this subsystem at all.
+StackSaga supports two distinct retry paths, and choosing between them is the developer's decision inside the executor.
+
+*Immediate retry* — in-thread and developer-driven.
+Inside `doProcess()`, the executor may re-attempt the failing call directly before deciding to give up on it — the request thread is still held, no state is committed, and the retry subsystem is never involved.
+This is the right choice for a fault expected to clear within the lifetime of the request, and its latency is whatever the developer's own re-attempt costs.
+
+*Asynchronous retry* — framework-driven, and the subject of this entire document.
+It begins only once the executor throws `RetryableExecutorException`.
+At that point StackSaga commits the in-flight state to the event store, releases the thread, and the transaction becomes the retry subsystem's responsibility: it is registered for a future recovery window and re-invoked later by whichever Retry-Node owns its token range at that time.
+
+[NOTE]
+====
+The two paths are complementary, not alternatives to choose between once and for all.
+Re-attempt in-thread while that is still cheap and likely to succeed; throw `RetryableExecutorException` once it is worth releasing the thread and letting the transaction be picked up later.
+
+The latency figures discussed in <<costs-and-trade-offs>> describe the *asynchronous* path only.
+They are not a limit on how quickly StackSaga can retry a transient fault.
+====
 
 === Why Instance-Level Retrying Is Insufficient
 
@@ -96,6 +121,7 @@ See xref:foundations:proportional-analysis-of-long-running-transactions-in-saga.
 The next challenge is how retry responsibility is safely distributed across the cluster of Retry-Nodes without any two nodes conflicting over the same transaction.
 This is where *Token Ring Partitioning* comes in.
 
+[[token-ring-partitioning]]
 == Token Ring Partitioning
 
 === Overview
@@ -169,7 +195,7 @@ image::stacksaga-diagram-token-ring-partitioning-for-transaction-retrying.svg[]
 | Retry-Coordinator-Slave Node 3 | `3,074,457,345,618,258,603` | `9,223,372,036,854,775,807`
 |===
 
-NOTE: Partition boundaries are recalculated automatically each time the number of registered Retry-Coordinator-Slaves changes (at the next 30-second publish cycle).
+NOTE: Partition boundaries are recalculated automatically each time the number of registered Retry-Coordinator-Slaves changes — at the next publish cycle, never inside the window already in progress.
 
 ==== Retry-Coordinator-Slave → Orchestrator Example (Retry-Coordinator-Slave Node 1, 2 Orchestrators)
 
@@ -203,13 +229,13 @@ Here is a brief orientation before the detailed descriptions:
 
 | xref:#ring-coordinator-master[*Retry-Coordinator-Master*]
 | Single authority for the domain.
-Divides the full token ring equally across Retry-Coordinator-Slaves every 30 seconds.
+Divides the full token ring equally across Retry-Coordinator-Slaves once per publish cycle.
 Tells new Orchestrators which Retry-Coordinator-Slave to connect to (Round Robin).
 
 | xref:#ring-coordinator-slave[*Retry-Coordinator-Slave*]
 | Relay between Master and Orchestrators.
 Receives its ring slice from the Master and divides it further across its connected Orchestrators.
-Delivers each Orchestrator its personal sub-range every minute.
+Delivers each Orchestrator its personal sub-range once per publish cycle, granted for the window it covers.
 
 | xref:#retry-node[*Orchestrator (Retry-Node)*]
 | Holds its sub-range for the current minute.
@@ -218,7 +244,7 @@ Polls the database for paused transactions whose token falls in that sub-range a
 
 Each component does one small job cleanly.
 No component reaches into another's responsibility.
-The result is a retry system that scales horizontally, tolerates partial failures, and guarantees that every paused transaction is eventually retried — exactly once at a time.
+The result is a retry system that scales horizontally, tolerates partial failures, and guarantees that every paused transaction is eventually retried — by exactly one owner at a time.
 
 [[ring-coordinator-master]]
 === Retry-Coordinator-Master
@@ -226,7 +252,7 @@ The result is a retry system that scales horizontally, tolerates partial failure
 ==== What It Is
 
 The Retry-Coordinator-Master is the *single authority* for retry coordination within a microservice domain.
-There is exactly *one Master per domain* (or per virtual cluster — see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters[Horizontal Scaling via Virtual Clusters]).
+There is exactly *one Master per domain* (or per virtual cluster — see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#virtual-clusters-cell-isolation[Horizontal Scaling via Virtual Clusters]).
 
 The Master has no knowledge of your business logic and never touches the transaction database.
 Its entire responsibility is coordination: dividing the token ring, tracking which Retry-Coordinator-Slaves are alive, and pointing new Orchestrators to the right Retry-Coordinator-Slave when they start up.
@@ -240,7 +266,7 @@ Every Retry-Coordinator-Slave that starts up connects to the Master via a persis
 The Master keeps a live registry of all connected Retry-Coordinator-Slaves.
 When a Retry-Coordinator-Slave disconnects (crashes, restarts), the Master notices immediately and updates its registry.
 
-*Responsibility 2 — Publish token ring partitions every 30 seconds.*
+*Responsibility 2 — Publish token ring partitions once per minute.*
 At the 30th second of every minute the Master fires a timer.
 It looks at the current list of registered Retry-Coordinator-Slaves, divides the full 64-bit token ring equally among them, and pushes each Retry-Coordinator-Slave its assigned range, tagged as valid for the *next* full minute.
 This 30-second lead gives the entire cluster time to receive and prepare the new assignments before they go live.
@@ -300,7 +326,7 @@ Its entire purpose is to act as a *distribution bridge* between the Retry-Coordi
 On startup, the Retry-Coordinator-Slave opens a persistent RSocket `request-stream` connection to the Master, announces itself, and waits for token range updates.
 
 *Step 2 — Receive a token range slice.*
-Every 30 seconds the Master publishes updated ranges.
+Once per minute, at the 30th second, the Master publishes updated ranges.
 The Retry-Coordinator-Slave receives its slice — a contiguous portion of the full 64-bit ring — and is told which minute that slice is valid for.
 
 *Step 3 — Accept Orchestrator registrations.*
@@ -309,7 +335,7 @@ When an Orchestrator starts up and connects, the Retry-Coordinator-Slave records
 *Step 4 — Divide and deliver.*
 With its slice in hand and a list of connected Orchestrators, the Retry-Coordinator-Slave divides the slice equally — one non-overlapping sub-range per Orchestrator — and pushes each sub-range to the respective Orchestrator over the persistent stream.
 
-This cycle repeats every minute, keeping every connected Orchestrator informed of its current retry ownership window.
+This cycle repeats once per minute, keeping every connected Orchestrator informed of its current retry ownership window.
 
 ==== Why Have a Retry-Coordinator-Slave Layer At All?
 
@@ -323,7 +349,7 @@ All the volatility of your application pods is absorbed by the Retry-Coordinator
 ==== What It Knows and Does Not Know
 
 Knows::
-* The Master it is registered with (`stacksaga.agent.slave.target-master.host` / `.port`).
+* The Master it is registered with (`stacksaga.coordinator.slave.target-master.host` / `.port`).
 * The Orchestrator instances currently connected to it.
 * The token range it has been assigned and how to divide it.
 
@@ -338,17 +364,20 @@ When a Retry-Coordinator-Slave crashes or becomes unreachable:
 
 . All Orchestrators connected to that Retry-Coordinator-Slave lose their stream.
 Their sub-ranges become stale; retry polling pauses for those instances.
-. The Master detects the lost connection and applies a *lazy rebalance strategy*:
-** If the lost Retry-Coordinator-Slave is *not the last index* in the registry, the Master assumes it will recover shortly (especially true in Kubernetes) and does *not* immediately rebalance.
-** The Master continues sending cached token ranges to the remaining Retry-Coordinator-Slaves.
-** The crashed Retry-Coordinator-Slave's token range is *frozen* — no Orchestrator covers it during the outage.
+. The Master detects the lost connection and applies a *lazy rebalance strategy*.
+In no case is the lost range redistributed inside a window that is already in progress — redistribution happens only when a new division is computed at a publish cycle.
+** The crashed Retry-Coordinator-Slave's token range is *frozen*: no Orchestrator covers it for the remainder of the current window.
+** If the lost Retry-Coordinator-Slave is *not the last index* in the registry, the Master assumes it will be rescheduled shortly — which is the normal case in Kubernetes — and does not recompute the division around its absence.
+It keeps sending the existing cached ranges to the remaining Retry-Coordinator-Slaves, so the surviving nodes' ranges do not shift underneath them.
+** If the lost Retry-Coordinator-Slave *is* the last index, removing it does not disturb any other node's boundaries, so the next division simply excludes it and the remaining nodes divide the full ring between them.
 . When the Retry-Coordinator-Slave restarts it reconnects to the Master and is treated as a *new registration*.
-. At the next 30-second publish cycle the Master recalculates and redistributes ranges across all currently registered Retry-Coordinator-Slaves, including the restarted one.
+Like any late registration it receives no range for the window already in progress.
+. At the next publish cycle the Master recalculates and redistributes ranges across all currently registered Retry-Coordinator-Slaves, including the restarted one.
 
 [IMPORTANT]
 ====
 During a Retry-Coordinator-Slave outage, transactions whose tokens fall within the frozen range are *not retried* until the range is covered again.
-These transactions remain safely stored in the database with status `FAILED_WITH_RETRYABLE_ERROR` and are not lost.
+They remain safely stored in the event store and are not lost — this is the liveness cost described in <<costs-and-trade-offs>>.
 ====
 
 [[retry-node]]
@@ -370,12 +399,55 @@ It runs two jobs side by side at all times.
 When a new business operation arrives (a customer places an order, for example), the Orchestrator creates a transaction, breaks it into *spans*, and executes them one by one — calling downstream services, updating databases, firing events.
 If a span fails with a permanent error, it starts a *compensation* sequence to undo what was already done.
 
-*Job 2 — Retry paused transactions.*
-Some spans fail not because of a business error but because a resource was temporarily unavailable.
-StackSaga does not discard these transactions — it marks them as paused and saves them in the database.
-The Orchestrator periodically checks the database for these paused transactions and re-invokes them.
-Crucially, it only checks the transactions it is currently *responsible for*, based on the token sub-range it holds for the current time window.
-This is how StackSaga guarantees that multiple running instances never accidentally retry the same transaction twice.
+*Job 2 — Recover transactions that are no longer moving.*
+Some spans stop advancing for reasons that have nothing to do with business logic.
+StackSaga does not discard these transactions — it records them and re-invokes them later.
+The Orchestrator checks the event store for the work it is currently *responsible for*, based on the token range it holds for the current window, and re-invokes each transaction's next pending span.
+This is how StackSaga guarantees that multiple running instances never retry the same transaction at the same time.
+
+[[what-a-retry-node-recovers]]
+==== What a Retry-Node Recovers
+
+Job 2 covers three distinct situations, all of which arrive through the same grant and the same token range:
+
+[cols="1,3",options="header"]
+[.google-anno-skip]
+|===
+| Situation | How it reaches the Retry-Node
+
+| *Retryable failure*
+| An executor threw `RetryableExecutorException`.
+The in-flight state was committed and the transaction was registered for a future recovery window.
+This is the path described throughout this document.
+
+| *Expired wait-state (Pausable LRT)*
+| An executor parked the saga with `.pauseUntilResume(duration)` and the expected callback never arrived within that duration.
+The Retry-Node re-invokes the parked executor's `doProcess(...)` rather than waiting indefinitely.
+See xref:ROOT:lrt-transaction-models.adoc[Long-Running Transaction Models] and xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#advanced-architectural-faq[FAQ Q1 & Q2].
+
+| *Silent crash (Restore)*
+| The pod died mid-transaction — OOM kill, eviction, power loss — so no error was ever recorded anywhere.
+Nothing distinguishes this transaction from one still running, which is why it is discovered by a separate mechanism rather than by looking for a failure.
+See <<retry-vs-restore>>.
+|===
+
+[[retry-vs-restore]]
+==== Retry vs Restore
+
+*Retry* handles a failure the framework *knows about*: an executor reported a transient fault, so there is a record to act on.
+
+*Restore* handles a failure nobody reported.
+When a pod is killed mid-transaction there is no exception, no log entry and no status change — the transaction simply stops.
+To catch this, a Standard-Node arms a *dead-man's switch* when a transaction starts: a watchdog record placed in a far-future recovery window, which is deleted when the transaction completes normally.
+If the transaction never completes, the watchdog is never deleted, and when that future window eventually comes up for processing a Retry-Node finds it and re-invokes the transaction.
+
+Both features share the same Retry-Node pool, the same token ring and the same ownership model — a Retry-Node does not run two schedulers.
+In the Cassandra implementation they are kept apart inside the directory by bucket parity: even buckets carry Retry work and odd buckets carry Restore work, so a sweep of one never reads the other's partitions.
+One Retry-Node — the holder of the lowest range, referred to as *Node-0* — additionally prunes completed windows from the directory while operating as a normal recovery worker.
+
+See xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc[Cassandra Support] for the directory layout, bucket parity and the compaction protocol.
+
+NOTE: Restore detection is deliberately far-dated — the watchdog sits hundreds of windows ahead of the transaction that armed it, because it must not fire while the transaction is merely slow. That delay is configurable; see <<costs-and-trade-offs>>.
 
 ==== What It Knows and Does Not Know
 
@@ -395,9 +467,12 @@ When an Orchestrator instance fails and restarts:
 
 . It performs a fresh `Request-Response` lookup to the Master for an available Retry-Coordinator-Slave (potentially receiving a *different Retry-Coordinator-Slave* due to Round Robin).
 . It opens a new persistent stream to the newly assigned Retry-Coordinator-Slave.
-. It receives the current sub-range at the next 30-second cycle and resumes retrying.
+. It receives a range at the next publish cycle and resumes retrying.
+As a late registration it is granted nothing for the window already in progress, and stays idle until that cycle.
 
-Any transactions being actively retried at the moment of failure will be re-attempted in the next window by whichever Orchestrator instance acquires that token range.
+Any transactions being actively retried at the moment of failure are *not* taken over by another instance during the current window.
+The failed instance's range simply stays uncovered until that window ends, because a grant is never reclaimed.
+Those transactions are re-attempted once a later division assigns that part of the ring to a live Orchestrator — see <<conflict-avoidance>>.
 
 == Registration & Token Distribution Flow
 
@@ -461,21 +536,22 @@ end note
 
 == Token Range Distribution (30th second of every minute) ==
 master -> master : timer triggers at 30th second\nrecalculate ring partitions
-master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd, validForMinute=T+1)
+master -> slave : publish TokenRangeUpdate\n(rangeStart, rangeEnd,\nvalidFrom=T+1, validUntil=T+2)
 slave -> slave : sub-divide received range\namong registered orchestrators
-slave -> orc : push SubTokenRangeUpdate\n(subRangeStart, subRangeEnd, validForMinute=T+1)
+slave -> orc : push SubTokenRangeUpdate\n(subRangeStart, subRangeEnd,\nvalidFrom=T+1, validUntil=T+2)
 
 note over orc
-  Orchestrator stores the
-  sub-range. Range becomes
-  active at minute T+1.
+  Orchestrator stores the grant
+  and polls with it only while
+  its own UTC clock is inside
+  T+1 .. T+2. Then it stops.
 end note
 
 == Retry Execution Loop (Minute T+1) ==
-loop polling window active (token range valid)
-  orc -> db : SELECT transactions WHERE\ntoken BETWEEN subRangeStart AND subRangeEnd\nAND cluster = 'us-central-c1'\nAND region  = 'us-central'\nAND status  = 'FAILED_WITH_RETRYABLE_ERROR'
-  db -> orc : list of retryable transactions
-  orc -> orc : re-invoke each transaction's\nnext pending span
+loop UTC now inside [validFrom, validUntil)
+  orc -> db : resolve owned work for\n[subRangeStart, subRangeEnd]\nscoped by cluster + region
+  db -> orc : transactions awaiting re-invocation
+  orc -> orc : re-check UTC window,\nthen re-invoke next pending span
 end
 
 @enduml
@@ -501,21 +577,61 @@ This ensures balanced Orchestrator distribution across Retry-Coordinator-Slaves 
 ==== Phase 3 — Token Range Distribution
 
 . At the 30th second of every minute the Master fires its publish timer.
-. The Master partitions the full token ring equally among all registered Retry-Coordinator-Slaves and sends each Retry-Coordinator-Slave its range, tagged with `validForMinute = T+1`.
-. Each Retry-Coordinator-Slave divides its range equally among its registered Orchestrators and pushes sub-range updates downstream.
-. Each Orchestrator stores the received sub-range and activates it at the start of minute `T+1`.
+. The Master partitions the full token ring equally among all registered Retry-Coordinator-Slaves and sends each Retry-Coordinator-Slave its range, granted for the absolute interval from minute `T+1` until minute `T+2`.
+. Each Retry-Coordinator-Slave divides its range equally among its registered Orchestrators and pushes sub-range updates downstream, carrying the same interval.
+. Each Orchestrator stores the received grant, activates it at the start of minute `T+1`, and stops polling with it at the end of minute `T+1` — the grant carries its own expiry, so nothing has to revoke it.
 
 ==== Phase 4 — Retry Execution Loop
 
-Once the time window is active, each Orchestrator enters its retry polling loop:
+Once the granted window is active, each Orchestrator enters its retry loop:
 
-. Query the transaction store for records where:
-** `token` is within `[subRangeStart, subRangeEnd]`
-** `cluster` matches the Orchestrator's configured cluster name
-** `region` matches the Orchestrator's configured region
-** `status = FAILED_WITH_RETRYABLE_ERROR`
-. For each matching transaction, re-invoke the next pending span.
-. Repeat until the time window expires (sub-range is superseded by the next update).
+. Resolve the granted token range to the transactions it owns, scoped by `cluster` and `region`.
+How that resolution happens depends on the event-store implementation — see <<resolving-a-token-range-to-transactions>>.
+. For each resolved transaction, re-check that the current UTC time is still inside the grant, then re-invoke the next pending span.
+. Stop when the grant expires.
+Expiry is part of the grant itself; nothing has to supersede or revoke it.
+
+[[resolving-a-token-range-to-transactions]]
+=== Resolving a Token Range to Transactions
+
+The grant is identical in every deployment: a token range plus a UTC window, issued by the same two-level hierarchy.
+What differs between event-store implementations is how a Retry-Node turns that range into a concrete set of transactions to re-invoke.
+
+Both paths use Murmur3, and both honour the same grant.
+Only the key being hashed for the lookup differs, and it differs because of how each database stores transactions.
+
+*General model (SQL event stores)*::
+Each transaction carries its own Murmur3 token, assigned at initialisation and stored on the record alongside `cluster` and `region`.
+The Retry-Node queries the transaction store directly for records whose token falls inside its granted range:
++
+[source,sql]
+----
+SELECT *
+FROM   transactions
+WHERE  token   BETWEEN :rangeStart AND :rangeEnd
+AND    region  = :region
+AND    cluster = :cluster
+AND    status  = 'FAILED_WITH_RETRYABLE_ERROR';
+----
++
+The reactive batch-fetch and concurrency pipeline that executes this loop is tuned through the
+`stacksaga.transaction.recovery-node.*` properties — see
+xref:stacksaga-database-support:sql-database-support/stacksaga-sql-configuration-properties.adoc[SQL Configuration Properties].
+
+*Cassandra*::
+A flat table used as a polling queue is a documented Cassandra anti-pattern: there is no global index across partitions, and continuous insert-and-delete traffic buries live rows behind tombstones.
+Cassandra therefore does not resolve the range against each transaction's own token.
+Instead, a Standard-Node that hits a transient failure registers *itself* — its `instance_id` and `token(instance_id)` — into a recovery window, and the Retry-Node matches its granted range against `instance_id_token` to discover *which pods* have pending work.
+It then descends a five-tier directory (day → UTC minute window → pod instances → buckets → transaction pointers) and hydrates each transaction lazily by `transaction_id`.
++
+Every query along that path supplies a full composite partition key, so no range scan is ever issued.
+See xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#cassandra-directory-architecture[Why Cassandra Requires a Directory-Based Architecture] for the mechanics.
+
+[NOTE]
+====
+The ownership model in <<ownership-model>> is unaffected by this difference.
+Whichever lookup an implementation uses, the Retry-Node acts only inside a granted range during a granted UTC window, and two nodes never hold the same range at the same time.
+====
 
 === RSocket Communication Patterns
 
@@ -539,22 +655,26 @@ StackSaga uses https://rsocket.io[RSocket] for all inter-component communication
 | Persistent subscription. Orchestrator subscribes to its assigned Retry-Coordinator-Slave and keeps the stream open to receive sub-range updates.
 |===
 
-== Token Time Window & Conflict Avoidance
+[[ownership-model]]
+== The Ownership Model
+
+Token ring partitioning decides *what* each node is responsible for.
+This section describes *how* that responsibility is held, which is the part of the design that makes retrying safe without a single lock anywhere in the system.
 
 === The Publish Cycle
 
-The Retry-Coordinator-Master runs a repeating timer that fires at the *30th second of every minute*.
+The Retry-Coordinator-Master runs a repeating timer that fires at the *30th second of every minute* — once per minute, not twice.
 At each trigger the Master:
 
 . Recalculates the token ring partition based on currently registered Retry-Coordinator-Slaves.
 . Publishes the new token range to each Retry-Coordinator-Slave.
 . Each Retry-Coordinator-Slave recalculates its sub-ranges and pushes updates to its registered Orchestrators.
 
-The published range is labelled as valid for the *next full minute* (`T+1`), not the current minute.
+The range is not merely *labelled* for the next minute — it is issued together with the absolute UTC interval over which it belongs to that node, as described in <<a-grant-is-a-range-plus-a-window>>.
 
 === Why the 30-Second Offset?
 
-Publishing at the 30th second and marking the range as valid for the *next* minute creates a *30-second preparation window*.
+Publishing at the 30th second and granting the range for the *next* minute creates a *30-second preparation window*.
 This window accounts for worst-case communication delays: Retry-Coordinator-Slave distribution, Orchestrator updates, and network latency in large clusters.
 
 By the time minute `T+1` begins, all Orchestrators are guaranteed to have received their new sub-ranges and are ready to start polling.
@@ -569,10 +689,149 @@ Timeline example:
   ...
 ----
 
+[[a-grant-is-a-range-plus-a-window]]
+=== A Grant Is a Range Plus a Window
+
+A node is never given a token range on its own.
+It is given a *grant*: a token range **together with** the absolute UTC interval over which that range belongs to it.
+
+----
+grant = { rangeStart, rangeEnd, validFrom, validUntil }   // validFrom / validUntil are UTC
+----
+
+Both levels of the hierarchy issue grants for the *same* window:
+
+. The Master divides the full 64-bit ring across its registered Retry-Coordinator-Slaves for window `T+1`.
+. Each Retry-Coordinator-Slave divides its own slice across its registered Orchestrators for that same window `T+1`.
+
+A Retry-Node receives nothing beyond this.
+There is no distributed lock to acquire, no fencing token to present and no dispatcher to ask — the range and the interval are the entire ownership contract.
+Claiming an individual due transaction inside that range is a separate, atomic step in the event store; see <<per-transaction-claim>>.
+
+=== Expiry Is Enforced by the Holder
+
+Nothing revokes a grant.
+The holder itself decides whether it is still inside the granted interval by reading its own UTC clock, and it makes that decision at *two* points:
+
+. *Before polling* — the window must be current, or the node does not query the event store at all.
+. *Before every single transaction invocation* — the check is repeated.
+If the clock has passed `validUntil` less the boundary guard, that transaction is *skipped without being retried*.
+
+Both checks stop one second short of `validUntil`.
+That *boundary guard* keeps the departing holder of a range and the arriving one apart whenever their clocks agree to within a second.
+The guard is affordable because only the asynchronous path passes through here.
+Immediate retries run in-thread inside the executor and never reach the retry subsystem (see <<immediate-vs-asynchronous-retry>>).
+What does reach it was registered for a later window and already waits roughly 10 to 70 seconds, so the guard costs about 1.7% of each one-minute window and at most one second on top of that floor.
+
+The second check is the load-bearing one.
+A batch fetched while the window was still open but which crosses the boundary mid-processing *stops mid-batch*: the remaining transactions in that batch are skipped rather than retried under an expired grant.
+
+[NOTE]
+.Why the check is per invocation rather than once per window
+====
+There is no guarantee that the same token range returns to the same node in the next window.
+A node therefore cannot assume that, because it owned a range a moment ago, it may finish its batch slightly past the boundary — past that boundary those tokens may already belong to another node.
+The check has to sit immediately before the transaction is touched, which is the last possible moment at which it is still meaningful.
+====
+
+Skipping costs nothing at a normal boundary.
+Because grants are published 30 seconds ahead, every node is *already holding* the next window's grant by the time the current one expires.
+A transaction skipped at the boundary is therefore re-exposed immediately — to the same node if the new division gave it the same range, or to another node if that part of the ring moved.
+Skipping is a handover, not a deferral.
+
+IMPORTANT: Because each holder enforces its own expiry by reading its own clock, synchronised UTC time across every Master, Slave and Retry-Node is a deployment requirement rather than a recommendation. See <<costs-and-trade-offs>>.
+
+=== Membership Is Closed for the Window
+
+A division is computed from the nodes registered *at that instant*, and it is then fixed for the window it covers.
+
+An Orchestrator or Retry-Coordinator-Slave that registers **after** a division has been computed receives no range from it.
+It stays *idle* until a later division includes it.
+This is why scaling Retry-Nodes up does not take effect within the window already in progress.
+
+[[conflict-avoidance]]
 === Conflict Avoidance
 
-Because each Orchestrator holds a *non-overlapping sub-range* for a *defined time window*, two Orchestrator instances can never claim responsibility for the same transaction simultaneously.
-This eliminates the need for distributed locking when retrying transactions.
+Two Orchestrator instances never hold the same token range in the same window, and no distributed locking is used to achieve it.
+
+The guarantee does *not* follow from the sub-ranges being disjoint alone — disjointness closes only one of four routes to a conflict.
+It follows from four separate properties of the protocol, which together leave no interval in which one range has two holders, up to clock agreement at the boundary:
+
+[cols="1,2",options="header"]
+[.google-anno-skip]
+|===
+| Route to a conflict | Why it cannot occur
+
+| *Reassignment during a window*
+| A grant is never revoked.
+If its holder is lost mid-window, the range is left *uncovered* until that window ends — the Master does not redistribute it among the survivors.
+
+| *Admission during a window*
+| A node that registers after a division has been computed receives no range from it.
+It stays idle until a later division includes it.
+
+| *A range outliving its window*
+| Expiry is part of the grant, and the holder re-checks it against its own UTC clock, less a one-second guard, before every transaction invocation.
+
+| *Two sub-ranges of one division intersecting*
+| Each division is a partition of the 64-bit ring — the sub-ranges are disjoint by construction.
+|===
+
+[IMPORTANT]
+.Why no fencing token is needed
+====
+Systems that **reclaim** a work assignment when it expires must also *fence* the previous holder, because reclamation is what can produce two nodes that each believe they own the same work.
+A fencing token — such as the `rangeID` used by Cadence and Temporal — exists to make the displaced holder's writes fail.
+
+StackSaga never reclaims.
+Declining to reassign a vacated range is precisely what guarantees that a second holder is never created, which is why no fencing token or distributed lock is needed at range level.
+The only locks in the design are per transaction and last one statement; see <<per-transaction-claim>>.
+====
+
+The cost of this choice is paid in *liveness*, never in safety: transactions inside an uncovered range are not retried until a later division covers that part of the ring again.
+They are never lost.
+See <<costs-and-trade-offs>> for the full accounting.
+
+[[per-transaction-claim]]
+=== Per-Transaction Claim
+
+Range ownership decides which node *looks* at a transaction.
+Which node *runs* it is decided by an atomic claim in the event store, made on each due transaction before it is re-invoked.
+Because ranges are disjoint, a claim meets another node's claim only at a boundary where two holders' clocks disagree by more than the guard; in steady state it is uncontended.
+
+[cols="1,2,2",options="header"]
+[.google-anno-skip]
+|===
+| | Relational (MySQL, PostgreSQL) | Cassandra
+
+| *Claim*
+| One short local transaction: `SELECT ... FOR UPDATE SKIP LOCKED`, restricted to the node's own token range, then an `UPDATE` that writes a fresh allocation key and moves `next_expose_time` forward by the transaction's retention.
+| One lightweight transaction (Paxos) on the transaction's own partition, applied only if the pointer's registration token is still current and no other claim is live.
+See xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc#pickup-claim[Pickup Claim].
+
+| *Two nodes at once*
+| `SKIP LOCKED` skips a row another node is claiming, and once claimed the row is no longer due.
+| Only one conditional update applies; the other node sees `[applied] = false`.
+
+| *A claimant crashes*
+| The row becomes due again when `next_expose_time` passes.
+| The transaction becomes claimable again when its claim expires; the pointer is kept until then.
+
+| *A late resume meets a re-invocation*
+| The resume locks the same row `FOR UPDATE` and rotates the allocation key, so a retry that claimed earlier is rejected when it loads the transaction.
+| The resume takes the same conditional claim on its resume key.
+
+| *A superseded run keeps going*
+| Every claim and resume advances the transaction's `run_epoch`, and every state write of a run carries `AND run_epoch = <its epoch>`.
+The displaced run's next write matches no row, the batch rolls back, and the run stops without terminating or compensating the transaction.
+| The claim and resume advance the same `run_epoch`.
+A recovery run checks it with a lightweight transaction before appending history; when the check is not applied, the run stops.
+First runs skip the check to keep Paxos off the happy path.
+|===
+
+The lock is held for one statement and never across a remote call, so this is not the shared-queue polling the token ring exists to avoid.
+What remains is a re-invocation that outlives its claim -- it runs longer than the lease, or its process is suspended past it -- which a second node may then join.
+The run epoch stops the displaced run at its next write, so only the step it had in flight can repeat, and that repeat is absorbed by the participant's idempotency key, not prevented.
 
 [[multi-region-deployment]]
 == Multi-Region Deployment
@@ -585,19 +844,24 @@ Every component — Master, Retry-Coordinator-Slave, and Orchestrator — is sta
 When a transaction is created it inherits the region of the Orchestrator that created it.
 That region value is stored in the transaction record in the database.
 
-During the retry polling loop, each Orchestrator adds `region` as a mandatory filter alongside the token range:
+During the retry loop, each Orchestrator applies `region` as a mandatory scope alongside the token range.
+In the general model that is a filter on the query itself:
 
+.General model — region as a query filter
 [source,sql]
 ----
 SELECT *
 FROM   transactions
-WHERE  token   BETWEEN :subRangeStart AND :subRangeEnd
+WHERE  token   BETWEEN :rangeStart AND :rangeEnd
 AND    region  = :region
 AND    cluster = :cluster
 AND    status  = 'FAILED_WITH_RETRYABLE_ERROR';
 ----
 
-This guarantees that an Orchestrator in `us-central` never picks up and retries a transaction that was originally created by an Orchestrator in `asia-south` — even if both regions share the same database (e.g., a globally replicated Cassandra cluster).
+In Cassandra the same scope is enforced structurally instead: `region` is part of the composite partition key of every recovery directory table, so a query simply cannot reach another region's partitions.
+See <<resolving-a-token-range-to-transactions>>.
+
+Either way the guarantee is the same — an Orchestrator in `us-central` never picks up and retries a transaction that was originally created by an Orchestrator in `asia-south`, even when both regions share one globally replicated database.
 
 == Virtual Clusters
 
@@ -622,7 +886,7 @@ The group identity is declared via the `stacksaga.instance.cluster` property.
 All three components sharing the same cluster name form one logical retry cluster:
 
 * The Master only accepts registrations from Retry-Coordinator-Slaves with a matching cluster name.
-* The Retry-Coordinator-Slave connects only to the Master of its cluster (`stacksaga.agent.slave.target-master.host` / `.port`).
+* The Retry-Coordinator-Slave connects only to the Master of its cluster (`stacksaga.coordinator.slave.target-master.host` / `.port`).
 * The Orchestrator connects only to the Master of its cluster for the initial Retry-Coordinator-Slave lookup, and subsequently to the Retry-Coordinator-Slave assigned by that Master.
 * Retry queries are filtered by cluster name in addition to token range and region.
 
@@ -643,19 +907,104 @@ If any single Master fails, only the fraction of transactions belonging to that 
 A transaction is permanently bound to the region and cluster of the Orchestrator that created it.
 No other virtual cluster — even within the same region — will ever attempt to retry it.
 
-The retry query always includes both `region` and `cluster` as mandatory filters:
+Retry ownership always carries both `region` and `cluster` as mandatory scope, in addition to the token range:
 
+.General model — region and cluster as query filters
 [source,sql]
 ----
 SELECT *
 FROM   transactions
-WHERE  token   BETWEEN :subRangeStart AND :subRangeEnd
+WHERE  token   BETWEEN :rangeStart AND :rangeEnd
 AND    region  = 'us-central'        -- physical region
 AND    cluster = 'us-central-c1'     -- virtual cluster
 AND    status  = 'FAILED_WITH_RETRYABLE_ERROR';
 ----
 
-This makes the system particularly well-suited to Apache Cassandra deployments where `region` and `cluster` form part of the partition key, enabling the database to route queries directly to the correct nodes with zero full-table scans.
+This maps especially well onto Apache Cassandra, where `region` and `cluster` form part of the composite partition key of every recovery directory table.
+There the isolation is physical rather than filtered: queries from two virtual clusters land in different partitions altogether, so the database routes each one directly to the correct nodes with no full-table scan.
+
+[[costs-and-trade-offs]]
+== Costs and Operational Trade-offs
+
+The ownership model buys safety without a distributed lock, and it is not free.
+This section states what it costs, so the trade can be evaluated rather than discovered in production.
+
+Almost every cost below is paid in *liveness* — work waits — and not in correctness.
+That is the deliberate shape of the design: StackSaga would rather leave a range uncovered for a while than risk two nodes retrying the same transaction.
+
+=== Paid in Liveness
+
+*An uncovered range stays dark for up to two windows.*
+When a Retry-Node is lost mid-window its range is not handed to a survivor, so the length of the gap depends on where in the cycle the loss happened.
+A node lost at `T+1:20` is already absent when the next division is computed at `T+1:30`, so its tokens are covered again from `T+2:00` — a gap of roughly 40 seconds.
+A node lost at `T+1:35`, *after* that division was computed, is still the grant holder for `T+2`, so its range stays dark for the remainder of `T+1` *and* the whole of `T+2`, and is only covered again at `T+3:00` — a gap of roughly 85 seconds.
+
+The worst case is therefore just under two windows, and which case applies depends only on whether the loss happened before or after the publish cycle.
+
+*A Retry-Coordinator-Slave outage freezes its entire slice.*
+Losing an Orchestrator darkens one sub-range; losing a Slave darkens the whole slice that Slave was dividing, across all of its Orchestrators.
+Lazy rebalance means the Master deliberately does not redistribute that slice, on the assumption the Slave will be rescheduled shortly.
+This is the larger of the two failure modes.
+
+*A Master outage across a window boundary stalls the subsystem.*
+Nodes finish the window they already hold and then stop, because no new grants are issued and no new Orchestrator can register.
+Primary transaction execution is unaffected, and nothing is lost — but retrying in that cluster pauses until the Master returns.
+
+*New capacity is idle for up to a window.*
+Membership is closed when a division is computed, so Retry-Nodes added to drain a backlog contribute nothing until the next division includes them.
+This is worth knowing precisely because scaling up is the natural reaction to a backlog.
+
+*A window boundary costs a re-read, not a stall.*
+Rows already fetched in a batch that crosses the boundary are discarded and read again by whichever node owns them next.
+Nothing waits for a later window: the next grant is published 30 seconds ahead, so a transaction skipped at the boundary is re-exposed at that same boundary.
+The cost is the repeated read.
+
+*An even ring split is not an even work split.*
+The ring is divided into equal token ranges, not into equal amounts of work.
+A range that happens to contain a disproportionate share of pending work leaves one Retry-Node saturated while its peers sit idle, and there is no work-stealing to correct it — stealing would require reclaiming a range, which the model forbids by design.
+Scaling out helps at the next division; it does not rebalance the window in progress.
+
+=== Paid in Latency
+
+*Asynchronous retry carries a floor of roughly 10 to 70 seconds.*
+A transient failure is registered into the *next* window rather than the current one, which gives a service that is restarting time to come back before anything retries it.
+A retry that fails again is registered forward once more, so each successive attempt costs another window.
+
+IMPORTANT: This floor applies to the asynchronous path only. A fault that should be retried in milliseconds belongs in an in-thread re-attempt inside the executor — see <<immediate-vs-asynchronous-retry>>.
+
+*The boundary guard idles the last second of every window.*
+Each holder stops claiming one second before its window ends, which is about 1.7% of a one-minute window and adds at most one second to a retry.
+No caller waits on that second: immediate retries stay in-thread inside the executor (see <<immediate-vs-asynchronous-retry>>), and everything that reaches this path already waits for a later window.
+That makes one second the cheapest way to keep consecutive holders of a range apart.
+
+*Silent-crash detection is far-dated by default.*
+The Restore watchdog is armed hundreds of windows ahead of the transaction that set it — ten hours ahead in the default Cassandra configuration — because it must not fire while a transaction is merely slow.
+A pod that dies silently is therefore recovered on the order of hours, not minutes, unless that delay is tuned down.
+The delay is configurable per domain entity; see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc[Cassandra Support].
+
+=== Required Operationally
+
+*Every component must keep NTP-class UTC synchronisation.*
+Each holder decides whether it is inside its granted window by reading its own clock, so clock discipline is a deployment requirement for the Master, every Slave and every Retry-Node — not a recommendation.
+
+The degradation is bounded rather than sudden.
+Drift below the one-second boundary guard keeps consecutive holders fully apart.
+Larger drift lets two holders' claims meet at a boundary, where the per-transaction claim still gives each transaction to one of them, so the cost is contention rather than a duplicate (see <<per-transaction-claim>>).
+Window granularity is one minute, registration happens a window ahead, directory pruning re-checks the wall clock before deleting anything, and recovery windows are traversed chronologically, so sub-second to few-second drift — the normal case in a cloud VPC — is absorbed outright.
+Severe drift of several minutes on a degraded pod causes it to register a window early or late; that window is still discovered and recovered later, rather than lost.
+See xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc[Cassandra Support] for the detailed analysis.
+
+=== Paid in Operational Surface
+
+*There is more to run.*
+A Master and its Slaves have to be deployed, configured and monitored — or embedded into an existing service — for a code path that, by design, handles the worst case rather than the normal flow.
+See xref:foundations:proportional-analysis-of-long-running-transactions-in-saga.adoc[] for how often that worst case actually occurs.
+Retry-Nodes are additionally expected to stay stable and long-lived, which pulls against aggressive autoscaling of the same service.
+
+*Cassandra deployments pay a write cost on the happy path.*
+Registering a transient failure writes across five directory tiers, and *every* transaction — including every successful one — arms a watchdog row at start and deletes it on completion.
+Successful transactions therefore carry part of the recovery machinery's cost, along with the resulting tombstone and compaction pressure.
+This is the price of avoiding range scans on a database that cannot support a polling queue; see xref:stacksaga-database-support:cassandra-database-support/stacksaga-cassandra-support.adoc[Cassandra Support].
 
 == Glossary
 
@@ -677,13 +1026,23 @@ Used to deterministically assign the transaction to a retry owner.
 StackSaga uses the Murmur3Partitioner model, identical in principle to Apache Cassandra's token ring.
 
 | *Token Range*
-| A contiguous subset of the token ring, assigned to a Retry-Coordinator-Slave or Orchestrator for a given time window.
+| A contiguous subset of the token ring, granted to a Retry-Coordinator-Slave or Orchestrator for a given time window.
+
+| *Grant*
+| A token range together with the absolute UTC interval over which it belongs to a node (`validFrom` / `validUntil`).
+A grant is never revoked or reclaimed; it expires on its own and the holder enforces that expiry against its own clock.
+See xref:#ownership-model[The Ownership Model].
 
 | *Time Window*
-| A one-minute interval during which an Orchestrator holds exclusive ownership of a sub-token range.
+| The one-minute UTC interval of a grant, during which exactly one Orchestrator holds that sub-range.
+Enforced by the holder reading its own clock, before polling and again before every transaction invocation.
 
 | *Publish Cycle*
-| The repeating event at the 30th second of every minute in which the Master redistributes token ranges.
+| The repeating event at the 30th second of every minute — once per minute — in which the Master computes a new division of the token ring for the following window.
+
+| *Membership Closed*
+| The rule that a division is computed from the nodes registered at that instant and then fixed for the window it covers.
+A node that registers later receives no range from that division and stays idle until the next one.
 
 | *Compensation*
 | The rollback sequence executed when a non-retryable error occurs in the primary transaction flow.
@@ -700,7 +1059,7 @@ Declared via `stacksaga.instance.region`. Stored on transactions (encoded as a 1
 Declared via `stacksaga.instance.cluster`. Allows multiple independent retry units within the same physical region.
 
 | *RSocket*
-| A binary application-level protocol supporting multiple interaction models: `request-response`, `Request-Response`, `request-stream`, and `channel`. StackSaga uses `request-stream` and `Request-Response`.
+| A binary application-level protocol supporting four interaction models: `fire-and-forget`, `request-response`, `request-stream`, and `request-channel`. StackSaga uses `request-response` and `request-stream`.
 
 | *Lazy Rebalance*
 | The Master's strategy of deferring token ring recalculation until the next scheduled publish cycle,
@@ -835,4 +1194,11 @@ This design enables operations teams to maintain a single unified StatefulSet ma
 
 For full configuration guidelines and properties, see xref:ring-coordinator.adoc#kubernetes-statefulset-deployment[Automated Role Detection via Kubernetes StatefulSet in the Ring-Coordinator guide].
 
-include::disabled-and-terminated-transaction.adoc[leveloffset=+2]
+== When Retrying Stops
+
+Retrying is not unbounded.
+A transaction carries a *lifetime*, and the retry subsystem keeps re-invoking it only while that lifetime lasts.
+A transaction that never completes within its lifetime becomes a *disabled transaction*, and one that fails while compensating becomes a *terminated transaction*.
+Neither is retried again until an operator restores it.
+
+See xref:disabled-and-terminated-transaction.adoc[] for what causes each case and how to restore them.

@@ -1,0 +1,1806 @@
+= Unified Saga Orchestration Patterns: Integration & Navigation Catalog (USIP & USNP)
+:navtitle: Unified Saga Orchestration Patterns (USIP & USNP)
+:keywords: stacksaga, usip, usnp, saga patterns, saga orchestration, orchestration engine, execution patterns, navigation patterns, process step manager, revert step manager, pre step manager, post step manager, pre executor, post executor, two-stage async, commit barrier, pausable lrt, continuous lrt, event sourcing, command executor, query executor
+:description: Architectural guide and pattern catalog of the Unified Saga Model (USM) for Saga Orchestration Engines -- explaining the two core pillars: Unified Saga Integration Patterns (USIP) and Unified Saga Navigation Patterns (USNP).
+:page-priority: 0.8
+
+[abstract]
+In microservice architectures, business transactions often span multiple services, databases, and external APIs.
+These long-running transactions (LRT) need a clear, reliable coordination strategy.
+This document defines the **Unified Saga Model (USM)** specifically for **Saga Orchestration Engines** — built around two core pillars: **Unified Saga Integration Patterns (USIP)**, which govern how individual steps communicate with external systems, and **Unified Saga Navigation Patterns (USNP)**, which govern how the workflow routes through the saga graph.
+
+Real-world business workflows cannot rely on just one communication style.
+A single transaction often mixes fast synchronous REST/gRPC calls, pause-and-wait states (like payment redirects, webhooks, or manual approvals), message queues (like Apache Kafka or RabbitMQ), and automatic rollback steps.
+
+This guide explains both pillars in detail:
+1. **Unified Saga Integration Patterns (USIP)**: How individual steps integrate with external systems (REST, gRPC, databases, webhooks, or message brokers), manage server threads, and commit state to the event store.
+2. **Unified Saga Navigation Patterns (USNP)**: How the workflow moves forward, handles conditional branches, and automatically rolls back on failure.
+
+---
+
+== Conceptual Foundations: The Saga Orchestration Engine Architecture
+
+In a distributed system, a single business process often needs to update data across multiple microservices.
+Traditional database transaction methods, like Two-Phase Commit (2PC), do not work well in microservices because they lock database rows across the network, run slowly, and create single points of failure.
+
+The **Saga Pattern** solves this problem.
+It breaks down a large distributed transaction into a series of smaller, independent local transactions.
+If any step fails, the system runs compensating transactions (undo actions) to reverse the changes made by previous steps.
+
+=== Two Architectural Approaches: Choreography vs. Orchestration
+
+There are two primary ways to implement the Saga pattern:
+
+1. **Saga Choreography (Event-Driven Without a Coordinator)**:
+* In choreography, there is no central controller.
+Microservices communicate only by publishing and listening to events on a message broker (like Apache Kafka or RabbitMQ).
+* Each service acts independently when it sees an event.
+* *The Problem with Choreography*: Choreography works fine for simple workflows with 2 or 3 steps.
+However, as the system grows, it becomes very hard to understand and debug.
+The workflow bounces around like a pinball machine.
+It is difficult to know the current status of a transaction, impossible to reliably manage long waiting states (like human approvals), and very hard to rollback cleanly without creating infinite event loops.
+Choreography has no central "brain" to enforce commit rules or manage step lifecycles.
+
+2. **Saga Orchestration (Coordinator-Driven Execution)**:
+* In orchestration, a central **Saga Orchestration Engine** manages the entire workflow.
+* The orchestrator tracks the current state, calls the necessary services in the right order, persists execution history into the Event Store, and triggers rollbacks if a failure happens.
+* Downstream services act as simple **Utility Services**.
+They do not need to know about the overall saga workflow.
+They just handle normal requests (REST, gRPC, or messaging).
+
+[IMPORTANT]
+====
+**Foundation of This Catalog**:
+The patterns explained in this document are **specifically and exclusively designed for a Saga Orchestration Engine**.
+Features like staged step managers, park-and-wait states, Event Store commit barriers, automatic reverse rollback, and 3-phase compensation can only exist when you have a centralized orchestration engine.
+====
+
+=== The Architecture of an Embedded Domain-Centric Orchestrator
+
+Traditional orchestration engines (such as separate BPMN workflow servers or external cluster tools) add operational overhead.
+They require dedicated servers, separate databases, background polling workers, and extra network hops for every step.
+
+StackSaga uses an **Embedded Domain-Centric Orchestrator**:
+
+* The orchestrator engine runs directly inside the microservice that owns the business process (for example, the `Order Service` runs the order placement saga).
+* The **Saga Execution Coordinator (`SEC`)** runs in-process as part of your standard Spring Boot application (see xref:implementations:stacksaga-sync/index.adoc#SEC[Saga Execution Coordinator (SEC)]).
+* Execution steps are governed by strongly-typed Command and Query Executors (see the xref:stacksaga-sync/orchestrator/executor_architecture.adoc[Saga Executor Component Reference]), operating over a persistent xref:stacksaga-sync/orchestrator/domain-entity.adoc[Domain Entity (DE)] state aggregate.
+* Controllers, listeners, and batch jobs initiate and resume transactions using the Spring-managed xref:stacksaga-sync/orchestrator/stacksaga_template.adoc[SagaTemplate] bean.
+* Other microservices (like payment, inventory, and notifications) remain simple utility services.
+They do not need to install StackSaga or know anything about the orchestrator.
+
+[NOTE]
+====
+**How the SEC Executes Each Step (The Core Loop)**
+
+At its heart, for every span in a long-running transaction, the SEC performs two operations in sequence:
+
+1. **Execute** — invoke the executor's business logic (a REST call, a database write, a Kafka publish, etc.).
+2. **Persist** — commit the resulting span status and domain entity snapshot immutably into the Event Store.
+
+The exact timing of that commit *relative to* the external call is the architectural decision that creates the collision risk — and it is precisely what differentiates the three USIP integration patterns introduced in this document.
+
+For a full walkthrough of the SEC execution lifecycle, see xref:implementations:stacksaga-sync/index.adoc#SEC[StackSaga Execution Coordinator (SEC) — Execution Flow].
+====
+
+=== The "Sync vs. Async" Misconception
+
+In the past, many developers believed they had to choose between two extreme styles:
+
+* **Only Synchronous (HTTP / gRPC)**: The engine executes every step synchronously.
+While this is simple to trace, holding connections open during long waiting states (like user redirects or human approvals) quickly uses up server threads and crashes the service.
+* **Only Asynchronous (Message Queues)**: The engine uses message queues for everything.
+While this does not block threads, it makes simple queries unnecessarily complex and introduces dangerous race conditions where callbacks arrive before the orchestrator finishes persisting its state to the Event Store.
+
+=== The Unified Saga Model (USM): The Two Core Pillars
+
+The **Unified Saga Model (USM)** removes this limitation.
+It recognizes that a modern **Saga Orchestration Engine** should handle multiple communication styles easily.
+A single workflow can use direct REST calls, pause-and-wait states, and message brokers whenever each one makes sense.
+
+To achieve this, the architecture separates coordination into two independent pillars:
+
+image::implementations:executor/Executor-Execution-USM-ARCHITECTURE.svg[alt="The Saga Orchestration Engine Architecture (USM)",width=100%,opts=interactive,scaledwidth=100%]
+
+1. **Pillar 1: Unified Saga Integration Patterns (USIP) [Outward System Integration]**: Focuses on **External Integration Mechanics**—how an individual atomic step connects and communicates across the network boundary with downstream services, databases, or message queues, manages thread/memory lifecycles, and enforces Event Store commit barriers.
+2. **Pillar 2: Unified Saga Navigation Patterns (USNP) [Inward Workflow Navigation]**: Focuses on **Internal Workflow Routing**—how execution travels across the saga graph, dynamically routes between command and query executors, concludes transactions, and unwinds historical steps via deterministic reverse autopilot.
+
+---
+
+== Pillar 1: Unified Saga Integration Patterns (USIP)
+
+=== What is Unified Saga Integration Patterns (USIP)?
+
+In a distributed microservices architecture, a business transaction is broken down into a series of independent atomic steps executed by different domain services.
+When an individual step runs, the orchestrator must interact with a target system: updating a local database, invoking an external REST or gRPC service, or publishing an event to a message broker.
+
+**Unified Saga Integration Patterns (USIP)** define the standard integration models governing **HOW** an individual step connects and communicates with external systems.
+USIP establishes the foundational technical rules for:
+1. **Thread & Memory Management**: How server threads and in-memory resources are managed during execution (blocking, reactive streaming, or park-and-wait).
+2. **State & Event Commitment**: When and how domain aggregate state and step events are committed to the Event Store.
+3. **Pausable Wait States**: How long-running wait states (such as payment redirects or human approvals) are handled safely without holding open network connections or server threads.
+4. **Failure & Retry Mechanics**: How temporary network timeouts and external service errors are retried automatically.
+
+=== The Need for Identifying Integration Patterns in Mixed-Style LRTs
+
+In real-world enterprise architectures, a distributed transaction is rarely homogeneous.
+You cannot force an entire business process to follow a single communication style:
+
+* **The Failure of Pure Synchronous Workflows**: If every step relies on open HTTP or gRPC connections, holding connections open during external waits (such as waiting for customer 3D-Secure payment authentication, bank settlement, or administrative approval) quickly exhausts thread pools, causes gateway timeouts, and crashes services under load.
+* **The Failure of Pure Asynchronous Workflows**: If every step relies on message queues (like Kafka or RabbitMQ), simple read-only queries become unnecessarily complex, overall latency multiplies, and the system becomes susceptible to race conditions where asynchronous replies arrive before the orchestrator finishes persisting its state to the Event Store.
+
+A real-world Long Running Transaction (LRT) is fundamentally a **Mixed-Style LRT**.
+Consider a typical e-commerce order fulfillment saga:
+
+1. **Step 1 (Order Creation)**: Fast local database write (needs sub-second synchronous completion).
+2. **Step 2 (Customer Payment)**: Redirects the user to a 3D-Secure banking portal (requires parking for up to 20 minutes without consuming server threads, resuming upon webhook notification).
+3. **Step 3 (Warehouse Logistics)**: Dispatches a command message over Apache Kafka to an automated fulfillment center (requires commit barrier safety to prevent race conditions).
+4. **Step 4 (Tax Calculation)**: Read-only query to an external compliance provider.
+
+image::implementations:executor/stacksaga-saga-mixed-style-lrt-pipeline.svg[alt="Mixed-Style Long Running Transaction Pipeline",width=100%,opts=interactive,scaledwidth=100%]
+
+To execute a Mixed-Style LRT reliably within a single orchestrator, the engine must formally identify and categorize **every fundamental integration mode**.
+Developers can then freely combine synchronous calls, pausable wait states, and asynchronous message queues within the same workflow, while the engine guarantees state durability and thread safety.
+
+=== High-Level Overview & Evolution of the Three Integration Patterns
+
+StackSaga categorizes all step integrations into three fundamental patterns.
+Each pattern represents an architectural evolution designed to overcome the physical limitations of the pattern before it:
+
+1. **<<#usip-pattern-1-direct-synchronous, Pattern 1: Direct Synchronous Integration (Sync-Continuous)>>** +
+* **High-Level Concept**: Executes immediate request-response calls on the active execution thread.
+Aggregate mutations and step events are committed immediately upon receiving the response.
+* **Evolutionary Purpose**: The baseline starting point for distributed steps.
+Offers the lowest latency for fast, atomic database and API operations (< 500ms), but cannot safely wait for external human or asynchronous triggers without exhausting server threads.
+* *<<#usip-pattern-1-direct-synchronous, Explore Pattern 1 in depth &rarr;>>*
+
+2. **<<#usip-pattern-2-correlated-park-resume, Pattern 2: Correlated Park-and-Resume Integration (Sync-Paused)>>** +
+* **High-Level Concept**: Safely enters a persistent `PAUSED` state in the Event Store and terminates the in-memory execution thread ("Park and Wait").
+The saga releases all CPU and memory resources while waiting for an external trigger (webhook, message, or user action) to resume.
+* **Evolutionary Purpose (Solving Pattern 1's Thread Starvation)**: Eliminates the open-connection and thread-blocking bottleneck of Pattern 1 during long delays.
+However, it introduces an edge-case race condition if an external callback arrives faster than the local engine can persist the paused state to the Event Store.
+* *<<#usip-pattern-2-correlated-park-resume, Explore Pattern 2 in depth &rarr;>>*
+
+3. **<<#usip-pattern-3-two-stage-lazy-dispatch, Pattern 3: Two-Stage Lazy Broker Dispatch Integration (Async-Paused: Commit Barrier)>>** +
+* **High-Level Concept**: Enforces a strict two-stage execution protocol using an **Event Store Commit Barrier**.
+Stage 1 writes and commits the `PAUSED` transaction record to the Event Store *before* any message is dispatched.
+Stage 2 executes the deferred `.invoker(...)` lambda to publish the message over Kafka or RabbitMQ.
+* **Evolutionary Purpose (Solving Pattern 2's Callback Race Condition)**: Guarantees that even if downstream message consumers respond within microseconds, the saga transaction record is already committed in the Event Store, completely eliminating race conditions when communicating over high-speed message brokers.
+* *<<#usip-pattern-3-two-stage-lazy-dispatch, Explore Pattern 3 in depth &rarr;>>*
+
+'''
+
+[[usip-pattern-1-direct-synchronous]]
+=== Pattern 1: Direct Synchronous Integration Pattern (Sync-Continuous)
+
+==== Problem & Context
+
+Certain steps need immediate confirmation before moving on.
+For example, checking product stock in a local database, calculating a price, or calling an internal gRPC service that answers in a few milliseconds.
+In these cases, you do not need message queues or pause states.
+A direct synchronous call is the simplest and fastest solution.
+
+==== Architectural Diagram
+
+image::implementations:executor/Executor-Execution-SYNC-CONTINUOUS.svg[alt="Direct Synchronous Execution Pattern (SYNC-CONTINUOUS)",width=100%,opts=interactive,scaledwidth=100%]
+
+==== Detailed Flow Walkthrough
+
+1. **Invocation**: The orchestrator invokes the `Executor` in the transaction pipeline.
+2. **Execution**: The `Executor` calls `Service-A` (the target service) over REST, gRPC, or a local database query.
+This can be written in a blocking style (`CommandExecutor`) or a non-blocking reactive style (`ReactiveCommandExecutor`).
+3. **Immediate Response**: `Service-A` processes the request and returns the response payload right away.
+4. **State Persistence**: The Saga Execution Coordinator (`SEC`) persists the updated domain entity state and the step event into the Event Store.
+5. **Moving to Destination**: Without pausing, the coordinator (`SEC`) immediately transfers control to the configured **`Destination`** (resolved via USNP as another command, a query, a dynamic branch, or completion).
+
+==== Blocking vs. Non-Blocking Reactive Support
+
+StackSaga is built natively on **Project Reactor**.
+You can choose the style that matches your application design:
+
+1. **Imperative Blocking Execution (`CommandExecutor`, `QueryExecutor`)**:
+
+* Uses standard Spring MVC with a thread-per-request model.
+* The worker thread remains busy while waiting for the remote service to reply.
+* Best for fast database operations (JPA/Hibernate) or internal calls responding within milliseconds.
+
+2. **Non-Blocking Reactive Execution (`ReactiveCommandExecutor`, `ReactiveQueryExecutor`)**:
+
+* Uses Spring WebFlux and non-blocking I/O (Netty).
+* Returns a Project Reactor `Mono<ProcessStepManager<DE>>` without blocking any worker thread.
+* Works smoothly with non-blocking HTTP clients (`WebClient`) and reactive database drivers (R2DBC), giving high throughput with few threads.
+
+==== Key Rules of Pattern 1
+
+* **No Pausing**: The step runs continuously using `.noPause()`.
+The saga does not park its state in the Event Store.
+* **Immediate State Persistence**: Domain entity state mutations and step events are persisted to the Event Store as soon as the response arrives.
+* **No Correlation Keys**: Does not generate correlation keys or wait timers.
+* **Retries on Failure**: If a temporary network failure occurs, throw a `RetryableExecutorException` (or return it via `Mono.error`).
+The engine automatically retries with exponential backoff.
+Immediate retries are the developer's choice and happen in memory inside `doProcess()`; the framework takes over only the asynchronous retry after the developer throws.
+* **Non-Transactional by Design**: The engine never wraps `doProcess()` in a database transaction, because that would hold a connection for the whole external call.
+The step result is persisted to the Event Store only after the method returns.
+A crash between the external call and that commit re-executes the step, so protection comes from the forwarded `idempotencyKey`, not from atomicity.
+
+[[publish-without-waiting]]
+.Publishing an Event Without Waiting for a Reply
+[NOTE]
+====
+When a step only needs to emit a message and expects no callback, do not park the saga.
+Use Pattern 1: send the message inside `doProcess()`, wait for the broker acknowledgement (`.get()`, or return the `Mono` of a reactive producer), retry in memory as needed, and throw `RetryableExecutorException` once retries are exhausted.
+Return `.asSync().noPause().toNextExecutor(...)` afterwards.
+A crash before the commit re-publishes the message, so put the `idempotencyKey` in the message and deduplicate in the consumer (at-least-once, effectively-once).
+
+Keep the publish in its own executor, separate from any database write: that split is why a StackSaga application needs no Transactional Outbox (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#outbox-pattern-eliminated[Why StackSaga Eliminates the Transactional Outbox Pattern]).
+====
+
+==== Advantages of Pattern 1
+
+* **Lowest Latency**: Fast execution because it avoids message queues, thread context switches, and background timers.
+* **Immediate Entity Updates**: You can read the response payload and update `currentDomainEntityState` right away.
+* **Mix and Match**: You can freely use blocking executors and reactive executors together in the same orchestrator service.
+
+==== Reference Implementation
+
+===== Example 1.A: Imperative Blocking Executor (`CommandExecutor`)
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "createOrderExecutor")
+public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final OrderServiceClient orderClient;
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull ProcessContext<OrderDomainEntity> context,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        // Synchronous blocking HTTP/gRPC invocation
+        OrderResponse response = orderClient.createOrder(
+                currentDomainEntityState.getOrderId(),
+                currentDomainEntityState.getItems(),
+                context.idempotencyKey()
+        );
+
+        // Immediate aggregate mutation using response payload
+        currentDomainEntityState.setTrackingNumber(response.getTrackingNumber());
+
+        // Pattern 1: Direct Synchronous Advance
+        return stepManager
+                .success("ORDER_CREATED")
+                .asSync()
+                .noPause()
+                .toNextExecutor(ReserveInventoryExecutor.class);
+    }
+
+    @Override
+    public @NonNull RevertStepManager doRevert(...) {
+        return stepManager.success("ORDER_CANCELED").asSync().noPause().toNextDefaultExecutor();
+    }
+}
+----
+
+===== Example 1.B: Non-Blocking Reactive Executor (`ReactiveCommandExecutor`)
+
+[source,java]
+----
+@SagaExecutor(executeFor = "reactive-order-service", value = "createOrderReactiveExecutor")
+public class CreateOrderReactiveExecutor implements ReactiveCommandExecutor<OrderDomainEntity> {
+
+    private final WebClient webClient;
+
+    @Override
+    public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
+            ProcessContext<OrderDomainEntity> context,
+            ProcessStepManager<OrderDomainEntity> stepManager
+    ) {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        // Non-blocking reactive WebClient invocation (Zero thread blocking)
+        return webClient.post()
+                .uri("/orders")
+                .header("Idempotency-Key", context.idempotencyKey())
+                .bodyValue(new CreateOrderRequest(currentDomainEntityState.getOrderId(), currentDomainEntityState.getItems()))
+                .retrieve()
+                .bodyToMono(OrderResponse.class)
+                .map(response -> {
+                    currentDomainEntityState.setTrackingNumber(response.getTrackingNumber());
+                    return stepManager
+                            .success("ORDER_CREATED")
+                            .asSync()
+                            .noPause()
+                            .toNextExecutor(ReserveInventoryExecutor.class);
+                })
+                .onErrorResume(WebClientResponseException.class, ex ->
+                        Mono.error(new RetryableExecutorException("Order service temporarily unavailable", ex)));
+    }
+
+    @Override
+    public Mono<RevertStepManager> doRevert(...) {
+        return Mono.just(stepManager.success("ORDER_CANCELED").asSync().noPause().toNextDefaultExecutor());
+    }
+}
+----
+
+==== The Inherent Limitation: In-Memory Lifecycles vs. Long Waiting Periods
+
+Now that we have seen how Pattern 1 executes synchronously, it is essential to understand its boundaries.
+Developers often assume that the only drawback of Pattern 1 is thread blocking, and that non-blocking reactive executors (`ReactiveCommandExecutor`) solve every waiting problem.
+
+However, **reactive programming does NOT solve the problem of long wait periods**:
+
+1. **Connections Cannot Stay Open Forever**: Even with non-blocking reactive sockets, an HTTP connection is an active network stream.
+If a step must wait for user action (such as a 3D-Secure payment redirect, an SMS verification code, or a multi-day manager approval), **no HTTP connection or load balancer can stay open for hours or days**.
+Network gateways, proxies, and firewalls terminate idle sockets after 30 to 120 seconds.
+2. **Server Restarts Destroy In-Memory State**: If an application pod restarts, crashes, or scales down during a blue-green deployment, **all in-memory threads and active Project Reactor subscriptions are instantly lost**.
+Any transaction waiting in memory is dropped without recovery.
+3. **Memory Overhead**: Retaining thousands of unresolved reactive stream subscriptions in JVM heap memory degrades application performance and risks OutOfMemory errors.
+
+==== Getting Ready for Pattern 2: The Requirement for 'Park-and-Wait'
+
+To support real-world workflows that take minutes, hours, or days—and to guarantee that transactions survive server restarts and deployments—distributed workflows need a fundamentally different integration style:
+
+* **The Requirement**: When an external step cannot complete immediately, the orchestrator must **persist the transaction state and correlation key into the Event Store, terminate all active threads and in-memory streams, and return resources to the operating system ("Park and Wait")**.
+* When the external user or service eventually replies (via an HTTP webhook, message queue, or admin UI action), the orchestrator reloads the transaction state from the Event Store and resumes seamlessly.
+
+This critical requirement leads directly to **Pattern 2: Correlated Park-and-Resume**.
+
+'''
+
+[[usip-pattern-2-correlated-park-resume]]
+=== Pattern 2: Correlated Park-and-Resume Integration Pattern (Sync-Paused)
+
+==== Evolution from Pattern 1: Solving Wait States with Park-and-Wait
+
+Where Pattern 1 keeps the transaction active in memory, Pattern 2 splits execution into two clear phases:
+
+1. **Initial Synchronous Call**: The executor sends an initial request to `Service-A` (using either a blocking or reactive executor) and receives an immediate acknowledgment or session ticket (such as a payment redirect URL or pending status).
+2. **Park and Wait (Freeing Resources)**: The Saga Execution Coordinator (`SEC`) marks the saga instance as `PAUSED` in the `event-store`, registers a correlation key (`resumeKey`), and **completely ends the in-memory execution**.
+All server threads are returned to the pool, and active `Mono` streams are closed.
+
+While the external system or user completes their action (which might take minutes, hours, or days), the saga consumes **zero CPU, zero threads, zero memory streams, and zero network connections**.
+The orchestrator service can safely restart or redeploy.
+When an external resume trigger arrives (via an HTTP webhook, a message broker subscriber, or user action), the coordinator reloads the saga state from the Event Store and continues the workflow.
+
+==== Architectural Diagram
+
+image::implementations:executor/Executor-Execution-SYNC-PAUSED.svg[alt="Correlated Park-and-Resume Execution Pattern (SYNC-PAUSED)",width=100%,opts=interactive,scaledwidth=100%]
+
+==== Detailed Flow Walkthrough
+
+1. **Synchronous Initiation**: The orchestrator invokes the `Executor`, which calls `Service-A` (for example, creating a checkout session or submitting an approval request).
+2. **Pending Acknowledgment**: `Service-A` returns an initial response containing a session token (`Request Ack / Pending`).
+3. **State Persistence & Parking**: The Saga Execution Coordinator (`SEC`) marks the transaction as `PAUSED` (`is_paused = 1`) in the `event-store`.
+It persists the updated domain entity state, registers a unique attempt correlation key (`resumeKey` formatted as `transactionId:tryoutId`), records the active step with **`ExecutionStatus.NOT_YET`**, and sets a retention timeout.
+4. **Freeing Threads ("Park and Wait")**: The server thread is returned immediately to the application pool.
+No resources remain tied to this transaction during the waiting period.
+5. **External Resume Trigger (Transport-Agnostic)**: Later, external input arrives to wake up the transaction. **Resumption is never limited to HTTP webhooks**; it can arrive through any communication channel:
+* An HTTP Webhook or REST endpoint (`@PostMapping("/webhook")`)
+* A Message Broker Subscriber (`@KafkaListener`, `@RabbitListener`, SQS)
+* A User / Operator UI Action (e.g. a manager clicking an approval button in an internal admin dashboard)
+* A gRPC service or scheduled batch process
+6. **Reloading Saga & Destination Handoff**: When the trigger invokes `sagaTemplate.resume(...)`, the coordinator (`SEC`) looks up the saga in the `event-store` using the correlation key, verifies that the timeout has not expired and that the Tryout UID matches the active attempt, transitions the parked step to **`ExecutionStatus.SUCCESS`**, injects the trigger data into `ResumeContext`, and moves execution to the configured **`Destination`** (defined by USNP).
+
+==== Key Rules of Pattern 2
+
+* **Zero Held Threads**: No server threads remain blocked while waiting.
+* **Persistent Correlation & Tryout UID Precision**: The transaction state and correlation key are safely persisted in the Event Store. The resume key (`transactionId:tryoutId`) encapsulates the attempt's specific Tryout UID.
+* **Parked Execution Status (`ExecutionStatus.NOT_YET`)**: While parked waiting for external resumption, the step event's status is strictly `ExecutionStatus.NOT_YET`. It transitions to `ExecutionStatus.SUCCESS` only upon successful callback resumption.
+* **Stale Callback Protection**: If a wait-state times out and the Retry Coordinator re-invokes the step, a new Tryout UID is allocated. If the external gateway belatedly returns a callback for the earlier timed-out attempt, StackSaga recognizes that the callback's tryout UID does not match the active tryout and safely rejects the stale callback.
+* **Enforces Replay Protection (Double Execution Guard)**: If a gateway, message broker, or user action sends multiple duplicate resume requests with the same `resumeKey`, only the first invocation succeeds in acquiring the active transaction lease and resuming the saga.
+Subsequent duplicate requests are rejected with `InvalidTransactionResumeKeyException` (because the correlation key is atomically consumed and invalidated in the Event Store upon the first resumption).
+This strictly prevents double execution of downstream executors (idempotent single execution).
+Controllers receiving external callbacks can catch `InvalidTransactionResumeKeyException` to return an idempotent HTTP `200 OK` acknowledgment, signaling external gateways to cease further retries.
+
+==== Advantages of Pattern 2
+
+* **Safe for Long Waits**: Safely handles long and unpredictable waiting periods without risking thread starvation or server crashes.
+* **Captures Initial Data**: The executor can read session tokens (like `paymentSessionId` or `redirectUrl`) from the initial response and save them into `currentDomainEntityState` before pausing.
+* **Ideal for Human Approvals**: Perfect for workflows requiring manual sign-offs, manager reviews, or multi-day review processes.
+
+==== Reference Implementation
+
+[source,java]
+----
+@SagaExecutor(executeFor = "payment-service", value = "initiatePaymentExecutor")
+public class InitiatePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentGatewayClient paymentGatewayClient;
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull ProcessContext<OrderDomainEntity> context,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        // Synchronous initiation: create 3DS session
+        PaymentSessionResponse session = paymentGatewayClient.createSession(
+                currentDomainEntityState.getOrderId(),
+                currentDomainEntityState.getTotalAmount(),
+                context.idempotencyKey()
+        );
+
+        // Immediate session capture before pause
+        currentDomainEntityState.setPaymentSessionId(session.getSessionId());
+
+        // Pattern 2: Correlated Park and Wait (15-minute retention window)
+        return stepManager
+                .success("PAYMENT_SESSION_INITIATED")
+                .asSync()
+                .pauseUntilResume(Duration.ofMinutes(15))
+                .resumeToNextExecutor(CapturePaymentExecutor.class);
+    }
+}
+----
+
+==== Awakening the Parked Saga Across Different Entry Points
+
+A parked saga is awakened by invoking `sagaTemplate.resume(...)`.
+Crucially, this resume trigger is **transport-agnostic**—it is never tied solely to HTTP webhooks.
+Below are three common real-world examples:
+
+[TIP]
+.Deep Dive into Saga Resumption & Context Injection
+====
+For a comprehensive guide on `SagaTemplate` resumption methods, reactive vs. blocking resumption, JSON serialization, and the read-only `ResumeContext` contract, see xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions-pausable-lrt[Resuming Paused Transactions via SagaTemplate].
+====
+
+===== Example 2.A: Awakening via an HTTP Webhook Endpoint
+
+Used when an external service or user redirect sends an HTTP POST callback:
+
+[source,java]
+----
+@RestController
+@RequestMapping("/api/v1/payments")
+@RequiredArgsConstructor
+public class PaymentWebhookController {
+
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
+
+    @PostMapping("/webhook")
+    public ResponseEntity<Void> handleWebhook(@RequestBody PaymentWebhookPayload payload) {
+        sagaTemplate.resume(payload.getResumeKey(), Duration.ofMinutes(15))
+                .put("authCode", payload.getAuthCode())
+                .put("status", payload.getStatus())
+                .execute();
+        return ResponseEntity.ok().build();
+    }
+}
+----
+
+===== Example 2.B: Awakening via a Message Broker Subscriber (`@KafkaListener`)
+
+Used when an external service finishes a background job and publishes an event to an Apache Kafka topic:
+
+[source,java]
+----
+@Component
+@RequiredArgsConstructor
+public class PaymentKafkaResponseListener {
+
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
+
+    @KafkaListener(topics = "payment-resolution-topic", groupId = "order-orchestrator-group")
+    public void onPaymentCompleted(PaymentEventMessage message) {
+        sagaTemplate.resume(message.getResumeKey(), Duration.ofMinutes(15))
+                .put("authCode", message.getAuthCode())
+                .put("status", message.getStatus())
+                .execute();
+    }
+}
+----
+
+TIP: `execute()` returns once the resumption is accepted. To make the listener wait until the resumed run has ended, so that the number of resumed transactions running at once stays bounded, use `executeAndWait()`. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fire-and-wait[Waiting for the Run: `fireAndWait`].
+
+===== Example 2.C: Awakening via a User Action (Manual Manager Approval Endpoint)
+
+Used when a transaction waits for a human manager or supervisor to review and click an "Approve" button on an internal dashboard:
+
+[source,java]
+----
+@RestController
+@RequestMapping("/api/v1/orders/approvals")
+@RequiredArgsConstructor
+public class OrderApprovalController {
+
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
+
+    @PostMapping("/approve")
+    public ResponseEntity<Void> approveOrder(
+            @RequestParam String resumeKey,
+            @RequestParam String managerId
+    ) {
+        sagaTemplate.resume(resumeKey, Duration.ofHours(1))
+                .put("approvedBy", managerId)
+                .put("approvalStatus", "APPROVED")
+                .execute();
+        return ResponseEntity.ok().build();
+    }
+}
+----
+
+[[the-critical-problem-fast-callback-outbox-race-condition]]
+[IMPORTANT]
+.The Critical Problem: Fast-Callback & Outbox Race Condition
+====
+While Pattern 2 is ideal for user redirects, payments, and human approvals, it executes in this specific order:
+
+*Step 1: Network Call Out* ➔ *Step 2: SEC Persists PAUSED State to Event Store*
+
+In high-throughput systems, this execution order causes a serious race condition in two common scenarios:
+
+* **Scenario A: Asynchronous Message Brokers (Kafka / RabbitMQ)**: An executor publishes a message to an Apache Kafka topic.
+A consumer service on another server receives it in 2 milliseconds, finishes the work, and immediately sends a completion event back to the orchestrator.
+* **Scenario B: HTTP Fire-and-Forget Endpoints**: An executor calls a fire-and-forget HTTP endpoint on `Service-A`. `Service-A` immediately returns HTTP `202 Accepted` and triggers a fast background webhook back to the orchestrator.
+
+**What Happens When the Persistence Layer Experiences Latency? (The Stuck Wait-State Vulnerability)**
+
+Consider what happens when an outbound network call is dispatched eagerly inside `doProcess()` before the orchestrator commits the step state to the Event Store:
+
+[source,text]
+----
+EXECUTOR (doProcess)               EVENT STORE                      EXTERNAL SERVICE
+       │                                │                                  │
+  (1)  ├────── Send Outbound Request ───┼─────────────────────────────────►│
+       │                                │                                  │
+  (2)  │                                │◄─── Immediate Resume Callback ───┤
+       │                                │     (sagaTemplate.resume)        │
+       │                                │                                  │
+       │   [ Event Store Query ]        │                                  │
+       │   No active PAUSED state found!│                                  │
+       │   (Step 1 not yet committed)   │                                  │
+       │                                │                                  │
+  (3)  │                                ├───► Rejected! (Correlation Key Mismatch)
+       │                                │                                  │
+  (4)  ├─── Commit PAUSED State ───────►│                                  │
+       │    (Saga parked & waiting)     │                                  │
+       │                                │                                  │
+  (5)  ▼   [ DEADLOCK / STUCK ]         ▼                                  ▼
+       Saga waits forever for a callback that was already consumed and rejected!
+----
+
+1. The executor dispatches the network request eagerly inside `doProcess()` (*Step 1*).
+2. The external service receives it and **immediately sends the resume callback back to the orchestrator** (*Step 2*).
+3. Meanwhile, the orchestrator's local thread is still finalizing execution and has not yet committed the step's `PAUSED` state or registered the correlation key in the Event Store.
+4. The incoming resume callback arrives at the orchestrator **BEFORE the Event Store commits the `PAUSED` state!**
+5. When the orchestrator queries the Event Store, it finds no active paused transaction matching the correlation key.
+The engine rejects the premature callback with `InvalidTransactionResumeKeyException` (correlation key mismatch / uncommitted transaction).
+6. Moments later, the local executor thread completes and the orchestrator commits the `PAUSED` state to the Event Store, holding an active transaction lease.
+7. **The Fatal Result**: Because the single callback was already delivered, rejected, and discarded by the external system, **no further resume triggers will arrive**.
+The transaction remains **permanently stuck in a waiting state**, and downstream steps are **never invoked**.
+
+**The Universal Need for Pattern 3 (The Commit Barrier)**:
+
+Whenever there is **any chance that a callback or reply event could arrive before the orchestrator finishes persisting its state to the Event Store**, Pattern 2 is unsafe.
+Distributed systems require an execution model that guarantees the saga transaction state is safely persisted and committed in the Event Store **BEFORE** the external request is dispatched.
+This critical requirement leads directly to **Pattern 3**.
+====
+
+==== Getting Ready for Pattern 3: The Requirement for the Commit Barrier
+
+The race condition described above reveals a crucial architectural requirement for high-throughput messaging:
+
+* **The Requirement**: When integrating with message brokers (Apache Kafka, RabbitMQ) or fast fire-and-forget APIs, the orchestrator cannot use a single-step dispatch.
+It must enforce a **strict two-stage protocol**:
+1. **Stage 1 (The Commit Barrier)**: Persist and commit the `PAUSED` transaction state and correlation key to the Event Store **FIRST**.
+2. **Stage 2 (Lazy Dispatch)**: Only after the Event Store state persistence is confirmed durable, execute the network dispatch lambda to send the message.
+
+Even if downstream consumers process the message in 1 millisecond and trigger an immediate callback, the orchestrator's Event Store is already committed and waiting.
+This introduces **Pattern 3: Two-Stage Lazy Broker Dispatch**.
+
+'''
+
+[[usip-pattern-3-two-stage-lazy-dispatch]]
+=== Pattern 3: Two-Stage Lazy Dispatch Integration Pattern (Async-Paused)
+
+==== Evolution from Pattern 2: Eliminating Race Conditions via the Commit Barrier
+
+Pattern 3 directly solves the race condition of Pattern 2 by **reversing the order of operations**:
+
+*Stage 1: SEC Persists PAUSED State to Event Store FIRST (Commit Barrier)* ➔ *Stage 2: SEC Sends Message / Call SECOND*
+
+By dividing execution into two stages, the coordinator guarantees that the transaction state and correlation key are safely persisted to the Event Store **BEFORE** the network request is sent.
+
+Even if the downstream service or message consumer finishes in 1 millisecond and triggers the callback immediately, the orchestrator's Event Store is already prepared to accept it.
+The race condition is completely prevented.
+
+==== Pattern 3 is Universal (Not Just for Kafka)
+
+A common misconception is that Pattern 3 is only used with Apache Kafka or RabbitMQ.
+
+In reality, **Pattern 3 is the universal Commit-Barrier pattern for ANY asynchronous call** where a callback could arrive faster than the Event Store can persist the state:
+
+* **Message Broker Publishing**: Sending commands to Apache Kafka, RabbitMQ, or AWS SQS.
+* **HTTP Fire-and-Forget Endpoints**: Calling an external REST endpoint that returns `200/202` without a payload and immediately triggers an asynchronous webhook back to the orchestrator.
+* **Fast Asynchronous SaaS APIs**: Any third-party service whose completion webhook could return faster than the orchestrator's Event Store persistence latency.
+
+==== Architectural Diagram
+
+image::implementations:executor/Executor-Execution-ASYNC-PAUSED.svg[alt="Two-Stage Lazy Dispatch Execution Pattern (ASYNC-PAUSED)",width=100%,opts=interactive,scaledwidth=100%]
+
+==== Detailed Flow Walkthrough
+
+1. **Delegation**: The orchestrator invokes the `Executor`.
+Instead of sending the message directly, the executor gives the coordinator (`SEC`) an invoker lambda function.
+2. **Stage 1 (The Commit Barrier)**: The coordinator (`SEC`) enforces the commit barrier.
+It persists the entity state mutations and records the `PAUSED` step event into the `event-store` **FIRST**.
+At this point, the network request has not been sent yet.
+3. **Stage 2 (Lazy Dispatch)**: Only after the Event Store commit succeeds does the coordinator (`SEC`) execute the lambda function, sending the command over Kafka, RabbitMQ, or an HTTP fire-and-forget endpoint.
+4. **Freeing Threads ("Park and Wait")**: The orchestrator thread is returned to the pool while the message travels across the network.
+5. **External Processing & Callback**: `Service-A` processes the job and sends a completion message or webhook back to the orchestrator.
+6. **Reloading Saga & Destination Handoff**: The message listener delivers the `Resume Trigger` to the coordinator (`SEC`), which reloads the saga from the `event-store` and transfers control to the configured **`Destination`** (defined by USNP).
+
+==== Key Rules of Pattern 3
+
+* **Commit Barrier**: State persistence in the Event Store always precedes the network call.
+An external service will never see a message unless that step is already durably persisted in the Event Store.
+"Durably" means that the database's acknowledgement survives a failover: see the note on replication below.
+* **Entity Immutability**: The domain entity snapshot is sealed before Stage 2. Code inside the `invoker(...)` lambda must not modify the entity.
+* **Safe Crash Recovery**: If the orchestrator server crashes after state persistence but before the message is sent, the background recovery process safely retries sending the message.
+The recovery latency is bounded by the *crash retention* (`defaultRestoreOnCrashDuration`) that the engine applies by default as soon as an executor starts, so a crashed step is re-exposed for re-execution after that configurable delay.
+* **Invoker Failure Contract**: The framework runs the `invoker(...)` lambda once; it does not re-run it.
+Immediate retries are the developer's responsibility and happen in memory *inside* the lambda.
+Once those retries are exhausted, throw the exception type declared in `.invoker(lambda, duration, ExceptionType.class)`: the engine then records the attempt as a transient failure, keeps the transaction parked (`is_paused = 1`), temporarily clears the active `resume_key` in the Event Store (so no phantom callback can be accepted), sets `target_retention_end_time` to the retry duration, and the Retry Subsystem re-invokes the step asynchronously after the given duration has elapsed.
+Any exception that is *not* of the declared type is treated as a `NonRetryableExecutorException` and starts compensation.
+If that happens on a re-invocation, the step's own `doRevert()` runs first, because the earlier dispatch may already have been applied (see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step]).
+* **Await the Broker Acknowledgement**: In the imperative `invoker(...)`, `kafkaTemplate.send(...)` returns a future.
+Wait for it (for example `.get()` or `.join()`) and rethrow a failure as the declared exception type; otherwise a failed send never reaches the lambda and the step stays parked until the wait-state expires.
+* **Duplicates Are Possible, So Forward the `idempotencyKey`**: A re-executed step gets a new Tryout UID and therefore a new `resumeKey`.
+The `resumeKey` alone cannot identify a duplicate message, so always put the engine-provided `idempotencyKey` in the message (key or header) and deduplicate on it in the consumer.
+
+[IMPORTANT]
+.The barrier is only as durable as the database's acknowledgement
+====
+The engine dispatches as soon as the database acknowledges the Stage 1 commit.
+With *asynchronous* replication, a primary can acknowledge that commit and fail before the record reaches its replica.
+After failover, the message has been sent but the record it belongs to is gone: the reply finds nothing to match, and the saga is stranded.
+
+Run the event store on a configuration where an acknowledged commit survives failover: synchronous or semi-synchronous replication (for example MySQL semi-sync, a PostgreSQL synchronous standby, or a managed multi-AZ deployment with synchronous replication), or, on Cassandra, a write consistency level whose quorum includes the failover target.
+This applies to every design that keeps its state in an ordinary database, the transactional outbox included; StackSaga cannot detect the replication mode it runs on.
+====
+
+==== Reference Implementation
+
+===== Example A: Two-Stage Broker Dispatch (Apache Kafka)
+
+[source,java]
+----
+@SagaExecutor(executeFor = "shipping-service", value = "dispatchShippingExecutor")
+public class DispatchShippingExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final KafkaTemplate<String, ShippingCommandMessage> kafkaTemplate;
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull ProcessContext<OrderDomainEntity> context,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        // Stage 1: Aggregate preparation (Committed BEFORE the network call)
+        String trackingId = UUID.randomUUID().toString();
+        currentDomainEntityState.setShippingTrackingId(trackingId);
+
+        // Pattern 3: Two-Stage Lazy Dispatch with Commit Barrier
+        return stepManager
+                .success("SHIPPING_DISPATCH_SUBMITTED")
+                .asAsync()
+                .invoker(
+                        resumeKey -> {
+                            // Stage 2: Lazy Invocation (Executed strictly AFTER the event store commit)
+                            ShippingCommandMessage message = new ShippingCommandMessage(
+                                    currentDomainEntityState.getOrderId(),
+                                    currentDomainEntityState.getShippingTrackingId(),
+                                    currentDomainEntityState.getShippingAddress(),
+                                    resumeKey,      // Resume key included for the asynchronous callback
+                                    context.idempotencyKey()  // Stable across re-executions: lets the consumer deduplicate
+                            );
+                            kafkaTemplate.send("shipping-commands-topic", currentDomainEntityState.getOrderId(), message);
+                        },
+                        Duration.ofMinutes(15),     // Tier 2 scheduled retry window on transient network failure
+                        KafkaException.class        // Exception type triggering framework scheduled retry
+                )
+                .pauseUntilResume(Duration.ofHours(2))
+                .resumeToNextExecutor(ConfirmDeliveryExecutor.class);
+    }
+}
+----
+
+===== Example B: Two-Stage HTTP Fire-and-Forget Dispatch
+
+[source,java]
+----
+@SagaExecutor(executeFor = "notification-service", value = "dispatchSmsFireAndForgetExecutor")
+public class DispatchSmsFireAndForgetExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final FastSmsGatewayClient fastSmsGatewayClient;
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull ProcessContext<OrderDomainEntity> context,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        // Stage 1: State preparation committed prior to dispatch
+        currentDomainEntityState.setNotificationDispatched(true);
+
+        // Pattern 3: Immune to persistence layer latency even if SMS webhook arrives instantly
+        return stepManager
+                .success("SMS_DISPATCH_COMMITTED")
+                .asAsync()
+                .invoker(
+                        resumeKey -> {
+                            // Stage 2: Fire-and-forget HTTP call (No payload returned)
+                            fastSmsGatewayClient.sendFireAndForget(
+                                    currentDomainEntityState.getCustomerPhone(),
+                                    "Your order " + currentDomainEntityState.getOrderId() + " is confirmed! Callback token: " + resumeKey,
+                                    context.idempotencyKey()
+                            );
+                        },
+                        Duration.ofMinutes(5),           // Retry window for transient network failure
+                        WebClientResponseException.class // Exception triggering framework scheduled retry
+                )
+                .pauseUntilResume(Duration.ofMinutes(10))
+                .resumeToNextExecutor(PostNotificationConfirmationExecutor.class);
+    }
+}
+----
+
+===== Example C: Reactive Two-Stage Broker Dispatch (`ReactiveCommandExecutor`)
+
+[source,java]
+----
+@SagaExecutor(executeFor = "reactive-shipping-service", value = "dispatchShippingReactiveExecutor")
+public class DispatchShippingReactiveExecutor implements ReactiveCommandExecutor<OrderDomainEntity> {
+
+    private final ReactiveKafkaProducerTemplate<String, ShippingCommandMessage> kafkaTemplate;
+
+    @Override
+    public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
+            ProcessContext<OrderDomainEntity> context,
+            ProcessStepManager<OrderDomainEntity> stepManager
+    ) {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        // Stage 1: State preparation committed before dispatch
+        currentDomainEntityState.setShippingTrackingId(UUID.randomUUID().toString());
+
+        // Pattern 3: Reactive Two-Stage Dispatch using reactiveInvoker
+        return Mono.just(stepManager
+                .success("SHIPPING_DISPATCH_SUBMITTED")
+                .asAsync()
+                .reactiveInvoker(
+                        resumeKey -> kafkaTemplate.send(
+                                "shipping-commands-topic",
+                                currentDomainEntityState.getOrderId(),
+                                new ShippingCommandMessage(currentDomainEntityState.getOrderId(), resumeKey)
+                        ),
+                        Duration.ofHours(2),
+                        KafkaDeliveryException.class
+                )
+                .pauseUntilResume(Duration.ofHours(2))
+                .resumeToNextExecutor(ConfirmDeliveryExecutor.class));
+    }
+
+    @Override
+    public Mono<RevertStepManager> doRevert(...) {
+        return Mono.just(stepManager.success("SHIPPING_REVERTED").asSync().noPause().toNextDefaultExecutor());
+    }
+}
+----
+
+==== The Architectural Trade-off: Domain Entity Immutability
+
+Now that we have seen the code implementations of Pattern 3, note the key architectural boundary: **you cannot modify `DomainEntity` inside the `invoker(...)` lambda based on a response payload**.
+
+Because the coordinator has already committed the entity snapshot to the Event Store in Stage 1 *before* executing the lambda in Stage 2, any mutations made to `currentDomainEntityState` inside the lambda will not be persisted.
+
+* **Why This Is Fine in Practice**:
+
+- Message brokers and HTTP fire-and-forget endpoints do not return business payloads during dispatch (they only return a transport ACK or HTTP 202).
+- When the downstream microservice completes its task, its business results are delivered in the return event or callback, which you read cleanly via `ResumeContext`.
+
+==== Decision Guide: Choosing Between Pattern 1, Pattern 2, and Pattern 3
+
+[cols="25%,35%,40%",options="header"]
+[.matrix-table]
+|===
+| Pattern | When to Choose | Key Operational Trade-off
+
+| **Pattern 1** +
+_(Direct Synchronous)_
+| Fast atomic operations (< 500ms) where immediate response data must update `DomainEntity`.
+| **Limitation**: Server thread is held during execution. Unsafe for long waiting states or human approvals.
+
+| **Pattern 2** +
+_(Correlated Park-and-Resume)_
+| Operations requiring user redirects (3D-Secure, PayPal) or human approvals where the callback arrives minutes/hours later, AND you must capture initial session tokens in `DomainEntity`.
+| **Limitation**: Vulnerable to fast-callback race conditions if the Event Store persistence layer experiences latency. Do not use for high-throughput message brokers.
+
+| **Pattern 3** +
+_(Two-Stage Lazy Dispatch)_
+| High-throughput message brokers (Kafka/RabbitMQ) or fast fire-and-forget HTTP APIs where reply callbacks could arrive within milliseconds.
+| **Limitation**: Domain entity is sealed before dispatch; response payloads cannot be saved during the network send (handled via `ResumeContext` upon resume).
+|===
+
+=== Comparison of the Three Integration Patterns
+
+Now that we have explored all three integration patterns in detail, the following matrix summarizes how they compare across key operational dimensions:
+
+[cols="18%,18%,22%,22%,20%",options="header"]
+[.matrix-table]
+|===
+| Pattern | Where to Use | Supported Styles | Server Thread / Memory Behavior | Event Store State
+
+| **Pattern 1: Direct Synchronous** +
+_(Sync-Continuous)_
+| Local DB / REST / gRPC
+| **Blocking:** `CommandExecutor` +
+**Reactive:** `ReactiveCommandExecutor`
+| **Blocking:** Thread is held until finished +
+**Reactive:** Non-blocking (`Mono`)
+| `SUCCESS` (Persisted immediately)
+
+| **Pattern 2: Correlated Park-and-Resume** +
+_(Sync-Paused)_
+| User Redirects / 3D-Secure / Webhooks / Manual Approvals
+| **Blocking & Reactive:** +
+`.pauseUntilResume(duration)`
+| Thread is freed immediately ("Park and Wait")
+| `PAUSED` + `resumeKey`
+
+| **Pattern 3: Two-Stage Lazy Dispatch** +
+_(Async-Paused)_
+| Kafka / RabbitMQ / Fast HTTP Fire-and-Forget
+| **Imperative:** `.invoker(...)` +
+**Reactive:** `.reactiveInvoker(...)`
+| Thread is freed immediately ("Park and Wait")
+| `PAUSED` (Persisted *before* sending)
+|===
+
+'''
+
+=== The Four Core Technical Dimensions of Step Integration
+
+Across all three patterns, the Saga Orchestration Engine systematically manages four core technical dimensions of external integration:
+
+* **1. State Persistence & Commit Timing** +
+Governs *when* the domain aggregate state and step event are committed to the Event Store relative to the external action:
+** *Pattern 1 (Sync-Continuous)*: Persists state immediately after receiving the successful synchronous response.
+** *Pattern 2 (Sync-Paused)*: Persists the `PAUSED` state upon receiving an initial session token or acknowledgment.
+** *Pattern 3 (Async-Paused)*: Enforces a **Commit Barrier**—persists the `PAUSED` state to the Event Store *before* dispatching the network message or API call.
+
+* **2. Thread Lifecycle & Resource Usage** +
+Governs how server threads and in-memory resources are managed during the step:
+** *Pattern 1*: Retains the thread (imperative blocking) or maintains an active stream subscription (reactive `Mono`) throughout execution.
+** *Patterns 2 & 3*: Uses **"Park and Wait"**—terminates the active in-memory context immediately upon commitment, releasing all CPU, thread, and memory resources while waiting for external events.
+
+* **3. Resumption Mechanics (Transport-Agnostic)** +
+Governs how a parked transaction wakes up and resumes forward progression:
+** *Pattern 1*: Runs continuously without pausing; advances immediately in the same execution thread.
+** *Patterns 2 & 3*: Wakes up via any external **Resume Trigger**.
+Resumption is never tied to a single transport—it can be invoked from an HTTP Webhook (`@PostMapping`), an asynchronous message subscriber (`@KafkaListener`, `@RabbitListener`), a gRPC call, or a manual user action in an admin UI by calling `sagaTemplate.resume(...)`.
+
+* **4. Step Completion & Control Handoff** +
+Governs how the execution pattern concludes its work:
+** In all three patterns, once the step's business action finishes and its state mutation is safely committed to the Event Store, the execution pattern completes its responsibility and hands control over to the workflow navigation engine.
+
+---
+
+== The Architectural Bridge: Connecting System Integration (USIP) to Workflow Navigation (USNP)
+
+=== The 'Destination' Concept: The Handoff Threshold
+
+In Pillar 1 (USIP), we explored how an individual step integrates with an external system or database, manages server threads, and commits state to the Event Store.
+In all three execution diagrams (`SYNC-CONTINUOUS`, `SYNC-PAUSED`, and `ASYNC-PAUSED`), the execution pipeline concludes at an abstract box labeled **`[ Destination ]`**.
+
+image::implementations:executor/stacksaga-saga-orchestration-execution-to-navigation-bridge.svg[alt="StackSaga Architectural Bridge - Connecting Execution to Navigation",width=100%,opts=interactive,scaledwidth=100%]
+
+=== Separation of Concerns: Integration Domain vs. Navigation Domain
+
+Why does StackSaga strictly separate **System Integration** from **Workflow Navigation**?
+
+* **The Integration Domain (Pillar 1: USIP - Outward Communication)**:
+Focuses entirely on **HOW** a single step communicates across external boundaries:
+** Communicating with external microservices (REST, gRPC, messaging, or local DB).
+** Managing thread resources (imperative blocking, reactive streaming, or park-and-wait).
+** Enforcing data durability and commit barriers in the Event Store.
+** *Once the step event is committed, the execution pattern's job is complete.* It delivers control to the abstract `[ Destination ]` threshold.
+
+* **The Navigation Domain (Pillar 2: USNP - Inward Graph Routing)**:
+Focuses entirely on **WHERE** execution travels within the saga graph:
+** Resolving the abstract `[ Destination ]` into concrete runtime targets.
+** Routing to a successor `CommandExecutor` or `QueryExecutor`.
+** Evaluating domain entity aggregate state to dynamically branch workflows.
+** Concluding the saga with `.complete()`.
+** Triggering deterministic reverse autopilot (`.resumeToNextDefaultExecutor()`) on failure.
+
+By decoupling *how a step integrates* from *where it navigates*, developers can change how a step communicates (e.g., changing from a direct REST call to an asynchronous Kafka message) without modifying the workflow graph, and vice-versa.
+
+---
+
+== Pillar 2: Unified Saga Navigation Patterns (USNP) & Destination Taxonomy
+
+=== The Four Step Managers: Directing the Workflow Graph
+
+Now that external integration has safely committed and handed control to the navigation domain, Pillar 2 (**Unified Saga Navigation Patterns - USNP**) governs **where execution travels next**.
+
+Instead of relying on external BPMN XML files, JSON state machines, or rigid orchestrator scripts, StackSaga defines the distributed workflow graph directly through four strongly-typed **Step Managers**:
+
+[cols="1,2,2",options="header"]
+|===
+| Step Manager | Operational Scope | Valid Destinations
+| <<#usnp-process-step-manager, `ProcessStepManager<DE>`>> | Forward execution (`doProcess`) | Next Target Executor, Dynamic Content Branching, Terminal Completion, Failure Pivot Point
+| <<#usnp-revert-step-manager, `RevertStepManager`>> | Core compensation (`doRevert`) | Preceding Core Revert, Preceding Pre-Executor Hook, End of LRT Compensation
+| <<#usnp-pre-step-manager, `PreStepManager<DE, E>`>> | Pre-compensation pipeline | Host Core `doRevert()`, Next Pre-Executor Hook
+| <<#usnp-post-step-manager, `PostStepManager<DE, E>`>> | Post-compensation pipeline | Preceding Core Revert, Preceding Pre-Executor Hook, Next Post-Executor Hook, End of Saga Compensation
+|===
+
+Every destination pattern can be executed using any of the three execution modes (Continuous, Pausable LRT, or Two-Stage Async) through StackSaga's fluent API without changing the underlying routing topology.
+
+'''
+
+[[usnp-process-step-manager]]
+=== 1. Forward Navigation via `ProcessStepManager<DE>`
+
+`ProcessStepManager<DE>` coordinates forward workflow progression for both state-changing `CommandExecutor` steps and read-only `QueryExecutor` steps.
+Forward steps can route to a successor executor, conclude the transaction, dynamically branch based on domain entity state, or trigger compensation.
+
+==== Overview & Forward Destination Roadmap
+
+Under `ProcessStepManager<DE>`, forward workflow progression can route to four distinct destination patterns:
+
+1. **<<#usnp-1-1-executor-to-executor, 1.1: Executor to Executor Navigation>>** +
+Routes execution sequentially to the next target `CommandExecutor` or `QueryExecutor` in the forward workflow.
+2. **<<#usnp-1-2-terminal-completion, 1.2: Terminal Completion Navigation>>** +
+Concludes the entire distributed transaction successfully via `.complete()` or `.resumeToComplete()`.
+3. **<<#usnp-1-3-dynamic-branching, 1.3: Dynamic Content-Based Branching>>** +
+Selects the target executor dynamically at runtime by evaluating domain aggregate state.
+4. **<<#usnp-1-4-failure-pivot, 1.4: Failure Pivot Point (Triggering Compensation)>>** +
+Halts forward progression immediately upon an unrecoverable failure and engages Reverse Autopilot.
+
+'''
+
+[[usnp-1-1-executor-to-executor]]
+==== 1.1: Executor to Executor Navigation
+
+Routes forward progression directly from the current executor to the next target executor in the distributed workflow.
+
+image::implementations:executor/stacksaga-saga-forward-executor-to-next-executor.svg[alt="StackSaga Saga Forward Navigation - Executor to Next Executor",width=100%,opts=interactive,scaledwidth=100%]
+
+===== Scenario A: Command to Command (Direct Business Mutations)
+
+Used when a state-changing step completes and hands execution to another state-changing step.
+
+* **Direct Synchronous (Continuous)**:
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    // Command 1 creates order in local database
+    orderService.createOrder(context.currentDomainEntityState().getOrderId());
+    
+    // Direct Sync navigation to Command 2
+    return stepManager
+            .success("ORDER_CREATED")
+            .asSync()
+            .noPause()
+            .toNextExecutor(ReserveInventoryCommandExecutor.class);
+}
+----
+
+* **Correlated Park-and-Resume (Pausable LRT)**:
+Used when the step initiates an operation requiring an external callback, user interaction (e.g., 3D-Secure), or message subscriber trigger before moving to the next command.
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    SessionRedirect redirect = paymentClient.initiate3DSecure(context.currentDomainEntityState().getTotalAmount());
+    context.currentDomainEntityState().setPaymentSessionId(redirect.getSessionId());
+
+    return stepManager
+            .success("3DS_SESSION_INITIATED")
+            .asSync()
+            .pauseUntilResume(Duration.ofMinutes(20))
+            .resumeToNextExecutor(CapturePaymentCommandExecutor.class);
+}
+----
+
+* **Two-Stage Lazy Broker Dispatch (Async-Paused)**:
+Used when publishing a command event over Apache Kafka or RabbitMQ with transactional commit barrier safety before parking until a reply arrives.
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    context.currentDomainEntityState().setPickingBatchId(UUID.randomUUID().toString());
+
+    return stepManager
+            .success("WAREHOUSE_PICKING_SUBMITTED")
+            .asAsync()
+            .invoker((de, ctx) -> {
+                WarehousePickCommand cmd = new WarehousePickCommand(de.getOrderId(), de.getPickingBatchId());
+                kafkaTemplate.send("warehouse-pick-topic", de.getOrderId(), cmd);
+            })
+            .pauseUntilResume(Duration.ofHours(3))
+            .resumeToNextExecutor(PackOrderCommandExecutor.class);
+}
+----
+
+===== Scenario B: Command to Query (Enrichment Before Mutation)
+
+Used when a state-changing command must be followed by a read-only query to fetch supplemental information before the next state mutation.
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    inventoryClient.reserveStock(context.currentDomainEntityState().getItems());
+    
+    // Command navigating to QueryExecutor
+    return stepManager
+            .success("INVENTORY_RESERVED")
+            .asSync()
+            .noPause()
+            .toNextExecutor(CalculateTaxQueryExecutor.class);
+}
+----
+
+===== Scenario C: Query to Command & Query to Query
+
+Used when a read-only query step inspects data to decide or prepare the next state mutation, or queries multiple downstream services in sequence.
+
+[source,java]
+----
+@SagaExecutor(executeFor = "credit-service", value = "checkCreditQueryExecutor")
+public class CheckCreditQueryExecutor implements QueryExecutor<OrderDomainEntity> {
+
+    @Override
+    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+        CreditReport report = creditClient.fetchCreditScore(context.currentDomainEntityState().getCustomerId());
+        context.currentDomainEntityState().setCreditApproved(report.isEligible());
+
+        // Query navigating to CommandExecutor
+        return stepManager
+                .success("CREDIT_CHECKED")
+                .asSync()
+                .noPause()
+                .toNextExecutor(DebitCustomerAccountCommandExecutor.class);
+    }
+}
+----
+
+[TIP]
+.Architectural Consideration: Should You Merge Consecutive Queries?
+====
+When two read-only queries run consecutively (e.g., fetching tax rules, then fetching currency exchange rates):
+
+* **Merging into a single QueryExecutor**: Safe if both queries are idempotent and read-only.
+Reduces event store commits and pipeline latency.
+* **Keeping separate QueryExecutors**: Best if queries belong to distinct domain boundaries (SRP), require different timeout/retry policies, or need granular audit tracking in the event store.
+====
+
+'''
+
+[[usnp-1-2-terminal-completion]]
+==== 1.2: Terminal Completion Navigation
+
+Concludes the entire distributed transaction successfully.
+Once completed, no further forward execution occurs, and the saga reaches a successful terminal state.
+
+image::implementations:executor/stacksaga-saga-forward-executor-to-end-of-lrt.svg[alt="StackSaga Saga Forward Execution - Terminal Completion",width=100%,opts=interactive,scaledwidth=100%]
+
+* **Continuous Completion**:
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    notificationClient.sendOrderConfirmation(context.currentDomainEntityState().getOrderId());
+
+    // Concludes the Saga forward progression immediately
+    return stepManager
+            .success("ORDER_FULFILLMENT_COMPLETED")
+            .asSync()
+            .noPause()
+            .complete();
+}
+----
+
+* **Pausable Completion (`resumeToComplete()`)**:
+Used when the final step in a saga must wait for an external confirmation (such as customer physical delivery sign-off) before concluding the transaction.
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    logisticsClient.dispatchCarrier(context.currentDomainEntityState().getShippingTrackingId());
+
+    return stepManager
+            .success("COURIER_DISPATCHED")
+            .asSync()
+            .pauseUntilResume(Duration.ofDays(7))
+            .resumeToComplete();
+}
+----
+
+'''
+
+[[usnp-1-3-dynamic-branching]]
+==== 1.3: Dynamic Content-Based Branching
+
+Evaluates domain entity aggregate state at runtime to select the target destination dynamically without requiring external rules engines.
+
+image::implementations:executor/stacksaga-saga-forward-dynamic-branching.svg[alt="StackSaga Saga Forward Navigation - Dynamic Content Branching",width=100%,opts=interactive,scaledwidth=100%]
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    Class<? extends SagaExecutor<OrderDomainEntity>> nextStep;
+
+    if (context.currentDomainEntityState().isVipCustomer()) {
+        // Option 1: Fast-track VIP dispatch (CommandExecutor)
+        nextStep = PriorityLogisticsCommandExecutor.class;
+    } else if (context.currentDomainEntityState().isInternationalShipping()) {
+        // Option 2: Query cross-border tariff rules before dispatch (QueryExecutor)
+        nextStep = CheckCustomsTariffQueryExecutor.class;
+    } else {
+        // Option 3: Standard domestic ground fulfillment (CommandExecutor)
+        nextStep = StandardGroundLogisticsCommandExecutor.class;
+    }
+
+    return stepManager
+            .success("ROUTING_DETERMINED")
+            .asSync()
+            .noPause()
+            .toNextExecutor(nextStep);
+}
+----
+
+[NOTE]
+====
+**Polymorphic Destination Navigation**:
+Notice how `nextStep` dynamically resolves to either a `CommandExecutor` or a `QueryExecutor`.
+The framework does not require separate branching methods for commands versus queries; `toNextExecutor(nextStep)` polymorphically accepts any valid `SagaExecutor` class.
+====
+
+'''
+
+[[usnp-1-4-failure-pivot]]
+==== 1.4: Failure Pivot Point (Triggering Compensation)
+
+An unrecoverable business failure stops forward progress immediately and activates the Reverse Autopilot.
+
+image::implementations:executor/stacksaga-saga-forward-failure-pivot-to-compensation.svg[alt="StackSaga Saga Forward Navigation - Failure Pivot Point",width=100%,opts=interactive,scaledwidth=100%]
+
+When an executor throws a `NonRetryableExecutorException`, the framework catches the business failure, records the error event to the event store, halts the forward pipeline, and begins deterministic reverse compensation.
+
+[source,java]
+----
+if (availableStock < requestedQuantity) {
+    // Aborts forward pipeline immediately and engages Reverse Autopilot
+    throw NonRetryableExecutorException
+            .buildWith(new IllegalStateException("Out of stock for SKU: " + currentSku))
+            .withEvent("OUT_OF_STOCK")
+            .withDefaultReexposeOnUnexpectedCrash()
+            .compensateThisStep(true)
+            .build();
+}
+----
+
+NOTE: If the failing executor had already been re-executed after a transient failure, an earlier attempt may have been applied by the remote service.
+If the exception is built with `compensateThisStep(true)`, the failing executor's own `doRevert()` runs first, before the reverse unwinding continues.
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step].
+
+'''
+
+[[usnp-revert-step-manager]]
+=== 2. Core Rollback Navigation via `RevertStepManager`
+
+`RevertStepManager` coordinates compensation operations inside `CommandExecutor.doRevert(...)`.
+
+[IMPORTANT]
+.Deterministic Reverse Autopilot (LIFO Rollback)
+====
+During forward execution, business logic chooses which step to run next (`.toNextExecutor(Next.class)`).
+
+During rollback, however, **developers do NOT select rollback targets manually**.
+Choosing rollback steps manually in distributed systems often leads to bugs (such as skipped compensations or out-of-order reversals).
+
+Instead, StackSaga handles rollback automatically via **Deterministic Reverse Autopilot**:
+
+1. When compensation activates, the coordinator inspects the executed event store history.
+2. It identifies all completed command steps in the exact order they ran.
+3. It reverses the steps in backward order (Last-In, First-Out: LIFO).
+4. Calling `.toNextDefaultExecutor()` (or `.resumeToNextDefaultExecutor()` when entering a pausable wait-state) signals the engine to automatically route to the appropriate predecessor step in history.
+
+The step that failed is normally not part of this chain.
+The exception is a step that failed non-retryably *after being re-executed* with `compensateThisStep(true)`: its own `doRevert()` is the first compensation, because an earlier attempt may have been applied.
+See xref:stacksaga-sync/orchestrator/executor_architecture.adoc#non_retryable_after_retry[Compensating the Failing Step].
+====
+
+[IMPORTANT]
+.Domain Entity Immutability & RevertHintStore During Rollback
+====
+During rollback execution, `finalDomainEntityState` represents the immutable domain entity snapshot frozen at the exact point of forward failure.
+
+* **No Domain Entity Persistence in Revert**: StackSaga intentionally does NOT persist any modifications made to `finalDomainEntityState` during rollback. The Event Store preserves the aggregate's forward state at the failure point for post-mortem forensics, auditing, and debugging.
+* **Passing Data Backward Across Compensations**: To transfer data backward between compensating steps (such as refund references, cancellation codes, or restock batch IDs), developers must use `RevertHintStore` (`context.revertHintStore().put(key, value)`).
+* The `RevertHintStore` is automatically propagated backward across the entire reverse cascade (`doRevert`, Pre-Executors, Post-Executors) and persisted immutably with each compensation execution in the Event Store for full auditability and trace parity.
+====
+
+==== Overview & Rollback Destination Roadmap
+
+During rollback, developers do not pick compensation targets manually.
+The engine's Reverse Autopilot automatically unwinds the executed history into three distinct destination patterns:
+
+1. **<<#usnp-2-1-revert-to-core, 2.1: Core Revert to Preceding Core Revert Executor>>** +
+Unwinds directly into the preceding command's core `doRevert()` when that command has no pre-compensation hooks.
+2. **<<#usnp-2-2-revert-to-pre, 2.2: Core Revert to Preceding Command's Pre-Executor>>** +
+Unwinds automatically into the preceding command's `@StartPreExecutor` hook when pre-compensation is configured.
+3. **<<#usnp-2-3-revert-to-end, 2.3: Core Revert to End of LRT (Compensation Completed)>>** +
+Concludes all transaction rollback when the initial root command finishes compensation.
+
+'''
+
+[[usnp-2-1-revert-to-core]]
+==== 2.1: Core Revert to Preceding Core Revert Executor
+
+Unwinds directly to the preceding command's core `doRevert()` when that preceding command has no `@StartPreExecutor` hooks.
+
+image::implementations:executor/stacksaga-saga-compensation-core-revert-to-preceding-core-executor.svg[alt="StackSaga Saga Compensation - Core Revert to Preceding Core Executor",width=100%,opts=interactive,scaledwidth=100%]
+
+* **Continuous Rollback**:
+
+[source,java]
+----
+@Override
+public @NonNull RevertStepManager doRevert(
+        @NonNull RevertContext<OrderDomainEntity> context,
+        @NonNull RevertStepManager stepManager
+) throws RetryableExecutorException {
+    OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
+
+    // Synchronously release stock
+    inventoryClient.releaseStock(finalDomainEntityState.getItems(), context.idempotencyKey());
+
+    // Signals the engine to roll back the previous command
+    return stepManager
+            .success("INVENTORY_UNRESERVED")
+            .asSync()
+            .noPause()
+            .toNextDefaultExecutor();
+}
+----
+
+* **Pausable Rollback (Sync-Paused)**:
+Used when a rollback action cannot finish immediately and must wait for an asynchronous settlement or webhook callback.
+
+[source,java]
+----
+@Override
+public @NonNull RevertStepManager doRevert(...) throws RetryableExecutorException {
+    if (!context.revertHintStore().containsKey("refundInitiated")) {
+        // Initial attempt: Send refund request
+        String refundRef = paymentClient.requestAsyncRefund(context.finalDomainEntityState().getPaymentId());
+        context.revertHintStore().put("refundInitiated", refundRef);
+
+        // Pause rollback waiting for bank notification (webhook or Kafka event)
+        return stepManager
+                .success("REFUND_DISPATCHED")
+                .asSync()
+                .pauseUntilResume(Duration.ofDays(1))
+                .resumeToNextDefaultExecutor();
+    }
+
+    // Resumed attempt: Settlement trigger arrived
+    return stepManager.success("REFUND_SETTLED").asSync().noPause().toNextDefaultExecutor();
+}
+----
+
+* **Two-Stage Broker Rollback (Async-Paused)**:
+Used when the rollback action requires sending a cancellation message over Apache Kafka or RabbitMQ with commit barrier safety.
+
+[source,java]
+----
+@Override
+public @NonNull RevertStepManager doRevert(...) {
+    return stepManager
+            .success("ROLLBACK_COMMAND_EMITTED")
+            .asAsync()
+            .invoker(
+                    resumeKey -> {
+                        kafkaTemplate.send("logistics-cancel-topic", context.finalDomainEntityState().getOrderId(), resumeKey);
+                    },
+                    Duration.ofHours(1),
+                    KafkaException.class
+            )
+            .pauseUntilResume(Duration.ofHours(2))
+            .resumeToNextDefaultExecutor();
+}
+----
+
+'''
+
+[[usnp-2-2-revert-to-pre]]
+==== 2.2: Core Revert to Preceding Command's Pre-Executor
+
+When the preceding command step in history has `@StartPreExecutor` hooks configured, calling `.resumeToNextDefaultExecutor()` automatically unwinds into that command's initial pre-compensation hook.
+
+image::implementations:executor/stacksaga-saga-compensation-core-revert-to-preceding-pre-executor.svg[alt="StackSaga Saga Compensation - Core Revert to Preceding Pre-Executor",width=100%,opts=interactive,scaledwidth=100%]
+
+Developers write the exact same `.resumeToNextDefaultExecutor()` invocation; the StackSaga engine inspects the predecessor's hook metadata and automatically delivers control to the start of the pre-compensation pipeline.
+
+'''
+
+[[usnp-2-3-revert-to-end]]
+==== 2.3: Core Revert to End of LRT (Compensation Completed)
+
+When the initial command step (root command) of the saga finishes its `doRevert()`, all executed state changes have been compensated and the distributed transaction concludes.
+
+image::implementations:executor/stacksaga-saga-compensation-core-revert-to-end-of-lrt.svg[alt="StackSaga Saga Compensation - Core Revert to End of LRT",width=100%,opts=interactive,scaledwidth=100%]
+
+The coordinator marks the saga's final status as successfully compensated, completing the transaction lifecycle.
+
+'''
+
+[[usnp-pre-step-manager]]
+=== 3. Pre-Compensation Pipeline via `PreStepManager<DE, E>`
+
+In real-world systems, a step often requires preparatory tasks before its main `doRevert()` can execute (such as acquiring a cancellation scope token, unlocking a distributed mutex, or verifying account permissions).
+
+StackSaga enables this using `@StartPreExecutor(FirstPreExecutor.class)` and `PreStepManager<DE, E>`.
+
+[IMPORTANT]
+.Rollback Lifecycle Handoff Rules
+====
+In a multi-step saga rollback, execution unwinds in deterministic reverse order (LIFO).
+When control enters a step's `@StartPreExecutor` pre-compensation pipeline, the originating source step in rollback history depends on that step's configuration:
+
+[cols="1,2,2",options="header"]
+|===
+| Step Configuration | Originating Source (Step N+1) | Receiving Target (Step N)
+| **Default Rollback** | `StepN+1.doRevert()` | `StepN.doRevert()`
+| **Target has Pre-Hooks** | `StepN+1.doRevert()` | `StepN.FirstPreExecutor`
+| **Source has Post-Hooks** | `StepN+1.LastPostExecutor` | `StepN.doRevert()`
+| **Both Hooks Configured** | `StepN+1.LastPostExecutor` | `StepN.FirstPreExecutor`
+|===
+====
+
+[CAUTION]
+.Sub-Executor Failure During Rollback: Terminal Halting (`REVERT_FAILED`)
+====
+In distributed saga workflows, **there is no compensation for a compensation**.
+If a `@PreExecutor`, `doRevert()`, or `@PostExecutor` in the rollback pipeline encounters an unrecoverable failure or exhausts its configured retries (`RetryableExecutorException`), the engine **cannot roll back further**.
+
+Instead:
+
+* The transaction transitions immediately into **`TransactionCompleteStatus.REVERT_FAILED`** (terminal state).
+* All automated retries halt immediately to protect external systems from cascading failures or infinite retry loops.
+* The transaction snapshot is preserved in the Event Store with full error logs and diagnostic stack traces.
+* Operators can inspect the failure via the Trace Window dashboard and safely restore or remediate the transaction once the downstream issue is resolved.
+====
+
+==== Overview & Pre-Compensation Destination Roadmap
+
+`PreStepManager<DE, E>` coordinates modular preparatory tasks before the host command's core rollback begins across two destination patterns:
+
+1. **<<#usnp-3-1-pre-to-core, 3.1: Pre-Executor to Core Revert Executor (Direct Handoff)>>** +
+Completes preparation and transfers control directly into the parent command's core `doRevert()`.
+2. **<<#usnp-3-2-pre-to-pre, 3.2: Pre-Executor to Another Pre-Executor (Chaining Hooks)>>** +
+Sequentially chains multiple preparatory steps (e.g., releasing mutexes, acquiring tokens) before core compensation begins.
+
+'''
+
+[[usnp-3-1-pre-to-core]]
+==== 3.1: Pre-Executor to Core Revert Executor (Direct Handoff)
+
+Used when a single preparatory hook (or the terminal hook in a pre-pipeline) completes and transfers control directly to the parent command executor's `doRevert()`.
+
+image::implementations:executor/stacksaga-saga-compensation-pre-executor-to-host-core-revert.svg[alt="StackSaga Saga Compensation - Pre-Executor to Host Core Revert",width=100%,opts=interactive,scaledwidth=100%]
+
+*Real-World Example*: Fetching an authorization token from an identity service and storing it in `RevertHintStore` so that `doRevert()` can authenticate with the payment gateway.
+
+[source,java]
+----
+@SagaExecutor(executeFor = "auth-service", value = "fetchRefundTokenPreExecutor")
+public class FetchRefundTokenPreExecutor implements PreExecutor<OrderDomainEntity, PaymentCommandExecutor> {
+
+    @Override
+    public @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(
+            @NonNull RevertContext<OrderDomainEntity> context,
+            @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> stepManager
+    ) throws RetryableExecutorException {
+        String token = authClient.acquireCancellationScopeToken();
+        context.revertHintStore().put("CANCELLATION_TOKEN", token);
+
+        // Transitions directly into PaymentCommandExecutor.doRevert()
+        return stepManager
+                .success("REFUND_TOKEN_ACQUIRED")
+                .asSync()
+                .noPause()
+                .toNextDefaultExecutor();
+    }
+}
+----
+
+NOTE: For full specifications on pre-revert hook ordering and configuration, see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#pre-executors[PreExecutor in Executor Architecture].
+
+*Pausable Pre-Rollback*:
+If preparation requires waiting for supervisor approval or an asynchronous token grant, the pre-executor can pause:
+
+[source,java]
+----
+return stepManager
+        .success("APPROVAL_AWAITED")
+        .asSync()
+        .pauseUntilResume(Duration.ofHours(2))
+        .resumeToNextDefaultExecutor(); // Resumes straight into host doRevert()
+----
+
+'''
+
+[[usnp-3-2-pre-to-pre]]
+==== 3.2: Pre-Executor to Another Pre-Executor (Chaining Hooks)
+
+Chains multiple preparatory hooks sequentially before the main `doRevert()` begins.
+
+image::implementations:executor/stacksaga-saga-compensation-pre-executor-to-another-pre-executor.svg[alt="StackSaga Saga Compensation - Pre-Executor Chaining to Another Pre-Executor",width=100%,opts=interactive,scaledwidth=100%]
+
+*Real-World Example*: Releasing a distributed lock (`UnlockMutexBeforeExecutor`), followed by fetching a security token (`FetchTokenBeforeExecutor`), before entering `doRevert()`.
+
+[source,java]
+----
+@Override
+public @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(...) {
+    distributedLockClient.releaseLock(context.finalDomainEntityState().getOrderId());
+
+    // Chains to the next pre-compensation hook
+    return stepManager
+            .success("MUTEX_UNLOCKED")
+            .asSync()
+            .noPause()
+            .toNextPreExecutor(FetchTokenPreExecutor.class);
+}
+----
+
+'''
+
+[[usnp-post-step-manager]]
+=== 4. Post-Compensation Pipeline via `PostStepManager<DE, E>`
+
+After a command executor finishes its core compensation (`doRevert()`), auxiliary tasks (such as sending a customer notification, logging an audit trail, or emitting metrics) must often be performed.
+
+StackSaga supports this using `@StartPostExecutor(FirstPostExecutor.class)` and `PostStepManager<DE, E>`.
+
+==== Overview & Post-Compensation Destination Roadmap
+
+Following core rollback completion, `PostStepManager<DE, E>` handles non-blocking cleanup, notifications, and auditing across four destination patterns:
+
+1. **<<#usnp-4-1-post-to-post, 4.1: Post-Executor to Another Post-Executor (Chaining Hooks)>>** +
+Sequentially chains multiple post-revert auxiliary actions (e.g., customer email, metric recording).
+2. **<<#usnp-4-2-post-to-preceding-core, 4.2: Post-Executor to Preceding Core Revert Executor>>** +
+Concludes post-compensation on the current step and unwinds directly into the preceding command's core `doRevert()`.
+3. **<<#usnp-4-3-post-to-preceding-pre, 4.3: Post-Executor to Preceding Command's Pre-Executor>>** +
+Transfers unwinding execution into the preceding command's `@StartPreExecutor` pipeline when pre-hooks exist.
+4. **<<#usnp-4-4-post-to-end, 4.4: Post-Executor to End of Compensation>>** +
+Concludes all auxiliary post-compensation tasks on the root command, finalizing the entire saga lifecycle.
+
+'''
+
+[[usnp-4-1-post-to-post]]
+==== 4.1: Post-Executor to Another Post-Executor (Chaining Hooks)
+
+Chains multiple follow-up actions sequentially within the host command's post-compensation pipeline.
+
+image::implementations:executor/stacksaga-saga-compensation-post-executor-to-another-post-executor.svg[alt="StackSaga Saga Compensation - Post-Executor Chaining to Another Post-Executor",width=100%,opts=interactive,scaledwidth=100%]
+
+*Real-World Example*: Sending a cancellation email (`SendCancelEmailAfterExecutor`), followed immediately by publishing audit metrics to Datadog (`PublishAuditMetricsAfterExecutor`).
+
+[source,java]
+----
+@SagaExecutor(executeFor = "notification-service", value = "sendCancelEmailPostExecutor")
+public class SendCancelEmailPostExecutor implements PostExecutor<OrderDomainEntity, PaymentCommandExecutor> {
+
+    @Override
+    public @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(
+            @NonNull RevertContext<OrderDomainEntity> context,
+            @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> stepManager
+    ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
+
+        emailClient.sendOrderCancellation(finalDomainEntityState.getCustomerEmail());
+
+        // Chains to next post-compensation hook
+        return stepManager
+                .success("CANCEL_EMAIL_SENT")
+                .asSync()
+                .noPause()
+                .toNextPostExecutor(PublishAuditMetricsPostExecutor.class);
+    }
+}
+----
+
+NOTE: For full specifications on post-revert hook ordering and configuration, see xref:stacksaga-sync/orchestrator/executor_architecture.adoc#post-executors[PostExecutor in Executor Architecture].
+
+'''
+
+[[usnp-4-2-post-to-preceding-core]]
+==== 4.2: Post-Executor to Preceding Core Revert Executor
+
+The terminal post-hook in a command's post-pipeline finishes auxiliary work and hands execution back to the engine to unwind into the preceding command's core `doRevert()`.
+
+image::implementations:executor/stacksaga-saga-compensation-post-executor-to-preceding-core-executor.svg[alt="StackSaga Saga Compensation - Post-Executor to Preceding Core Executor",width=100%,opts=interactive,scaledwidth=100%]
+
+[source,java]
+----
+@Override
+public @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(...) {
+    auditClient.recordRollbackAudit(context.finalDomainEntityState().getOrderId());
+
+    // Concludes step compensation; engine unwinds to preceding command step in history
+    return stepManager
+            .success("AUDIT_COMPLETED")
+            .asSync()
+            .noPause()
+            .toNextDefaultExecutor();
+}
+----
+
+'''
+
+[[usnp-4-3-post-to-preceding-pre]]
+==== 4.3: Post-Executor to Preceding Pre-Executor
+
+When the preceding command in history has `@StartPreExecutor` hooks configured, calling `.toNextDefaultExecutor()` from the terminal post-hook automatically hands off into that predecessor's initial pre-compensation hook.
+
+image::implementations:executor/stacksaga-saga-compensation-post-executor-to-preceding-pre-executor.svg[alt="StackSaga Saga Compensation - Post-Executor to Preceding Pre-Executor",width=100%,opts=interactive,scaledwidth=100%]
+
+'''
+
+[[usnp-4-4-post-to-end]]
+==== 4.4: Post-Executor to End of Compensation
+
+When the terminal post-hook of the root command finishes, all compensation for the entire saga concludes.
+
+image::implementations:executor/stacksaga-saga-compensation-post-executor-to-end-of-compensation.svg[alt="StackSaga Saga Compensation - Post-Executor to End of Compensation",width=100%,opts=interactive,scaledwidth=100%]
+
+[source,java]
+----
+@Override
+public @NonNull PostStepManager<OrderDomainEntity, OrderCommandExecutor> doRevert(...) {
+    customerNotificationClient.sendFinalCancellationSummary(context.finalDomainEntityState().getCustomerId());
+
+    // Concludes total saga compensation
+    return stepManager
+            .success("FINAL_NOTIFICATION_DISPATCHED")
+            .asSync()
+            .noPause()
+            .toNextDefaultExecutor();
+}
+----
+
+'''
+
+=== 5. Query State Pruning & Bypass Pattern
+
+Distributed workflows frequently require steps that do not participate in compensating rollbacks.
+StackSaga uses `QueryExecutor` for two distinct architectural scenarios:
+
+1. **Pure Read-Only Queries**: Atomic steps that fetch data from databases or external APIs without mutating any external state (e.g., checking credit ratings, validating shipping addresses, or calculating taxes).
+2. **Non-Compensable State Changes**: Steps that *do* perform writes or state mutations on external databases or services, but **must never be undone if the saga fails** (e.g., writing security access audit logs, recording compliance metrics, or appending analytics).
+
+Unlike `CommandExecutor`, a `QueryExecutor` does not implement `doRevert(...)` because it has no compensation logic.
+
+```
+FORWARD EXECUTION HISTORY:
+  [ Step 1: Create Order ] ──► [ Query Step: Check Tax ] ──► [ Step 2: Charge Card (FAILS!) ]
+                                                                             │
+                                                                 [ Trigger Compensation ]
+                                                                             ▼
+AUTOMATIC ROLLBACK:
+  [ Revert Step 1: Cancel Order ] ◄─────── (AUTOMATICALLY SKIPPED!) ◄────────
+```
+
+* **The Skipping Mechanism**: When rollback starts, the coordinator checks the event store history.
+* When it sees a `QueryExecutor` event, it **automatically skips it**.
+* The coordinator never tries to call an undo method on a query step.
+This guarantees that read-only queries and non-compensable audit operations never break or complicate your rollback workflow.
+
+---
+
+== Master Navigation Matrix & Diagnostic Guide
+
+=== Comprehensive Navigation Matrix
+
+[cols="18%,14%,16%,18%,16%,18%",options="header"]
+[.matrix-table]
+|===
+| Step Manager | Execution Mode | Source Step | Target Destination | Fluent Method | Real-World Use Case
+
+| `ProcessStepManager`
+| Sync-Continuous
+| `CommandExecutor`
+| `CommandExecutor`
+| `.asSync().noPause().toNextExecutor(Next.class)`
+| Create Order -> Reserve Inventory
+
+| `ProcessStepManager`
+| Sync-Continuous
+| `CommandExecutor`
+| `QueryExecutor`
+| `.asSync().noPause().toNextExecutor(NextQuery.class)`
+| Reserve Inventory -> Calculate Dynamic Tax
+
+| `ProcessStepManager`
+| Sync-Continuous
+| `QueryExecutor`
+| `CommandExecutor`
+| `.asSync().noPause().toNextExecutor(NextCommand.class)`
+| Check Credit Score -> Debit Customer Account
+
+| `ProcessStepManager`
+| Sync-Continuous
+| `QueryExecutor`
+| `QueryExecutor`
+| `.asSync().noPause().toNextExecutor(NextQuery.class)`
+| Load Tax Rates -> Fetch Live Exchange Rate
+
+| `ProcessStepManager`
+| Sync-Continuous
+| Any Executor
+| Dynamic Branching
+| `.toNextExecutor(condition ? A.class : B.class)`
+| Route to VIP Air Shipping vs Standard Ground
+
+| `ProcessStepManager`
+| Sync-Continuous
+| Any Executor
+| Terminal Complete
+| `.asSync().noPause().complete()`
+| Send Order Confirmation -> Conclude Saga
+
+| `ProcessStepManager`
+| Sync-Paused
+| `CommandExecutor`
+| `CommandExecutor`
+| `.asSync().pauseUntilResume(d).resumeToNextExecutor(Next.class)`
+| Start 3DS Payment -> Park -> Resume Trigger (Webhook, Message, or UI) -> Capture Payment
+
+| `ProcessStepManager`
+| Sync-Paused
+| `CommandExecutor`
+| `QueryExecutor`
+| `.asSync().pauseUntilResume(d).resumeToNextExecutor(Query.class)`
+| Submit Fraud Scan -> Park -> Resume Trigger (Webhook or Message) -> Inspect Score
+
+| `ProcessStepManager`
+| Sync-Paused
+| `CommandExecutor`
+| Terminal Complete
+| `.asSync().pauseUntilResume(d).resumeToComplete()`
+| Dispatch Package -> Park -> Resume Trigger (Delivery Webhook or Message) Completes Saga
+
+| `ProcessStepManager`
+| Async-Paused
+| `CommandExecutor`
+| `CommandExecutor`
+| `.asAsync().invoker(...).pauseUntilResume(d).resumeToNextExecutor(...)`
+| Publish Pick Command to Kafka -> Park -> Picking Done Event -> Pack Order
+
+| `RevertStepManager`
+| Sync-Continuous
+| `CommandExecutor`
+| Preceding Command
+| `.asSync().noPause().toNextDefaultExecutor()`
+| Immediate Stock Unreservation -> Rolls back to previous step
+
+| `RevertStepManager`
+| Sync-Paused
+| `CommandExecutor`
+| Preceding Command
+| `.asSync().pauseUntilResume(d).resumeToNextDefaultExecutor()`
+| Request Bank Refund -> Park -> Resume Trigger (Bank Webhook or Event) -> Rolls back to previous step
+
+| `RevertStepManager`
+| Async-Paused
+| `CommandExecutor`
+| Preceding Command
+| `.asAsync().invoker(...).pauseUntilResume(d).resumeToNextDefaultExecutor()`
+| Publish Cancel Message to Kafka -> Rolls back to previous step
+
+| `PreStepManager`
+| Sync-Continuous
+| `PreExecutor`
+| Parent `doRevert`
+| `.asSync().noPause().toNextDefaultExecutor()`
+| Get Refund Token -> Handoff to Payment `doRevert`
+
+| `PreStepManager`
+| Sync-Continuous
+| `PreExecutor`
+| `PreExecutor`
+| `.asSync().noPause().toNextPreExecutor(NextPre.class)`
+| Unlock Mutex Step -> Get Auth Token Step
+
+| `PreStepManager`
+| Sync-Paused
+| `PreExecutor`
+| Parent `doRevert`
+| `.asSync().pauseUntilResume(d).resumeToNextDefaultExecutor()`
+| Request Supervisor Cancellation Approval -> Resumes to `doRevert`
+
+| `PostStepManager`
+| Sync-Continuous
+| `PostExecutor`
+| Preceding Command
+| `.asSync().noPause().toNextDefaultExecutor()`
+| Send Cancellation Email -> Step Rollback Done -> Rolls back to previous step
+
+| `PostStepManager`
+| Sync-Continuous
+| `PostExecutor`
+| `PostExecutor`
+| `.asSync().noPause().toNextPostExecutor(NextPost.class)`
+| Send Email Step -> Publish Metrics Step
+
+| `PostStepManager`
+| Sync-Paused
+| `PostExecutor`
+| Preceding Command
+| `.asSync().pauseUntilResume(d).resumeToNextDefaultExecutor()`
+| External Audit Check -> Park -> Resumes to Previous Step
+|===
+
+'''
+
+=== Step Design Decision Guide
+
+When designing a step for your distributed workflow, use these three simple questions:
+
+```
+[ Question 1: What is the step's primary responsibility? ]
+    │
+    ├─► Pure read-only query OR non-compensable action (never needs rollback)?
+    │     └─► Implement QueryExecutor<DE> (Automatically skipped during rollback)
+    │
+    └─► State changes that MUST be reversed if the saga fails?
+          └─► Implement CommandExecutor<DE> (Requires doProcess and doRevert)
+                │
+[ Question 2: How does the step interact with downstream systems? ]
+    │
+    ├─► Fast local DB or synchronous REST/gRPC (< 500ms)?
+    │     └─► Use Pattern 1: Direct Synchronous (.asSync().noPause())
+    │
+    ├─► Requires user redirect, 3DS, external callback, message subscriber event, or human approval?
+    │     └─► Use Pattern 2: Correlated Park-and-Resume (.asSync().pauseUntilResume(duration))
+    │
+    └─► Emits command messages over Kafka, RabbitMQ, SQS, or fast HTTP fire-and-forget?
+          └─► Use Pattern 3: Two-Stage Lazy Dispatch (.asAsync().invoker(...).pauseUntilResume(duration))
+                │
+[ Question 3: Does rollback need extra setup or cleanup? ]
+    │
+    ├─► Need to unlock resources or fetch cancellation tokens before doRevert()?
+    │     └─► Attach @StartPreExecutor(...) using PreStepManager
+    │
+    └─► Need to send customer emails, report metrics, or alert teams after doRevert()?
+          └─► Attach @StartPostExecutor(...) using PostStepManager
+```
+
+---
+
+== Summary: The Architecture of Unified Orchestration
+
+By organizing transaction management into **Unified Saga Integration Patterns (USIP)** and **Unified Saga Navigation Patterns (USNP)**, developers get a clean, practical framework for building reliable microservices.
+
+Instead of forcing every step into rigid synchronous calls or dealing with the chaos of uncoordinated choreography, the Unified Saga Model gives you the tools, clear patterns, and code structure needed to handle real-world transactions with confidence.

@@ -1,0 +1,1205 @@
+:description: 一个循序渐进的快速入门示例，演示如何在 StackSaga 统一编排引擎上构建混合风格 Saga（包含连续型 STP 与基于 Webhook 回调的可暂停等待状态），以 MySQL 作为事件存储——从最小实现逐步进阶到重试韧性与可观测性。
+:keywords: StackSaga, 快速入门示例, saga 编排, 混合风格 saga, 连续型长事务, 可暂停长事务, 直通处理, STP, 人机协同, HITL, webhook 回调, resumeKey, retentionDuration, MySQL 事件存储, 编排器, 执行器, 补偿, 重试, 链路追踪窗口
+
+= 快速入门示例：StackSaga 与 MySQL（混合风格 Saga：连续型与可暂停型）
+
+本快速入门示例将引导您在 StackSaga 统一编排引擎上构建一个完整的*下单 (order-placement)* Saga，并使用 *MySQL*（通过响应式 R2DBC）作为持久化事件存储 (Event Store)。
+
+传统编排框架往往迫使开发者在纯同步管道与纯异步消息队列之间做出非此即彼的割裂选择，而 StackSaga 原生在**同一 Saga 工作流内**将二者融为一体。
+我们将从包含自动化连续执行、可暂停支付等待状态以及外部 Webhook 回调恢复的最小实现入手，随后逐步叠加分布式重试自愈与链路追踪可观测性。
+
+[[mental-model]]
+== 统一心智模型：连续型 (STP)、可暂停型 (HITL) 与混合风格 (Mixed)
+
+[IMPORTANT]
+.单一核心引擎：零配置切换
+====
+在编写代码之前，必须明确一点：**StackSaga 只有唯一一个统一编排协调器**——即由 `stacksaga-spring-boot-starter` 提供的 **StackSaga Execution Coordinator (SEC)**。
+
+框架内部不存在独立的“连续型引擎”或“可暂停型引擎”，也没有任何应用级模式切换配置。
+框架将**连续型 (STP)**、**可暂停型 (Wait-State / HITL)** 以及**混合风格 (Mixed-Style)** 视为由 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[统一 Saga 模型 (USM)] 规范管理的标准架构范式。
+====
+
+根据具体业务场景，任何 Saga 事务均可采用以下三种拓扑之一进行构建（详见 xref:ROOT:lrt-transaction-models.adoc[长事务模型：连续型 vs. 可暂停型]）：
+
+1. **纯连续型长事务 (Continuous Long-Running Transaction / Continuous LRT / STP)**：
+* 工作流中的每个步骤都通过返回 `.asSync().noPause().toNextExecutor(...)` 连续直通推进，不发生任何主动挂起（遵循 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-1-direct-synchronous[USIP 模式 1: 直接同步集成]）。
+* 适用于耗时仅数毫秒的快速、全自动化微服务操作（如内部 API 调用、数据库写入、数据校验等）。
+
+2. **纯可暂停型长事务 (Pausable Long-Running Transaction / Pausable LRT / HITL)**：
+* 业务步骤通过返回 `.asSync().pauseUntilResume(duration)` 主动挂起执行（遵循 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP 模式 2: 关联挂起与恢复]）。
+* SEC 将当前状态安全提交至事件存储，并在事务休眠期间**彻底释放 100% 的 CPU 工作线程与数据库连接**（"Park and Wait"）。
+* 仅当外部触发源（如客户 Webhook 回调、KYC 人工审核通过或经理审批）调用 xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resuming-paused-transactions[`sagaTemplate.resume(resumeKey, retentionDuration)`] 时才会被唤醒并恢复执行。
+
+3. **混合风格长事务 (Mixed-Style LRT —— 现代企业级标准)**：
+* 现实企业级工作流往往将毫秒级的自动化步骤与现实世界中的外部延迟（如支付网关重定向跳转、备餐出库就绪回调）穿插在一起。
+* 单个 Saga 可以先连续直通执行前序步骤，随后进入可暂停等待状态等待外部回调，唤醒后继续直通推进直至事务完结。
+
+TIP: **为什么本快速示例采用混合风格：** 通过构建混合风格 Saga，您只需阅读一篇教程即可掌握 **StackSaga 的完整技术全貌**——掌握连续推进、线程安全挂起、Webhook 回调恢复以及确定性倒序补偿。如果您的生产应用仅需要连续直通处理，只需在所有步骤上使用 `.noPause()` 即可。
+
+---
+
+== 业务场景与执行器拓扑概述
+
+我们以电商*下单 (place-order)* 事务为例，跨四个原子步骤（*执行器 (Executors)*）进行编排，直观展示聚合根领域实体 `OrderDomainEntity` 如何在各步骤间累积演进状态：
+
+[cols="1,2,2,2,3",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| # | 步骤 (执行器) | 类型 | 执行风格 | 补偿逻辑 (`doRevert`)
+
+| 1
+| *验证用户* (`ValidateUserExecutor`)
+| 查询 (Query / 只读)
+| 连续型 (`.asSync().noPause()`)
+| — _(查询操作不产生持久化业务副作用；回滚时由引擎自动跳过并修剪)_
+
+| 2
+| *预留订单库存* (`ReserveOrderExecutor`)
+| 命令 (Command / 状态变更)
+| 连续型 (`.asSync().noPause()`)
+| 调用仓库微服务释放已预留的商品库存
+
+| 3
+| *发起支付会话* (`InitiatePaymentExecutor`)
+| 命令 (Command / 状态变更)
+| 可暂停等待状态 (`.asSync().pauseUntilResume(...)`)
+| 向支付机构发起作废已创建的收银台会话
+
+| —
+| *支付网关 Webhook 回调*
+| 外部 REST 回调
+| 通过 `sagaTemplate.resume(resumeKey, duration)` 唤醒挂起的事务
+| —
+
+| 4
+| *终结订单* (`FinalizeOrderExecutor`)
+| 命令 (Command / 状态变更)
+| 恢复后的连续型 (`.asSync().noPause()`)
+| 在本地数据库将订单标记为取消/失败
+|===
+
+若后续任何步骤发生不可重试异常（或支付网关返回支付失败回调），StackSaga 将自动以**倒序补偿**此前已成功执行的命令步骤——自动作废支付会话并释放预留库存，无需开发者编写任何复杂的反向路由编排代码。
+
+[[step-architecture-rationale]]
+=== 架构原理解析：各步骤模型选型依据
+
+在 `QueryExecutor` 与 `CommandExecutor` 之间做选择，以及在连续直通 (`.noPause()`) 与可暂停等待状态 (`.pauseUntilResume(...)`) 之间做选择，是 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[统一 Saga 模型 (USM)] 中至关重要的架构设计决策。理解选型背后的技术原理有助于在生产微服务中做出最合理的架构设计：
+
+* **步骤 1 (`ValidateUserExecutor`): `QueryExecutor` 与连续型 STP**
+** *为什么选 Query?* 向用户微服务校验用户资质属于纯粹的只读查询——在下游系统中不产生任何需要逆向撤销的状态变更或持久化副作用。实现 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor`] 而非 `CommandExecutor`，StackSaga 的逆向自动驾驶仪在事务失败回滚时将**自动跳过并修剪**此步骤。无需编写补偿逻辑，避免了冗余的反向网络调用。
+** *为什么选连续型 STP (`.noPause()`)?* 内部微服务调用耗时仅数毫秒，不存在用户交互或异步重定向等待，因此遵循 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-1-direct-synchronous[USIP 模式 1: 直接同步集成] 直通推进至下一步。
+
+* **步骤 2 (`ReserveOrderExecutor`): `CommandExecutor` 与连续型 STP**
+** *为什么选 Command?* 在仓库微服务中锁定或预留商品库存改变了分布式业务状态。凡是产生现实业务副作用的操作，必须实现 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[`CommandExecutor`] 并提供配对的 `doRevert()` 方法。若后续步骤（如支付）失败，SEC 将调度 `doRevert()` 调用库存服务释放预留库存。
+** *为什么选连续型 STP (`.noPause()`)?* 内部自动化库存预留操作仅耗时数毫秒，使用连续直通推进最为高效自然。
+
+* **步骤 3 (`InitiatePaymentExecutor`): `CommandExecutor` 与可暂停型 LRT 等待状态**
+** *为什么选 Command?* 在支付网关创建收银台会话登记了活跃支付意图。若后续步骤失败，`doRevert()` 会向支付机构请求作废该会话。
+** *为什么选可暂停等待状态 (`.pauseUntilResume(...)`)?* 用户需要重定向跳转至第三方收银台（或进行 3D-Secure 手机短信验证码/银行安全验证）。人机交互耗时具有不可预估性（数秒至数分钟），如果保持 HTTP 长连接或阻塞操作系统工作线程，将迅速耗尽服务器线程池并在高并发下导致服务崩溃。通过调用 `.pauseUntilResume(Duration.ofMinutes(15))`，SEC 将当前状态写入 MySQL，通过 `stepManager.getResumeKey()` 生成全局唯一恢复令牌，并**彻底终结内存中的执行——释放 100% 的 CPU 线程与数据库连接**（即 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP 模式 2: 关联挂起与恢复]）。
+** *模式 2 的关键碰撞风险与规避原则*:
++
+[IMPORTANT]
+.极速回调与发件箱竞态碰撞风险 (Fast-Callback Race Condition)
+====
+请注意 USIP 模式 2 的物理执行时序：  
+*步骤 1: 对外发起网络请求* ➔ *步骤 2: SEC 向事件存储提交 PAUSED 状态记录*
+
+在高吞吐或异步消息通信场景下，该执行顺序会导致严重的竞态碰撞：
+* 若下游消费系统在亚毫秒内响应（例如 Kafka 自动化消费者或极速的 Fire-and-Forget 异步接口），外部回调可能在 **SEC 尚未完成将 `PAUSED` 记录提交到 MySQL 之前**就已经到达编排器！
+* 当回调端点调用 `sagaTemplate.resume(resumeKey, ...)` 时，由于数据库中尚未查到挂起事务，回调将被直接拒绝，导致事务永久卡死！
+
+**为什么在本支付场景下完全安全：** 客户支付跳转与人工审核天然具备人类物理操作延迟（数秒至数分钟），远远超出 2–5ms 的 MySQL 提交耗时。
+
+**何时严禁使用模式 2：** 若通过 Apache Kafka、RabbitMQ 发布异步命令，或调用可能在毫秒内触发回调的 Fire-and-Forget 接口，**必须改用 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[USIP 模式 3: 双阶段惰性消息派发与提交屏障]** (`.asAsync().invoker(...)`)。模式 3 保证先完成事件存储持久化，再真正向外派发网络消息，从物理机制上彻底杜绝竞态。详见完整风险分析：xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#the-critical-problem-fast-callback-outbox-race-condition[关键风险：极速回调与发件箱竞态条件]。
+====
+
+* **步骤 4 (`FinalizeOrderExecutor`): `CommandExecutor` 与恢复后的连续型 STP**
+** *为什么选 Command?* 确认订单履约发货并更新本地数据库具有状态变更副作用。若发货失败，或支付网关返回被拒状态，抛出 xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`] 将阻断推进并触发逆向自动补偿。
+** *为什么选恢复后的连续型 STP (`.noPause().complete()`)?* 一旦被外部 Webhook 回调唤醒，终态确认属于完全自动化的内部操作，直通推进至事务完结 (`.complete()`)，满足 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-1-2-terminal-completion[USNP 模式 1.2: 终态完成]。
+
+教程分为三个渐进阶段：
+
+. xref:#stage-1[阶段一 —— 混合风格最小实现]：创建领域实体聚合根、四个原子执行器（包含补偿与等待状态）、生命周期监听器以及触发与恢复事务的 REST 端点。
+. xref:#stage-2[阶段二 —— 添加重试自愈能力]：引入环形协调器 (Ring Coordinator) 与重试子系统，使流程能够应对微服务瞬态故障。
+. xref:#stage-3[阶段三 —— 可观测性]：接入 StackSaga 链路追踪窗口 (Trace Window)，实时图形化观测事务运行轨迹。
+
+---
+
+[[stage-1]]
+== 阶段一 [混合风格最小实现]
+
+阶段一构建一个由 MySQL 作为事件存储的完整混合风格 Saga。我们将按以下步骤逐步实现：
+
+. xref:#prerequisites[前置准备]
+. xref:#getting-started[起步 - 初始项目搭建]
+. xref:#creating-domain-entity[创建领域实体聚合根]
+. xref:#creating-executors[创建原子执行器]
+. xref:#create-handler[创建生命周期事件监听器]
+. xref:#creating-controller[创建 REST 控制器]
+. xref:#tuning-configuration[调整配置参数]
+. xref:#running-application[运行应用并测试事务流]
+
+[[prerequisites]]
+=== 前置准备
+
+在开始之前，请确保已安装并运行以下环境：
+
+. Java 21+
+. Spring Boot 3.x / 4.x
+. MySQL 8+ —— 用作编排器的持久化事件存储 (Event Store)。
+. Maven 3.8+
+
+TIP: 启动本地 MySQL 数据库最便捷的方式是 Docker：`docker run -d --name stacksaga-mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=order_service_event_store mysql:8`。
+
+[[getting-started]]
+=== 起步 - 初始项目搭建
+
+创建一个使用 Spring MVC 的 Spring Boot 应用程序，并在 `pom.xml` 中引入以下依赖与插件：
+
+IMPORTANT: 您也可以访问 http://init.stacksaga.org/[StackSaga Initializer] 在线生成量身定制的工程脚手架。
+
+[source,xml,subs="attributes+"]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>{stacksaga-version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <!-- Spring Boot Starter Web (MVC) -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <optional>true</optional>
+    </dependency>
+
+    <!-- StackSaga 核心引擎协调器 (SEC) -->
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- StackSaga MySQL 响应式支持 (基于 R2DBC 的事件存储) -->
+    <dependency>
+        <groupId>org.stacksaga</groupId>
+        <artifactId>stacksaga-mysql-reactive-support</artifactId>
+    </dependency>
+</dependencies>
+
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <executions>
+                <execution>
+                    <goals>
+                        <goal>build-info</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+----
+
+* `stacksaga-spring-boot-starter`: 核心 StackSaga Execution Coordinator (SEC) 运行时，负责管理事务图推进、提交屏障与逆向补偿。
+* `stacksaga-mysql-reactive-support`: 高性能非阻塞 R2DBC 驱动集成，用于将 Saga 快照与执行事件持久化写入 MySQL。
+* `build-info`: 生成应用构建版本元数据，使框架能够为每笔事务打上精确的部署版本标签。
+
+[[creating-domain-entity]]
+=== 创建领域实体 (Saga 聚合根)
+
+`DomainEntity` 在整个事务生命周期中充当聚合根 (Aggregate Root) 与状态载体。
+每个执行器在执行业务逻辑时读取前序步骤所填充的业务数据，并在本步骤成功后向聚合根中追加新的业务状态。
+每个步骤执行完毕后，SEC 会将最新的聚合根序列化并作为不可变快照持久化提交至 MySQL。详见 xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc[领域实体 (Domain Entity) 架构详解]。
+
+[source,java]
+----
+@Getter
+@Setter
+@SagaDomainEntity(
+        version = @SagaDomainEntityVersion(major = 1, minor = 0, patch = 0),
+        name = "OrderDomainEntity"
+)
+public class OrderDomainEntity extends DomainEntity {
+
+    // 1. 初始请求载荷 (在 Saga 发起时填充)
+    @JsonProperty("username")
+    private String username;
+
+    @JsonProperty("total_amount")
+    private double totalAmount;
+
+    @JsonProperty("product_items")
+    private List<String> productItems;
+
+    // 2. 步骤 1 (ValidateUserExecutor) 填充的用户状态
+    @JsonProperty("user_id")
+    private String userId;
+
+    @JsonProperty("user_email")
+    private String userEmail;
+
+    @JsonProperty("user_validated")
+    private boolean userValidated;
+
+    // 3. 步骤 2 (ReserveOrderExecutor) 填充的库存预留状态
+    @JsonProperty("reservation_id")
+    private String reservationId;
+
+    @JsonProperty("warehouse_code")
+    private String warehouseCode;
+
+    // 4. 步骤 3 (InitiatePaymentExecutor) 填充的支付收银台会话状态
+    @JsonProperty("payment_session_id")
+    private String paymentSessionId;
+
+    @JsonProperty("payment_redirect_url")
+    private String paymentRedirectUrl;
+
+    // 5. 步骤 4 (FinalizeOrderExecutor) 依据 Webhook 回调填充的终态
+    @JsonProperty("payment_reference_id")
+    private String paymentReferenceId;
+
+    @JsonProperty("order_status")
+    private String orderStatus;
+
+    public OrderDomainEntity() {
+        super(OrderDomainEntity.class);
+    }
+}
+----
+
+* `@SagaDomainEntity`: 将此类声明为 Saga 事务的泛型锚点，并定义语义化版本号。
+* `super(OrderDomainEntity.class)`: 框架多态序列化与反序列化必需构造调用。
+
+[[creating-executors]]
+=== 创建原子执行器
+
+现在我们实现四个原子执行器。每个执行器**仅封装一项原子操作**（如远程调用微服务或写入数据库），展示如何从聚合根读取数据、调用外部服务、回填聚合根，并通过标准 4 阶段构建器导航：
+`事件 (Event)` ➔ `模式 (.asSync() / .asAsync())` ➔ `生命周期 (.noPause() / .pauseUntilResume())` ➔ `流向 (.toNextExecutor() / .complete())`（参考 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#step-manager-navigation-reference[StepManager 导航完整规范]）。
+
+==== 1. ValidateUserExecutor (QueryExecutor — 连续型 STP)
+
+向用户微服务验证当前下单用户的资质。
+由于只读查询不会产生需要逆向撤销的持久化业务副作用，因此实现 `QueryExecutor`（无需实现 `doRevert()`）。
+代码展示了如何读取 `currentDomainEntity.getUsername()`，并在外部服务返回后为聚合根填充 `userId`、`userEmail` 与 `userValidated`。
+
+[NOTE]
+.模式原理解析：QueryExecutor + 连续型 STP (USIP 模式 1)
+====
+* **执行器类型**：实现 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#query-executors[`QueryExecutor<OrderDomainEntity>`]，因为查询用户状态不产生持久化业务副作用。当下游发生失败回滚时，SEC 逆向自动驾驶仪自动跳过并修剪此查询，免去冗余回滚开销。
+* **流程推进**：调用 `.asSync().noPause().toNextExecutor(...)`（xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-1-direct-synchronous[USIP 模式 1]），毫秒级直通推进至下一步。
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "user-service", value = "ValidateUserExecutor")
+public class ValidateUserExecutor implements QueryExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. 从 DomainEntity 聚合根中读取前序初始化的请求数据
+        String username = currentDomainEntity.getUsername();
+        log.info("步骤 1: 验证用户 '{}' [幂等键: {}]", username, idempotencyKey);
+
+        // 2. 模拟调用外部微服务客户端 (如 FeignClient, WebClient 或 RestTemplate)
+        // 生产实际调用: UserValidationResponse response = this.userServiceClient.validateUser(username, idempotencyKey);
+        log.info(">> [模拟调用] 外部用户微服务: GET /users/{}?idempotencyKey={}", username, idempotencyKey);
+        String simulatedUserId = "usr_" + Math.abs(username.hashCode() % 10000);
+        String simulatedEmail = username + "@example.com";
+        boolean isUserActive = true;
+
+        // 3. 将外部服务响应回填至 DomainEntity 聚合根
+        currentDomainEntity.setUserId(simulatedUserId);
+        currentDomainEntity.setUserEmail(simulatedEmail);
+        currentDomainEntity.setUserValidated(isUserActive);
+        currentDomainEntity.setOrderStatus("USER_VALIDATED");
+        log.info(">> [聚合根更新] OrderDomainEntity: userId={}, email={}, status={}", 
+                simulatedUserId, simulatedEmail, currentDomainEntity.getOrderStatus());
+
+        // 4. 连续直通推进 (STP) 至下一个执行器 ReserveOrderExecutor
+        return stepManager
+                .success("VALIDATED_USER")
+                .asSync()
+                .noPause()
+                .toNextExecutor(ReserveOrderExecutor.class);
+    }
+}
+----
+
+==== 2. ReserveOrderExecutor (CommandExecutor — 连续型 STP)
+
+在库存微服务中预留商品库存。该步骤实现 `CommandExecutor`：
+* `doProcess`: 从聚合根中读取步骤 1 生成的 `userId` 以及初始化的 `productItems` 和 `totalAmount`，携带 `idempotencyKey` 调用库存微服务，并将返回的 `reservationId` 和 `warehouseCode` 写入聚合根。
+* `doRevert`: 若后续步骤失败，从历史快照 `finalDomainEntityState` 中读取不可变的 `reservationId`，调用库存服务释放锁定的库存。
+
+[NOTE]
+.模式原理解析：CommandExecutor + 连续型 STP (USIP 模式 1 与 USNP 模式 2.1)
+====
+* **执行器类型**：实现 xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc#command-executors[`CommandExecutor<OrderDomainEntity>`]，因为锁定预留库存改变了仓库业务状态。配对的 `doRevert()` 从还原的历史快照中读取不可变的 `reservationId` 执行释放。
+* **逆向自动驾驶**：在 `doRevert()` 中返回 `.resumeToNextDefaultExecutor()` 将激活 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-2-1-revert-to-core[USNP 模式 2.1: 逆向自动驾驶]，自动沿执行历史倒序回退至上一个命令步骤，无需硬编码反向路径。
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "order-service", value = "ReserveOrderExecutor")
+public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. 从聚合根中读取前置步骤注入的业务数据
+        String userId = currentDomainEntity.getUserId(); // 步骤 1 (ValidateUserExecutor) 填充
+        List<String> items = currentDomainEntity.getProductItems(); // 事务发起时填充
+        double totalAmount = currentDomainEntity.getTotalAmount(); // 事务发起时填充
+        log.info("步骤 2: 为用户 '{}' 预留商品库存, 商品: {}, 金额: {} [幂等键: {}]", 
+                userId, items, totalAmount, idempotencyKey);
+
+        // 2. 模拟调用外部库存微服务客户端
+        // 生产实际调用: ReservationResponse response = this.inventoryServiceClient.reserveStock(userId, items, idempotencyKey);
+        log.info(">> [模拟调用] 外部库存微服务: POST /inventory/reservations [userId: {}, items: {}, idempotencyKey: {}]",
+                userId, items, idempotencyKey);
+        String simulatedReservationId = "resv_" + idempotencyKey.substring(0, 8);
+        String simulatedWarehouseCode = "WH-NORTH-01";
+
+        // 3. 将库存预留详情回填至聚合根
+        currentDomainEntity.setReservationId(simulatedReservationId);
+        currentDomainEntity.setWarehouseCode(simulatedWarehouseCode);
+        currentDomainEntity.setOrderStatus("INVENTORY_RESERVED");
+        log.info(">> [聚合根更新] OrderDomainEntity: reservationId={}, warehouseCode={}, status={}", 
+                simulatedReservationId, simulatedWarehouseCode, currentDomainEntity.getOrderStatus());
+
+        // 4. 连续直通推进 (STP) 至可暂停支付步骤 InitiatePaymentExecutor
+        return stepManager
+                .success("RESERVED_ORDER")
+                .asSync()
+                .noPause()
+                .toNextExecutor(InitiatePaymentExecutor.class);
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        // 1. 从还原的历史快照中读取已预留的 reservationId
+        String reservationId = finalDomainEntityState.getReservationId();
+        String userId = finalDomainEntityState.getUserId();
+        log.warn("补偿步骤 2: 释放用户 '{}' 的库存预留 '{}' [幂等键: {}]", 
+                userId, reservationId, idempotencyKey);
+
+        // 2. 模拟调用库存微服务的逆向补偿接口
+        // 生产实际调用: this.inventoryServiceClient.releaseStock(reservationId, idempotencyKey);
+        log.info(">> [模拟调用] 外部库存微服务逆向补偿: POST /inventory/reservations/{}/release [幂等键: {}]",
+                reservationId, idempotencyKey);
+
+        // 3. 逆向自动驾驶仪：自动退回至执行历史中的前一个命令步骤
+        return stepManager
+                .success("REVERTED_ORDER")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+==== 3. InitiatePaymentExecutor (CommandExecutor — 可暂停型 LRT 等待状态)
+
+向第三方支付平台（如微信支付、支付宝或银行 3D-Secure 支付网关）发起异步收银台支付会话：
+* 从聚合根中读取 `totalAmount`、`userId` 与 `reservationId`。
+* 调用 `stepManager.getResumeKey()` 获取全局唯一的恢复令牌。
+* 调用支付提供商，将 `resumeKey` 作为回调参数或 Webhook Token 传递给对方。
+* 将生成的 `paymentSessionId` 与支付跳转链接 `paymentRedirectUrl` 回填至聚合根。
+* **主动挂起执行长达 15 分钟**：调用 `.pauseUntilResume(Duration.ofMinutes(15))`，挂起期间彻底释放计算线程与连接池。
+* `doRevert`: 若后续步骤失败，向支付网关作废该未完成的收银台会话。
+
+[IMPORTANT]
+.模式原理解析：可暂停型 LRT 等待状态 (USIP 模式 2) 与极速回调竞态风险
+====
+* **执行器类型**：实现 `CommandExecutor<OrderDomainEntity>` 并调用 `.pauseUntilResume(Duration.ofMinutes(15))`，在用户跳转收银台支付期间彻底释放 100% 的工作线程与连接池资源。
+* **恢复令牌**：`stepManager.getResumeKey()` 生成全局唯一恢复凭证传递给支付网关，网关在 Webhook 回调时原样带回。
+* **极速回调竞态碰撞风险**：USIP 模式 2 遵循“先发网络请求，再持久化提交 PAUSED 状态”的顺序。若外部系统在亚毫秒内极速返回（如 Kafka 消息），外部回调可能在 MySQL 尚未完成提交前到达，导致回调因未查到挂起事务而被拒绝。在人机支付场景下该时序完全安全（人类操作需数秒至数分钟）。若用于高频消息队列，请必须使用 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[USIP 模式 3: 双阶段惰性消息派发与提交屏障]。
+* **深度阅读**：详见风险剖析：xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#the-critical-problem-fast-callback-outbox-race-condition[关键风险：极速回调与发件箱竞态条件]。
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "payment-service", value = "InitiatePaymentExecutor")
+public class InitiatePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. 从聚合根中读取累积的订单与库存数据
+        String userId = currentDomainEntity.getUserId(); // 步骤 1 填充
+        String userEmail = currentDomainEntity.getUserEmail(); // 步骤 1 填充
+        double amount = currentDomainEntity.getTotalAmount(); // 事务发起时填充
+        String reservationId = currentDomainEntity.getReservationId(); // 步骤 2 填充
+
+        // 2. 获取唯一恢复令牌 (resumeKey)，作为 Webhook 回调关联标识
+        String resumeKey = stepManager.getResumeKey();
+        log.info("步骤 3: 为用户 '{}' ({}) 创建支付会话, 金额: {}, 预留号: {} [resumeKey: {}]", 
+                userId, userEmail, amount, reservationId, resumeKey);
+
+        // 3. 模拟调用第三方支付网关创建收银台会话
+        // 生产实际调用: PaymentSessionResponse session = this.paymentGatewayClient.createCheckoutSession(userId, amount, reservationId, resumeKey);
+        log.info(">> [模拟调用] 外部支付网关接口: POST /checkout/sessions [amount: {}, ref: {}, callbackToken: {}]",
+                amount, reservationId, resumeKey);
+        String simulatedSessionId = "sess_" + idempotencyKey.substring(0, 8);
+        String simulatedRedirectUrl = "https://pay.gateway.com/checkout/" + simulatedSessionId;
+
+        // 4. 将支付网关会话信息写入聚合根
+        currentDomainEntity.setPaymentSessionId(simulatedSessionId);
+        currentDomainEntity.setPaymentRedirectUrl(simulatedRedirectUrl);
+        currentDomainEntity.setOrderStatus("AWAITING_PAYMENT_CALLBACK");
+        log.info(">> [聚合根更新] OrderDomainEntity: paymentSessionId={}, redirectUrl={}, status={}", 
+                simulatedSessionId, simulatedRedirectUrl, currentDomainEntity.getOrderStatus());
+
+        // 5. 可暂停等待状态 (USIP Pattern 2): 在事件存储中挂起长达 15 分钟
+        return stepManager
+                .success("PAYMENT_SESSION_INITIATED")
+                .asSync()
+                .pauseUntilResume(Duration.ofMinutes(15))
+                .resumeToNextExecutor(FinalizeOrderExecutor.class);
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        // 1. 从还原的历史快照中读取 paymentSessionId
+        String sessionId = finalDomainEntityState.getPaymentSessionId();
+        log.warn("补偿步骤 3: 作废外部支付收银台会话 '{}' [幂等键: {}]",
+                sessionId, idempotencyKey);
+
+        // 2. 模拟调用支付网关撤销接口
+        // 生产实际调用: this.paymentGatewayClient.cancelSession(sessionId, idempotencyKey);
+        log.info(">> [模拟调用] 外部支付网关逆向补偿: POST /checkout/sessions/{}/void [幂等键: {}]",
+                sessionId, idempotencyKey);
+
+        return stepManager
+                .success("PAYMENT_SESSION_VOIDED")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+==== 4. FinalizeOrderExecutor (CommandExecutor — 恢复执行与终结)
+
+当外部支付网关推送支付成功的 Webhook 回调时，控制器调用 `sagaTemplate.resume(resumeKey, retentionDuration)` 唤醒事务。
+SEC 从 MySQL 完整恢复聚合根状态，并将回调携带的业务载荷注入 `ResumeContext`，紧接着调度执行 `FinalizeOrderExecutor`：
+* 从 `ResumeContext` 中安全提取回调状态（`paymentStatus`、`referenceId`）。
+* 从聚合根中读取累积的历史数据（`reservationId`、`userEmail`、`paymentSessionId`）。
+* **正常路径 (`SUCCESS`)**：将支付流水号 `paymentReferenceId` 回填至聚合根，调用履约发货微服务与通知服务，并调用 `.complete()` 终结事务。
+* **异常路径 (`DECLINED`)**：抛出 `NonRetryableExecutorException`，框架自动阻断前向推进并立即启动逆向补偿！
+
+[NOTE]
+.模式原理解析：恢复执行、ResumeContext 解耦与终结流向
+====
+* **载荷解耦**：回调参数由控制器注入 `ResumeContext`，而不是在控制器内直接污染修改实体。这保障了领域实体的内聚与线程隔离（参见 xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#resume-context-contract[ResumeContext 契约规范]）。
+* **故障倒戈**：若支付被拒，抛出 xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`] 将即刻中断推进并触发逆向补偿。
+* **终结完成**：支付成功后调用 `.complete()`，事务以 `PROCESS_COMPLETED` 完结（参见 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-1-2-terminal-completion[USNP 模式 1.2: 终态完成]）。
+====
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "order-service", value = "FinalizeOrderExecutor")
+public class FinalizeOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        // 1. 从 ResumeContext 中提取由控制器注入的回调元数据
+        String paymentStatus = resumeContext.get("paymentStatus").orElse("DECLINED");
+        String referenceId = resumeContext.get("referenceId").orElse("UNKNOWN");
+
+        // 2. 从聚合根中读取此前步骤沉淀的数据
+        String reservationId = currentDomainEntity.getReservationId(); // 步骤 2 填充
+        String userEmail = currentDomainEntity.getUserEmail(); // 步骤 1 填充
+        String paymentSessionId = currentDomainEntity.getPaymentSessionId(); // 步骤 3 填充
+
+        log.info("步骤 4: 接收到支付回调已唤醒. 状态: {}, 支付单号: {}, 会话号: {}, 预留号: {}", 
+                paymentStatus, referenceId, paymentSessionId, reservationId);
+
+        if ("SUCCESS".equalsIgnoreCase(paymentStatus)) {
+            // 支付成功正常路径
+            // 3. 将支付确认信息回填至聚合根
+            currentDomainEntity.setPaymentReferenceId(referenceId);
+            currentDomainEntity.setOrderStatus("CONFIRMED");
+            log.info(">> [聚合根更新] OrderDomainEntity: paymentReferenceId={}, status=CONFIRMED", referenceId);
+
+            // 4. 模拟调用外部履约微服务与通知中心
+            // 生产实际调用:
+            //   this.orderFulfillmentClient.confirmOrder(reservationId, referenceId, idempotencyKey);
+            //   this.notificationClient.sendOrderConfirmation(userEmail, referenceId);
+            log.info(">> [模拟调用] 外部订单履约服务: POST /orders/{}/confirm [ref: {}, idempotencyKey: {}]",
+                    reservationId, referenceId, idempotencyKey);
+            log.info(">> [模拟调用] 外部通知中心服务: POST /notifications/email [recipient: {}, ref: {}]",
+                    userEmail, referenceId);
+
+            // 成功完结 Saga 事务
+            return stepManager
+                    .success("ORDER_CONFIRMED")
+                    .asSync()
+                    .noPause()
+                    .complete();
+        } else {
+            // 支付拒绝异常路径: 标记状态并抛出不可重试异常，触发逆向自动回滚
+            currentDomainEntity.setOrderStatus("PAYMENT_DECLINED");
+            log.warn("步骤 4: 支付被拒绝，事务: {}. 更新聚合根并抛出 NonRetryableExecutorException 启动回滚.", 
+                    currentDomainEntity.getTransactionId());
+
+            throw NonRetryableExecutorException
+                    .buildWith(new RuntimeException("支付网关拒绝了交易请求 (单号: " + referenceId + ")"))
+                    .put("reason", "PAYMENT_DECLINED")
+                    .put("referenceId", referenceId)
+                    .build();
+        }
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        String txId = finalDomainEntityState.getTransactionId();
+        log.warn("补偿步骤 4: 取消本地订单终态确认，事务号: {}", txId);
+
+        // 模拟本地数据库订单取消更新
+        // 生产实际调用: this.orderRepository.updateStatus(txId, "ORDER_CANCELED");
+        log.info(">> [模拟调用] 在本地数据库将订单标记为 CANCELED, 事务号: {}", txId);
+
+        return stepManager
+                .success("ORDER_FINALIZATION_REVERTED")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+[[create-handler]]
+=== 创建生命周期事件监听器
+
+实现 `TransactionEventListener<OrderDomainEntity>` 以实时捕获并记录事务状态跃迁事件（参考 xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#state-change-listeners[状态变更监听器详解]）：
+
+[source,java]
+----
+@Slf4j
+@Component
+public class PlaceOrderHandler implements TransactionEventListener<OrderDomainEntity> {
+
+    @Override
+    public void onStateChanged(TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> transactionState) {
+        log.info(">>> Saga 状态转换: status={}, txId={}, hasException={}",
+                transactionState.getCurrentStatus(),
+                transactionState.getTransactionId(),
+                transactionState.getExecutionException() != null);
+    }
+}
+----
+
+[[creating-controller]]
+=== 创建 REST 控制器 (发起、回调与状态查询)
+
+提供三个标准端点展示 `SagaTemplate` 的操作方式：
+1. `POST /api/v1/order`: 通过 `sagaTemplate.init(...)` 初始化并使用 xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#stackSagaTemplate_usage_in_non_reactive_environment[fireAndForget] 异步启动 Saga。
+2. `POST /api/v1/order/callback/payment`: 接收外部支付回调，并通过 xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[sagaTemplate.resume(resumeKey, retentionDuration)] 恢复事务。
+3. `GET /api/v1/order/status?order-id={id}`: 通过 xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc#getcurrentstate-on-demand[sagaTemplate.getCurrentState(orderId).fetch()] 按需拉取事务全量执行快照。
+
+[source,java]
+----
+@Slf4j
+@RestController
+@RequestMapping("/api/v1/order")
+@RequiredArgsConstructor
+public class PlaceOrderController {
+
+    private final SagaTemplate<OrderDomainEntity> sagaTemplate;
+
+    @PostMapping
+    public ResponseEntity<PlaceOrderResponse> placeOrder(@RequestBody PlaceOrderRequest request) {
+        final String transactionId = this.sagaTemplate
+                .init(() -> {
+                    OrderDomainEntity entity = new OrderDomainEntity();
+                    entity.setUsername(request.getUsername());
+                    entity.setTotalAmount(request.getTotalAmount());
+                    entity.setProductItems(request.getItems() != null ? Arrays.asList(request.getItems()) : List.of());
+                    entity.setOrderStatus("INITIALIZED");
+                    return entity;
+                })
+                .peek(entity -> log.info("启动订单 Saga 事务: {}", entity.getTransactionId()))
+                .startWith(ValidateUserExecutor.class)
+                .fireAndForget()
+                .execute();
+
+        return ResponseEntity.ok(new PlaceOrderResponse(
+                transactionId,
+                "订单已成功受理，正在等待支付网关回调。"
+        ));
+    }
+
+    @PostMapping("/callback/payment")
+    public ResponseEntity<String> paymentCallback(@RequestBody PaymentCallbackRequest callback) {
+        log.info("收到支付 Webhook 回调，resumeKey: {}", callback.getResumeKey());
+
+        // 唤醒挂起的事务，并将回调载荷写入 ResumeContext
+        this.sagaTemplate
+                .resume(callback.getResumeKey(), Duration.ofMinutes(15))
+                .put("paymentStatus", callback.getPaymentStatus())
+                .put("referenceId", callback.getReferenceId())
+                .execute();
+
+        return ResponseEntity.ok("支付回调已被成功处理并恢复调度。");
+    }
+
+    @GetMapping("/status")
+    public ResponseEntity<TransactionState<?, ?>> orderStatus(@RequestParam("order-id") String orderId) {
+        TransactionState<OrderDomainEntity, SyncExecutionEvent<OrderDomainEntity>> state = 
+                this.sagaTemplate.getCurrentState(orderId).fetch();
+        return ResponseEntity.ok(state);
+    }
+
+    // --- DTO 数据传输对象 ---
+    @Data
+    public static class PlaceOrderRequest {
+        private String username;
+        private double totalAmount;
+        private String[] items;
+    }
+
+    @Data
+    @AllArgsConstructor
+    public static class PlaceOrderResponse {
+        private String transactionId;
+        private String message;
+    }
+
+    @Data
+    public static class PaymentCallbackRequest {
+        private String resumeKey;
+        private String paymentStatus; // "SUCCESS" 或 "DECLINED"
+        private String referenceId;
+    }
+}
+----
+
+[[tuning-configuration]]
+=== 调整配置参数
+
+配置 `application.properties` (或 `application.yml`)。完整配置项参考 xref:implementations:stacksaga-sync/orchestrator/properties.adoc[StackSaga 配置属性规范]。
+
+[source,properties]
+----
+spring.application.name=order-service
+
+# StackSaga 拓扑标识
+stacksaga.instance.cluster=local-cluster
+stacksaga.instance.region=local-region
+stacksaga.instance.zone=local-zone
+
+# 扫描 @SagaDomainEntity 所在包路径
+stacksaga.domain-entity-scan=org.example.orderservice.domain
+
+# 专用于 MySQL 事件存储的数据源 (通过 R2DBC)
+stacksaga.datasource.r2dbc.url=r2dbc:mysql://localhost:3306
+stacksaga.datasource.r2dbc.database=order_service_event_store
+stacksaga.datasource.r2dbc.username=${MYSQL_USER:root}
+stacksaga.datasource.r2dbc.password=${MYSQL_PASSWORD:password}
+----
+
+* `stacksaga.instance.*`: 标识集群节点信息，供故障重试协调器分区感知。
+* `stacksaga.datasource.r2dbc.*`: 配置 MySQL 事件存储连接。首次启动时，Liquibase 将自动初始化所需的表结构。
+
+---
+
+[[running-application]]
+=== 运行应用并测试事务流
+
+启动 MySQL 并运行 `order-service` 应用程序。
+
+==== 步骤 1: 发起下单事务
+
+使用 `curl` 向 `/api/v1/order` 发起 POST 请求：
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/v1/order \
+  -H "Content-Type: application/json" \
+  -d '{
+        "username": "john.doe",
+        "totalAmount": 149.99,
+        "items": ["item-1", "item-2"]
+      }'
+----
+
+响应示例：
+[source,json]
+----
+{
+  "transactionId": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2",
+  "message": "订单已成功受理，正在等待支付网关回调。"
+}
+----
+
+在控制台日志中，您将观察到步骤 1 和步骤 2 直通执行，每个步骤读取聚合根数据、执行模拟服务调用并更新聚合根，随后步骤 3 挂起进入 **`PAUSED`** 等待状态：
+
+[source,text]
+----
+INFO ... c.e.o.s.ValidateUserExecutor : 步骤 1: 验证用户 'john.doe' [幂等键: idk-val-01]
+INFO ... c.e.o.s.ValidateUserExecutor : >> [模拟调用] 外部用户微服务: GET /users/john.doe?idempotencyKey=idk-val-01
+INFO ... c.e.o.s.ValidateUserExecutor : >> [聚合根更新] OrderDomainEntity: userId=usr_4821, email=john.doe@example.com, status=USER_VALIDATED
+INFO ... c.e.o.s.ReserveOrderExecutor : 步骤 2: 为用户 'usr_4821' 预留商品库存, 商品: [item-1, item-2], 金额: 149.99 [幂等键: idk-res-02]
+INFO ... c.e.o.s.ReserveOrderExecutor : >> [模拟调用] 外部库存微服务: POST /inventory/reservations [userId: usr_4821, items: [item-1, item-2], idempotencyKey: idk-res-02]
+INFO ... c.e.o.s.ReserveOrderExecutor : >> [聚合根更新] OrderDomainEntity: reservationId=resv_c0af5df2, warehouseCode=WH-NORTH-01, status=INVENTORY_RESERVED
+INFO ... c.e.o.s.InitiatePaymentExecutor : 步骤 3: 为用户 'usr_4821' (john.doe@example.com) 创建支付会话, 金额: 149.99, 预留号: resv_c0af5df2 [resumeKey: orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2:c0af5df2-pay]
+INFO ... c.e.o.s.InitiatePaymentExecutor : >> [模拟调用] 外部支付网关接口: POST /checkout/sessions [amount: 149.99, ref: resv_c0af5df2, callbackToken: orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2:c0af5df2-pay]
+INFO ... c.e.o.s.InitiatePaymentExecutor : >> [聚合根更新] OrderDomainEntity: paymentSessionId=sess_c0af5df2, redirectUrl=https://pay.gateway.com/checkout/sess_c0af5df2, status=AWAITING_PAYMENT_CALLBACK
+INFO ... c.e.o.s.PlaceOrderHandler : >>> Saga 状态转换: status=PROCESSING, txId=orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2, hasException=false
+----
+
+==== 步骤 2: 查询挂起状态下的聚合根中间态
+
+在事务处于挂起休眠期间查询快照：
+
+[source,bash]
+----
+curl -X GET "http://localhost:8080/api/v1/order/status?order-id=orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2"
+----
+
+响应内容：
+[source,json]
+----
+{
+  "transaction_id": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2",
+  "current_status": "PROCESSING",
+  "current_domain_entity_state": {
+    "username": "john.doe",
+    "total_amount": 149.99,
+    "product_items": ["item-1", "item-2"],
+    "user_id": "usr_4821",
+    "user_email": "john.doe@example.com",
+    "user_validated": true,
+    "reservation_id": "resv_c0af5df2",
+    "warehouse_code": "WH-NORTH-01",
+    "payment_session_id": "sess_c0af5df2",
+    "payment_redirect_url": "https://pay.gateway.com/checkout/sess_c0af5df2",
+    "payment_reference_id": null,
+    "order_status": "AWAITING_PAYMENT_CALLBACK"
+  },
+  "execution_history": {
+    "0": {
+      "executor": "ValidateUserExecutor",
+      "executor_type": "QUERY_EXECUTOR",
+      "event_name": "VALIDATED_USER",
+      "current_status": "SUCCESS"
+    },
+    "1": {
+      "executor": "ReserveOrderExecutor",
+      "executor_type": "COMMAND_EXECUTOR",
+      "event_name": "RESERVED_ORDER",
+      "current_status": "SUCCESS"
+    },
+    "2": {
+      "executor": "InitiatePaymentExecutor",
+      "executor_type": "COMMAND_EXECUTOR",
+      "event_name": "PAYMENT_SESSION_INITIATED",
+      "current_status": "SUCCESS"
+    }
+  }
+}
+----
+
+请注意，`current_domain_entity_state` 已经完好沉淀了各步骤生成的数据：`user_id`、`reservation_id` 与 `payment_session_id` 已可靠写入 MySQL，而在等待回调期间，计算线程已被完全释放！
+
+==== 步骤 3.A: 正常流程 —— 支付成功 Webhook 回调唤醒
+
+模拟支付网关推送 `"SUCCESS"` 回调并携带 `resumeKey`：
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/v1/order/callback/payment \
+  -H "Content-Type: application/json" \
+  -d '{
+        "resumeKey": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2:c0af5df2-pay",
+        "paymentStatus": "SUCCESS",
+        "referenceId": "PAY-GATEWAY-998811"
+      }'
+----
+
+Saga 事务立刻被精准唤醒，调度至 `FinalizeOrderExecutor`，确认履约发货，并标记事务为 `PROCESS_COMPLETED`：
+
+[source,text]
+----
+INFO ... c.e.o.s.FinalizeOrderExecutor : 步骤 4: 接收到支付回调已唤醒. 状态: SUCCESS, 支付单号: PAY-GATEWAY-998811, 会话号: sess_c0af5df2, 预留号: resv_c0af5df2
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [聚合根更新] OrderDomainEntity: paymentReferenceId=PAY-GATEWAY-998811, status=CONFIRMED
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [模拟调用] 外部订单履约服务: POST /orders/resv_c0af5df2/confirm [ref: PAY-GATEWAY-998811, idempotencyKey: idk-fin-04]
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [模拟调用] 外部通知中心服务: POST /notifications/email [recipient: john.doe@example.com, ref: PAY-GATEWAY-998811]
+INFO ... c.e.o.s.PlaceOrderHandler : >>> Saga 状态转换: status=PROCESS_COMPLETED, txId=orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2, hasException=false
+----
+
+再次查询 `/api/v1/order/status`：
+
+[source,json]
+----
+{
+  "transaction_id": "orde-01a0b098-4e11-797f-bb12-c1b5c0af5df2",
+  "current_status": "PROCESS_COMPLETED",
+  "current_domain_entity_state": {
+    "username": "john.doe",
+    "total_amount": 149.99,
+    "product_items": ["item-1", "item-2"],
+    "user_id": "usr_4821",
+    "user_email": "john.doe@example.com",
+    "user_validated": true,
+    "reservation_id": "resv_c0af5df2",
+    "warehouse_code": "WH-NORTH-01",
+    "payment_session_id": "sess_c0af5df2",
+    "payment_reference_id": "PAY-GATEWAY-998811",
+    "order_status": "CONFIRMED"
+  }
+}
+----
+
+==== 步骤 3.B: 异常流程 —— 自动逆向补偿回滚
+
+发起一笔新订单，随后模拟支付网关推送 `"DECLINED"` 失败回调：
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/v1/order/callback/payment \
+  -H "Content-Type: application/json" \
+  -d '{
+        "resumeKey": "orde-01a0b098-new-id:idemp-key",
+        "paymentStatus": "DECLINED",
+        "referenceId": "ERR-CARD-EXPIRED"
+      }'
+----
+
+`FinalizeOrderExecutor` 抛出 xref:ROOT:non_retryable_executor_exception.adoc[`NonRetryableExecutorException`]。
+SEC 立即阻断前向推进并启动**确定性逆向自动驾驶仪 (Deterministic Reverse Autopilot)**（参考 xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-2-1-revert-to-core[USNP 模式 2.1: 逆向回滚]）：
+
+1. `FinalizeOrderExecutor.doRevert()` 取消订单终态标记 (`ORDER_FINALIZATION_REVERTED`)。
+2. `InitiatePaymentExecutor.doRevert()` 从历史快照中读取 `payment_session_id` 并将其作废 (`PAYMENT_SESSION_VOIDED`)。
+3. `ReserveOrderExecutor.doRevert()` 从历史快照中读取 `reservation_id` 并调用仓库服务释放库存 (`REVERTED_ORDER`)。
+4. `ValidateUserExecutor` (`QueryExecutor`) 被 SEC **自动跳过并修剪**。
+5. 事务以状态 **`REVERT_COMPLETED`** 干净完结。
+
+控制台日志：
+[source,text]
+----
+WARN ... c.e.o.s.FinalizeOrderExecutor : 补偿步骤 4: 取消本地订单终态确认，事务号: orde-01a0b098-new-id
+INFO ... c.e.o.s.FinalizeOrderExecutor : >> [模拟调用] 在本地数据库将订单标记为 CANCELED, 事务号: orde-01a0b098-new-id
+WARN ... c.e.o.s.InitiatePaymentExecutor : 补偿步骤 3: 作废外部支付收银台会话 'sess_new' [幂等键: idk-rev-3]
+INFO ... c.e.o.s.InitiatePaymentExecutor : >> [模拟调用] 外部支付网关逆向补偿: POST /checkout/sessions/sess_new/void [幂等键: idk-rev-3]
+WARN ... c.e.o.s.ReserveOrderExecutor : 补偿步骤 2: 释放用户 'usr_4821' 的库存预留 'resv_new' [幂等键: idk-rev-2]
+INFO ... c.e.o.s.ReserveOrderExecutor : >> [模拟调用] 外部库存微服务逆向补偿: POST /inventory/reservations/resv_new/release [幂等键: idk-rev-2]
+INFO ... c.e.o.s.PlaceOrderHandler : >>> Saga 状态转换: status=REVERT_COMPLETED, txId=orde-01a0b098-new-id, hasException=true
+----
+
+---
+
+[[stage-2]]
+== 阶段二 [添加重试自愈能力]
+
+阶段一涵盖了连续执行、挂起等待与逆向补偿。
+在实际生产中，难免遇到**瞬态故障**（如临时网络闪断、第三方服务短暂 503 或数据库死锁），此类故障应当自动重试而非立刻触发代价高昂的整体回滚。
+
+StackSaga 提供了分布式**重试子系统 (Retry Subsystem)**：
+1. 使用 `stacksaga-ring-coordinator-spring-boot-starter` 创建专用的**环形协调器应用 (Ring Coordinator)**。
+2. 在您的 `order-service` 编排器中引入 `stacksaga-ring-coordinator-connector`。
+
+=== 1. 创建环形协调器应用
+
+创建独立的 Spring Boot 工程并引入依赖：
+
+[source,xml,subs="attributes+"]
+----
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.stacksaga</groupId>
+            <artifactId>stacksaga-bom</artifactId>
+            <version>{stacksaga-version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-ring-coordinator-spring-boot-starter</artifactId>
+</dependency>
+----
+
+配置 `application.properties`:
+
+[source,properties]
+----
+spring.application.name=order-service-ring-coordinator
+
+# Master 上的 RSocket 服务端口
+spring.rsocket.server.address=localhost
+spring.rsocket.server.port=4455
+
+# Master 与 Slave 协同配置
+stacksaga.coordinator.target-services=order-service
+stacksaga.coordinator.instance-type=master,slave
+
+# 必须与编排器集群与区域配置一致
+stacksaga.instance.cluster=local-cluster
+stacksaga.instance.region=local-region
+stacksaga.instance.zone=local-zone
+
+stacksaga.coordinator.slave.target-master.port=4455
+stacksaga.coordinator.slave.target-master.host=localhost
+----
+
+=== 2. 连接编排器服务
+
+在 `order-service` 的 `pom.xml` 中引入协调器连接器：
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-ring-coordinator-connector</artifactId>
+</dependency>
+----
+
+在 `order-service` 的 `application.properties` 中添加连接配置：
+
+[source,properties]
+----
+# 停滞事务被判定为可重试之前的等待延时
+stacksaga.sql.transaction.recovery.default.retry.delay=1m
+
+# 启用连接器并连接到 Ring Coordinator RSocket Master
+stacksaga.coordinator.connector.enabled=true
+stacksaga.coordinator.connector.master.requester.host=localhost
+stacksaga.coordinator.connector.master.requester.port=4455
+----
+
+=== 3. 模拟瞬态故障自愈
+
+修改 `ReserveOrderExecutor`，在首次执行时通过抛出 xref:ROOT:retryable_executor_exception.adoc[`RetryableExecutorException`] 模拟瞬态网络超时。环形协调器将自动认领该停滞事务并执行重试：
+
+[source,java]
+----
+@Slf4j
+@SagaExecutor(executeFor = "order-service", value = "ReserveOrderExecutor")
+public class ReserveOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final AtomicReference<Map<String, Integer>> attemptCounter = new AtomicReference<>(new HashMap<>());
+
+    @NonNull
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            @NonNull OrderDomainEntity currentDomainEntity,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+    ) throws RetryableExecutorException, NonRetryableExecutorException {
+
+        String txId = currentDomainEntity.getTransactionId();
+        int attempts = attemptCounter.get().compute(txId, (k, v) -> v == null ? 1 : v + 1);
+
+        // 1. 首次尝试因瞬态网络超时而失败
+        if (attempts == 1) {
+            log.warn("第 1 次执行: 模拟连接库存服务发生网络超时，事务号: {}", txId);
+            // 抛出 RetryableExecutorException -> SEC 将事务标记为已停滞，等待调度重试
+            throw RetryableExecutorException.of("库存微服务连接瞬态超时，事务号: " + txId);
+        }
+
+        // 2. 第二次尝试 (由 Ring Coordinator 分布式重试唤醒) 成功
+        String userId = currentDomainEntity.getUserId();
+        List<String> items = currentDomainEntity.getProductItems();
+        log.info("第 {} 次执行成功: 为用户 '{}' 预留商品库存, 商品: {}", attempts, userId, items);
+
+        log.info(">> [模拟调用] 重试执行外部库存服务: POST /inventory/reservations [userId: {}, items: {}]",
+                userId, items);
+        String simulatedReservationId = "resv_" + idempotencyKey.substring(0, 8);
+        currentDomainEntity.setReservationId(simulatedReservationId);
+        currentDomainEntity.setWarehouseCode("WH-NORTH-01");
+        currentDomainEntity.setOrderStatus("INVENTORY_RESERVED");
+        log.info(">> [聚合根更新] 重试成功回填聚合根: reservationId={}", simulatedReservationId);
+
+        return stepManager
+                .success("RESERVED_ORDER")
+                .asSync()
+                .noPause()
+                .toNextExecutor(InitiatePaymentExecutor.class);
+    }
+
+    @NonNull
+    @Override
+    public RevertStepManager doRevert(
+            @NonNull NonRetryableExecutorException primaryExecutionException,
+            @NonNull OrderDomainEntity finalDomainEntityState,
+            @NonNull RevertHintStore revertHintStore,
+            @NonNull String idempotencyKey,
+            @NonNull ResumeContext resumeContext,
+            @NonNull RevertStepManager stepManager
+    ) throws RetryableExecutorException {
+
+        String reservationId = finalDomainEntityState.getReservationId();
+        log.warn("补偿步骤 2: 调用库存微服务释放预留 '{}'", reservationId);
+
+        log.info(">> [模拟调用] 外部库存微服务逆向补偿: POST /inventory/reservations/{}/release",
+                reservationId);
+
+        return stepManager
+                .success("REVERTED_ORDER")
+                .asSync()
+                .noPause()
+                .resumeToNextDefaultExecutor();
+    }
+}
+----
+
+---
+
+[[stage-3]]
+== 阶段三 [接入链路追踪窗口]
+
+xref:trace-window:stacksaga-trace-window.adoc[StackSaga 链路追踪窗口 (Trace Window)] 是一套开箱即用的可视化 Web 门户，能够以实时动态图谱展现事务执行全貌——涵盖时间线、状态跃迁、步骤延迟、领域实体聚合快照与补偿调用树（详见 xref:trace-window:stacksaga-trace-window-connector-overview.adoc[链路追踪连接器概述]）。
+
+=== 1. 添加链路追踪连接器
+
+在 `order-service` 的 `pom.xml` 中引入追踪连接器：
+
+[source,xml]
+----
+<dependency>
+    <groupId>org.stacksaga</groupId>
+    <artifactId>stacksaga-trace-window-connector-servlet</artifactId>
+</dependency>
+----
+
+在 `order-service` 的 `application.properties` 中开启接口：
+
+[source,properties]
+----
+stacksaga.trace-window.enable-api=true
+stacksaga.trace-window.secure-api=false
+----
+
+=== 2. 可视化事务执行
+
+1. 重启 `order-service`。
+2. 浏览器打开 https://trace.stacksaga.org/[Trace-Window]。
+3. 输入本地服务器地址 `http://localhost:8080` 完成连接。
+4. 输入 `transactionId` 即可全面检查：
+   * 连续前推步骤 (`ValidateUserExecutor`, `ReserveOrderExecutor`) 及其对聚合根数据的逐步累积演进。
+   * `InitiatePaymentExecutor` 处的主动挂起等待点，以及所分配的 `resumeKey`。
+   * Webhook 回调唤醒并恢复进入 `FinalizeOrderExecutor` 的完整过程。
+   * 若发生异常，查看确定性倒序补偿调用树以及被自动修剪的只读查询步骤。
+
+---
+
+[[next-steps-and-references]]
+== 进阶探索与参考文档
+
+本快速入门示例涵盖了构建混合风格 Saga 的核心骨干。在实际生产级企业架构中，您还将面对更深层次的集成场景、复杂流向控制以及运维配置需求。推荐深入研读以下专业参考手册以增强生产实践：
+
+[cols="1,2,2",options="header"]
+|===
+| 主题 | 核心架构关注点 | 官方文档链接
+
+| *集成模式 (USIP)*
+| 深入掌握三大核心集成模式：直接同步模式（模式 1）、关联挂起与恢复（模式 2）以及带提交屏障的双阶段惰性派发（模式 3）。
+| xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-overview[统一 Saga 集成模式 (USIP) 详解]
+
+| *导航流向模式 (USNP)*
+| 动态运行时条件分支、故障倒戈、前置/后置执行器 (Pre/Post) 以及三阶段补偿回滚。
+| xref:implementations:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-overview[统一 Saga 导航模式 (USNP) 详解]
+
+| *执行器架构规范*
+| `CommandExecutor`、`QueryExecutor`、响应式 `ReactiveCommandExecutor` 规范以及方法签名契约。
+| xref:implementations:stacksaga-sync/orchestrator/executor_architecture.adoc[执行器组件架构与参考]
+
+| *SagaTemplate 编程式操作*
+| 编程式发起（`fireAndForget`、`fireAndWatch`）、流式唤醒恢复（`ResumeSpec`）以及按需快照查询（`getCurrentState`）。
+| xref:implementations:stacksaga-sync/orchestrator/stacksaga_template.adoc[SagaTemplate 参考手册]
+
+| *状态聚合根 (Domain Entity)*
+| Jackson 多态序列化机制、聚合根语义版本演进以及 R2DBC 事件存储中的快照持久化。
+| xref:implementations:stacksaga-sync/orchestrator/domain-entity.adoc[领域实体 (Domain Entity) 架构详解]
+
+| *异常与故障分类学*
+| 准确区分微服务瞬态故障 (`RetryableExecutorException`) 与终态业务失败 (`NonRetryableExecutorException`)。
+| xref:ROOT:retryable_executor_exception.adoc[可重试异常] 与 xref:ROOT:non_retryable_executor_exception.adoc[不可重试异常]
+
+| *配置与性能调优*
+| 调度器并发度配置、线程池容量、事件存储重试与集群拓扑分区配置。
+| xref:implementations:stacksaga-sync/orchestrator/properties.adoc[StackSaga 配置属性规范]
+
+| *Trace Window 链路可观测性*
+| 将微服务集群无缝接入可视化诊断平台，实时分析事务执行时延、状态变迁与补偿调用树。
+| xref:trace-window:stacksaga-trace-window.adoc[StackSaga 链路追踪窗口指南]
+|===

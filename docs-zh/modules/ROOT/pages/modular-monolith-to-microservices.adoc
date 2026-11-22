@@ -1,0 +1,238 @@
+:description: 全面架构指南：如何使用 StackSaga 构建模块化单体（Modular Monolith），并在零事务重写的前提下平滑扩展至分布式微服务架构。
+:keywords: StackSaga, 模块化单体, Modular Monolith, Modulith, Spring Modulith, 微服务迁移, Saga编排, 分布式事务, 零重写, Spring Boot, 事件溯源, 进程内执行, 服务抽取
+:page-priority: 0.85
+
+= 从模块化单体到微服务：实现零事务重写的可扩展架构
+
+[.lead]
+**StackSaga 提供了在第一天（Day 1）构建清晰、高性能的“模块化单体（Modular Monolith）”，并在此后平滑扩展至“分布式微服务架构”的核心技术基石，且无需重写任何业务 Saga 事务流程。**
+通过从一开始将业务操作解耦为原子化、编译期类型安全的执行器（Executors），开发团队能够彻底终结在传统单体向微服务拆分过程中普遍遭遇的“抽取陷阱（The Extraction Trap）”。
+
+[NOTE]
+.架构思维演进：为什么提倡先从模块化单体（Modular Monolith）起步？
+====
+在现代企业级软件工程实践中，过早推进分布式微服务架构已被普遍公认为一种“反模式（Anti-Pattern）”。
+系统早期往往会面临不必要的网络延迟、繁琐的部署流水线、复杂的分布式数据一致性难题以及高昂的云基础设施开销。
+以**模块化单体（Modular Monolith）**作为起点，可以让团队在单一 Spring Boot 应用程序内部实现极其敏捷的高效开发。
+然而，传统的单体架构几乎都重度依赖共享数据库与 `@Transactional` 本地事务，从而在模块间造成了严重的关系型深度耦合。一旦未来需要将某个模块拆分为独立服务，往往意味着耗费数月的痛苦重写。
+StackSaga 彻底终结了这种妥协：**在今天，你既能享有单体进程内的亚毫秒级（<1ms）执行极速；在明天，又能拥有微服务级别的分布式事务完整性保证。**
+====
+
+== 行业普遍困境：“抽取陷阱（The Extraction Trap）”
+
+要理解 StackSaga 模型的核心突破，首先需要审视传统企业系统在演化过程中所面临的严峻困局：
+
+=== 第一阶段：单体 `@Transactional` 本地事务陷阱
+
+当开发团队使用传统 Spring Boot 模式构建模块化单体时：
+
+1. **共享数据库与 ACID 锁绑定**：各业务模块间通常直接通过依赖注入（DI）互相调用 Spring Bean，或在单一 `@Transactional` 事务边界内直接向共享数据表进行读写。
+2. **数据库级缠绕**：`order-module` 直接调用 `@Transactional OrderService.placeOrder()`，其内部又隐式调用了 `PaymentRepository.save()` 与 `InventoryRepository.decrementStock()`。
+3. **隐蔽的实体强关联**：跨业务域的数据库外键、Hibernate 延迟加载关联以及数据库行锁，将各个模块在物理层面上紧密绑死。
+
+=== 第二阶段：微服务拆分难以推进的绝境
+
+随着业务快速发展，部分高吞吐模块（如 `payment-service` 或 `inventory-service`）必须被独立拆分为微服务：
+
+* **ACID 事务无法跨越网络**：一旦将 `PaymentService` 迁移至独立容器并改为通过 REST、gRPC 或 Kafka 调用，Spring 的 `@Transactional` 本地事务边界将彻底失效。
+* **双写不一致与局部失败灾难**：若远程支付成功但随后的本地库存扣减发生异常，本地数据库回滚仅能影响本地数据表。已完成的远程支付将继续挂账，引发灾难性的系统状态不一致。
+* **不得不全面推倒重写**：团队不得不放弃原有的事务代码，被迫开展历时数月的高风险架构重写，以便在事后引入分布式 Saga 或事件驱动编排。
+
+---
+
+== StackSaga 解决方案：原子化执行器边界（Atomic Executor Boundaries）
+
+StackSaga 通过引入**Saga 执行器模式（Saga Executor Pattern）**（`CommandExecutor<T>` 与 `QueryExecutor<T>`），在系统初始阶段便确立了**原子化领域边界**：
+
+[cols="1,2,2",options="header"]
+|===
+| 核心架构维度 | 传统单体 (`@Transactional`) | StackSaga 模块化单体
+
+| *执行效率*
+| 进程内（<1ms）
+| **进程内（<1ms 内存极速）**
+
+| *基础设施要求*
+| 0 台外部服务器
+| **0 台外部服务器**（内嵌式 Spring Boot Starter）
+
+| *领域隔离性*
+| 泄漏（共享 DB 实体与内存污染）
+| **严格隔离**（封装于原子化的 `CommandExecutor` 步阶中）
+
+| *状态演进*
+| 可变实体快照
+| **不可变事件溯源（Event Sourcing）**
+
+| *回滚与补偿*
+| 仅限本地 DB 回滚（跨网失效）
+| **对称化自动补偿**（`doRevert()` 与前/后置补偿链）
+
+| *服务抽取重构成本*
+| **推倒重来式重写**（耗时数月）
+| **零 Saga 重写**（仅需修改内部具体调用协议）
+|===
+
+每个业务步骤均被独立封装在原子化的执行器中：
+
+* **正向演进 (`doProcess()`)**：执行本模块的具体业务逻辑，并将结果富集到强类型的 `DomainEntity` 聚合数据载体中。
+* **反向补偿 (`doRevert()`)**：明确定义当后续步阶发生故障时的确定性回滚与对冲操作。
+* **事件溯源快照**：每一个里程碑均通过现有的单体关系型数据库不可变地持久化至 Event Store 中。
+
+---
+
+== 第一阶段：使用 StackSaga 构建模块化单体（Day 1）
+
+在系统的起步阶段，整个系统打包并部署为单一 Spring Boot 应用程序。
+
+=== 进程内亚毫秒级执行
+
+在模块化单体内部，执行器直接通过 Spring Bean 注入在内存中调用其他模块的服务：
+
+[source,java]
+----
+@Component
+@SagaExecutor(executeFor = "order-service", liveCheck = true, value = "MakePaymentExecutor")
+public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentInternalService paymentInternalService;
+
+    public MakePaymentExecutor(PaymentInternalService paymentInternalService) {
+        this.paymentInternalService = paymentInternalService;
+    }
+
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            ProcessContext<OrderDomainEntity> context, 
+            ProcessStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity order = context.currentDomainEntityState();
+
+        // 进程内内存调用：亚毫秒级（<1ms）极速执行，无网络序列化开销
+        PaymentResult result = paymentInternalService.charge(
+                order.getOrderId(), 
+                order.getTotalAmount()
+        );
+
+        order.setPaymentReferenceId(result.getTransactionId());
+
+        return stepManager
+                .success(order)
+                .asSync()
+                .noPause()
+                .toNextExecutor(ReserveInventoryExecutor.class);
+    }
+
+    @Override
+    public RevertStepManager<OrderDomainEntity> doRevert(
+            RevertContext<OrderDomainEntity> context, 
+            RevertStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity finalState = context.finalDomainEntityState();
+
+        // 进程内反向补偿调用
+        paymentInternalService.refund(finalState.getPaymentReferenceId());
+
+        return stepManager
+                .success()
+                .asSync()
+                .noPause()
+                .toNextDefaultExecutor();
+    }
+}
+----
+
+=== 阶段优势
+
+* **零额外基础设施负担**：无需搭建 Temporal、Camunda 或 Kafka 集群，依赖仅需引入 `stacksaga-spring-boot-starter`。
+* **复用现有关系型数据库**：现有的 PostgreSQL 或 MySQL 数据库（_Oracle 即将推出_）既存放单体业务表，同时承担不可变的 Saga 事件存储。
+* **开发期全链路可观测性**：在本地开发与测试环境中，即可通过 Trace Window 仪表盘图形化审查每笔事务的步阶耗时与状态回滚。
+
+---
+
+== 第二阶段：微服务无痛拆分与零事务重写（Scale Phase）
+
+当系统流量激增或研发团队规模扩大，需要将 `payment-module` 抽取为独立的微服务（`payment-service`）。
+
+=== 唯一需要改动的地方：仅限网络调用层
+
+由于在第一天就已经将事务边界、回滚逻辑和事件溯源状态封装在了 StackSaga 执行器中，**整个 Saga 编排流程完全无需重写**。
+
+开发者仅需将 `doProcess()` 和 `doRevert()` 内原有的本地 Spring Bean 调用修改为远程 HTTP/REST、WebClient 或 gRPC 调用：
+
+[source,java]
+----
+@Component
+@SagaExecutor(executeFor = "order-service", liveCheck = true, value = "MakePaymentExecutor")
+public class MakePaymentExecutor implements CommandExecutor<OrderDomainEntity> {
+
+    private final PaymentServiceClient paymentServiceClient; // 替换为远程客户端 Stub
+
+    public MakePaymentExecutor(PaymentServiceClient paymentServiceClient) {
+        this.paymentServiceClient = paymentServiceClient;
+    }
+
+    @Override
+    public ProcessStepManager<OrderDomainEntity> doProcess(
+            ProcessContext<OrderDomainEntity> context, 
+            ProcessStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity order = context.currentDomainEntityState();
+
+        // 改为调用远程独立微服务 (HTTP/REST 或 gRPC)
+        PaymentResult result = paymentServiceClient.chargeRemote(
+                order.getOrderId(), 
+                order.getTotalAmount()
+        );
+
+        order.setPaymentReferenceId(result.getTransactionId());
+
+        // 核心 Saga 编排步阶流转 100% 保持原样，无需任何改动！
+        return stepManager
+                .success(order)
+                .asSync()
+                .noPause()
+                .toNextExecutor(ReserveInventoryExecutor.class);
+    }
+
+    @Override
+    public RevertStepManager<OrderDomainEntity> doRevert(
+            RevertContext<OrderDomainEntity> context, 
+            RevertStepManager<OrderDomainEntity> stepManager) throws RetryableExecutorException {
+
+        OrderDomainEntity finalState = context.finalDomainEntityState();
+
+        // 调用远程独立微服务的退款补偿接口
+        paymentServiceClient.refundRemote(finalState.getPaymentReferenceId());
+
+        return stepManager
+                .success()
+                .asSync()
+                .noPause()
+                .toNextDefaultExecutor();
+    }
+}
+----
+
+=== 100% 保持不变的核心资产
+
+服务拆分过程中，以下所有核心架构资产均无需任何修改：
+
+1. **`OrderDomainEntity` 状态模型**：实体字段、JSON 注解与版本控制逻辑完全不变。
+2. **编排图谱与状态机**：步阶流转逻辑、条件分支路由完全不变。
+3. **补偿拓扑与回滚机制**：LIFO 逆序自动回滚、查询步阶自动剪枝、前置/后置补偿链完全不变。
+4. **幂等性保障**：`context.idempotencyKey()` 继续提供全局不可变的幂等键，防止远程服务重复扣款。
+5. **审计日志与事件追踪**：历史快照与 Trace Window 审查链条在服务拆分前后保持完美连续性。
+
+---
+
+== 总结：为何 StackSaga 是“单体优先”架构的理想引擎？
+
+| 架构特性 | 传统单体架构 | 传统工作流编排（Temporal / Camunda） | StackSaga 模块化单体演进模型 |
+| :--- | :--- | :--- | :--- |
+| **初期落地成本** | 极低 | 极高（需单独部署服务器、调度中心及数据库） | **极低**（仅需引入单一 Starter 依赖） |
+| **单体内部性能开销** | 无额外开销 | 极高（轮询器与集群服务器之间跨网往返） | **亚毫秒级进程内内存直调极速** |
+| **未来微服务拆分难度**| **接近不可能**（需彻底重写事务） | 较复杂（受限于厂商 SDK 与轮询模板） | **极简**（仅修改执行器内部的具体调用方式） |
+| **事件溯源与审计** | 无（往往需要自行打日志） | 依赖外部集群存储 | **原生零基础设施（直接复用当前单体数据库）** |
+
+通过在项目初期便采用 StackSaga，架构师能够确保系统**生于现代，行于极速，且在未来的无限扩展中永无重写之忧。**

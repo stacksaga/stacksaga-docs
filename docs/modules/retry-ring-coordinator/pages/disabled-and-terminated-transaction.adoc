@@ -1,42 +1,80 @@
-= Disabled Transactions VS Terminated Transactions
+= Disabled Transactions vs Terminated Transactions
 
+The xref:transaction-retrying-with-retry-coordinator.adoc[retry subsystem] does not retry a transaction forever.
+This page describes the two end states a transaction can reach when it stops being retried, and how to bring it back.
+
+[[transaction-lifetime]]
+== Transaction Lifetime
+
+Every transaction carries a *lifetime*: the bounded period during which the retry subsystem will keep re-invoking it.
+While the lifetime lasts, a transaction that fails with a retryable error is registered for another recovery window and attempted again.
+
+The lifetime exists so that a transaction which can never succeed does not circulate through the retry subsystem indefinitely, consuming capacity that live recovery work needs.
+What happens when a transaction stops depends on *how* it stopped:
+
+* It ran out of lifetime without completing — a xref:#disabled-transactions[disabled transaction].
+* It failed while compensating, which ends it immediately — a xref:#terminated-transactions[terminated transaction].
+
+[[disabled-transactions]]
 == Disabled Transactions
 
-If some transactions are expired after retrying withing the transaction lifetime these transactions are disabled transactions.
+A transaction that is still incomplete when its lifetime expires is marked as a *disabled transaction*.
+It is no longer picked up for retrying.
 
-What are the reasons for expiring transactions without completing?
+There are two common reasons a transaction reaches the end of its lifetime without completing.
 
-. *Some executors may have been changed during the transaction execution period.* +
-For instance, Just imagine that a transaction is initiated at service version 1.0.0, and it keeps some time for retrying due to the target service not available and if a new version is deployed during the time without the executor that transaction can not be executed.
-even if the transaction is passed for retrying the transaction is not executed due to the executor not existing.
-Even if the executor is not found at that moment the transaction is re-scheduled again for retrying again and again until reaching the end of the transaction lifetime.
-After the end of the lifetime, the transaction is marked as a disabled transaction. +
+. *An executor was removed or renamed while the transaction was still in flight.* +
+Consider a transaction initiated on service version `1.0.0` that then spends time awaiting retry because a target service is unavailable.
+If version `1.1.0` is deployed during that period and no longer contains the executor the transaction is waiting on, the transaction cannot proceed: each time it is passed for retrying, execution fails because the executor no longer exists.
+It is rescheduled again and again until its lifetime runs out, at which point it becomes a disabled transaction.
 +
-NOTE: The reason for rescheduling the transaction even if the executor is not found is that the team can recognise the issue and fix them before reaching the lifetime.
-Because if there is this kind of error, Stacksaga framework notifies the issue into the StackSaga Trace Window. +
+NOTE: Rescheduling a transaction whose executor is missing is deliberate — it gives the team a window in which to recognise the problem and restore the executor before the lifetime expires. StackSaga reports this condition to the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] as soon as it occurs.
 
-. *The target service host is not found*. +
-If the target host is not found again and again until the lifetime is exceeded the transaction is marked as a disabled transaction after the end of the lifetime.
+. *The target service host could not be resolved.* +
+If the target host cannot be reached on every attempt until the lifetime is exceeded, the transaction becomes a disabled transaction.
 +
-NOTE: At this moment the system doesn't warn you through the StackSaga Trace Window because resources unavailable are accepted by the framework.
+NOTE: This case is not raised as a warning in the Trace Window. Resources being temporarily unavailable is an expected condition that the framework is designed to absorb, not a defect to report.
 
+[[terminated-transactions]]
 == Terminated Transactions
 
-If a transaction is failed while reverting, the transaction is marked as a terminated transaction. because revert process cannot be failed except a RetryableException in StackSaga.
-The difference between a terminated transaction and a disabled transaction is that the transaction is stopped without reaching the lifetime.
+A transaction that *fails while reverting* is marked as a *terminated transaction* (with status `TransactionCompleteStatus.REVERT_FAILED`).
 
-== How to restore the Disabled Transactions and Terminated Transactions?
+Compensation is not permitted to fail permanently in StackSaga: the only exception a `doRevert()` method or revert sub-executor may throw is a retryable one (`RetryableExecutorException`).
+If compensation encounters an unhandled non-retryable failure, or if a compensating step (`doRevert()`, `@PreExecutor`, or `@PostExecutor`) exhausts all its configured retry attempts, there is no further recovery path — because there is no compensation for a compensation. The transaction stops at once and transitions to `REVERT_FAILED`.
 
-The bugs of the Disabled transactions and Terminated Transactions should be discovered manually by the team.
-and after readying for execute that transactions you can restore the transaction for retrying.
+The distinction between the two end states is *when* they happen:
 
-There are 2 endpoints for handle the Disabled Transactions and Terminated Transactions.
+[cols="1,2,2",options="header"]
+[.google-anno-skip]
+|===
+| | Disabled | Terminated
 
-. *Fetching the Disabled Transactions and Terminated Transactions.* +
-You can collect the Disabled Transactions and Terminated Transactions through this endpoint for analyzing the errors or issues.
+| Cause
+| Lifetime expired before completion
+| Compensation failed with an unrecoverable error or exhausted all retries (`REVERT_FAILED`)
 
-. *Restoring the Disabled Transactions and Terminated Transactions.* +
-You can restore the Disabled Transactions and Terminated Transactions through this endpoint by extending the transaction lifetime.
+| Timing
+| At the end of the lifetime
+| Immediately, without reaching the lifetime
+
+| Flow
+| Primary or compensation flow
+| Compensation flow only
+|===
+
+== Restoring Disabled and Terminated Transactions
+
+Both end states require the team to diagnose the underlying problem manually — a missing executor, an unreachable host, a defect in a `doRevert()` implementation.
+Once the cause is fixed and the transaction can run to completion, it can be restored for retrying.
+
+Two endpoints handle these transactions:
+
+. *Fetching disabled and terminated transactions.* +
+Collects the affected transactions so their errors can be analysed.
+
+. *Restoring disabled and terminated transactions.* +
+Returns a transaction to the retry subsystem by extending its lifetime.
 
 // todo add the endpoints links
-NOTE: The endpoints are different from each implementation. and find the relevant endpoint here as per the implementation that you are using.
+NOTE: These endpoints differ between implementations. Refer to the documentation for the implementation you are using for the exact endpoint.

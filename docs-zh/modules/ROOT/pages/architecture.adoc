@@ -1,0 +1,139 @@
+:page-priority: 0.7
+
+= Architecture - StackSaga Framework
+
+The following sections describe the **StackSaga Framework** architecture progressively across three deployment stages.
+Each stage builds on the previous one, adding production-readiness capabilities incrementally.
+This staged approach makes it possible to start with a minimal setup and harden the system as operational requirements expand.
+
+. xref:#stacksaga-architecture-1st-stage[Stage 1: Basic Setup] — orchestrator service + utility microservices and message brokers communicating over direct endpoints (REST, gRPC, GraphQL, local DB) or event brokers (Apache Kafka, RabbitMQ).
+. xref:#stacksaga-architecture-2nd-stage[Stage 2: Retry-Ready Setup] — distributed retry coordination via token ring coordinator.
+. xref:#stacksaga-architecture-3rd-stage[Stage 3: Monitoring Setup] — end-to-end saga observability and transaction tracing via Trace Window.
+
+[[stacksaga-identifying-service-roles]]
+== Service Classification: Orchestrator, Utility Services, and Message Brokers
+
+Before exploring the architectural stages, it is important to understand the role classification within the StackSaga ecosystem:
+
+[cols="1,3",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Role | Description
+
+| *Orchestrator Service*
+| Any existing domain microservice that has been given the responsibility of driving a distributed saga end-to-end. Applications with the `stacksaga-spring-boot-starter` dependency are orchestrator services. They start sagas, coordinate atomic executions, manage event store snapshots, publish asynchronous commands, and handle compensations.
+
+| *Standard Utility Service & Message Brokers*
+| The baseline role of participating services and message brokers. A utility service has **zero StackSaga dependencies**; it exposes standard REST, gRPC, or GraphQL endpoints, or consumes messages from broker topics (Apache Kafka, RabbitMQ). Downstream services remain completely unaware of the saga orchestration framework.
+|===
+
+*Orchestrator* is a role label within the saga domain, not a separate infrastructure deployment.
+Every microservice in your system — `order-service`, `payment-service`, `user-service`, etc. — is primarily a business domain service: it exposes its own endpoints, interacts with its own database, and serves consumers.
+
+Adding `stacksaga-spring-boot-starter` overlays the orchestrator role directly into that service.
+For example, if `order-service` adds StackSaga, it continues exposing its own client APIs while gaining the internal capability to coordinate multi-service order sagas across downstream payment gateways, inventory databases, and Kafka topics.
+
+TIP: This is a core architectural strength of StackSaga: it embeds directly into existing services without requiring dedicated orchestration servers or intrusive changes to downstream microservices. Adoption is completely additive.
+
+[[stacksaga-architecture-1st-stage]]
+== Stage 1: Basic Setup
+
+Stage 1 establishes the minimal viable topology: an orchestrator service that initiates and coordinates sagas across utility services and message brokers.
+
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-1-minimal-architecture-overview.svg[StackSaga Architecture: Stage 1 — Basic Setup,width=800]
+
+=== Dependencies
+
+[cols="1,1,2",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Service | Dependency | Purpose
+
+| Orchestrator
+| `stacksaga-spring-boot-starter`
+| Provides the Saga Execution Coordinator (`SEC`), `SagaTemplate`, `TransactionEventListener`, `CommandExecutor`, `QueryExecutor`, and step managers.
+
+| Orchestrator
+| `stacksaga-database-support`
+| Provides the event store adapter (MySQL, PostgreSQL, Cassandra — _Oracle coming soon_) for persisting `DomainEntity` state and execution history.
+|===
+
+=== Architectural Topology & Interaction Flow
+
+. **Client Inbound Trigger**: Inbound client traffic (REST/GraphQL) reaches the orchestrator service controller, which initializes the saga domain entity and hands execution over to the embedded SEC engine.
+. **Synchronous Direct Calls**: The orchestrator invokes participating utility microservices over standard protocols (HTTP/REST, gRPC) or executes local database operations. Downstream services remain completely unaware of the saga coordinator.
+. **Asynchronous Broker Messaging**: For event-driven steps, the orchestrator dispatches messages to broker topics (Apache Kafka, RabbitMQ) via the Two-Stage model—committing the transaction state to the Event Store before message emission.
+. **Callback Resumption**: When an asynchronous reply, broker event, or webhook arrives, the orchestrator correlates the callback and seamlessly resumes the saga workflow.
+. **Automated Reverse Compensation**: If a downstream step encounters a non-retryable business failure, the SEC automatically executes compensating actions (`doRevert`) in reverse chronological order across both synchronous APIs and asynchronous messaging topics.
+
+TIP: For a complete code-level walkthrough (`sagaTemplate.process(...)`, staged builders, `.asSync()`, `.asAsync()`, and `resume()`), see xref:implementations:stacksaga-sync/index.adoc[SEC Overview & Core Concepts].
+
+[[stacksaga-architecture-2nd-stage]]
+== Stage 2 — Retry-Ready Setup
+
+Stage 2 introduces distributed self-healing through the Retry Subsystem.
+Without this stage, a saga that stalls due to transient infrastructure faults (e.g. downstream service 503, network disconnect, broker timeout) would remain incomplete.
+Stage 2 makes the cluster fully self-healing.
+
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-2-retry-ready-architecture-overview.svg[StackSaga Architecture: Stage 2 — Retry-Ready Setup,width=800]
+
+=== New Components at This Stage
+
+[cols="1,1,2",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Service | New Component | Purpose
+
+| Ring Coordinator Service
+| `stacksaga-ring-coordinator`
+| Standalone service that manages the token ring. It tracks available orchestrator instances, distributes Murmur3 token sub-ranges among them, and dynamically rebalances token ranges when instances scale up or down.
+
+| Orchestrator
+| `stacksaga-ring-coordinator-connector`
+| Connects the orchestrator instance to the ring coordinator via RSocket `request-stream`, receives its assigned token range, and enables the local retry scheduler to scan the event store for stalled transactions belonging to its token range.
+|===
+
+=== Retry Mechanism
+
+By adding `stacksaga-ring-coordinator-connector` to the orchestrator service, the instance is promoted to a xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#orchestrator-deployment-modes[Retry Node].
+The ring coordinator assigns each orchestrator instance a deterministic sub-range of the Murmur3 token ring.
+The local scheduler scans the event store for non-terminal transactions (`IN_PROGRESS`, `COMPENSATING`) whose transaction ID hashes into the locally owned token range, safely re-submitting them to the SEC for re-execution.
+
+This partitioning guarantees that **each stuck transaction is retried by exactly one instance without distributed locking or multi-node race conditions**.
+
+[[stacksaga-architecture-3rd-stage]]
+== Stage 3 — Monitoring and Observability Setup
+
+Stage 3 adds enterprise observability, enabling the xref:trace-window:stacksaga-trace-window.adoc[StackSaga Trace Window] to query real-time and historical saga execution telemetry.
+
+image::implementations:stacksaga-sync/stacksaga-diagram-stage-3-monitoring-and-retry-ready-architecture-overview.svg[StackSaga Architecture: Stage 3 — Monitoring + Retry-Ready,width=800]
+
+=== New Component at This Stage
+
+[cols="1,1,2",options="header"]
+[.properties-table.google-anno-skip]
+|===
+| Service | New Component | Purpose
+
+| Orchestrator
+| `stacksaga-trace-window-connector`
+| Exposes internal telemetry APIs consumed by the StackSaga Trace Window dashboard, surfacing per-transaction execution traces, step latencies, failure payloads, and compensation status directly from the event store.
+|===
+
+=== Observability Capabilities
+
+With the trace window connector in place, operators gain:
+
+* **End-to-End Execution Graphs**: Visualizes each span, execution timestamp, duration, status, and domain entity snapshot.
+* **Hybrid Execution Telemetry**: Tracks synchronous REST/gRPC latency alongside asynchronous Kafka dispatch times and callback resumptions.
+* **Compensation Traces**: Audits which executors compensated, in what order, and their outcomes.
+* **Distributed Retry Logs**: Audits retry attempts, identifying which node performed the retry and the transient fault reason.
+* **Manual Operational Interventions**: Allows operators to manually retry, replay, or inspect stuck sagas from the UI.
+
+== Next Steps
+
+Now that you understand the system topology and deployment stages, discover how transactions flow across these services:
+
+* xref:lrt-transaction-models.adoc[Transaction Execution Models: Continuous (STP) & Pausable (HITL)] -- Learn how straight-through processing and wait-states are orchestrated across microservices without thread starvation.
+* xref:saga-region-resolver.adoc[Instance Region Resolution & SagaRegionResolver] -- Configure multi-region and multi-datacenter operational localities.
+* xref:implementations:stacksaga-sync/index.adoc[Orchestration Engine (SEC) Guide] -- Dive into code implementation, executors, and staged builders.

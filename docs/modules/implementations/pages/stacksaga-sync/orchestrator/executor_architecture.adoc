@@ -1,1116 +1,1061 @@
-:description: Architectural guide to StackSaga Executors -- Command and Query Executors, staged fluent navigation (.success().noPause().nextExecutor()), Event Sourcing state restoration, Pausable LRT lifecycle, and compensating transactions for resilient distributed microservices.
-:keywords: StackSaga, saga executors, CommandExecutor, QueryExecutor, stepManager, pause, noPause, nextExecutor, complete, event sourcing, idempotencyKey, correlationKey, compensation, doRevert, doProcess, Spring Boot, distributed transactions
+:description: Technical reference and implementation guide for StackSaga Executors -- Command, Query, Pre-Executors, and Post-Executors, method signatures and context objects, exception handling, and staged step manager navigation for resilient distributed microservices.
+:keywords: StackSaga, saga executors, CommandExecutor, QueryExecutor, PreExecutor, PostExecutor, ReactivePreExecutor, ReactivePostExecutor, stepManager, pauseUntilResume, noPause, toNextExecutor, resumeToNextExecutor, resumeToNextDefaultExecutor, toNextDefaultExecutor, toNextPreExecutor, toNextPostExecutor, asSync, asAsync, AsyncInvoker, complete, event sourcing, idempotencyKey, correlationKey, compensation, doRevert, doProcess, Spring Boot, distributed transactions
 :page-priority: 0.7
 
-= Saga Executors
+= Saga Executors: Component Reference & Implementation Guide
 
 == Overview
 
-A Saga Executor in StackSaga is a specialized component responsible for encapsulating and executing a single atomic transaction within a distributed saga workflow.
-It acts as the bridge between your business logic and the saga orchestration engine, ensuring that each step in a long-running transaction is performed reliably and consistently.
+In StackSaga, a **Saga Executor** is a specialized Spring-managed component responsible for encapsulating and executing a **single atomic transaction** within a distributed saga workflow.
+It serves as the boundary between your business domain logic and the Saga Execution Coordinator (SEC), ensuring that every step in a long-running transaction (LRT) executes with strict fault isolation, automated retry capabilities, and deterministic compensation.
 
-Saga Executors are categorized as either **Command Executors** (handling both primary and compensating executions for operations that modify state) or **Query Executors** (handling read-only operations).
-By isolating each atomic transaction in its own executor, StackSaga enables precise control, automated retries, and compensation mechanisms, eliminating distributed data anomalies and guaranteeing eventual consistency across microservices.
+StackSaga classifies executors into three primary contracts:
 
-IMPORTANT: If you are new to the saga pattern, it is recommended to read xref:foundations:idempotency.adoc[] to understand the concept of idempotency and atomic operations in distributed systems.
+1. **Command Executors** (`CommandExecutor` / `ReactiveCommandExecutor`): For state-modifying operations that require compensation (`doProcess` and `doRevert`).
+2. **Query Executors** (`QueryExecutor` / `ReactiveQueryExecutor`): For read-only queries or non-compensable actions that require no rollback (`doProcess` only).
+3. **Pre-Executors & Post-Executors** (`PreExecutor`, `PostExecutor` / `ReactivePreExecutor`, `ReactivePostExecutor`): For decomposing complex multi-action compensations into isolated atomic steps before and after the host command's core rollback.
 
-Typically, an atomic execution consists of two phases: **primary execution** and **compensating execution**.
-
-1. **Primary Execution (Main Forward Execution)**:
-The primary execution represents the core forward operation within a long-running transaction.
-Each primary execution is a distinct step in the overall business workflow, advancing the process toward completion.
-These operations are idempotent and isolated, ensuring they can be executed safely without unintended side effects.
-+
-For example, in a place-order workflow, primary executions might include fetching user details, initializing the order, performing pre-authorization, updating stock, and processing the final payment.
-+
-These primary executions move the process forward. [icon:arrow-circle-right[1x,role=green]]
-
-2. **Compensating Execution (Revert Execution)**:
-A compensating execution is designed to undo the effects of a previously completed primary execution if a subsequent step fails.
-Each command execution has a corresponding compensating action to reverse its impact, ensuring the system returns to a consistent state upon failure.
-+
-Compensating executions move the process backward. [icon:arrow-circle-left[1x,role=green]]
+[TIP]
+====
+**Concept Model vs. Component Reference**: +
+This document provides the **practical component reference** for creating, configuring, and testing Saga Executors in Spring Boot.
+For the foundational theory of the **Unified Saga Model (USM)**, the deep mechanics of external integration patterns (USIP: continuous, pausable wait-states, and commit barriers), and workflow graph routing (USNP: LIFO reverse autopilot and query pruning), see the companion architecture guide:
+xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc[Unified Saga Orchestration Patterns (USIP & USNP)].
+====
 
 [[conceptual-foundation]]
-== Conceptual Foundation: Atomic Boundaries & Flow Management
+== The Executor Contract: Rules Every Executor Must Follow
 
-Before examining Java interfaces and method signatures, it is essential to establish the architectural foundations: **why** Saga executors exist, **how** they manage distributed workflow chains, and **where** atomic transaction boundaries must be drawn.
+Before implementing any Java interface, recognize the two rules that apply to every Saga Executor, whatever its type.
+Everything else on this page builds on them.
 
-=== The Real-World Business Scenario: E-Commerce Checkout Saga
+[[rule-one-atomic-transaction]]
+=== Rule 1: One Executor = One Atomic Transaction
 
-Consider a typical e-commerce order checkout workflow where a customer purchases a \$1,500 laptop. To fulfill this single business request, the orchestrator must interact with 4 independent microservices:
+[IMPORTANT]
+.The Fundamental Architectural Rule: One Executor = One Atomic Transaction
+====
+An executor must interact with **exactly one microservice or one local database boundary**.
+Never combine multiple external state-changing actions inside a single executor's `doProcess()` method (for example, creating a database record AND charging a credit card in the same step).
+====
 
-1. **User Service** (`CheckCustomerEligibilityExecutor`): Validates customer account status and checks credit limits. (Read-only query).
-2. **Order Service** (`CreateOrderCommandExecutor`): Initializes an order record in the `PENDING` state and persists order line items.
-3. **Payment Service** (`ProcessPaymentCommandExecutor`): Communicates with an external payment gateway or bank to authorize and charge the customer's credit card.
-4. **Inventory Service** (`ReserveStockCommandExecutor`): Deducts and reserves physical product stock units in the warehouse database.
+[[keeping-step-data-locally]]
+==== Keeping Step Data in Your Own Database
+
+The domain entity and the revert hint store carry data from one executor to the next, forward and backward, and the event store saves them with every step.
+You are not required to put everything there.
+Sensitive or bulky data can stay in your service's own database instead, with only a reference (for example an ID) in the domain entity.
+A later executor, or a `doRevert()`, then reads it back; reading is not a state change, so it never conflicts with Rule 1.
+
+Writing that data is a state change, so it must take one of these two shapes:
+
+[cols="1,3",options="header"]
+|===
+| Shape | Rule
+
+| *The main action is local too*
+| Save the data and perform the main action in **one local database transaction**. That is still one atomic effect, so Rule 1 holds as it is.
+
+| *The main action is a remote call*
+| Save the data first, then make the remote call. This is allowed only if the save is:
+
+* *idempotent* -- keyed by the transaction ID and the executor, written as an upsert, so a re-execution overwrites the row instead of adding a second one (executors run at least once, see <<rule-idempotent-execution,Rule 2>>);
+* *private to the saga* -- data that only later executors of this transaction read, never business state that other code acts on, because if the remote call fails and the saga compensates, the row is still there.
+
+Delete the rows when the transaction finishes (or let your normal retention remove them).
+|===
+
+[source,java]
+----
+// main action is remote: idempotent, saga-private save first, then the call
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
+        @NonNull ProcessContext<OrderDomainEntity> context,
+        @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+) throws RetryableExecutorException, NonRetryableExecutorException {
+    OrderDomainEntity order = context.currentDomainEntityState();
+
+    // [0] saga-private data for later executors: an upsert keyed by transaction + executor, so a re-execution overwrites it
+    paymentScratchRepository.upsert(order.getTransactionId(), "processPaymentExecutor", cardToken);
+
+    // [1] the one real effect, forwarding the step's idempotency key
+    paymentClient.charge(order.getPaymentAmount(), context.idempotencyKey());
+
+    return stepManager
+            .success("PAYMENT_CHARGED")
+            .asSync()
+            .noPause()
+            .toNextExecutor(ReserveStockExecutor.class);
+}
+----
+
+==== Real-World Scenario: E-Commerce Checkout Saga
+
+Consider an e-commerce order checkout where a customer places an order. The business transaction spans four distinct microservice boundaries:
+
+1. **User Service** (`CheckCustomerEligibilityExecutor`): Queries customer account eligibility and credit limits (read-only query).
+2. **Order Service** (`CreateOrderCommandExecutor`): Inserts a `PENDING` order record in the local Order database.
+3. **Payment Service** (`ProcessPaymentCommandExecutor`): Connects over REST/gRPC to authorize and charge the payment gateway.
+4. **Inventory Service** (`ReserveStockCommandExecutor`): Deducts and locks inventory in the warehouse database.
 
 image:implementations:executor/stacksaga-orchestrator-atomic-transactions.drawio.svg[alt="Saga Orchestrator Service and Atomic Transaction Boundaries",width=100%,opts=interactive,scaledwidth=100%]
 
-.Orchestrator Service & Atomic Boundaries Reference Guide (Numbered Diagram Callouts)
+.Orchestrator Service & Atomic Boundaries Reference Guide
 [cols="1,3,6",options="header"]
 [.properties-table.google-anno-skip]
 |===
-| Badge | Flow Component | Architectural Role & Execution Mechanics
+| Badge | Flow Component | Architectural Role & Execution Boundary
 
 | **1**
 | **Order Service Application** +
 _(Saga Orchestrator)_
-| **Saga Orchestrator Service**: The microservice that originates the distributed workflow acts as the **Saga Orchestrator**. In our e-commerce scenario, the **Order Service application** hosts the StackSaga framework and encapsulates the 4 distinct saga executors. Each executor is an autonomous Spring Bean responsible for exactly one atomic business transaction.
+| **Saga Orchestrator Service**: The microservice hosting the business transaction encapsulates the saga executors as Spring Beans. Downstream services act as standard utility microservices and require no knowledge of StackSaga.
 
 | **2**
 | `CheckCustomerEligibility` +
 ➔ `User Service` +
 _(Query Boundary)_
-| **Target Service**: User Service (`GET /users/{userId}/eligibility`). +
-**Forward (`doProcess`)**: Queries customer account status and credit balance in the User DB. +
-**Backward (`doRevert`)**: _Skipped automatically_. Because this step performs a pure read-only query and mutates no persistent state, it implements `QueryExecutor` with no compensating `doRevert()` method.
+| **Target**: User Service (`GET /users/pass:[{userId}]/eligibility`). +
+**Forward (`doProcess`)**: Checks customer account standing. +
+**Backward (`doRevert`)**: _Skipped automatically_. Implements `QueryExecutor` because read-only queries require no compensation.
 
 | **3**
 | `CreateOrderCommand` +
 ➔ `Order DB (Local)` +
 _(Command Boundary)_
-| **Target Service**: Order Service's own persistence layer (`OrderRepository`). +
-**Forward (`doProcess`)**: Inserts an initial order record with status `PENDING` into the local PostgreSQL database using standard Spring Data JPA / JDBC. +
-**Backward (`doRevert`)**: If any downstream step fails, the SEC calls `doRevert()`, which executes an internal update setting the order status to `CANCELLED`.
+| **Target**: Local Order database via Spring Data JPA / JDBC. +
+**Forward (`doProcess`)**: Inserts order with `PENDING` status. +
+**Backward (`doRevert`)**: If downstream steps fail, updates status to `CANCELLED`.
 
 | **4**
 | `ProcessPaymentCommand` +
 ➔ `Payment Service` +
 _(Command Boundary)_
-| **Target Service**: Payment Service (`POST /api/payments/charge`). +
-**Forward (`doProcess`)**: Connects over HTTP/REST to the Payment Service (or Stripe/PayPal/Core Banking gateway) to authorize and charge the customer's credit card. +
-**Backward (`doRevert`)**: If subsequent steps fail (e.g. out of stock), the SEC calls `doRevert()`, which invokes the Payment Service compensating endpoint (`POST /api/payments/refund`) to void the authorization or issue an automatic refund.
+| **Target**: Payment Service / Gateway (`POST /api/payments/charge`). +
+**Forward (`doProcess`)**: Authorizes and captures customer funds. +
+**Backward (`doRevert`)**: Issues an automatic refund (`POST /api/payments/refund`) if subsequent steps fail.
 
 | **5**
 | `ReserveStockCommand` +
 ➔ `Inventory Service` +
 _(Command Boundary)_
-| **Target Service**: Inventory Service (`POST /api/inventory/reserve`). +
-**Forward (`doProcess`)**: Dispatches a stock reservation request to deduct and lock product units in the warehouse MySQL database. +
-**Backward (`doRevert`)**: If this step fails partially or an error occurs, the SEC calls `doRevert()`, which calls the Inventory Service compensating endpoint (`POST /api/inventory/release`) to restore the reserved units back to available stock.
+| **Target**: Inventory Service (`POST /api/inventory/reserve`). +
+**Forward (`doProcess`)**: Locks physical stock units. +
+**Backward (`doRevert`)**: Releases reserved units (`POST /api/inventory/release`) on failure.
 |===
 
-=== Why Monolithic `@Transactional` Fails in Distributed Microservices
+[[rule-idempotent-execution]]
+=== Rule 2: Every Execution Must Be Idempotent
 
-In a traditional monolithic architecture, this entire workflow lives inside a single Spring `@Transactional` method.
-If the payment gateway rejects the card at Step 3, the local database transaction rolls back automatically: the order record is discarded, stock remains unchanged, and data consistency is preserved.
+The engine guarantees that every executor runs *at least once* — not *exactly once*.
+The same `doProcess()` or `doRevert()` can legitimately run more than once for the same step:
 
-However, in a distributed microservice architecture:
-
-* The Order Service writes to its own **PostgreSQL** database.
-* The Inventory Service writes to an **Oracle** or **MySQL** database.
-* The Payment Service calls an external third-party API (**Stripe, PayPal, or a Core Banking System**) over HTTP.
-
-Because each service controls its own isolated persistence store, **a single distributed database transaction is physically impossible**.
-Traditional distributed transaction protocols like Two-Phase Commit (2PC) or XA transactions require global locking across all participating services, introducing extreme latency, single points of failure, and severe fragility across network boundaries.
-
-This is precisely the core architectural problem that **StackSaga Executors** solve.
-
-=== The Atomic Transaction Boundary: "One Executor = One Atomic Operation"
-
-In StackSaga, a **Saga Executor** is strictly defined as the encapsulation of **one single atomic transaction** within a single microservice boundary.
+* *Transient failures*: when an executor throws `RetryableExecutorException`, the retry subsystem invokes it again.
+* *Crashes*: the engine never wraps an executor in a database transaction, and it records the step result only after the method returns.
+If the service stops between the external call and that record, the step runs again after recovery.
+* *Wait-state timeouts*: when the callback of a paused step does not arrive in time, the step is invoked again.
 
 [IMPORTANT]
-.The Fundamental Architectural Rule: One Executor = One Atomic Transaction
+.Make every repeated execution safe
 ====
-An executor should interact with **exactly one microservice or one database boundary**.
-Never combine multiple state-changing external actions inside a single executor (e.g., creating an order AND charging a credit card within the same `doProcess()` method).
+* Forward the engine-provided `idempotencyKey` to the downstream service — as an `Idempotency-Key` HTTP header, a message key or header, or a unique business key in your database.
+The key stays the same across every retry of the same execution, so the downstream service can recognize a repeat.
+* Treat an "already processed" answer from the downstream service as success, not as a failure — see the `OperationAlreadyExecutedException` handling in the <<command-executors,canonical Command Executor>>.
 ====
 
-Why is strictly enforcing atomic boundaries essential?
+For the theory behind this rule — ambiguous network outcomes, why retries cannot be avoided, and common idempotency techniques — see xref:foundations:idempotency.adoc#what_is_idempotency[What is Idempotency?].
 
-1. **Fault Isolation and Blast Radius Control**:
-If an executor creates an order record in the Order Service and then attempts to charge a card via Stripe within the same method, a network drop during the Stripe call leaves the system in an ambiguous state. StackSaga cannot know whether the card was charged or not.
-By separating them into `CreateOrderCommandExecutor` and `ProcessPaymentCommandExecutor`, StackSaga knows with 100% certainty that Step 2 completed successfully and Step 3 failed.
+=== Why These Rules Matter
 
-2. **Granular Idempotency and Retries**:
-Each executor receives its own deterministic `idempotencyKey` generated for that specific execution span.
-If the Payment Service times out due to transient network congestion, StackSaga's retry engine can safely re-invoke `ProcessPaymentCommandExecutor` using its stable `idempotencyKey` without accidentally creating duplicate order records in the Order Service.
+Together, the two rules give the engine three operational guarantees:
 
-3. **Clean Compensating Boundaries**:
-When compensation is triggered, StackSaga only needs to compensate the exact steps that succeeded.
-If Step 3 (Payment) fails, the Inventory Service (Step 4) was never called, so no inventory rollback is needed. The SEC only invokes `CreateOrderCommandExecutor.doRevert()` to cancel the pending order.
+1. **Fault Isolation**: If Step 3 (Payment) fails, the orchestrator knows with certainty that Step 2 (Order Creation) succeeded and Step 4 (Inventory) was never touched.
+2. **Granular Idempotency & Retries**: Every execution span receives a deterministic `idempotencyKey`. If a network timeout occurs during Payment, the orchestrator safely retries only that step without generating duplicate orders.
+3. **Clean Compensating Execution**: When failure occurs, the SEC unwinds only the steps that completed successfully. Developers never manually write reverse routing logic; the SEC coordinates compensation automatically via **Deterministic Reverse Autopilot** (see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-revert-step-manager[Unified Saga Navigation Patterns: USNP]).
 
-=== How Executors Form and Steer the Saga Chain
+[TIP]
+.A direct consequence of Rule 1: no Transactional Outbox
+====
+Because a database write and a message publish always live in two separate executors, StackSaga applications do not need the Transactional Outbox Pattern.
+See <<outbox-pattern-eliminated,Why StackSaga Eliminates the Transactional Outbox Pattern>> at the end of this page for the full explanation.
+====
 
-In StackSaga, the execution chain is not defined in an external XML file, a rigid database table, or a central BPMN orchestrator. Instead, the Saga chain is formed **decentralized, programmatic, and type-safe**:
+'''
 
-==== 1. Forward Chaining (Decentralized Programmatic Routing)
-Every executor dictates the next step in the forward flow through the `ProcessStepManager`:
+[[executor-types]]
+== Executor Types & Sealed Interface Hierarchy
 
-[source,java]
-----
-// Forward transition: Step 2 hands over to Step 3
-return stepManager
-        .success("ORDER_INITIALIZED")
-        .noPause()
-        .nextExecutor(ProcessPaymentCommandExecutor.class);
-----
-
-==== 2. Dynamic Conditional Branching
-Because routing is programmatic, an executor can inspect the cumulative aggregate state in `currentDomainEntity` and dynamically branch the execution path at runtime:
-
-[source,java]
-----
-// Dynamic routing based on domain state:
-if (currentDomainEntity.isVipCustomer()) {
-    // High-priority customers bypass standard queues:
-    return stepManager
-            .success("ORDER_INITIALIZED")
-            .noPause()
-            .nextExecutor(ExpressPaymentCommandExecutor.class);
-} else {
-    return stepManager
-            .success("ORDER_INITIALIZED")
-            .noPause()
-            .nextExecutor(StandardPaymentCommandExecutor.class);
-}
-----
-
-==== 3. Terminal Completion
-The final executor in the forward chain signals the SEC that the entire business transaction has completed successfully:
-
-[source,java]
-----
-// Terminal success: marks the saga complete in the event store
-return stepManager
-        .success("STOCK_RESERVED")
-        .noPause()
-        .complete();
-----
-
-==== 4. Automatic Reverse Compensation Chaining (Managed by the SEC)
-A major architectural advantage of StackSaga is that **developers never write backward routing links**.
-You do **not** configure "If payment fails, jump back to order cancellation".
-
-**How does StackSaga coordinate rollback?**
-
-1. As forward execution progresses, the Saga Execution Coordinator (SEC) commits an immutable, append-only log of every successfully executed command executor span into the event store (`es_transaction_execution_tryout`).
-2. If any step throws a `NonRetryableExecutorException` (e.g. `PaymentDeclinedException`), the SEC immediately halts forward progression.
-3. The SEC inspects the event log to identify all previously committed command executors and invokes their `doRevert()` methods **in reverse chronological order**:
-+
-[source,text]
-----
-Failed Step N ──> doRevert(Step N-1) ──> doRevert(Step N-2) ... ──> doRevert(Step 1)
-----
-+
-4. For each step, the SEC restores the exact domain entity aggregate checkpoint that existed when that executor ran, ensuring the compensation logic operates on accurate historical data.
-
-== Executor Types & Architecture
-
-Based on the execution nature, saga executors in StackSaga are divided into core types and specialized sub-executors:
+StackSaga builds upon Java 21 **sealed interfaces** rooted at `SagaExecutor<DE>`, ensuring strict compile-time type safety across blocking and reactive paradigms:
 
 image:implementations:executor/stacksaga-diagram-executor-types-in-stacksaga.svg[alt="Stacksaga Executors types",width=100%,opts=interactive,scaledwidth=100%]
 
-* **xref:#command-executors[Command Executors]** (`CommandExecutor` / `ReactiveCommandExecutor`): For state-changing operations that require compensation.
-* **xref:#query-executors[Query Executors]** (`QueryExecutor` / `ReactiveQueryExecutor`): For read-only operations that require no compensation.
-* **xref:#sub-executors[Sub Executors]**: For decomposing complex multi-action compensations into atomic steps:
-** **xref:#sub-before-executors[Sub-Before Executors]** (`RevertBeforeExecutor` / `ReactiveRevertBeforeExecutor`)
-** **xref:#sub-after-executors[Sub-After Executors]** (`RevertAfterExecutor` / `ReactiveRevertAfterExecutor`)
+.Executor Interface Taxonomy
+[cols="25%,20%,20%,35%",options="header"]
+|===
+| Category | Imperative (Blocking) | Reactive (Project Reactor) | Primary Responsibility
 
-IMPORTANT: Each executor interface provides both blocking (imperative) and non-blocking (reactive via Project Reactor) implementations. You can freely choose or mix both paradigms within the same saga.
+| **Command Executor**
+| `CommandExecutor<DE>`
+| `ReactiveCommandExecutor<DE>`
+| State-modifying operations requiring forward logic (`doProcess`) and compensating rollback (`doRevert`).
 
-[TIP]
-.Sealed Interface Foundation & Type Safety
-====
-All executor contracts in StackSaga are defined as modern Java 21 **sealed interfaces** rooted at `SagaExecutor<DE>`.
-Intermediate contracts like `SagaCommandExecutor<DE>` unify synchronous (`CommandExecutor`) and reactive (`ReactiveCommandExecutor`) implementations, and serve as the generic target bound `<E extends SagaCommandExecutor<DE>>` for sub-executor hooks (`@RevertBefore` and `@RevertAfter`).
-Similarly, `SagaQueryExecutor<DE>` unifies read-only queries, and `SagaReactiveExecutor<DE>` marks non-blocking Project Reactor pipelines.
-====
+| **Query Executor**
+| `QueryExecutor<DE>`
+| `ReactiveQueryExecutor<DE>`
+| Read-only lookups or non-compensable writes (`doProcess` only). Automatically bypassed during rollback.
 
-=== Method Parameter Anatomy
+| **Pre-Executor**
+| `PreExecutor<DE, E>`
+| `ReactivePreExecutor<DE, E>`
+| Modular preparatory tasks executed *before* the host command's `doRevert()` (e.g. unlocking mutexes, fetching tokens).
 
-StackSaga provides clean, compile-time typed method signatures across all executors.
-Every primary execution (`doProcess`) receives 4 standardized parameters, and every command compensation (`doRevert`) receives 6 standardized parameters:
+| **Post-Executor**
+| `PostExecutor<DE, E>`
+| `ReactivePostExecutor<DE, E>`
+| Modular follow-up tasks executed *after* the host command's `doRevert()` (e.g. customer notifications, audit metrics).
+|===
+
+=== The `@SagaExecutor` Annotation
+
+Every executor must be annotated with `@SagaExecutor` to register it as a Spring Bean within the orchestrator container:
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "createOrderExecutor")
+public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
+    // ...
+}
+----
+
+* **`executeFor`**: The logical domain service or bounded context that owns this step (e.g., `"order-service"`, `"payment-service"`).
+* **`value`**: The unique Spring Bean identifier for this executor instance.
+
+'''
+
+[[method-signatures]]
+== Method Signatures & Context Objects
+
+Every executor method takes exactly two arguments:
+
+* a **context** — everything the engine supplies to this execution (`ProcessContext` for forward execution, `RevertContext` for compensation), and
+* a **step manager** — the builder the execution uses to report its outcome and choose where the saga goes next.
 
 .Standard Method Signatures
 [source,java]
 ----
-// Forward Execution (CommandExecutor & QueryExecutor):
+// Forward execution (CommandExecutor & QueryExecutor):
 ProcessStepManager<DE> doProcess(
-        @NonNull DE currentDomainEntity,
-        @NonNull String idempotencyKey,
-        @NonNull ResumeContext resumeContext,
+        @NonNull ProcessContext<DE> context,
         @NonNull ProcessStepManager<DE> stepManager
 ) throws RetryableExecutorException, NonRetryableExecutorException;
 
-// Compensating Execution (CommandExecutor):
+// Compensation (CommandExecutor):
 RevertStepManager doRevert(
-        @NonNull NonRetryableExecutorException processException,
-        @NonNull DE finalDomainEntityState,
-        @NonNull RevertHintStore revertHintStore,
-        @NonNull String idempotencyKey,
-        @NonNull ResumeContext resumeContext,
+        @NonNull RevertContext<DE> context,
         @NonNull RevertStepManager stepManager
+) throws RetryableExecutorException;
+
+// Compensation hooks around the host command's doRevert (PreExecutor / PostExecutor):
+PreStepManager<DE, E> doRevert(
+        @NonNull RevertContext<DE> context,
+        @NonNull PreStepManager<DE, E> stepManager
 ) throws RetryableExecutorException;
 ----
 
-* **`currentDomainEntity` / `finalDomainEntityState`**: The cumulative domain aggregate state restored from the event store up to this execution step.
-* **`idempotencyKey`**: A deterministic, retry-stable unique key generated per execution span. Pass this key to downstream services (via body, headers, or query parameters) to guarantee idempotency across retries.
-* **`resumeContext`**: An immutable key-value metadata store (`Map<String, String>`) carrying external callback payloads when a paused transaction is resumed via `sagaTemplate.resume(...)`.
-* **`revertHintStore`** _(Compensation only)_: A persistent key-value store across compensation steps used to pass diagnostic hints or compensation tracking IDs (e.g., external refund request IDs).
-* **`stepManager`**: The staged fluent builder interface used to declare execution results and control saga navigation.
+The naming is deliberate: `doProcess` always moves the saga *forward*, and `doRevert` always runs during *compensation* — whether it is a command's own rollback or a Pre/Post hook around it.
+Reactive executors use the same arguments and return the step manager wrapped in a `Mono`.
 
-To provide clear separation of concerns, StackSaga classifies executor usage into two foundational paradigms:
+=== `ProcessContext` (forward execution)
 
-1. *xref:#usage-1-continuous-lrt[Usage Pattern 1: Continuous Long-Running Transactions (Continuous LRT)]* -- Straight-through, unbroken sequential execution.
-2. *xref:#usage-2-pausable-lrt[Usage Pattern 2: Pausable Long-Running Transactions (Wait-State / Callback-Driven LRT)]* -- Deliberate wait states awaiting external callbacks or human interaction.
+1. **`currentDomainEntityState()`**:
+   * The cumulative domain aggregate state, restored from the Event Store up to this execution step.
+   * Mutate it with the response data of your external call; the SEC persists the updated snapshot when the step completes.
+
+2. **`idempotencyKey()`**:
+   * A deterministic, retry-stable key generated by the SEC for this execution. Every re-execution of the same step receives the same key.
+   * Always forward it to the downstream service, as required by <<rule-idempotent-execution,Rule 2: Every Execution Must Be Idempotent>>.
+
+3. **`resumeContext()`**:
+   * An immutable key-value store (`ResumeContext`) delivered when a paused transaction is awakened via `sagaTemplate.resume(resumeKey, retentionDuration)`.
+   * Read callback parameters with `context.resumeContext().get("key")` (returns `Optional<String>`).
+   * When a step runs continuously without pausing, it is empty.
+
++
+[CAUTION]
+.Architectural Anti-Pattern: Never use `resumeContext().isEmpty()` for Lifecycle Checks
+====
+Never check `if (context.resumeContext().isEmpty())` to determine whether an executor is executing for the first time or running after a resume.
+External webhooks or user approval clicks may legitimately deliver no body payload, leaving the resume context empty even though the execution is a resumption.
+Instead, use **Saga Flow Topology** (separate pausing and resumed steps) or inspect domain entity state (`currentDomainEntityState.getPaymentSessionId() != null`).
+====
+
+=== `RevertContext` (compensation)
+
+`RevertContext` is passed to a command's `doRevert` and to every Pre/Post hook of that command.
+
+1. **`finalDomainEntityState()`**:
+   * The exact historical snapshot of the domain aggregate at the time compensation started.
+   * It is read-only during compensation; record compensation data in the `revertHintStore()` instead.
+
+2. **`primaryExecutionException()`**:
+   * The `NonRetryableExecutorException` that stopped forward execution and started compensation.
+
+3. **`revertHintStore()`**:
+   * A persistent key-value store scoped across the entire compensation pipeline of the transaction.
+   * Used to pass intermediate compensation tokens (such as refund session IDs, cancellation tracking numbers, or error details) between retries, pre-executors, and post-executors.
+
+4. **`idempotencyKey()`**:
+   * The retry-stable key of *this compensating execution*. Forward it with the undo call so that a retried compensation is applied only once.
+
+5. **`primaryExecutionIdempotencyKey()`**:
+   * The key that the same step's `doProcess` received. In a Pre/Post hook, it is the key of the host command's `doProcess`.
+   * Use it to address the remote operation the forward step created — for example, to look up, cancel, or refund that operation by the key it was submitted with.
+
+6. **`resumeContext()`**:
+   * Same as in `ProcessContext`: the callback data delivered when a paused compensation is resumed. See <<pausable-compensation,Implementing Pausable Compensation>>.
+
+=== `stepManager`
+
+The staged, fluent builder used to record step outcomes, declare execution modes (Sync vs. Async), configure wait-states, and specify workflow destinations.
+See <<step-manager-navigation-reference,Step Manager Navigation Quick Reference>>.
 
 '''
-
-[[usage-1-continuous-lrt]]
-== Usage Pattern 1: Continuous Long-Running Transactions (Continuous LRT)
-
-In a **Continuous Long-Running Transaction**, all steps execute sequentially from start to finish without entering a durable wait state.
-This represents the vast majority of standard microservice orchestration flows (such as synchronous order creation, customer account debiting, and stock reservations).
-
-In Continuous LRT:
-
-* **Primary Execution**: Completes its work and immediately invokes `.noPause().nextExecutor(...)` or `.noPause().complete()`.
-* **Compensating Execution**: Undoes state changes and immediately invokes `.noPause()`.
-* **Resume Context**: Naturally empty (`resumeContext.isEmpty() == true`) because the transaction was never paused.
 
 [[command-executors]]
-=== Command Executors in Continuous LRT
+== Implementing Command Executors
 
-If an atomic operation modifies system state and requires compensation if downstream steps fail, implement `CommandExecutor` (blocking) or `ReactiveCommandExecutor` (non-blocking).
+Command Executors represent state-modifying actions requiring forward execution (`doProcess`) and backward compensation (`doRevert`).
 
-[[blocking-command-executors]]
-==== Blocking Command-Executor
+=== Canonical Imperative Command Executor (`CommandExecutor`)
+
+Below is a complete, production-ready implementation of `CommandExecutor<OrderDomainEntity>`:
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "order-service", value = "initializeOrderExecutor") //<1>
-@AllArgsConstructor
-public class InitializeOrderExecutor implements CommandExecutor<OrderDomainEntity> { //<2>
+@SagaExecutor(executeFor = "order-service", value = "createOrderExecutor")
+@RequiredArgsConstructor
+public class CreateOrderExecutor implements CommandExecutor<OrderDomainEntity> {
 
-    private final OrderService orderService;
+    private final OrderServiceClient orderClient;
 
-    @Override //<3>
+    @Override
     public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
         try {
-            //<4>
-            String orderId = this.orderService.initializeOrder(
-                    currentDomainEntity.getUsername(),
-                    currentDomainEntity.getProductItems(),
-                    currentDomainEntity.getTotalAmount(),
-                    idempotencyKey
+            // 1. Invoke downstream service forwarding idempotencyKey
+            OrderResponse response = orderClient.createOrder(
+                    currentDomainEntityState.getOrderId(),
+                    currentDomainEntityState.getItems(),
+                    context.idempotencyKey()
             );
-            currentDomainEntity.setOrderId(orderId);
 
-            //<5>
+            // 2. Mutate domain entity with response data
+            currentDomainEntityState.setTrackingNumber(response.getTrackingNumber());
+
+            // 3. Staged navigation: Continuous Sync Advance (USIP Pattern 1)
             return stepManager
-                    .success("INITIALIZED_ORDER")
+                    .success("ORDER_CREATED")
+                    .asSync()
                     .noPause()
-                    .nextExecutor(ReserveItemsExecutor.class);
+                    .toNextExecutor(ReserveInventoryExecutor.class);
 
-        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
-            //<6>
+        } catch (OperationAlreadyExecutedException ex) {
+            // Idempotent recovery: already processed downstream, advance safely
             return stepManager
-                    .success("INITIALIZED_ORDER")
+                    .success("ORDER_CREATED")
+                    .asSync()
                     .noPause()
-                    .nextExecutor(ReserveItemsExecutor.class);
+                    .toNextExecutor(ReserveInventoryExecutor.class);
 
-        } catch (FeignException.ServiceUnavailable unavailableException) {
-            //<7>
-            throw RetryableExecutorException.of(unavailableException);
+        } catch (FeignException.ServiceUnavailable ex) {
+            // Transient infrastructure fault: triggers automatic retry
+            throw RetryableExecutorException.of(ex);
 
-        } catch (FeignException.BadRequest badRequestException) {
-            //<8>
+        } catch (FeignException.BadRequest ex) {
+            // Permanent business failure: triggers reverse compensation
             throw NonRetryableExecutorException
-                    .buildWith(badRequestException)
-                    .put("time", LocalDateTime.now())
-                    .put("reason", "BadRequest")
+                    .buildWith(ex)
+                    .withEvent("ORDER_REJECTED")
+                    .withDefaultReexposeOnUnexpectedCrash()
+                    .compensateThisStep(true)
+                    .put("reason", "Invalid order payload")
                     .build();
         }
     }
 
     @Override
-    @RevertBefore(startFrom = OrderInitializeSubBeforeExecutor.class) //<12>
-    @RevertAfter(startFrom = OrderInitializeSubAfterExecutor.class) //<13>
     public @NonNull RevertStepManager doRevert(
-            @NonNull NonRetryableExecutorException processException,
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull RevertContext<OrderDomainEntity> context,
             @NonNull RevertStepManager stepManager
     ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
 
         try {
-            //<9>
-            this.orderService.cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager
-                    .success("CANCELLED_ORDER")
-                    .noPause(); //<10>
+            // Undo previous action using historical state snapshot
+            orderClient.cancelOrder(finalDomainEntityState.getOrderId(), context.idempotencyKey());
 
-        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
+            // Conclude compensation; SEC unwinds to preceding command in history
             return stepManager
-                    .success("CANCELLED_ORDER")
-                    .noPause(); //<10>
+                    .success("ORDER_CANCELED")
+                    .asSync()
+                    .noPause()
+                    .toNextDefaultExecutor();
 
-        } catch (FeignException.ServiceUnavailable unavailableException) {
-            //<11>
-            throw RetryableExecutorException.of(unavailableException);
-
-        } catch (FeignException.BadRequest badRequestException) {
-            // Unrecoverable compensation error: log to revertHintStore and proceed without stalling rollback
-            revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
+        } catch (OperationAlreadyExecutedException ex) {
+            // Already cancelled: treat as successfully compensated
             return stepManager
-                    .success("CANCEL_ORDER_TOLERATED")
-                    .noPause();
+                    .success("ORDER_CANCELED")
+                    .asSync()
+                    .noPause()
+                    .toNextDefaultExecutor();
+
+        } catch (FeignException.ServiceUnavailable ex) {
+            // Retry transient rollback failure
+            throw RetryableExecutorException.of(ex);
         }
     }
 }
 ----
 
-<1> `@SagaExecutor` registers the class as a Spring Bean and specifies metadata (`executeFor` service name and unique executor identifier).
-<2> Implements `CommandExecutor<OrderDomainEntity>` bound to the saga's domain aggregate entity.
-<3> Overrides `doProcess` accepting the 4 standard parameters.
-<4> Executes primary business logic, forwarding `idempotencyKey` to downstream APIs.
-[[stepManager_navigation]]
-<5> **Staged Fluent Step Navigation (`stepManager`)**: +
-*Stage 1*: `.success("INITIALIZED_ORDER")` records the completed execution event. +
-*Stage 2*: `.noPause()` declares continuous forward execution without entering a wait state. +
-*Stage 3*: `.nextExecutor(ReserveItemsExecutor.class)` designates the next executor in the saga. To complete the entire transaction successfully, call `.complete()`.
-<6> **Handle Duplicate Executions Gracefully**: If the downstream service indicates the request was already executed (e.g., HTTP `409 Conflict`), return `stepManager.success(...).noPause().nextExecutor(...)`. Never throw an exception on already-processed operations.
-<7> Throw `RetryableExecutorException.of(unavailableException)` for transient network blips to schedule automated retries.
-<8> Throw `NonRetryableExecutorException` on permanent business rejections (e.g., invalid data, insufficient funds) to trigger backward rollback.
-<9> Compensating logic in `doRevert`: reverses the effects of `doProcess`.
-<10> Conclude compensation with `stepManager.success("CANCELLED_ORDER").noPause()`. The SEC automatically advances backward to the preceding command executor.
-<11> Transient failures during compensation trigger automated retry via `RetryableExecutorException`.
-<12> `@RevertBefore`: Optional hook to execute sub-before executors before this `doRevert()` runs.
-<13> `@RevertAfter`: Optional hook to execute sub-after executors after this `doRevert()` runs.
+[NOTE]
+====
+In `doRevert()`, **only `RetryableExecutorException` is allowed**. `NonRetryableExecutorException` is strictly forbidden because in the Saga pattern there is no compensation for a compensation. If compensation fails permanently due to an unhandled exception, the saga becomes a Terminated Transaction requiring manual operator intervention. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#advanced-architectural-faq[FAQ Q4: Compensation Error Handling & Terminated Transactions].
+====
 
-[[reactive-command-executors]]
-==== Non-Blocking (Reactive) Command-Executor
+=== Supporting Pausable Wait-States (USIP Pattern 2)
+
+When an operation requires an external callback, user redirect (3D-Secure, PayPal), or manual manager approval, configure a pausable wait-state using `.pauseUntilResume(duration)`:
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "order-service", value = "reactiveInitializeOrderExecutor")
-@AllArgsConstructor
-public class ReactiveInitializeOrderExecutor implements ReactiveCommandExecutor<OrderDomainEntity> {
+// Forward wait-state awaiting payment webhook (e.g. 15-minute window):
+return stepManager
+        .success("PAYMENT_SESSION_INITIATED")
+        .asSync()
+        .pauseUntilResume(Duration.ofMinutes(15))
+        .resumeToNextExecutor(CapturePaymentExecutor.class);
+----
 
-    private final OrderService orderService;
+* The SEC marks the transaction as `PAUSED` (`is_paused = 1`), registers the unique `resumeKey` (formatted as `transactionId:tryoutId`), records the step with **`ExecutionStatus.NOT_YET`**, and **immediately frees the worker thread and DB connection**.
+* The saga consumes zero CPU, threads, or memory while parked.
+* **Parked Step Execution Status (`ExecutionStatus.NOT_YET`):** While parked waiting for external input, the active step event remains in `ExecutionStatus.NOT_YET`. It only transitions to `ExecutionStatus.SUCCESS` once the external callback arrives and the orchestrator successfully resumes the transaction to the destination executor.
+* **Dual-Token Distinction:** The engine provides two tokens with separate responsibilities:
+** **`idempotencyKey`** (Method Parameter): Business-level idempotency hash. Pass this to external APIs (e.g. in HTTP `Idempotency-Key` headers) to prevent duplicate side effects on the external service upon network retries.
+** **`stepManager.getResumeKey()`** (`transactionId:tryoutId`): Runtime correlation token encapsulating the attempt-specific **Tryout UID**. Pass this in callback/webhook metadata so that late/stale callbacks from previous timed-out attempts are rejected automatically.
+* When the webhook arrives, call `sagaTemplate.resume(resumeKey, retentionDuration)` (fluent `.put(...)` or `.withContext(resumeContext)`) to wake the saga and invoke `CapturePaymentExecutor`.
+* **Timeout Re-Execution:** If the callback fails to arrive within the configured duration, the Retry Coordinator re-invokes this executor's `doProcess(...)` with a newly generated Tryout UID. See xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#advanced-architectural-faq[FAQ Q1 & Q2: Re-Invocation of Succeeded Steps and Tuning Wait-State Duration].
+* See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-2-correlated-park-resume[USIP Pattern 2: Correlated Park-and-Resume] for complete thread lifecycle details.
+
+=== Supporting Two-Stage Broker Dispatch with Commit Barrier (USIP Pattern 3)
+
+When emitting command messages over **Apache Kafka, RabbitMQ, or AWS SQS**, enforce the Two-Stage Asynchronous Model via `.asAsync().invoker(...)`:
+
+[source,java]
+----
+@Override
+public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
+    // Stage 1: Preparation committed to Event Store BEFORE network send
+    context.currentDomainEntityState().setShippingTrackingId(UUID.randomUUID().toString());
+
+    return stepManager
+            .success("SHIPPING_DISPATCH_COMMITTED")
+            .asAsync()
+            .invoker((de, ctx) -> {
+                // Stage 2: Lazy dispatch executed strictly AFTER Event Store commit
+                ShippingCommandMessage message = new ShippingCommandMessage(
+                        de.getOrderId(),
+                        de.getShippingTrackingId(),
+                        context.idempotencyKey()
+                );
+                kafkaTemplate.send("shipping-commands", de.getOrderId(), message);
+            })
+            .pauseUntilResume(Duration.ofHours(2))
+            .resumeToNextExecutor(ConfirmDeliveryExecutor.class);
+}
+----
+
+* **Commit Barrier**: The SEC commits the `PAUSED` transaction record (`is_paused = 1`) to the Event Store *before* firing the lambda, recording the step in **`ExecutionStatus.NOT_YET`** and completely eliminating fast-callback race conditions.
+* **Strict Rule**: Never mutate `currentDomainEntityState` inside the `invoker(...)` closure, as the entity snapshot is sealed prior to invocation.
+* **Lifecycle Status**: The step remains in `ExecutionStatus.NOT_YET` while waiting for the downstream consumer's callback response; it transitions to `ExecutionStatus.SUCCESS` only after resumption.
+* See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[USIP Pattern 3: Two-Stage Lazy Dispatch] for architectural details.
+
+=== Reactive Command Executor (`ReactiveCommandExecutor`)
+
+For non-blocking reactive stacks (Spring WebFlux, Netty, R2DBC), implement `ReactiveCommandExecutor<DE>`:
+
+[source,java]
+----
+@SagaExecutor(executeFor = "order-service", value = "reactiveCreateOrderExecutor")
+@RequiredArgsConstructor
+public class ReactiveCreateOrderExecutor implements ReactiveCommandExecutor<OrderDomainEntity> {
+
+    private final WebClient webClient;
 
     @Override
-    @NonNull
     public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
-            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+            ProcessContext<OrderDomainEntity> context,
+            ProcessStepManager<OrderDomainEntity> stepManager
     ) {
-        return this.orderService
-                .createOrder(
-                        currentDomainEntity.getUserData(),
-                        currentDomainEntity.getOrderDetails(),
-                        idempotencyKey
-                )
-                .map(orderId -> {
-                    currentDomainEntity.setOrderId(orderId);
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        return webClient.post()
+                .uri("/orders")
+                .header("Idempotency-Key", context.idempotencyKey())
+                .bodyValue(new CreateOrderRequest(currentDomainEntityState.getOrderId(), currentDomainEntityState.getItems()))
+                .retrieve()
+                .bodyToMono(OrderResponse.class)
+                .map(response -> {
+                    currentDomainEntityState.setTrackingNumber(response.getTrackingNumber());
                     return stepManager
-                            .success("INITIALIZED_ORDER")
+                            .success("ORDER_CREATED")
+                            .asSync()
                             .noPause()
-                            .nextExecutor(ReactiveReserveItemsExecutor.class);
+                            .toNextExecutor(ReserveInventoryExecutor.class);
                 })
-                .onErrorResume(throwable -> {
-                    if (throwable instanceof OperationAlreadyExecutedException) {
-                        return Mono.just(stepManager
-                                .success("INITIALIZED_ORDER")
-                                .noPause()
-                                .nextExecutor(ReactiveReserveItemsExecutor.class));
-                    } else if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.of(throwable));
-                    } else {
-                        return Mono.error(NonRetryableExecutorException.buildWith(throwable)
-                                .put("time", String.valueOf(System.currentTimeMillis()))
-                                .put("reason", "BadRequest")
-                                .build());
-                    }
-                });
+                .onErrorResume(WebClientResponseException.class, ex ->
+                        Mono.error(new RetryableExecutorException("Order service unavailable", ex)));
     }
 
     @Override
-    @NonNull
     public Mono<RevertStepManager> doRevert(
-            @NonNull NonRetryableExecutorException processException,
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
-            @NonNull RevertStepManager stepManager
+            RevertContext<OrderDomainEntity> context,
+            RevertStepManager stepManager
     ) {
-        return this.orderService
-                .cancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey)
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
+
+        return webClient.delete()
+                .uri("/orders/" + finalDomainEntityState.getOrderId())
+                .retrieve()
+                .toBodilessEntity()
                 .thenReturn(stepManager
-                        .success("REVERTED_ORDER_INITIALIZATION")
-                        .noPause())
-                .onErrorResume(throwable -> {
-                    if (throwable instanceof OperationAlreadyExecutedException) {
-                        return Mono.just(stepManager
-                                .success("REVERTED_ORDER_INITIALIZATION")
-                                .noPause());
-                    } else if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.of(throwable));
-                    } else {
-                        revertHintStore.put("InitializeOrderExecutor:FAILED", processException.getMessage());
-                        return Mono.just(stepManager
-                                .success("IGNORED")
-                                .noPause());
-                    }
-                });
+                        .success("ORDER_CANCELED")
+                        .asSync()
+                        .noPause()
+                        .toNextDefaultExecutor());
     }
 }
 ----
 
-IMPORTANT: In reactive executors, the pipeline must never return `null` or `Mono.empty()`. Always wrap results in `Mono.just(stepManager...)` or `Mono.error(...)`.
+[[pausable-compensation]]
+=== Implementing Pausable Compensation (Patterns 2 & 3 in Rollback)
+
+Just as forward execution can park while awaiting external webhooks or asynchronous broker confirmations, **compensation (`doRevert`) fully supports pausable integration patterns**:
+
+1. **Pattern 2 Revert (Sync-Paused)**: When reversing a step requires waiting for an asynchronous settlement or external webhook confirmation (such as an asynchronous banking refund or payment gateway refund callback), return `.pauseUntilResume(duration)`:
++
+[source,java]
+----
+@Override
+public @NonNull RevertStepManager doRevert(
+        @NonNull RevertContext<OrderDomainEntity> context,
+        @NonNull RevertStepManager stepManager
+) throws RetryableExecutorException {
+    OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
+
+    if (!context.revertHintStore().containsKey("refundInitiated")) {
+        // First attempt: Request refund from external gateway
+        String refundRef = paymentClient.requestAsyncRefund(finalDomainEntityState.getPaymentId(), context.idempotencyKey());
+        context.revertHintStore().put("refundInitiated", refundRef);
+
+        // Pause compensation awaiting webhook notification
+        return stepManager
+                .success("REFUND_DISPATCHED")
+                .asSync()
+                .pauseUntilResume(Duration.ofDays(1))
+                .resumeToNextDefaultExecutor();
+    }
+
+    // Resumed attempt: Webhook callback arrived and resumeContext is populated
+    String refundStatus = context.resumeContext().get("refundStatus").orElse("UNKNOWN");
+    if (!"CONFIRMED".equalsIgnoreCase(refundStatus)) {
+        throw new RetryableExecutorException("Refund not yet confirmed by gateway");
+    }
+
+    return stepManager
+            .success("REFUND_COMPLETED")
+            .asSync()
+            .noPause()
+            .toNextDefaultExecutor();
+}
+----
+
+2. **Pattern 3 Revert (Async-Paused: Commit Barrier)**: When rollback requires emitting a compensating message to an external broker (e.g., publishing a `CancelShippingCommand` to Kafka), use `.asAsync().invoker(...)`:
++
+[source,java]
+----
+@Override
+public @NonNull RevertStepManager doRevert(...) {
+    return stepManager
+            .success("CANCEL_DISPATCH_COMMITTED")
+            .asAsync()
+            .invoker(
+                    resumeKey -> {
+                        kafkaTemplate.send("shipping-cancel-topic", context.finalDomainEntityState().getOrderId(), resumeKey);
+                    },
+                    Duration.ofMinutes(15),     // Tier 2 retry window on transient network failure
+                    KafkaException.class        // Exception triggering scheduled retry
+            )
+            .pauseUntilResume(Duration.ofHours(2))
+            .resumeToNextDefaultExecutor();
+}
+----
+
+* **Uniform Resumption**: External webhooks resume compensating steps using the exact same API: `sagaTemplate.resume(resumeKey, duration).execute()`. The StackSaga Execution Coordinator (SEC) recognizes that the transaction is in `REVERTING` status, restores the rollback checkpoint, injects the `ResumeContext`, and re-invokes `doRevert(...)` to finalize compensation.
+* **Transient Error Safety**: If the broker dispatch lambda throws the declared transient exception, the transaction remains parked (`is_paused = 1`) with transient retention, waiting for the Retry Subsystem to re-dispatch the cancellation event.
+* For complete LIFO unwinding details and pre/post compensation cascades, see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-2-1-revert-to-core[Core Revert Navigation in Unified Saga Patterns].
+
+'''
 
 [[query-executors]]
-=== Query Executors in Continuous LRT
+== Implementing Query Executors
 
-Query executors represent read-only operations (e.g., fetching user profile data, verifying account limits, checking stock catalog).
-Because read-only queries make no external state modifications, they do not require compensation: a Query Executor implements only `doProcess`.
+Query Executors encapsulate read-only operations (e.g. checking customer credit, inspecting inventory, validating addresses) or non-compensable writes (e.g. appending security audit logs).
+Because read-only queries make no external state mutations that need to be reversed, Query Executors **do not implement `doRevert()`**.
 
-[[blocking-query-executors]]
-==== Blocking Query Executor
+[TIP]
+====
+**Automatic Rollback Pruning**: During compensation, the SEC automatically skips historical `QueryExecutor` events. A query step will never break or complicate transaction rollback.
+See xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[Query State Pruning & Bypass Pattern].
+====
+
+[IMPORTANT]
+.Architectural Best Practice: QueryExecutor vs. TransactionEventListener for Post-Step Invocations
+====
+If an operation must execute immediately following another executor (such as generating an internal receipt, recording an immutable audit ledger entry, or invoking a non-compensable verification) and must **never be skipped under any failure condition (including application crashes)**, model it as a formal **`QueryExecutor`** chained as the next step, rather than placing it inside a `TransactionEventListener`.
+
+* *Why not an Event Listener?* As explained in xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#at-least-once-listener-semantics[The Atomicity Mandate and the Crash Window], the SEC must durably persist executor state to the Event Store *before* notifying listeners to prevent phantom notifications. If the JVM process crashes immediately after state persistence, cluster restoration resumes execution directly from the *next* executor in the workflow, meaning any critical logic inside `onStateChanged` is permanently skipped and will never execute.
+* *Why QueryExecutor?* `QueryExecutor` instances are first-class saga participants: they are **re-invokable by default**, tracked in the Event Store, self-healed by the xref:retry-ring-coordinator:transaction-retrying-with-retry-coordinator.adoc#retry-node[Retry Subsystem], and fully observable in the xref:trace-window:stacksaga-trace-window.adoc[Trace Window dashboard]. Because they do not implement `doRevert()`, the SEC's Reverse Autopilot prunes them automatically during backward compensation (see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-query-pruning[USNP Query Pruning Pattern]), delivering durability without rollback overhead.
+* *Developer Decision Matrix:* To determine whether your logic should be a `QueryExecutor`, `CommandExecutor`, or `TransactionEventListener`, consult the xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#at-least-once-listener-semantics[Developer Decision Matrix in the SagaTemplate Guide].
+====
+
+=== Blocking Query Executor
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "user-service", value = "checkUserDetailsExecutor")
-@AllArgsConstructor
-public class CheckUserDetailsExecutor implements QueryExecutor<OrderDomainEntity> {
+@SagaExecutor(executeFor = "user-service", value = "checkCreditQueryExecutor")
+@RequiredArgsConstructor
+public class CheckCreditQueryExecutor implements QueryExecutor<OrderDomainEntity> {
 
-    private final UserService userService;
+    private final CreditServiceClient creditClient;
 
     @Override
     public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
+            @NonNull ProcessContext<OrderDomainEntity> context,
             @NonNull ProcessStepManager<OrderDomainEntity> stepManager
     ) throws RetryableExecutorException, NonRetryableExecutorException {
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
 
-        try {
-            UserDetailDto userDetail = this.userService.getUserDetails(currentDomainEntity.getUsername());
-            currentDomainEntity.setUserDetail(userDetail);
+        CreditScoreResponse response = creditClient.fetchScore(currentDomainEntityState.getCustomerId());
+        currentDomainEntityState.setCreditApproved(response.isEligible());
 
-            return stepManager
-                    .success("FETCHED_USER_DETAILS")
-                    .noPause()
-                    .nextExecutor(InitializeOrderExecutor.class);
-
-        } catch (FeignException.ServiceUnavailable unavailableException) {
-            throw RetryableExecutorException.of(unavailableException);
-        } catch (FeignException.BadRequest badRequestException) {
-            throw NonRetryableExecutorException
-                    .buildWith(badRequestException)
-                    .put("time", LocalDateTime.now())
-                    .put("reason", "BadRequest")
-                    .build();
-        }
+        // Navigates directly to next command or query
+        return stepManager
+                .success("CREDIT_VERIFIED")
+                .asSync()
+                .noPause()
+                .toNextExecutor(DebitAccountCommandExecutor.class);
     }
 }
 ----
 
-[[non-blocking-query-executors]]
-==== Non-Blocking Query-Executor
+=== Reactive Query Executor
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "user-service", value = "reactiveCheckUserDetailsExecutor")
-@AllArgsConstructor
-public class ReactiveCheckUserDetailsExecutor implements ReactiveQueryExecutor<OrderDomainEntity> {
+@SagaExecutor(executeFor = "user-service", value = "reactiveCheckCreditQueryExecutor")
+@RequiredArgsConstructor
+public class ReactiveCheckCreditQueryExecutor implements ReactiveQueryExecutor<OrderDomainEntity> {
 
-    private final UserService userService;
+    private final WebClient webClient;
 
     @Override
-    @NonNull
     public Mono<ProcessStepManager<OrderDomainEntity>> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
-            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
+            ProcessContext<OrderDomainEntity> context,
+            ProcessStepManager<OrderDomainEntity> stepManager
     ) {
-        return this.userService
-                .getUserDetails(currentDomainEntity.getUsername())
-                .map(userData -> {
-                    currentDomainEntity.setTel(userData.getPhoneNumber());
-                    currentDomainEntity.setEmail(userData.getEmail());
-                    currentDomainEntity.setAddress(userData.getEmail());
+        OrderDomainEntity currentDomainEntityState = context.currentDomainEntityState();
+
+        return webClient.get()
+                .uri("/credit/" + currentDomainEntityState.getCustomerId())
+                .retrieve()
+                .bodyToMono(CreditScoreResponse.class)
+                .map(response -> {
+                    currentDomainEntityState.setCreditApproved(response.isEligible());
                     return stepManager
-                            .success("FETCHED_USER_DETAILS")
+                            .success("CREDIT_VERIFIED")
+                            .asSync()
                             .noPause()
-                            .nextExecutor(ReactiveInitializeOrderExecutor.class);
-                })
-                .onErrorResume(throwable -> {
-                    if (throwable instanceof ResourceUnavailableException) {
-                        return Mono.error(RetryableExecutorException.of(throwable));
-                    } else {
-                        return Mono.error(NonRetryableExecutorException.buildWith(throwable)
-                                .put("time", String.valueOf(System.currentTimeMillis()))
-                                .put("reason", "BadRequest")
-                                .build());
-                    }
+                            .toNextExecutor(DebitAccountCommandExecutor.class);
                 });
-    }
-}
-----
-
-[[sub-executors]]
-=== Sub-Executors in Continuous LRT
-
-Sub-executors are specialized executors in StackSaga used for executing **extra compensating atomic transactions** in addition to the parent command executor's primary compensation (`doRevert`).
-
-Remember the core rule: **One executor = One atomic transaction**.
-If cancelling an order requires two distinct operations -- e.g., (1) voiding an internal reservation and (2) notifying an external third-party courier service -- implementing both inside a single `doRevert()` method violates atomic boundaries.
-Sub-executors solve this challenge cleanly:
-
-[source,text]
-----
-Sub-Before Executors (1..N) ──> Parent doRevert() ──> Sub-After Executors (1..N)
-----
-
-image:executor/Architecture-Stacksaga-command-executor-with-revert-executors.drawio.svg[alt="Stacksaga Executors",width=100%,opts=interactive,scaledwidth=100%]
-
-[[sub-before-executors]]
-==== Sub-Before-Executor
-
-Runs *before* the parent command executor's `doRevert()`:
-
-[source,java]
-----
-@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubBeforeExecutor")
-@AllArgsConstructor
-public class OrderInitializeSubBeforeExecutor implements RevertBeforeExecutor<OrderDomainEntity, InitializeOrderExecutor> {
-
-    private final OrderService orderService;
-
-    @Override
-    public @NonNull RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull NonRetryableExecutorException processException,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
-            @NonNull RevertBeforeStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
-    ) throws RetryableExecutorException {
-
-        try {
-            this.orderService.preCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager
-                    .success("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE")
-                    .noPause()
-                    .noMoreRevertBeforeExecutors(); // routes to parent command executor's doRevert()
-        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
-            return stepManager
-                    .success("REVERTED_ORDER_INITIALIZATION_SUB_BEFORE")
-                    .noPause()
-                    .noMoreRevertBeforeExecutors();
-        } catch (FeignException.ServiceUnavailable unavailableException) {
-            throw RetryableExecutorException.of(unavailableException);
-        }
-    }
-}
-----
-
-To chain multiple sub-before executors, call:
-[source,java]
-----
-return stepManager
-        .success("REVERTED_SUB_STEP_1")
-        .noPause()
-        .setNextRevertBeforeExecutor(SecondSubBeforeExecutor.class);
-----
-
-[[sub-after-executors]]
-==== Sub-After-Executor
-
-Runs *after* the parent command executor's `doRevert()`:
-
-[source,java]
-----
-@SagaExecutor(executeFor = "order-service", value = "orderInitializeSubAfterExecutor")
-@AllArgsConstructor
-public class OrderInitializeSubAfterExecutor implements RevertAfterExecutor<OrderDomainEntity, InitializeOrderExecutor> {
-
-    private final OrderService orderService;
-
-    @Override
-    public @NonNull RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> doProcess(
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull NonRetryableExecutorException processException,
-            @NonNull RevertHintStore revertHintStore,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
-            @NonNull RevertAfterStepManager<OrderDomainEntity, InitializeOrderExecutor> stepManager
-    ) throws RetryableExecutorException {
-
-        try {
-            this.orderService.postCancelOrder(finalDomainEntityState.getOrderId(), idempotencyKey);
-            return stepManager
-                    .success("REVERTED_ORDER_INITIALIZATION_SUB_AFTER")
-                    .noPause()
-                    .noMoreRevertAfterExecutors(); // completes after-revert phase for this step
-        } catch (OperationAlreadyExecutedException alreadyExecutedException) {
-            return stepManager
-                    .success("REVERTED_ORDER_INITIALIZATION_SUB_AFTER")
-                    .noPause()
-                    .noMoreRevertAfterExecutors();
-        } catch (FeignException.ServiceUnavailable unavailableException) {
-            throw RetryableExecutorException.of(unavailableException);
-        }
     }
 }
 ----
 
 '''
 
-[[usage-2-pausable-lrt]]
-== Usage Pattern 2: Pausable Long-Running Transactions (Wait-State / Callback-Driven LRT)
+[[pre-and-post-executors]]
+[[sub-executors]]
+== Implementing Pre-Executors and Post-Executors (Pre & Post Compensation Hooks)
 
-In enterprise microservices, transactions often cannot execute unbroken from start to finish. Real-world workflows demand deliberate, durable wait states:
+When compensating a step requires multiple actions across distinct systems (for example, releasing a distributed mutex before refunding, or sending a notification after cancelling), placing all logic inside one `doRevert()` method violates <<rule-one-atomic-transaction,Rule 1: One Executor = One Atomic Transaction>>.
 
-* **Payment Gateways**: Asynchronous 3D-Secure payment redirects or banking clearing delays.
-* **Human-in-the-Loop**: Asynchronous human approvals (KYC verification, loan underwriting, manager authorization).
-* **Physical Operations**: Slow physical operations (kitchen food preparation, warehouse parcel packing).
+StackSaga solves this by allowing developers to attach modular **Pre-Executors** and **Post-Executors** to any host `CommandExecutor`.
+Because they run only during compensation, each hook implements `doRevert` and receives the same `RevertContext` as the host command, so `context.primaryExecutionIdempotencyKey()` gives a hook the key of the host command's forward execution:
 
-StackSaga provides native, first-class support for **Pausable Long-Running Transactions (Wait-State / Callback-Driven LRT)** via the `.pause(Duration retentionDuration)` operator on `stepManager`.
+image:implementations:executor/Architecture-Stacksaga-command-executor-with-revert-executors.drawio.svg[alt="Command Executor with Pre and Post Executors",width=100%,opts=interactive,scaledwidth=100%]
 
-[[pausable_lrt_lifecycle]]
-=== Real-World Mixed Saga Flow: Continuous & Pausable Orchestration
+=== Declaring Hooks on Host Command Executor
 
-In production enterprise architectures, a single saga flow frequently combines both synchronous continuous execution and asynchronous pausable wait-states inside the same orchestrator service.
-
-The diagram below illustrates how an `Order-service` orchestrator coordinates unbroken local and remote steps alongside asynchronous third-party callbacks using StackSaga:
-
-image:implementations:executor/stacksaga-pausable-lrt-lifecycle.drawio.svg[alt="Continuous and Pausable LRT Flow Lifecycle",width=100%,opts=interactive,scaledwidth=100%]
-
-.Real-World Saga Flow Reference Guide (Numbered Diagram Callouts)
-[cols="1,3,6",options="header"]
-[.properties-table.google-anno-skip]
-|===
-| Badge | Flow Component | Architectural Role & Execution Mechanics
-
-| **1**
-| `exe-1 (no pause)` +
-`CheckCustomerEligibility`
-| **Continuous Query Execution**: The `Order-service` orchestrator queries `service-1` (`User Service`) to verify customer status, credit limit, and shipping eligibility. Because this is a read-only query, it executes as a `QueryExecutor`. The step completes synchronously and returns `.noPause().nextExecutor(CreateOrderCommandExecutor.class)`, advancing immediately without blocking or persisting wait states.
-
-| **2**
-| `exe-2 (no pause)` +
-`CreateOrder`
-| **Continuous Command Execution**: The orchestrator inserts the order record into its local database (`service-2: Order DB`) in a `PENDING` state via local JPA. Because this operation modifies state, it executes as a `CommandExecutor` (with `doRevert` registered for compensation). It commits locally and returns `.noPause().nextExecutor(ProcessPaymentCommandExecutor.class)`.
-
-| **3**
-| `exe-3 (pause)` +
-`ProcessPayment`
-| **Pausable Wait-State Initiation**: The orchestrator dispatches an asynchronous payment initialization request to `service-3` (`Payment Gateway API`), forwarding `idempotencyKey` as the correlation ID. It then returns:
-`stepManager.success("PAYMENT_DISPATCHED").pause(Duration.ofMinutes(15)).nextExecutor(DispatchDeliveryCommandExecutor.class)`. +
-**Thread Liberation**: The SEC engine durably saves the transaction snapshot to the Event Store and **immediately releases the worker thread and DB connection back to the thread pool**. StackSaga holds zero threads or locks in memory while waiting for the gateway.
-
-| **4**
-| **Webhook Endpoint (Pill)** +
-`/resume-to 4` +
-`sagaTemplate.resume()`
-| **Asynchronous Webhook Callback Handshake**: Represented as a compact pill shape to distinguish external HTTP endpoints from internal Saga Executors. Upon customer payment completion, the payment gateway sends an asynchronous HTTP POST webhook to `/resume-to 4`. The controller executes: +
-`sagaTemplate.resume(transactionId, resumeKey).put("authCode", authCode).execute();` +
-The SEC engine verifies the correlation key, resets `is_paused = 0`, injects callback metadata into `ResumeContext`, allocates a fresh worker thread, and activates `exe-4`.
-
-| **5**
-| `exe-4 (pause)` +
-`DispatchDelivery`
-| **Pausable Wait-State Continuation**: Awakened with the payment confirmation, `exe-4` ingests the `authCode` from `ResumeContext` and dispatches a delivery booking request to `service-4` (`Delivery Partner Service`). Because physical driver assignment is asynchronous, `exe-4` returns `.pause(Duration.ofHours(2)).nextExecutor(FinalizeOrderCommandExecutor.class)`. The worker thread is once again immediately freed.
-
-| **6**
-| **Webhook Endpoint (Pill)** +
-`/resume-to 5` +
-`sagaTemplate.resume()`
-| **Delivery Webhook Callback Handshake**: Represented as a compact pill shape. When the delivery partner assigns a courier and driver schedule, its webhook triggers the `/resume-to 5` endpoint. The controller calls: +
-`sagaTemplate.resume(transactionId, resumeKey).put("trackingNumber", trackingNumber).execute();` +
-The SEC wakes up the transaction and routes execution directly to the final executor (`exe-5`).
-
-| **7**
-| `exe-5 (complete)` +
-`FinalizeOrder (no pause)`
-| **Terminal Completion**: The final command executor updates the order aggregate in the local database to `CONFIRMED` and `DISPATCHED`, logs audit metrics, and returns `.noPause().complete()`. The entire distributed saga completes with full consistency across all four involved microservices.
-|===
-
-[NOTE]
-.Symmetrical Wait-State Architecture: Pausable Compensation in `doRevert()`
-====
-The **Process -> Pause / Wait -> Callback Resumption** pattern demonstrated in the diagram above is not limited to forward execution (`doProcess()`).
-StackSaga provides a completely symmetrical wait-state capability for reverse compensation (`doRevert()`):
-
-* **Wait-States in Rollback**: If an atomic compensation step requires an asynchronous external operation (such as submitting an asynchronous refund request to a banking gateway or voiding an airline ticket through a global reservation system), `doRevert()` can return:
-+
-[source,java]
-----
-return stepManager.success("REFUND_DISPATCHED").pause(Duration.ofHours(24));
-----
-
-* **Immediate Thread & Lock Liberation**: Just like in forward execution, StackSaga immediately persists the transaction snapshot in a paused rollback state (`is_paused = 1`), releases all worker threads and database connections, and awaits the external confirmation callback.
-* **Automatic Rollback Continuation**: When the external provider fires its refund webhook, your controller resumes the transaction via `sagaTemplate.resume(txId, resumeKey).put("refundStatus", "SUCCESS").execute()`. The SEC engine verifies the callback payload in `ResumeContext`, completes the step, and **automatically continues reverse compensation backward through the remaining preceding steps** (e.g., `exe-2` -> `exe-1`).
-
-For in-depth code examples and complete configuration details of rollback wait-states, see xref:#pausable-compensation[Pausable Compensation in doRevert()].
-====
-
-[[resume-context-in-executors]]
-=== Forward Wait-States (`doProcess`)
-
-In forward execution, wait-states are achieved through **Saga Flow Topology (Separation of Concerns)**:
-
-1. **Pausing Step (`InitiatePaymentCommandExecutor`)**: Initiates the external asynchronous process and requests a durable wait state.
-2. **Resumed Step (`ConfirmPaymentCommandExecutor`)**: Designated as the downstream step in the Saga DAG, executing when the transaction resumes.
-
-==== Step A: The Pausing Executor (`InitiatePaymentCommandExecutor`)
+Attach `@StartPreExecutor` and `@StartPostExecutor` directly to the `doRevert()` method of the host command:
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "payment-service", value = "initiatePaymentCommandExecutor")
-@AllArgsConstructor
-public class InitiatePaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
+@Override
+@StartPreExecutor(AcquireRefundTokenPreExecutor.class)
+@StartPostExecutor(SendCancellationEmailPostExecutor.class)
+public @NonNull RevertStepManager doRevert(
+        @NonNull RevertContext<OrderDomainEntity> context,
+        @NonNull RevertStepManager stepManager
+) throws RetryableExecutorException {
+    OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
 
-    private final PaymentGatewayClient paymentGateway;
-
-    @Override
-    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
-            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
-    ) throws RetryableExecutorException, NonRetryableExecutorException {
-
-        // 1. Dispatch asynchronous request to external payment provider forwarding idempotencyKey
-        String intentId = this.paymentGateway.initiatePaymentIntent(
-                currentDomainEntity.getOrderId(),
-                currentDomainEntity.getTotalAmount(),
-                idempotencyKey //<1>
-        );
-
-        // 2. Persist intent reference into domain aggregate state
-        currentDomainEntity.setPaymentIntentId(intentId);
-
-        // 3. Pause forward execution awaiting external callback webhook
-        return stepManager
-                .success("PAYMENT_INTENT_DISPATCHED")
-                .pause(Duration.ofHours(2)) //<2>
-                .nextExecutor(ConfirmPaymentCommandExecutor.class); //<3>
-    }
-
-    @Override
-    public @NonNull RevertStepManager doRevert(...) {
-        // Compensation logic if cancelled before completion
-        return stepManager.success("PAYMENT_INTENT_CANCELLED").noPause();
-    }
+    // Core payment refund compensation
+    paymentClient.refund(finalDomainEntityState.getPaymentId(), context.idempotencyKey());
+    return stepManager.success("PAYMENT_REFUNDED").asSync().noPause().toNextDefaultExecutor();
 }
 ----
 
-<1> Forward `idempotencyKey` as the unique correlation identifier for the external service.
-<2> `.pause(Duration.ofHours(2))` marks the transaction `PAUSED` in the event store and releases the worker thread.
-<3> `.nextExecutor(ConfirmPaymentCommandExecutor.class)` designates the executor that the SEC will invoke upon resumption.
+[[pre-executors]]
+=== Pre-Executor (`PreExecutor`)
 
-==== Step B: The Resumed Executor (`ConfirmPaymentCommandExecutor`)
-
-When the external payment gateway calls back and the application triggers `sagaTemplate.resume(...)`, the SEC advances and executes `ConfirmPaymentCommandExecutor`:
+Executes *before* the parent command's core `doRevert()`. Use `.toNextDefaultExecutor()` to transition directly into the parent command's `doRevert()`:
 
 [source,java]
 ----
-@SagaExecutor(executeFor = "payment-service", value = "confirmPaymentCommandExecutor")
-@AllArgsConstructor
-public class ConfirmPaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
+@SagaExecutor(executeFor = "auth-service", value = "acquireRefundTokenPreExecutor")
+@RequiredArgsConstructor
+public class AcquireRefundTokenPreExecutor implements PreExecutor<OrderDomainEntity, PaymentCommandExecutor> {
 
-    private final PaymentGatewayClient paymentGateway;
-
-    @Override
-    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(
-            @NonNull OrderDomainEntity currentDomainEntity,
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext, //<1>
-            @NonNull ProcessStepManager<OrderDomainEntity> stepManager
-    ) throws RetryableExecutorException, NonRetryableExecutorException {
-
-        // 1. Ingest optional payload from ResumeContext if provided by the callback webhook
-        Optional<String> authCode = resumeContext.get("authCode"); //<2>
-        Optional<String> status = resumeContext.get("status");
-
-        // 2. Verify payment status (either from payload or by querying gateway using domain state)
-        boolean isSuccess = status
-                .map("SUCCESS"::equalsIgnoreCase)
-                .orElseGet(() -> this.paymentGateway.verifyPaymentStatus(currentDomainEntity.getPaymentIntentId()));
-
-        if (isSuccess) {
-            authCode.ifPresent(currentDomainEntity::setPaymentAuthCode);
-
-            // 3. Advance to the next forward step
-            return stepManager
-                    .success("PAYMENT_CONFIRMED")
-                    .noPause()
-                    .nextExecutor(DispatchDeliveryExecutor.class); //<3>
-        } else {
-            // Payment rejected: trigger compensation
-            throw NonRetryableExecutorException
-                    .buildWith(new PaymentDeclinedException("Payment declined by gateway"))
-                    .put("intentId", currentDomainEntity.getPaymentIntentId())
-                    .build();
-        }
-    }
+    private final AuthServiceClient authClient;
 
     @Override
-    public @NonNull RevertStepManager doRevert(...) {
-        // Compensating refund if downstream delivery fails
-        this.paymentGateway.refundPayment(currentDomainEntity.getPaymentAuthCode());
-        return stepManager.success("PAYMENT_REFUNDED").noPause();
-    }
-}
-----
-
-<1> `resumeContext` contains the key-value data passed during `sagaTemplate.resume(txId, key).put("authCode", ...).execute()`.
-<2> Safely extract values using `resumeContext.get(key)`. The context is strictly read-only within executors.
-<3> Advance forward continuously via `.noPause().nextExecutor(...)`.
-
-[CAUTION]
-.Architectural Anti-Pattern: Do NOT use `resumeContext.isEmpty()` for Lifecycle Checking!
-====
-Never use `if (resumeContext.isEmpty())` to determine whether an executor is running for the first time or running after a resume.
-
-**Why?** An external webhook or manual resume trigger might legitimately carry **no payload** (e.g., an administrator clicking "Approve" in a dashboard, or a webhook ping with an empty HTTP 200 body).
-In such cases, `resumeContext.isEmpty()` is `true`, **yet the execution IS a resumed execution**.
-
-**How do executors know their phase?**
-1. **By Saga Flow Topology**: The executor positioned after a pause step (e.g. `ConfirmPaymentCommandExecutor`) is architecturally dedicated to handling post-resumption verification.
-2. **By Domain Entity State**: If an executor must verify whether external work was already dispatched, inspect domain state (e.g. `currentDomainEntity.getPaymentIntentId() != null`), never whether `ResumeContext` contains keys.
-====
-
-=== Retention Timeout & Idempotency Management
-
-What happens if the external system fails, crashes, or never calls back within the configured `retentionDuration`?
-
-1. **Automatic Re-Invocation of the Pausing Executor**:
-+
-* Upon timeout expiry, StackSaga's Retry Ring Coordinator re-exposes the paused transaction.
-* The engine **automatically re-invokes the pausing executor** (`InitiatePaymentCommandExecutor`) with its pristine input aggregate state (`in_data`).
-* **Why?** Because downstream confirmation was never received, and the business logic to check status, resend notifications, or initiate cancellation resides inside that pausing executor.
-
-2. **Mandatory Idempotency Requirement**:
-+
-* Because the same executor is re-invoked even though its primary execution had previously completed before pausing, the executor **must strictly maintain idempotency**.
-* Before issuing a new charge or request, the executor should verify whether `currentDomainEntity.getPaymentIntentId()` already exists or query the external provider using `idempotencyKey`.
-
-3. **Concurrency & Race Condition Protection**:
-+
-* What happens if the external webhook callback from the first attempt arrives *after* the timeout expired and the executor has already been re-invoked?
-* StackSaga guarantees that **only the first valid resume request is processed; subsequent or duplicate resume requests are safely rejected**.
-
-4. **Extended Pauses for Human-in-the-Loop**:
-+
-* If your workflow requires an indefinite wait (e.g., a manager approval that should never time out automatically), specify an extended duration such as `Duration.ofDays(365)`.
-
-[[pausable-compensation]]
-=== Backward Compensation Wait-States (`doRevert`)
-
-Rollback operations in distributed microservices frequently cannot complete synchronously. For example, reversing a payment often requires an **asynchronous refund request** with a banking clearing house that confirms completion hours or days later via a webhook.
-
-StackSaga natively supports wait-states inside `doRevert(...)` using `stepManager.success(...).pause(Duration retentionDuration)`:
-
-[[pausable-compensation-example]]
-[source,java]
-----
-@SagaExecutor(executeFor = "payment-service", value = "paymentCommandExecutor")
-@AllArgsConstructor
-public class PaymentCommandExecutor implements CommandExecutor<OrderDomainEntity> {
-
-    private final PaymentGatewayClient paymentGatewayClient;
-
-    @Override
-    public @NonNull ProcessStepManager<OrderDomainEntity> doProcess(...) {
-        // Continuous forward execution
-        String paymentRef = this.paymentGatewayClient.charge(currentDomainEntity.getTotalAmount(), idempotencyKey);
-        currentDomainEntity.setPaymentRef(paymentRef);
-        return stepManager.success("PAYMENT_CHARGED").noPause().nextExecutor(ReserveStockExecutor.class);
-    }
-
-    @Override
-    public @NonNull RevertStepManager doRevert(
-            @NonNull NonRetryableExecutorException primaryExecutionException,
-            @NonNull OrderDomainEntity finalDomainEntityState,
-            @NonNull RevertHintStore revertHintStore, //<1>
-            @NonNull String idempotencyKey,
-            @NonNull ResumeContext resumeContext,
-            @NonNull RevertStepManager stepManager
+    public @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(
+            @NonNull RevertContext<OrderDomainEntity> context,
+            @NonNull PreStepManager<OrderDomainEntity, PaymentCommandExecutor> stepManager
     ) throws RetryableExecutorException {
 
-        // Check persistent RevertHintStore to determine compensation phase:
-        if (!revertHintStore.containsKey("refundSessionId")) { //<2>
-            // --- 1. INITIAL COMPENSATION ATTEMPT ---
-            // Dispatch asynchronous refund request forwarding idempotencyKey:
-            String refundSessionId = this.paymentGatewayClient.initiateAsyncRefund(
-                    finalDomainEntityState.getPaymentRef(),
-                    idempotencyKey
-            );
-            revertHintStore.put("refundSessionId", refundSessionId); //<3>
+        // Acquire cancellation token and save to hint store for parent doRevert()
+        String token = authClient.acquireCancellationScopeToken();
+        context.revertHintStore().put("CANCELLATION_TOKEN", token);
 
-            // Pause compensation awaiting bank clearing webhook:
-            return stepManager
-                    .success("REFUND_INITIATED")
-                    .pause(Duration.ofHours(24)); //<4>
-        }
-
-        // --- 2. RESUMED COMPENSATION ATTEMPT ---
-        // Webhook arrived! Ingest refund result from resumeContext or query gateway:
-        String refundStatus = resumeContext.get("refundStatus")
-                .orElseGet(() -> this.paymentGatewayClient.checkRefundStatus(revertHintStore.get("refundSessionId")));
-
-        if ("SUCCESS".equalsIgnoreCase(refundStatus)) {
-            // Reversal completed: finalize this compensation step
-            return stepManager
-                    .success("REFUND_COMPLETED")
-                    .noPause(); //<5>
-        } else {
-            // Transient gateway delay: retry verification
-            throw new RetryableExecutorException("Refund clearing pending in banking gateway");
-        }
+        // Hands control directly into PaymentCommandExecutor.doRevert()
+        return stepManager
+                .success("CANCELLATION_TOKEN_ACQUIRED")
+                .asSync()
+                .noPause()
+                .toNextDefaultExecutor();
     }
 }
 ----
 
-<1> `revertHintStore` is the durable storage for compensation metadata preserved across retries and pauses.
-<2> Use `!revertHintStore.containsKey("refundSessionId")` (NOT `resumeContext.isEmpty()`) to cleanly distinguish between the initial refund dispatch and the resumed callback.
-<3> Store the refund tracking identifier in `revertHintStore`.
-<4> Pause compensation via `stepManager.success("REFUND_INITIATED").pause(Duration.ofHours(24))`.
-<5> Conclude compensation with `.noPause()`. StackSaga then automatically proceeds to compensate preceding steps in reverse order.
+To chain multiple pre-hooks, call `.toNextPreExecutor(SecondPreExecutor.class)`.
+
+[[post-executors]]
+=== Post-Executor (`PostExecutor`)
+
+Executes *after* the parent command's core `doRevert()` completes. Calling `.toNextDefaultExecutor()` concludes compensation for this step, signaling the SEC to continue unwinding preceding commands in history:
+
+[source,java]
+----
+@SagaExecutor(executeFor = "notification-service", value = "sendCancellationEmailPostExecutor")
+@RequiredArgsConstructor
+public class SendCancellationEmailPostExecutor implements PostExecutor<OrderDomainEntity, PaymentCommandExecutor> {
+
+    private final EmailServiceClient emailClient;
+
+    @Override
+    public @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> doRevert(
+            @NonNull RevertContext<OrderDomainEntity> context,
+            @NonNull PostStepManager<OrderDomainEntity, PaymentCommandExecutor> stepManager
+    ) throws RetryableExecutorException {
+        OrderDomainEntity finalDomainEntityState = context.finalDomainEntityState();
+
+        emailClient.sendOrderCancellation(finalDomainEntityState.getCustomerEmail());
+
+        // Step compensation fully completed; unwinds to preceding command step in history
+        return stepManager
+                .success("CANCELLATION_EMAIL_SENT")
+                .asSync()
+                .noPause()
+                .toNextDefaultExecutor();
+    }
+}
+----
+
+To chain multiple post-hooks, call `.toNextPostExecutor(SecondPostExecutor.class)`.
+For complete reverse handoff lifecycle rules, see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-pre-step-manager[Pre-Compensation] and xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usnp-post-step-manager[Post-Compensation] in Unified Saga Navigation Patterns.
 
 '''
 
 [[exceptions]]
-== Exceptions
+== Exception Handling & Fault Classification
 
-Executors communicate execution outcomes and trigger fault recovery by throwing specialized exceptions:
+StackSaga classifies faults strictly into transient infrastructure issues and permanent business rejections:
 
-=== Retryable vs. Non-Retryable Summary
-
-**Retryable Executor Exceptions** (`RetryableExecutorException`):
-Allowed for transient infrastructure failures (network timeouts, service 503s, database lock contention). The Retry Ring Coordinator automatically retries execution up to configured limits.
-
-[cols="*,*,*"]
-[.google-anno-skip]
+.Exception Classification Matrix
+[cols="30%,20%,25%,25%",options="header"]
 |===
-|Executor Type |doProcess() Method |doRevert() Method
+| Exception Type | Allowed in `doProcess` | Allowed in `doRevert` | Framework Behavior
 
-|Query Executor
-|✔
-|N/A
+| **`RetryableExecutorException`**
+| ✔
+| ✔
+| **Transient Fault**: Indicates temporary network drops, HTTP 503s, or database lock contention. The engine automatically retries execution with exponential backoff via the Retry Ring Coordinator.
 
-|Command Executor
-|✔
-|✔
-
-|Revert Before Executor
-|✔
-|N/A
-
-|Revert After Executor
-|✔
-|N/A
+| **`NonRetryableExecutorException`**
+| ✔
+| ✖ _(Forbidden in rollback)_
+| **Permanent Business Failure**: Indicates business rejections (e.g. insufficient funds, out of stock). Forward progress halts immediately and reverse compensation engages.
 |===
 
-**Non-Retryable Executor Exceptions** (`NonRetryableExecutorException`):
-Allowed for permanent business failures (invalid input, account not found, insufficient balance). Immediately halts forward progress and triggers backward compensation.
+[[building-non-retryable-exception]]
+=== Building a `NonRetryableExecutorException`
 
-[cols="*,*,*"]
-[.google-anno-skip]
-|===
-|Executor Type |doProcess() Method |doRevert() Method
+A `NonRetryableExecutorException` is created with a staged builder.
+Every value is required and is set in a fixed order, so the compiler only offers `build()` once all of them have been decided:
 
-|Query Executor
-|✔
-|N/A
+[source,java]
+----
+throw NonRetryableExecutorException
+        .buildWith(badRequestException)                       // 1. the real error
+        .withEvent("PAYMENT_DECLINED")                        // 2. the event recorded for this failure
+        .reexposeOnUnexpectedCrash(Duration.ofMinutes(10))    // 3. the crash re-expose delay
+        .compensateThisStep(true)                             // 4. compensation of the failing step
+        .put("reason", "insufficient_funds")                  // optional, repeatable
+        .build();
+----
 
-|Command Executor
-|✔
-|✖ _(Compensation cannot throw non-retryable exceptions)_
+. **Real error** (`buildWith(...)`): the exception that caused the failure.
+. **Event** (`withEvent(String)` or `withEvent(SagaExecutionEventName)`): the event recorded for this failure in the transaction history. Use `withDefaultEvent()` to record the framework's default error event.
+. **Crash re-expose delay** (`reexposeOnUnexpectedCrash(Duration)`): how long the engine waits before it re-exposes the transaction if the instance crashes after this failure, before compensation has been handed over. Use `withDefaultReexposeOnUnexpectedCrash()` to apply the transaction's default restore-on-crash delay.
+. **Compensation of the failing step** (`compensateThisStep(boolean)`): whether the failing step's own `doRevert()` may run when an attempt of the step may have taken effect -- on a re-execution, or when the failure was never classified. See <<non_retryable_after_retry,Compensating the Failing Step>>.
+. **Metadata** (`put(key, value)`, optional): additional diagnostic details, available to listeners and compensating executors.
 
-|Revert Before Executor
-|✖
-|N/A
+[IMPORTANT]
+.Rollback Invariant: Non-Retryable Exceptions Forbidden in `doRevert()`
+====
+During compensation (`doRevert()`, `PreExecutor`, or `PostExecutor`), throwing unhandled non-retryable exceptions is prohibited because it would stall the rollback pipeline.
 
-|Revert After Executor
-|✖
-|N/A
-|===
+*What happens if one escapes anyway.* Any exception other than `RetryableExecutorException` -- including an unexpected one such as a `NullPointerException` -- stops the unwind at that reversal.
+The transaction is terminated with the compensations of the earlier commands still pending, and is surfaced to operators.
+When an operator fixes the cause and restores the transaction, the unwind resumes at the reversal that failed; no committed command is skipped.
 
-NOTE: During compensation (`doRevert()`, `RevertBeforeExecutor`, or `RevertAfterExecutor`), throwing unhandled non-retryable exceptions is prohibited because it would stall the rollback. If an unrecoverable exception occurs that can be safely tolerated, catch it, record diagnostic metadata via `revertHintStore.put(...)`, and return `.success("IGNORED").noPause()`.
+*How to tolerate an error instead.* If an unrecoverable compensation error can be safely tolerated (e.g., account already closed, or a known data problem you would rather record than halt on):
+
+1. Wrap the reversal's logic in `try`/`catch`, and record diagnostic metadata in `context.revertHintStore().put("key", errorMsg)`.
+2. Return `.success("REVERT_TOLERATED").asSync().noPause().toNextDefaultExecutor()` as usual, so the rollback proceeds to the next compensation.
+
+The tolerated error stays in the transaction's record through the hint store, so it is visible afterwards rather than silently skipped.
+====
+
+[[non_retryable_after_retry]]
+=== Compensating the Failing Step
+
+When a `NonRetryableExecutorException` is thrown, the engine reverts the executors that completed *before* the failing one.
+The failing executor's own `doRevert()` is not part of that chain when the step raised the failure itself on its first attempt: by raising it, the step asserts that the attempt had no effect.
+Two situations change that.
+
+==== The Scenarios
+
+A step can run more than once (see <<rule-idempotent-execution,Rule 2>>), and an attempt that failed may *already have had an effect* on the remote service — for example, a timeout where the remote service applied the request but the response was lost.
+
+*A re-execution fails.*
+
+. Attempt 1 calls the remote service and fails with a transient error (or parks and its wait expires). The engine invokes the step again later.
+. Attempt 2 of the same step fails with a *non-retryable* error (for example, the service now answers `400 Bad Request`).
+. The transaction must now be compensated, but attempt 1 may have left an effect behind. Skipping the failing step's `doRevert()` would leave that effect in place.
+
+*A first attempt fails in a way nobody classified.*
+The executor lets an exception escape that it did not map — a read timeout, a connection reset.
+The engine wraps it as a non-retryable failure with `compensateThisStep(true)`, because nothing shows that the attempt had no effect.
+
+A transient failure never starts compensation on its own.
+
+==== How StackSaga Handles It
+
+When compensation starts, the engine reads the failing step's `compensateThisStep(boolean)` (see <<building-non-retryable-exception,Building a `NonRetryableExecutorException`>>) and the step's attempt history:
+
+* If the step raised the failure itself on its *first* attempt, its `doRevert()` is *not* run, whatever the value is. Compensation starts from the previous step. If you are not sure the attempt had no effect (for example, you caught a timeout), throw `RetryableExecutorException` or let the exception escape instead.
+* If the failure was *not classified* (the engine wrapped it), the attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, then continues in the normal reverse order.
+* If the step fails non-retryably on a *re-execution* with `compensateThisStep(true)`, an earlier attempt may have had an effect, so the engine runs the failing step's own `doRevert()` *first*, then continues in the normal reverse order.
+* With `compensateThisStep(false)`, the failing step's `doRevert()` is *not* run in any of these cases. Use this for a step whose `doRevert()` must never run for its own failure.
+
+[source,java]
+----
+throw NonRetryableExecutorException
+        .buildWith(badRequestException)
+        .withEvent("PAYMENT_DECLINED")
+        .withDefaultReexposeOnUnexpectedCrash()
+        .compensateThisStep(false)
+        .build();
+----
+
+==== Writing a Safe `doRevert()`
+
+Because `doRevert()` can be called for an attempt that was only *possibly* applied, write it so that it is safe in both cases:
+
+* It must be idempotent (<<rule-idempotent-execution,Rule 2>>).
+* It must tolerate a target that was never created — for example, treat "not found" as success.
+* It must use `context.primaryExecutionIdempotencyKey()` — the key the forward attempts were submitted with — to address the same remote operation that the earlier attempt may have created.
+
+'''
 
 [[step-manager-navigation-reference]]
-== Step Manager Navigation Reference
+== Step Manager Navigation Quick Reference
 
-StackSaga provides compile-time type-safe, staged fluent step managers for each phase of execution.
-These staged builders steer the Saga Execution Coordinator (SEC) programmatically without centralized routing tables:
+Every executor concludes its execution by returning a staged builder. The builder enforces four logical stages:
 
-[cols="2,2,2,3",options="header"]
-[.properties-table.google-anno-skip]
+`Stage 1: Event` ➔ `Stage 2: Mode` ➔ `Stage 3: Lifecycle` ➔ `Stage 4: Destination`
+
+.Fluent Step Manager Syntax Quick Reference
+[cols="22%,18%,25%,35%",options="header"]
 |===
-| Step Manager Interface | Stage 1: Event | Stage 2: LRT Lifecycle | Stage 3: Navigation / Action
+| Step Manager Interface | Execution Mode | Lifecycle Method | Destination Navigation
 
 | **`ProcessStepManager<DE>`** +
 _(Forward Flow in `doProcess`)_
-| `.success(event)` +
-_(String or `SagaExecutionEventName`)_
+| `.asSync()` +
+_or_ `.asAsync()`
 | `.noPause()` _(Continuous)_ +
-_or_ +
-`.pause(duration)` _(Pausable)_
-| `.nextExecutor(NextExecutor.class)` +
-_or_ +
-`.complete()` _(Terminal success; permitted only after `.noPause()`)_
+_or_ `.pauseUntilResume(duration)` +
+_or_ `.invoker(...)`
+| `.toNextExecutor(Next.class)` +
+_or_ `.complete()` +
+_or_ `.resumeToNextExecutor(Next.class)`
 
 | **`RevertStepManager`** +
-_(Compensation in `doRevert`)_
-| `.success(event)` +
-_(String or `SagaExecutionEventName`)_
-| `.noPause()` _(Finalize step)_ +
-_or_ +
-`.pause(duration)` _(Async rollback)_
-| N/A +
-_(The SEC automatically coordinates backward navigation in reverse order)_
-
-| **`RevertBeforeStepManager<DE, E>`** +
-_(Sub-Before Flow)_
-| `.success(event)` +
-_(String or `SagaExecutionEventName`)_
+_(Core Rollback in `doRevert`)_
+| `.asSync()` +
+_or_ `.asAsync()`
 | `.noPause()` +
-_or_ +
-`.pause(duration)`
-| `.setNextRevertBeforeExecutor(Next.class)` +
-_or_ +
-`.noMoreRevertBeforeExecutors()` _(routes to parent `doRevert`)_
+_or_ `.pauseUntilResume(duration)` +
+_or_ `.invoker(...)`
+| `.toNextDefaultExecutor()` _(with `.noPause()`)_ +
+_or_ `.resumeToNextDefaultExecutor()` _(after `.pauseUntilResume(...)`)_ +
+_(Engine routes to the preceding command in history; not developer-selectable)_
 
-| **`RevertAfterStepManager<DE, E>`** +
-_(Sub-After Flow)_
-| `.success(event)` +
-_(String or `SagaExecutionEventName`)_
+| **`PreStepManager<DE, E>`** +
+_(Pre-Compensation Hook)_
+| `.asSync()`
 | `.noPause()` +
-_or_ +
-`.pause(duration)`
-| `.setNextRevertAfterExecutor(Next.class)` +
-_or_ +
-`.noMoreRevertAfterExecutors()` _(finalizes step compensation)_
+_or_ `.pauseUntilResume(duration)`
+| `.toNextDefaultExecutor()` _(hands off to parent `doRevert`)_ +
+_or_ `.toNextPreExecutor(Next.class)`
+
+| **`PostStepManager<DE, E>`** +
+_(Post-Compensation Hook)_
+| `.asSync()`
+| `.noPause()` +
+_or_ `.pauseUntilResume(duration)`
+| `.toNextDefaultExecutor()` _(concludes step rollback)_ +
+_or_ `.toNextPostExecutor(Next.class)`
 |===
 
-See xref:stacksaga-sync/index.adoc#glossary-step-manager[Step Manager in Glossary], xref:stacksaga-sync/index.adoc#dual-flow-pausable-lrt[Dual-Flow Pausable Architecture], and xref:stacksaga-sync/orchestrator/stacksaga_template.adoc#fluent-resume-spec[Resuming via SagaTemplate] for how these builders drive the distributed saga lifecycle.
+[TIP]
+====
+For the comprehensive **19-row Master Navigation Matrix**, runtime dynamic content branching, and failure pivot mechanics, see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#master-navigation-matrix[Master Navigation Matrix in Unified Saga Patterns].
+====
+
+[[no-revisit-rule]]
+[IMPORTANT]
+.An executor runs at most once per transaction
+====
+`toNextExecutor(..)` and `resumeToNextExecutor(..)` may branch and merge, but they must not name an executor that has already run in the same transaction -- including the current one.
+The engine identifies an executed step by its executor: the step's idempotency key and its place in the compensation order are both tied to that identity, so a second visit cannot be told apart from a re-execution of the first.
+The engine therefore rejects a revisit: it records the current step's success and then starts compensation from it.
+
+Model a loop such as "retry the payment with another card" as a distinct executor (for example `AuthorizeAlternativePaymentExecutor`), or as a re-attempt inside one step.
+Re-execution of the same step by the engine -- after a transient failure, a crash or an expired wait -- is not a revisit and is always allowed.
+====
+
+'''
 
 == Guidelines for Creating Executors
 
-When designing saga executors, follow these core architectural guidelines:
+When designing saga executors, follow these essential implementation best practices:
 
-. **One Executor = One Atomic Transaction**: Never combine multiple state-changing external operations in a single executor. Decompose them into separate command executors or sub-executors.
-. **Enforce Idempotency**: Always forward `idempotencyKey` to downstream APIs and handle already-executed responses as successful steps without throwing errors.
-. **Separate Continuous vs Pausable Concerns**: In pausable transactions, keep the pausing executor (`Initiate...`) and the resumed executor (`Confirm...`) distinct in the Saga DAG.
-. **Never Inspect `resumeContext.isEmpty()` for Lifecycle Phase**: Use flow topology and `currentDomainEntityState` for forward phase tracking, and `RevertHintStore` for compensation phase tracking.
-. **Maintain Documentation Integrity**: Ensure event names match the framework regex format (`^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$`): alphanumeric tokens separated by single underscores (e.g. `ORDER_CREATED`, `PAYMENT_SUCCESS`, `STOCK_RESERVED`). Hyphens, spaces, leading/trailing underscores, and consecutive underscores (e.g. `ORDER__CREATED`) are rejected by the framework. Document all external failure modes and retry policies.
+1. **One Executor = One Atomic Operation**: Never combine multiple external API or database writes in one executor (<<rule-one-atomic-transaction,Rule 1>>).
+2. **Forward Idempotency Keys**: Always forward the engine-provided `idempotencyKey` to downstream services and handle already-processed requests idempotently (<<rule-idempotent-execution,Rule 2>>).
+3. **Respect Invoker Immutability**: Never mutate `DomainEntity` inside `.asAsync().invoker(...)` or `.reactiveInvoker(...)` closures; state modifications belong strictly in the preparation phase.
+4. **Enforce Event Naming Format**: Step event names must match the regex `^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$` (e.g. `ORDER_CREATED`, `PAYMENT_AUTHORIZED`). Hyphens, spaces, and consecutive underscores (e.g. `ORDER__CREATED`) are rejected at runtime.
+5. **Separate Continuous vs. Pausable Steps**: Keep initial request dispatches (pausing steps) and subsequent callback validations (resumed steps) cleanly separated in your saga topology.
+6. **Tolerate Unrecoverable Rollback Errors**: Record diagnostic details in `context.revertHintStore()` rather than letting exceptions crash and stall compensating pipelines.
+7. **Never Revisit an Executor**: An executor runs at most once per transaction; model loops as distinct executors (<<no-revisit-rule,No-revisit rule>>).
+8. **Treat the `@SagaExecutor` Value as Permanent**: The declared name is stored in the transaction history, in the pointer to the next step, and in every idempotency key derived for the step. Renaming an executor while transactions are in flight leaves their history pointing at a name that no longer exists, so they cannot be recovered, and changes the keys their participants receive. To rename, keep the old executor registered until every transaction that used it has finished, and add the new one under the new name.
+
+'''
+
+[[outbox-pattern-eliminated]]
+== Why StackSaga Eliminates the Transactional Outbox Pattern
+
+Developers coming from event-driven or choreography-based systems often ask how to implement the Transactional Outbox Pattern in StackSaga.
+You do not need to: the <<conceptual-foundation,executor contract>> already gives the same guarantee, without the extra infrastructure.
+
+=== The Dual-Write Problem
+
+A service often has to do two things for one business action: write domain state to its database *and* publish an event to a message broker.
+These are two different systems, so no single local transaction covers both.
+If the service crashes after the database commit but before the publish, the state has changed but no one is told.
+
+The Transactional Outbox Pattern solves this by writing the event into an `outbox` table in the same database transaction as the domain change, then running a separate relay process that reads the table and publishes its rows to the broker.
+It works, but every service now owns an extra table, a relay process, and the retry and cleanup logic around them.
+
+=== How the Executor Model Removes It
+
+Under <<rule-one-atomic-transaction,Rule 1>>, the database write and the publish cannot share an executor.
+They become two consecutive steps, each touching exactly one system:
+
+[source,java]
+----
+// Step 1: writes to the local database only
+@SagaExecutor(executeFor = "order-service", value = "saveOrderExecutor")
+public class SaveOrderExecutor implements CommandExecutor<OrderDomainEntity> { ... }
+
+// Step 2: publishes to the message broker only
+@SagaExecutor(executeFor = "order-service", value = "publishOrderEventExecutor")
+public class PublishOrderEventExecutor implements CommandExecutor<OrderDomainEntity> { ... }
+----
+
+`SaveOrderExecutor` returns `.toNextExecutor(PublishOrderEventExecutor.class)`, so the engine records that step 1 finished before step 2 is invoked.
+No step contains a dual write any more: the gap between the two writes has become a step boundary that the engine tracks.
+
+=== What Replaces the Outbox Machinery
+
+[cols="1,1",options="header"]
+|===
+| Outbox Pattern | StackSaga
+| `outbox` table written in the same transaction as the domain change | The Event Store, where the engine records the result of every step
+| Custom relay or polling process | The built-in xref:retry-ring-coordinator:ring-coordinator.adoc[Retry Ring Coordinator], which resumes incomplete transactions
+| Hand-written retry and cleanup logic | `RetryableExecutorException` and the transaction lifetime
+| Manual undo when the publish can never succeed | `SaveOrderExecutor.doRevert()`, run by compensation
+|===
+
+A crash is covered on both sides of the step boundary:
+
+* *Crash after step 1 is recorded*: the transaction resumes at `PublishOrderEventExecutor`; the order is not written again.
+* *Crash before step 1 is recorded*: `SaveOrderExecutor` runs again. Because it forwards its `idempotencyKey` (<<rule-idempotent-execution,Rule 2>>), the repeated write does not create a second order.
+
+=== Failure Behavior & Delivery Guarantee
+
+* *Broker temporarily unavailable*: `PublishOrderEventExecutor` throws `RetryableExecutorException`, and the retry subsystem invokes it again within the xref:retry-ring-coordinator:disabled-and-terminated-transaction.adoc#transaction-lifetime[transaction lifetime].
+* *Publish can never succeed* (for example, the broker rejects the message as invalid): the executor throws `NonRetryableExecutorException`, compensation starts, and `SaveOrderExecutor.doRevert()` undoes the database write.
+
+Delivery is *at-least-once*, exactly as with an outbox relay: if the service crashes after the broker accepted the message but before the step was recorded, the message is published again.
+Put the `idempotencyKey` in the message key or a header, and deduplicate on it in the consumer.
+
+* To publish without waiting for a reply, see xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#publish-without-waiting[Publishing an Event Without Waiting for a Reply].
+* If the consumer replies to the orchestrator, use xref:stacksaga-sync/orchestrator/unified-saga-patterns.adoc#usip-pattern-3-two-stage-lazy-dispatch[Pattern 3: Two-Stage Lazy Dispatch], so the reply can never arrive before the step is recorded.
