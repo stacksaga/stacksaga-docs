@@ -2,31 +2,31 @@
 :navtitle: Observability & Metrics
 :keywords: observability, metrics, micrometer, prometheus, actuator, grafana, health
 
-StackSaga provides first-class production observability designed with **zero runtime dependencies** on metrics libraries in core modules, sub-microsecond overhead via cached meter arrays, and rich integrations with Spring Boot Actuator, Micrometer, Prometheus, and Grafana.
+StackSaga publishes production metrics through Micrometer, an Actuator endpoint (`/actuator/stacksaga`) and a health indicator. Core modules have no dependency on Micrometer or Actuator: metrics are an optional module that you add to the application.
 
+[#architecture]
 == Architecture & Design Principles
 
-StackSaga's observability architecture adheres to three core design rules:
-
 1. **Decoupled SPI (`SagaMetricsRecorder`)**:
-Core transaction management, scheduling, listener dispatch, and database support modules interact solely with `org.stacksaga.spi.metrics.SagaMetricsRecorder` located in `stacksaga-commons`. Core modules have zero runtime dependencies on Micrometer or Spring Boot Actuator.
-2. **Zero-Overhead Default (`NoopSagaMetricsRecorder`)**:
-When metrics collection is not included or disabled, all SPI methods are no-ops with `enabled() == false`. Call sites short-circuit before executing `System.nanoTime()`, ensuring non-measurable latency overhead (< 50 ns).
-3. **Pre-allocated Meter Cache**:
-`MicrometerSagaMetricsRecorder` pre-allocates meters for all standard enum combinations (`DbOperation`, `TxOutcome`, `ExecutionMode`, `StepStatus`, `RetryResult`) in fast indexed arrays or concurrent lookup caches, completely avoiding string concatenations or meter searches on the hot execution path.
+Transaction management, scheduling, listener dispatch and event-store support call only `org.stacksaga.spi.metrics.SagaMetricsRecorder`, which lives in `stacksaga-commons`. Core modules never reference Micrometer or Spring Boot Actuator.
+2. **No-op default (`NoopSagaMetricsRecorder`)**:
+When the metrics module is absent or `stacksaga.metrics.enabled=false`, every SPI method is a no-op and `enabled()` returns `false`. Call sites that measure time check `enabled()` first, so they do not even read `System.nanoTime()`.
+3. **Cached meters**:
+`MicrometerSagaMetricsRecorder` creates each meter once per distinct tag combination and keeps it in a concurrent map, so the execution path never searches the registry. Meters keyed by domain are registered at application start, so every domain appears with zero values before its first saga runs.
+
+Recording never throws: every recorder method catches its own errors, so a metrics problem can never fail a saga.
 
 == Dependency Configuration
 
-Add the `stacksaga-spring-boot-starter-metrics` starter to your application alongside Spring Boot Actuator and your desired Micrometer registry (e.g. Prometheus):
+Add the `stacksaga-spring-boot-starter-metrics` module together with Spring Boot Actuator and a Micrometer registry (Prometheus in this example). The version is managed by `stacksaga-bom`:
 
 [source,xml]
 ----
 <dependencies>
-    <!-- StackSaga Metrics Starter -->
+    <!-- StackSaga Metrics Starter (version managed by stacksaga-bom) -->
     <dependency>
         <groupId>org.stacksaga</groupId>
         <artifactId>stacksaga-spring-boot-starter-metrics</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
     </dependency>
 
     <!-- Spring Boot Actuator -->
@@ -45,7 +45,7 @@ Add the `stacksaga-spring-boot-starter-metrics` starter to your application alon
 
 == Configuration Properties
 
-All properties are configured under the `stacksaga.metrics` prefix in `application.yml` or `application.properties`:
+All properties use the `stacksaga.metrics` prefix:
 
 [cols="2,1,1,3",options="header"]
 |===
@@ -56,70 +56,55 @@ All properties are configured under the `stacksaga.metrics` prefix in `applicati
 |`true`
 |Enables or disables Micrometer metrics collection.
 
-|`stacksaga.metrics.step-sampling`
-|Integer
-|`1`
-|Sampling rate for step execution metrics (`1` records every step; `10` records 10% of steps).
-
-|`stacksaga.metrics.executor-tag-enabled`
-|Boolean
-|`true`
-|Controls whether the `executor` tag is included in step metrics.
+|`stacksaga.metrics.excluded-domains`
+|Set<String>
+|empty
+|Domain entity names (`@SagaDomainEntity` name) to leave out of all domain-keyed metrics.
 
 |`stacksaga.metrics.tags.service`
 |Boolean
 |`true`
-|Include service name tag on all metrics.
+|Adds the `service` tag (application name) to every metric.
 
 |`stacksaga.metrics.tags.cluster`
 |Boolean
 |`true`
-|Include cluster tag on all metrics.
+|Adds the `cluster` tag to every metric.
 
 |`stacksaga.metrics.tags.region`
 |Boolean
 |`true`
-|Include region tag on all metrics.
+|Adds the `region` tag to every metric.
 
 |`stacksaga.metrics.tags.zone`
 |Boolean
 |`false`
-|Include availability zone tag on all metrics.
+|Adds the `zone` tag to every metric.
 
 |`stacksaga.metrics.tags.instance-id`
 |Boolean
 |`false`
-|Include instance identifier tag on all metrics.
+|Adds the `instance_id` tag to every metric. This creates one series per instance, so enable it only when you need per-instance breakdowns.
+
+|`stacksaga.metrics.distribution.slo`
+|Duration[]
+|`5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s`
+|Histogram bucket boundaries for timers. Each timer publishes one `_bucket` series per boundary (plus `+Inf`), which keeps the number of series small.
 
 |`stacksaga.metrics.distribution.publish-percentile-histogram`
 |Boolean
 |`false`
-|Publishes bucket histograms for latency percentiles in Prometheus.
+|Publishes the full percentile histogram (about 70 `_bucket` series per timer) instead of the `slo` buckets. Use it when you need finer latency resolution and can afford the extra series.
+
+|`stacksaga.metrics.distribution.sla-min` / `sla-max`
+|Duration
+|`1ms` / `30s`
+|Lowest and highest bucket of the full percentile histogram. Used only when `publish-percentile-histogram` is `true`.
 
 |`stacksaga.metrics.distribution.percentiles`
 |Double[]
-|`0.5, 0.95, 0.99`
-|Client-side calculated percentiles for timers and summaries.
-
-|`stacksaga.metrics.distribution.sla-min`
-|Duration
-|`1ms`
-|Minimum expected SLA duration for timer bucket distribution.
-
-|`stacksaga.metrics.distribution.sla-max`
-|Duration
-|`30s`
-|Maximum expected SLA duration for timer bucket distribution.
-
-|`stacksaga.metrics.backlog.enabled`
-|Boolean
-|`false`
-|Enables background gauge for ongoing transaction backlog count.
-
-|`stacksaga.metrics.backlog.interval`
-|Duration
-|`30s`
-|Interval between backlog database polling queries.
+|empty
+|Client-side percentiles (for example `0.5, 0.95, 0.99`). Off by default: they cannot be merged across instances, so a p99 computed this way is wrong as soon as you run more than one pod. Prefer `histogram_quantile` over the buckets.
 |===
 
 === Example `application.yml`
@@ -129,20 +114,10 @@ All properties are configured under the `stacksaga.metrics` prefix in `applicati
 stacksaga:
   metrics:
     enabled: true
-    step-sampling: 1
-    executor-tag-enabled: true
     tags:
       service: true
       cluster: true
       region: true
-    distribution:
-      publish-percentile-histogram: true
-      percentiles: [0.5, 0.95, 0.99]
-      sla-min: 1ms
-      sla-max: 30s
-    backlog:
-      enabled: true
-      interval: 30s
 
 management:
   endpoints:
@@ -154,7 +129,11 @@ management:
       enabled: true
 ----
 
+WARNING: Do not set `stacksaga.metrics.distribution.percentiles` in a multi-instance deployment. Use the histogram buckets with `histogram_quantile` (see <<promql>>) so that percentiles stay correct across instances.
+
 == Metrics Catalog
+
+In Prometheus, dots become underscores, counters get `_total`, and timers get `_seconds_count`, `_seconds_sum`, `_seconds_max` and `_seconds_bucket`. Every metric also carries the common tags enabled under `stacksaga.metrics.tags.*`.
 
 === Transaction Metrics
 
@@ -170,28 +149,55 @@ management:
 |`stacksaga.transactions.init`
 |Timer
 |`domain`, `idempotent`
-|Duration of initial transaction insertion and setup.
+|Duration of initial transaction insertion and setup (`idempotent`: `true`, `false`).
 
-|`stacksaga.transactions.idempotent.hits`
+|`stacksaga.idempotent.hits`
 |Counter
 |`domain`
-|Number of incoming requests resolved via idempotency key dedup.
+|Number of incoming requests resolved by an existing idempotency key.
+
+|`stacksaga.transactions.paused`
+|Counter
+|`domain`
+|Count of transactions that entered a paused state.
+
+|`stacksaga.transactions.resumed`
+|Counter
+|`domain`
+|Count of transactions resumed from a pause.
+
+|`stacksaga.transactions.pause.duration`
+|Timer
+|`domain`
+|Duration of paused states.
 
 |`stacksaga.transactions.terminated`
 |Counter
 |`domain`, `outcome`, `reason`
-|Total transactions reaching terminal state (`outcome`: `completed`, `reverted`, `revert_failed`, `frozen`).
+|Transactions that reached a terminal state (`outcome`: `completed`, `reverted`, `revert_failed`, `frozen`; `reason`: `none`, `expired`, `middleware_exception`, `revert_error`).
 
 |`stacksaga.transactions.duration`
 |Timer
 |`domain`, `outcome`, `reason`
-|End-to-end lifetime of completed or terminated saga transactions.
+|End-to-end lifetime of terminated transactions, measured from the transaction start time, so it stays correct when a retry finishes the saga on another instance.
 
 |`stacksaga.transactions.active`
 |Gauge
 |`domain`
-|Current number of in-flight active transactions on this instance.
+|Runs currently executing on this instance. It goes up when a run starts or is claimed by a retry, and down when the run ends, pauses, hands off to a retry, or is fenced out.
+
+|`stacksaga.domain.info`
+|Gauge
+|`domain`, `version`
+|Constant `1.0` gauge publishing each registered domain entity and its current version. Registered at startup.
+
+|`stacksaga.listener.errors`
+|Counter
+|`domain`
+|Errors raised by user-registered transaction event listeners.
 |===
+
+NOTE: A saga that is retried can finish on a different instance than the one that started it, so `started` and `terminated` are counted on different instances. Always aggregate with `sum()` across instances.
 
 === Step Execution Metrics
 
@@ -202,12 +208,12 @@ management:
 |`stacksaga.step.duration`
 |Timer
 |`domain`, `executor`, `mode`, `status`
-|Duration of individual saga step execution (`mode`: `do_process`, `do_revert_main`, `do_revert_before`, `do_revert_after`; `status`: `success`, `error`).
+|Duration of one executor invocation (`mode`: `do_process`, `do_revert_main`, `do_revert_before`, `do_revert_after`; `status`: `success`, `failed`, `network_failed`).
 
 |`stacksaga.executor.errors`
 |Counter
 |`domain`, `executor`, `kind`
-|Errors encountered during step invocation (`kind`: `retryable`, `non_retryable`, `other`).
+|Errors raised by executors (`kind`: `retryable`, `non_retryable`, `other`). The series for an executor appears after its first error.
 |===
 
 === Pause, Resume & Retry Metrics
@@ -216,55 +222,55 @@ management:
 |===
 |Metric Name |Type |Tags |Description
 
-|`stacksaga.pause.duration`
-|Timer
-|`domain`
-|Duration of transaction paused states.
-
-|`stacksaga.resumed`
-|Counter
-|`domain`
-|Count of transactions resumed from pause.
-
 |`stacksaga.retry.invocations`
 |Counter
 |`domain`, `result`
-|Outcomes of retry invocations (`result`: `success`, `retry_again`, `failed_fatal`, `ignored`).
+|Outcomes of retry invocations (`result`: `success`, `failed`, `claim_rejected`, `fenced_out`).
 
 |`stacksaga.retry.lag`
 |Timer
 |`domain`
-|Latency between scheduled retry execution time and actual pickup.
+|Time between a transaction's scheduled retry time and the moment a retry node picked it up.
 
-|`stacksaga.fenced.out`
+|`stacksaga.fencing.events`
 |Counter
 |`phase`
-|Saga saves rejected due to fencing token run-epoch check.
+|Writes rejected by the run-epoch fencing check (`phase`: `primary`, `revert`).
 
-|`stacksaga.retry.fetch`
+|`stacksaga.retry.fetches`
 |Timer
 |None
-|Time required to poll and claim retryable transaction batches.
+|Time taken by one poll that claims a batch of retryable transactions.
 
-|`stacksaga.retry.batch.size`
+|`stacksaga.retry.fetch.batch.size`
 |DistributionSummary
 |None
-|Distribution of transaction batch sizes claimed during retry polls.
+|Number of transactions claimed per poll.
 
-|`stacksaga.retry.empty.polls`
+|`stacksaga.retry.fetch.empty`
 |Counter
 |None
-|Count of retry poll attempts that found 0 eligible transactions.
+|Polls that found no eligible transaction.
+
+|`stacksaga.retry.window.expired`
+|Counter
+|None
+|Polls abandoned because the node's retry time window had ended.
+
+|`stacksaga.retry.dispatched`
+|Counter
+|None
+|Transactions handed to the retry executor.
 
 |`stacksaga.retry.node.running`
 |Gauge
 |None
-|Retry manager master status (`1.0` if active master, `0.0` if standby).
+|`1.0` while the retry task manager of this instance is running, `0.0` otherwise (for example when retry is disabled).
 
 |`stacksaga.retry.inflight`
 |Gauge
 |None
-|Number of retry operations actively executing on this node.
+|Transactions this node has fetched for retry and not yet dispatched.
 |===
 
 === Database & Event-Store Metrics
@@ -276,22 +282,22 @@ management:
 |`stacksaga.db.operations`
 |Timer
 |`operation`, `outcome`
-|Duration and count of event store operations (`operation`: `init_transaction`, `save_primary_execution`, `save_revert_sub_execution`, `update_async_pause`, `save_terminated`, `get_retry_transaction`, `get_resumable_transaction`, `get_current_state`, `get_terminated`).
+|Duration of event-store operations (`operation`: `init_transaction`, `save_primary_execution`, `save_revert_sub_execution`, `save_terminated`, `update_async_pause`, `get_retry_transaction`, `get_resumable_transaction`, `get_current_state`, `get_terminated`, `get_next_expose_batch`, `trace_window_read`; `outcome`: `ok`, `error`, `cancelled`).
 
 |`stacksaga.db.retries`
 |Counter
 |`operation`
-|Count of transient database errors retried by the retry operator.
+|Transient database errors that were retried.
 
 |`stacksaga.db.errors`
 |Counter
 |`operation`, `exception`
-|Fatal or non-retryable database errors capped at top 30 exception classes.
+|Database errors that were not retried. The `exception` tag holds the exception's simple class name, limited to 30 distinct values; further values are reported as `Other`.
 
 |`stacksaga.db.connection.failures`
 |Counter
 |None
-|Count of connection acquisition or connection pool dropouts.
+|Failures to acquire a database connection.
 |===
 
 === Connection Pool & Scheduler Metrics
@@ -302,43 +308,62 @@ management:
 
 |`stacksaga.r2dbc.pool.allocated`
 |Gauge
-|None
-|Number of currently allocated R2DBC database connections.
+|`pool`
+|Connections currently allocated by the pool.
 
 |`stacksaga.r2dbc.pool.idle`
 |Gauge
-|None
-|Number of idle connections available in pool.
+|`pool`
+|Idle connections available in the pool.
 
 |`stacksaga.r2dbc.pool.pending`
 |Gauge
-|None
-|Number of connection requests waiting in the pool queue.
+|`pool`
+|Requests waiting for a connection.
 
 |`stacksaga.r2dbc.pool.acquired`
 |Gauge
-|None
-|Number of currently leased/active connections.
+|`pool`
+|Connections currently leased.
 
 |`stacksaga.r2dbc.pool.max.allocated`
 |Gauge
-|None
-|Configured maximum pool capacity.
+|`pool`
+|Configured maximum number of connections.
 
-|`saga-exe.tasks.active`
+|`stacksaga.r2dbc.pool.max.pending`
 |Gauge
-|None
-|Active threads in the parallel saga execution scheduler.
+|`pool`
+|Configured maximum number of pending requests (`2147483647` when unbounded).
 
-|`saga-bl-exe.tasks.active`
-|Gauge
-|None
-|Active threads in the bounded-elastic blocking scheduler.
+|`stacksaga.scheduler.tasks.active`
+|LongTaskTimer
+|`scheduler`
+|Tasks currently running on a StackSaga scheduler.
+
+|`stacksaga.scheduler.tasks.pending`
+|LongTaskTimer
+|`scheduler`
+|Tasks waiting in a scheduler's queue.
+
+|`stacksaga.scheduler.tasks.completed`
+|Timer
+|`scheduler`
+|Completed tasks and their run time.
+
+|`stacksaga.scheduler.tasks.submitted`
+|Counter
+|`scheduler`
+|Tasks submitted to the scheduler.
 |===
+
+The `scheduler` tag is `saga-exe` (non-blocking execution) and `saga-bl-exe` (blocking execution). When the retry node is enabled it also includes `saga-retry-fetch` and `saga-retry-process`.
+
+NOTE: Prometheus exposes the active and pending meters as summaries. The number of tasks currently active or queued is `stacksaga_scheduler_tasks_active_seconds_count` and `stacksaga_scheduler_tasks_pending_seconds_count`.
 
 == Actuator Endpoint (`/actuator/stacksaga`)
 
-When Spring Boot Actuator is present, StackSaga exposes the `/actuator/stacksaga` endpoint providing an instant operational snapshot:
+When Spring Boot Actuator is present, StackSaga exposes `/actuator/stacksaga`, an in-memory operational snapshot of the instance. It does not query the database.
 
 [source,bash]
 ----
@@ -349,54 +374,57 @@ curl -s http://localhost:8080/actuator/stacksaga | jq
 ----
 {
   "instance": {
-    "instanceId": "instance-a1",
-    "cluster": "prod-east",
-    "region": "us-east-1",
-    "serviceName": "order-service",
-    "version": "1.0.0"
+    "application": "order-service",
+    "region": "default",
+    "zone": "default",
+    "cluster": "default",
+    "instanceId": "beedf099-166a-4dae-88cd-870d795fb152",
+    "version": "0.0.1-SNAPSHOT"
   },
   "domains": [
-    {
-      "domain": "OrderDomain",
-      "active": 3,
-      "started": 1542,
-      "completed": 1530,
-      "reverted": 8,
-      "frozen": 1
-    }
+    { "name": "OrderDomainEntity", "version": "1.0.0", "active": 0 }
   ],
-  "pool": {
-    "allocated": 10,
-    "idle": 6,
-    "pending": 0,
-    "acquired": 4,
-    "maxAllocated": 20,
-    "maxPending": 100
-  },
   "retry": {
-    "nodeRunning": true,
-    "inFlight": 2
+    "enabled": false,
+    "running": false,
+    "inFlight": 0,
+    "dispatched": 0
+  },
+  "pool": {
+    "name": "stacksaga-eventstore",
+    "acquired": 0,
+    "allocated": 5,
+    "idle": 5,
+    "pending": 0,
+    "maxAllocated": 20,
+    "maxPending": 2147483647
   },
   "schedulers": {
-    "execution": { "active": 4, "pending": 0, "completed": 3520 },
-    "blocking": { "active": 2, "pending": 0, "completed": 1540 }
+    "saga-exe": { "queued": 0, "active": 0 },
+    "saga-bl-exe": { "queued": 0, "active": 0 }
+  },
+  "eventStore": {
+    "schemaVersion": "1.0.0"
   }
 }
 ----
 
+Domains are listed from application start, each with its current version and the number of runs active on this instance.
+
 === Sub-Selectors
 
-You can query individual components using sub-paths:
+You can query one section by adding its name to the path:
 
-* `/actuator/stacksaga/instance` - Instance metadata and version info
-* `/actuator/stacksaga/domains` - Domain active and terminal counts
-* `/actuator/stacksaga/pool` - Connection pool saturation metrics
-* `/actuator/stacksaga/retry` - Retry node master/standby and in-flight count
-* `/actuator/stacksaga/schedulers` - Scheduler thread and queue utilization
+* `/actuator/stacksaga/instance` - Instance metadata and version
+* `/actuator/stacksaga/domains` - Registered domains with version and active count
+* `/actuator/stacksaga/pool` - Connection pool state
+* `/actuator/stacksaga/retry` - Retry node enabled/running state, in-flight and dispatched counts
+* `/actuator/stacksaga/schedulers` - Queued and active tasks per scheduler
+* `/actuator/stacksaga/eventstore` - Event-store schema version
 
 == Reactive Health Indicator
 
-StackSaga registers a non-blocking `ReactiveHealthIndicator` at `/actuator/health` that pings the event store (`SELECT 1`), cached with a 5-second TTL and 1-second timeout:
+StackSaga registers a non-blocking `ReactiveHealthIndicator` as the `stacksaga` component of `/actuator/health`. It checks the event store with `SELECT 1` (1-second timeout, result cached for 5 seconds). `eventStore` is `reachable`, `unreachable: <reason>` (and the component is `DOWN`), or `none` when no event-store connection is configured.
 
 [source,json]
 ----
@@ -407,15 +435,18 @@ StackSaga registers a non-blocking `ReactiveHealthIndicator` at `/actuator/healt
       "status": "UP",
       "details": {
         "eventStore": "reachable",
-        "connectionPool": {
-          "acquired": 4,
-          "allocated": 10,
-          "pending": 0
+        "retryNodeRunning": false,
+        "activeTransactions": {
+          "OrderDomainEntity": 0
         },
-        "activeTransactions": 3,
-        "retryNode": {
-          "running": true,
-          "inFlight": 2
+        "pool": {
+          "name": "stacksaga-eventstore",
+          "acquired": 0,
+          "allocated": 5,
+          "idle": 5,
+          "pending": 0,
+          "maxAllocated": 20,
+          "maxPending": 2147483647
         }
       }
     }
@@ -423,6 +454,7 @@ StackSaga registers a non-blocking `ReactiveHealthIndicator` at `/actuator/healt
 }
 ----
 
+[#promql]
 == Prometheus & PromQL Reference
 
 [cols="2,3",options="header"]
@@ -441,8 +473,8 @@ StackSaga registers a non-blocking `ReactiveHealthIndicator` at `/actuator/healt
 |**Active Transactions per Domain**
 |`sum(stacksaga_transactions_active) by (domain)`
 
-|**Step Failure Rate by Executor**
-|`sum(rate(stacksaga_step_duration_seconds_count{status="error"}[5m])) by (executor) / sum(rate(stacksaga_step_duration_seconds_count[5m])) by (executor) * 100`
+|**Step Failure Rate by Executor (%)**
+|`sum(rate(stacksaga_step_duration_seconds_count{status=~"failed\|network_failed"}[5m])) by (executor) / sum(rate(stacksaga_step_duration_seconds_count[5m])) by (executor) * 100`
 
 |**p99 Step Latency**
 |`histogram_quantile(0.99, sum(rate(stacksaga_step_duration_seconds_bucket[5m])) by (le, executor))`
@@ -450,40 +482,159 @@ StackSaga registers a non-blocking `ReactiveHealthIndicator` at `/actuator/healt
 |**Retry Pickup Lag (p95)**
 |`histogram_quantile(0.95, sum(rate(stacksaga_retry_lag_seconds_bucket[5m])) by (le, domain))`
 
+|**p95 Event-Store Operation Latency**
+|`histogram_quantile(0.95, sum(rate(stacksaga_db_operations_seconds_bucket[5m])) by (le, operation))`
+
 |**R2DBC Pool Saturation (%)**
 |`stacksaga_r2dbc_pool_acquired / stacksaga_r2dbc_pool_max_allocated * 100`
 
 |**Event-Store Transient Retries/sec**
 |`sum(rate(stacksaga_db_retries_total[1m])) by (operation)`
+
+|**Scheduler Queue Depth**
+|`stacksaga_scheduler_tasks_pending_seconds_count{scheduler="saga-exe"}`
 |===
 
-== Performance & Benchmarks
+NOTE: With the default `slo` buckets, `histogram_quantile` interpolates inside a bucket, so a quantile can be off by up to the width of the bucket it falls in. Set `stacksaga.metrics.distribution.publish-percentile-histogram=true` for finer resolution.
 
-JMH microbenchmarks conducted on JDK 21 demonstrate that StackSaga's metric collection introduces minimal CPU and memory overhead:
+== Grafana Dashboard & Docker Quickstart
 
-[cols="3,1,1",options="header"]
-|===
-|Benchmark Event |Noop Mode (ns/op) |Micrometer Mode (ns/op)
+StackSaga provides a Grafana dashboard, link:{attachmentsdir}/stacksaga-overview.json[`stacksaga-overview.json`] (download), with throughput, p50/p95/p99 latency, step execution, R2DBC pool, scheduler and recovery panels. The service, cluster and domain drop-downs are filled from the metrics themselves.
 
-|`transactionStarted`
-|5.9 ns
-|231.8 ns
+=== 1. Folder Layout
 
-|`stepEnd` (Success)
-|56.8 ns
-|884.6 ns
+[source,text]
+----
+observability/
+  docker-compose.yml
+  prometheus/
+    prometheus.yml
+  grafana/
+    provisioning/
+      datasources/datasources.yml
+      dashboards/dashboards.yml
+    dashboards/
+      stacksaga-overview.json <1>
+----
+<1> link:{attachmentsdir}/stacksaga-overview.json[Download `stacksaga-overview.json`].
 
-|`dbOperation` (OK)
-|52.9 ns
-|542.6 ns
+Grafana loads the datasource and the dashboard from these files at startup, so no manual import is needed. Download link:{attachmentsdir}/stacksaga-overview.json[`stacksaga-overview.json`] and save it in `grafana/dashboards/`.
 
-|`transactionTerminated` (Completed)
-|58.1 ns
-|1486.9 ns
+=== 2. Docker Compose Configuration
 
-|**Full 6-Stage Saga Lifecycle**
-|**40.3 ns**
-|**4285.2 ns (~4.2 µs)**
-|===
+[source,yaml]
+----
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: stacksaga-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
 
-Because real database operations and network RPCs range from 5 ms to 500 ms (5,000,000 to 500,000,000 ns), an entire lifecycle metrics recording cost of **4.2 microseconds** represents **under 0.08%** of total transaction execution time, satisfying all production low-overhead latency SLAs.
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: stacksaga-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus_data:
+  grafana_data:
+----
+
+NOTE: The `admin` / `admin` login is for a local demo only. Change it for any shared environment.
+
+=== 3. Prometheus Configuration (`prometheus/prometheus.yml`)
+
+[source,yaml]
+----
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'stacksaga-order-service'
+    metrics_path: '/actuator/prometheus'
+    scrape_interval: 5s
+    honor_labels: true
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+        labels:
+          service: 'order-service'
+          cluster: 'default'
+----
+
+=== 4. Grafana Provisioning
+
+`grafana/provisioning/datasources/datasources.yml`:
+
+[source,yaml]
+----
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+----
+
+`grafana/provisioning/dashboards/dashboards.yml`:
+
+[source,yaml]
+----
+apiVersion: 1
+
+providers:
+  - name: 'StackSaga Dashboards'
+    orgId: 1
+    folder: 'StackSaga'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/dashboards
+----
+
+=== 5. Start and Open
+
+1. Start the stack: `docker compose up -d`.
+2. Open Grafana at `http://localhost:3000` and open the **StackSaga / Operational Overview** dashboard in the **StackSaga** folder.
+
+=== Troubleshooting
+
+Panels are empty::
+1. Open `http://localhost:9090/targets` and check that the application target is `UP`. If it is not, check `metrics_path` and the host and port in `prometheus.yml`.
+2. Open `http://localhost:9090/api/v1/label/__name__/values` and look for names starting with `stacksaga_`. If they are missing, check that `/actuator/prometheus` is exposed and returns `stacksaga_` series.
+3. If the names exist, run the panel's query in the Prometheus UI. A panel with a `scheduler` or `domain` filter stays empty until that series exists (for example `stacksaga_executor_errors_total` appears after the first executor error).
+
+The dashboard does not show a change you made to link:{attachmentsdir}/stacksaga-overview.json[`stacksaga-overview.json`]::
+Grafana re-reads provisioned dashboard files about every 10 seconds. Wait a moment and hard-refresh the browser (`Ctrl+Shift+R`). If it still shows the old version, run `docker compose restart grafana`. Deleting the `grafana_data` volume is not needed.
+
+A change to `prometheus.yml` has no effect::
+Reload the configuration with `curl -X POST http://localhost:9090/-/reload`. If the file was replaced by an editor and the container still sees the old content, run `docker compose restart prometheus`.
