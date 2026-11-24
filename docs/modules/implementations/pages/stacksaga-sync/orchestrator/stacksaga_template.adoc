@@ -238,7 +238,22 @@ public void onOrderPlaced(OrderPlacedEvent event, Acknowledgment acknowledgment)
 <1> Four consumer threads means at most four sagas running at once from this listener.
 <2> A redelivered event produces the same key, so it resolves to `DUPLICATE` instead of starting a second saga. See xref:#transaction-idempotency[Transaction Idempotency].
 <3> Blocks until the run segment has ended. It does not wait for a pause or a retry delay.
-<4> The message is acknowledged after the run segment.
+<4> The message is acknowledged after the run segment. This needs the listener container to use manual acknowledgment, as shown below.
+
+[IMPORTANT]
+====
+The `Acknowledgment` parameter is only supplied, and the message is only held back until you call `acknowledge()`, when the listener container is configured for manual acknowledgment.
+With Spring Boot:
+
+[source,properties]
+----
+spring.kafka.listener.ack-mode=manual
+spring.kafka.consumer.enable-auto-commit=false
+----
+
+Without it, Spring Kafka commits the offset on its own, and acknowledging after the run segment has no effect.
+If `execute()` throws (for example, the transaction could not be initialized), the exception propagates out of the listener before `acknowledge()` is reached, so the message is not acknowledged and the container's error handler decides whether to redeliver it.
+====
 
 [NOTE]
 ====
